@@ -209,22 +209,29 @@ class Database:
             )
 
     def _run_migration(self, conn: sqlite3.Connection, mig: "Migration") -> None:
-        """执行单个迁移脚本并记录版本。"""
+        """执行单个迁移脚本并原子记录版本。"""
         sql = mig.path.read_text(encoding="utf-8")
         logger.info("执行迁移 %d — %s（%s）", mig.version, mig.name, mig.path)
 
         # 通用处理：跳过已存在列的 ALTER TABLE ADD COLUMN（兼容旧库升级）
         sql = self._skip_existing_columns(conn, sql)
 
-        # SQLite 不支持单次多条语句的多结果集执行，用 executescript
-        conn.executescript(sql)
-
-        # 记录版本
-        conn.execute(
-            "INSERT INTO schema_version (version, description) VALUES (?, ?)",
-            (mig.version, mig.name),
+        # sqlite3.executescript() 会先提交调用前的事务；因此必须把 BEGIN、迁移 SQL
+        # 和 schema_version 写入放在同一脚本事务内，避免迁移中途失败留下半套 schema。
+        description = mig.name.replace("'", "''")
+        script = (
+            "BEGIN IMMEDIATE;\\n"
+            + sql
+            + f"\\nINSERT INTO schema_version (version, description) "
+              f"VALUES ({int(mig.version)}, '{description}');\\n"
+            + "COMMIT;"
         )
-        conn.commit()
+        try:
+            conn.executescript(script)
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
 
     def _backup(self) -> Path:
         """把当前 db 文件复制到 backups/easel_YYYYMMDD_HHMMSS.db。"""
