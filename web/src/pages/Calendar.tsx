@@ -263,7 +263,7 @@ export default function Calendar() {
           <div className={`calendar-agenda ${viewMode === "week" ? "calendar-week-grid" : ""}`}>
             {days.filter((d) => viewMode !== "week" || d.plans.length > 0 || d.events.length > 0).map((d) => (
               <section className="calendar-agenda-day" key={d.key} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); const id = e.dataTransfer.getData("text/plain"); const event = events.find((item) => item.id === id); if (event) { const oldValue = _toLocalInput(event.scheduled || event.saved_at); const time = oldValue.includes("T") ? oldValue.slice(11, 16) : "09:00"; void saveSchedule(id, `${d.key}T${time}`); } }}>
-                <button className="calendar-agenda-date" onClick={() => { setCursorDate(d.date); setViewMode("day"); }}>
+                <button className="calendar-agenda-date" onClick={() => { setPlanDate(d.key); setPlanFormOpen(true); }}>
                   <strong>{d.date.toLocaleDateString("zh-CN", { weekday: "long" })}</strong>
                   <span>{d.key}{d.date.toDateString() === today.toDateString() ? " · 今天" : ""}</span>
                 </button>
@@ -302,7 +302,8 @@ export default function Calendar() {
         )}
 
         {selected && (
-          <div className="panel" style={{ marginTop: 14, borderColor: "var(--blue)" }}>
+          <div className="calendar-drawer-backdrop" role="presentation" onClick={() => { setSelected(null); setDraftTime(""); }}>
+          <section className="panel calendar-side-drawer" role="dialog" aria-modal="true" aria-label="排期编辑" onClick={(e) => e.stopPropagation()}>
             <div className="panel-head">
               <div>
                 <div className="panel-title"><span className="icon">✎</span>排期编辑 · {selected.title}</div>
@@ -338,6 +339,7 @@ export default function Calendar() {
                 </button>
               </div>
             </div>
+          </section>
           </div>
         )}
       </div>
@@ -364,9 +366,11 @@ export default function Calendar() {
         </div>
       )}
 
-      <section className="panel calendar-plan-create">
+      {planFormOpen && <div className="calendar-drawer-backdrop" role="presentation" onClick={() => setPlanFormOpen(false)}>
+      <section className="panel calendar-side-drawer calendar-plan-create" role="dialog" aria-modal="true" aria-label="新建内容计划" onClick={(e) => e.stopPropagation()}>
         <div className="panel-head">
-          <div><div className="panel-title">内容计划</div><div className="panel-sub">计划独立于草稿保存；创建不触发生产，点击「加入全局队列」才开始生成，发布仍需人工确认。</div></div>
+          <div><div className="panel-title">新建内容计划</div><div className="panel-sub">创建计划不会自动开始生产；加入全局队列后才会生成，发布仍需人工确认。</div></div>
+          <button className="btn sm" onClick={() => setPlanFormOpen(false)}>关闭</button>
         </div>
         <div className="calendar-plan-form">
           <label>计划名称<input className="field" value={planTitle} maxLength={160} onChange={(e) => setPlanTitle(e.target.value)} placeholder="例如：本周产品功能系列" /></label>
@@ -383,13 +387,13 @@ export default function Calendar() {
             try {
               await withPending("content-plan:create", () => api.createContentPlan({ title: planTitle.trim(), topic: planTopic.trim(), platforms: planPlatforms, planned_count: Number(planCount), scheduled_date: planDate, notes: planNotes.trim() }));
               showToast("内容计划已创建", "success");
-              setPlanTitle(""); setPlanTopic(""); setPlanCount("1"); setPlanPlatforms([]); setPlanNotes("");
+              setPlanTitle(""); setPlanTopic(""); setPlanCount("1"); setPlanPlatforms([]); setPlanNotes(""); setPlanFormOpen(false);
               setCursorDate(new Date(`${planDate}T12:00:00`));
               await load();
             } catch (e: any) { showToast(`创建计划失败：${e?.message ?? e}`, "error"); }
           }}>{isPending("content-plan:create") ? "创建中…" : "创建计划"}</button>
         </div>
-      </section>
+      </section></div>}
 
       {/* 未排期草稿：直接挑选时间写入排期 */}
       <div className="panel">
