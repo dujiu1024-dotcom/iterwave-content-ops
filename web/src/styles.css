@@ -780,6 +780,9 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
   background: transparent; color: var(--blue); text-align: left; font-size: 10px; cursor: pointer;
 }
 .calendar-more-link:hover { text-decoration: underline; }
+.calendar-month-cell { position: relative; min-width: 0; }
+.calendar-day-add { position: absolute; top: 5px; right: 6px; width: 22px; height: 22px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--blue); opacity: 0; cursor: pointer; transition: opacity .12s ease; }
+.calendar-month-cell:hover .calendar-day-add, .calendar-day-add:focus-visible { opacity: 1; }
 .calendar-month-grid .calendar-event { margin-top: 3px; padding: 3px 5px; }
 .calendar-month-grid .calendar-event-title { font-size: 10px; }
 .calendar-month-grid .calendar-event-meta { font-size: 9px; }
@@ -796,10 +799,14 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
   gap: 8px;
   align-items: start;
 }
-.calendar-week-grid .calendar-agenda-day { min-width: 0; padding: 9px; }
+.calendar-week-grid .calendar-agenda-day { min-width: 0; min-height: 104px; padding: 9px; overflow: hidden; }
 .calendar-week-grid .calendar-agenda-date { display: flex; flex-direction: column; gap: 2px; width: 100%; }
-.calendar-week-grid .calendar-agenda-plan,
+.calendar-week-grid .calendar-agenda-plan { min-width: 0; display: flex; flex-direction: column; align-items: stretch; gap: 6px; white-space: normal; overflow-wrap: anywhere; }
+.calendar-week-grid .calendar-agenda-plan > * { max-width: 100%; min-width: 0; }
+.calendar-week-grid .calendar-agenda-copy { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.calendar-week-grid .calendar-agenda-plan .btn { width: 100%; white-space: normal; justify-content: center; }
 .calendar-week-grid .calendar-agenda-event { min-width: 0; }
+.calendar-week-grid .calendar-agenda-empty { min-height: 18px; padding: 2px 0; font-size: 10px; color: var(--subtle); }
 .calendar-date-picker { width: 148px; max-width: 100%; min-width: 0; }
 .calendar-drawer-backdrop {
   position: fixed; inset: 0; z-index: 140; display: flex; justify-content: flex-end;
@@ -819,11 +826,12 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 .skill-desc { white-space: pre-line; }
 .sidebar { min-height: 100vh; height: auto; align-self: stretch; position: relative; overflow: visible; }
 @media (max-width: 1100px) {
-  .calendar-week-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .calendar-week-grid { grid-template-columns: repeat(7, minmax(0, 1fr)); }
   .calendar-toolbar { flex-wrap: wrap; justify-content: flex-start; }
 }
 @media (max-width: 760px) {
   .calendar-week-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .calendar-day-add { opacity: 1; }
   .calendar-side-drawer { width: min(100vw, 520px); border-radius: 0; padding: 16px; }
   .calendar-date-picker { width: 100%; }
 }
@@ -833,3 +841,8 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
   .production-run-alert { max-width: 100%; min-width: 0; overflow-wrap: anywhere; }
   .production-run-alert > * { max-width: 100%; }
 }
+
+/* Demo/status badges must wrap within their parent at desktop and mobile widths. */
+.production-run-alert, .production-run-alert > * { min-width: 0; max-width: 100%; }
+.production-run-alert { overflow-wrap: anywhere; }
+.production-run-alert span { white-space: normal !important; overflow-wrap: anywhere; }
