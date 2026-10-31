@@ -9,7 +9,7 @@ const PLATFORM_NAME: Record<Platform, string> = {
 
 /** 中文描述统一使用中文句号，避免英文句点混入页面文案。 */
 function zhSentence(value: string): string {
-  return value.replace(/\\s*\\.$/, "。");
+  return value.replace(/\s*\.$/, "。");
 }
 
 /** R3：NULL 显示灰色「—」，0 显示正常 0 */
