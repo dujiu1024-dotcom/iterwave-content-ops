@@ -62,7 +62,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from src.core.config import load_config, get_config, DEFAULT_ENV_PATH
-from src.core.timezone import business_now, business_zone
+from src.core.timezone import business_now
 from src.core.config import PROJECT_ROOT
 from src.core.tenant_registry import TenantRegistry, TenantError
 from src.core.task_queue import GlobalTaskQueue
@@ -3386,9 +3386,7 @@ def _register_routes(app: FastAPI) -> None:
                 "restart_required": registry.active_id() != _g().get("runtime_tenant_id", "default"),
                 "hot_switch_enabled": _tenant_hot_switch_enabled(),
                 "items": [
-                    {**item, "created_at": _api_datetime(
-                        item.get("created_at"), naive_timezone=business_zone(_g().get("cfg")),
-                    )}
+                    {**item, "created_at": _api_datetime(item.get("created_at"))}
                     for item in registry.list()
                 ],
             }
