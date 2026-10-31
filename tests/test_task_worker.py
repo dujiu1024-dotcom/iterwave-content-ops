@@ -478,3 +478,44 @@ def test_worker_heartbeat_runs_in_background_thread(tmp_path):
     loop.close()
     assert not thread.is_alive()
     assert len(renewed) >= 2
+
+
+def test_worker_fallback_marks_producing_round_failed():
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE spiral_rounds (id INTEGER PRIMARY KEY, status TEXT, "
+        "transition_log TEXT, producing_started_at TEXT, collecting_metrics_started_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO spiral_rounds(id,status,transition_log) VALUES(1,'producing','[]')"
+    )
+    conn.commit()
+
+    assert GlobalTaskWorker._mark_round_failed(conn, 1, "snapshot validation failed")
+    row = conn.execute("SELECT status,transition_log FROM spiral_rounds WHERE id=1").fetchone()
+    assert row["status"] == "failed"
+    assert '"to": "failed"' in row["transition_log"]
+    conn.close()
+
+
+def test_worker_fallback_does_not_override_terminal_round():
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE spiral_rounds (id INTEGER PRIMARY KEY, status TEXT, "
+        "transition_log TEXT, producing_started_at TEXT, collecting_metrics_started_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO spiral_rounds(id,status,transition_log) VALUES(1,'completed','[]')"
+    )
+    conn.commit()
+
+    assert not GlobalTaskWorker._mark_round_failed(conn, 1, "late failure")
+    row = conn.execute("SELECT status FROM spiral_rounds WHERE id=1").fetchone()
+    assert row["status"] == "completed"
+    conn.close()
