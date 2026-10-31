@@ -7,6 +7,11 @@ const PLATFORM_NAME: Record<Platform, string> = {
   kuaishou: "快手", wechat_channels: "视频号",
 };
 
+/** 中文描述统一使用中文句号，避免英文句点混入页面文案。 */
+function zhSentence(value: string): string {
+  return value.replace(/\\s*\\.$/, "。");
+}
+
 /** R3：NULL 显示灰色「—」，0 显示正常 0 */
 function Num({ value }: { value: number | null | undefined }) {
   if (value === null || value === undefined) return <span style={{ color: "var(--subtle)" }}>—</span>;
@@ -337,7 +342,7 @@ export default function Analytics() {
             </div>}
             <h3 style={{ marginTop: 14 }}>可能原因</h3>
             {weeklyReport.why_it_may_work.map((item, i) => <div key={i} className="task-row" style={{ display: "block" }}>
-              <p className="panel-sub">{item.statement}（样本 {item.sample_size}）</p>
+              <p className="panel-sub">{zhSentence(item.statement)}（样本 {item.sample_size}）</p>
               <details>
                 <summary className="form-label" style={{ cursor: "pointer" }}>查看证据与适用范围</summary>
                 <div className="panel-sub">平台：{item.platform ? PLATFORM_NAME[item.platform] : "全部"} · 时间范围：{item.time_window ? item.time_window.start + " 至 " + item.time_window.end : "未指定"} · 数据来源：{weeklyReport.data_sources.join("、") || "暂无"}</div>
@@ -348,7 +353,7 @@ export default function Analytics() {
             <h3 style={{ marginTop: 14 }}>下一轮建议</h3>
             {weeklyReport.next_actions.length ? weeklyReport.next_actions.map((item, i) => <div key={item.suggestion_key || i} className="task-row" style={{ display: "block" }}>
               <div className="task-title">{item.action}</div>
-              <div className="task-desc">依据：{item.basis} · 验证：{item.verification}</div>
+              <div className="task-desc">依据：{zhSentence(item.basis)} · 验证：{zhSentence(item.verification)}</div>
               <details><summary className="form-label" style={{ cursor: "pointer" }}>查看建议证据</summary>
                 <div className="panel-sub">平台：{item.platform ? PLATFORM_NAME[item.platform] : "全部"} · 样本：{item.sample_size} · 时间范围：{item.time_window ? item.time_window.start + " 至 " + item.time_window.end : "未指定"}</div>
                 <div className="panel-sub">证据内容 ID：{item.evidence_content_ids?.join("、") || "无"}</div>
@@ -374,7 +379,7 @@ export default function Analytics() {
                 </>}
               </div>
             </div>) : <div className="panel-sub">样本不足，先补充发布数据，再生成策略建议。</div>}
-            <div className="panel-sub" style={{ marginTop: 10 }}>限制：{weeklyReport.limitations.join("；")}</div>
+            <div className="panel-sub" style={{ marginTop: 10 }}>限制：{weeklyReport.limitations.map(zhSentence).join("；")}</div>
           </div>
         </>}
       </div>
