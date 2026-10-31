@@ -62,7 +62,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from src.core.config import load_config, get_config, DEFAULT_ENV_PATH
-from src.core.timezone import business_now
+from src.core.timezone import business_now, business_zone
 from src.core.config import PROJECT_ROOT
 from src.core.tenant_registry import TenantRegistry, TenantError
 from src.core.task_queue import GlobalTaskQueue
@@ -499,8 +499,8 @@ _VALIDATION_FIELD_LABELS = {
 }
 
 
-def _api_datetime(value):
-    """API 时间统一携带时区；历史无时区时间按旧部署的 UTC 存储约定解释。"""
+def _api_datetime(value, *, naive_timezone=timezone.utc):
+    """API 时间统一携带时区；默认历史数据库时间按 UTC 解释，租户目录时间显式传业务时区。"""
     if not value or not isinstance(value, str):
         return value
     try:
@@ -508,7 +508,7 @@ def _api_datetime(value):
     except ValueError:
         return value
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=naive_timezone)
     return parsed.isoformat()
 
 
@@ -3386,7 +3386,9 @@ def _register_routes(app: FastAPI) -> None:
                 "restart_required": registry.active_id() != _g().get("runtime_tenant_id", "default"),
                 "hot_switch_enabled": _tenant_hot_switch_enabled(),
                 "items": [
-                    {**item, "created_at": _api_datetime(item.get("created_at"))}
+                    {**item, "created_at": _api_datetime(
+                        item.get("created_at"), naive_timezone=business_zone(_g().get("cfg")),
+                    )}
                     for item in registry.list()
                 ],
             }
@@ -3917,7 +3919,10 @@ def _register_routes(app: FastAPI) -> None:
             params.append(status)
         sql += " ORDER BY created_at DESC LIMIT 50"
         rows = conn.execute(sql, params).fetchall()
-        return [dict(r) for r in rows]
+        return [
+            {**dict(row), "created_at": _api_datetime(row["created_at"])}
+            for row in rows
+        ]
 
     @app.post("/api/rounds")
     def create_round(req: CreateRoundRequest):
