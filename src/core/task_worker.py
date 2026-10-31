@@ -47,6 +47,7 @@ class GlobalTaskWorker:
                 shutdown_grace_seconds = 30.0
         self.shutdown_grace_seconds = max(0.0, min(float(shutdown_grace_seconds), 300.0))
         self.owner = uuid.uuid4().hex
+        self._reconciled_interrupted_task_ids: set[str] = set()
 
     async def run(self, stop_event: asyncio.Event) -> None:
         logger.info("全局任务消费者启动 worker=%s", self.owner[:8])
