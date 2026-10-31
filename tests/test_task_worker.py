@@ -519,3 +519,25 @@ def test_worker_fallback_does_not_override_terminal_round():
     row = conn.execute("SELECT status FROM spiral_rounds WHERE id=1").fetchone()
     assert row["status"] == "completed"
     conn.close()
+
+
+
+def test_worker_reconciles_interrupted_round_tasks_on_startup(tmp_path, monkeypatch):
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    task, _ = queue.enqueue(
+        task_type="round_run", tenant_id="tenant-kill", aggregate_id="41",
+        payload={"round_id": 41, "operation": "run"},
+    )
+    claimed = queue.claim_next("worker-before-exit", lease_seconds=30)
+    assert claimed is not None
+    assert queue.interrupt(claimed.task_id, "worker-before-exit", error_message="模拟进程意外退出")
+
+    observed = []
+    worker = GlobalTaskWorker(queue, lambda tenant_id: {})
+    monkeypatch.setattr(worker, "_reconcile_round_failure", lambda item, reason: observed.append((item.task_id, item.tenant_id, reason)))
+    worker._sync_terminal_rounds()
+
+    assert observed == [(task.task_id, "tenant-kill", "模拟进程意外退出")]
+    worker._sync_terminal_rounds()
+    assert len(observed) == 1
