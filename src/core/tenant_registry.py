@@ -11,16 +11,17 @@ import re
 import sqlite3
 import tempfile
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Any
 
-from .timezone import business_now
+from .timezone import business_now, business_zone
 
 TENANT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 DEFAULT_TENANT_ID = "default"
 REGISTRY_MIGRATION = "tenant_registry_json_to_system_db_v1"
+TENANT_TIMESTAMP_UTC_MIGRATION = "tenant_registry_timestamps_to_utc_v1"
 
 
 class TenantError(ValueError):
@@ -75,6 +76,17 @@ def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     finally:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _tenant_timestamp_to_utc(value: str, cfg=None) -> str:
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=business_zone(cfg))
+    return parsed.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
 class TenantRegistry:
@@ -141,7 +153,7 @@ class TenantRegistry:
                         conn.execute(
                             "INSERT OR IGNORE INTO tenants(id,name,created_at) VALUES(?,?,?)",
                             (item["id"], item.get("name") or item["id"],
-                             item.get("created_at") or business_now(self.cfg).isoformat(timespec="seconds")),
+                             item.get("created_at") or _utc_now_iso()),
                         )
                     now = business_now(self.cfg).isoformat(timespec="seconds")
                     conn.execute(
@@ -167,6 +179,26 @@ class TenantRegistry:
                             ("active_tenant_id", json.dumps(DEFAULT_TENANT_ID),
                              business_now(self.cfg).isoformat(timespec="seconds")),
                         )
+                timestamp_marker = conn.execute(
+                    "SELECT 1 FROM system_migrations WHERE migration_key=?",
+                    (TENANT_TIMESTAMP_UTC_MIGRATION,),
+                ).fetchone()
+                if timestamp_marker is None:
+                    # 旧版账号组元数据使用业务时区的无时区本地时间；一次性按配置时区转为 UTC。
+                    for item in conn.execute("SELECT id,created_at FROM tenants").fetchall():
+                        conn.execute(
+                            "UPDATE tenants SET created_at=? WHERE id=?",
+                            (_tenant_timestamp_to_utc(item["created_at"], self.cfg), item["id"]),
+                        )
+                    for item in conn.execute("SELECT key,updated_at FROM system_settings").fetchall():
+                        conn.execute(
+                            "UPDATE system_settings SET updated_at=? WHERE key=?",
+                            (_tenant_timestamp_to_utc(item["updated_at"], self.cfg), item["key"]),
+                        )
+                    conn.execute(
+                        "INSERT INTO system_migrations(migration_key,completed_at,imported_count) VALUES(?,?,?)",
+                        (TENANT_TIMESTAMP_UTC_MIGRATION, _utc_now_iso(), 0),
+                    )
                 conn.commit()
                 rows = conn.execute("SELECT id,name FROM tenants ORDER BY created_at,id").fetchall()
                 if not rows:
