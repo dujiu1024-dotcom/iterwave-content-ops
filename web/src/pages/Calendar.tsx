@@ -222,7 +222,7 @@ export default function Calendar() {
               {days.map((d) => {
                 const isToday = d.date.toDateString() === today.toDateString();
                 return (
-                  <div key={d.key} style={{
+                  <div key={d.key} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); const id = e.dataTransfer.getData("text/plain"); const event = events.find((item) => item.id === id); if (event) { const oldValue = _toLocalInput(event.scheduled || event.saved_at); const time = oldValue.includes("T") ? oldValue.slice(11, 16) : "09:00"; void saveSchedule(id, `${d.key}T${time}`); } }} style={{
                     border: "1px solid var(--line)", borderRadius: 8, padding: 6, minHeight: 76,
                     background: isToday ? "var(--blue-weak)" : "var(--surface)",
                     opacity: d.inMonth ? 1 : 0.48,
@@ -239,7 +239,8 @@ export default function Calendar() {
                     {d.events.slice(0, 2).map((e) => {
                       const editable = e.status === "draft_pending" || e.status === "draft_saved";
                       return (
-                        <button type="button" key={e.id} className="calendar-event"
+                        <button type="button" key={e.id} className="calendar-event" draggable={editable}
+                          onDragStart={(event) => { event.dataTransfer.setData("text/plain", e.id); event.dataTransfer.effectAllowed = "move"; }}
                           title={editable ? `${e.title} · 点击改排期` : `${e.title} · ${statusLabel[e.status] ?? e.status}（不可改排期）`}
                           disabled={!editable}
                           onClick={() => { setSelected({ id: e.id, title: e.title }); setDraftTime(_toLocalInput(e.scheduled || e.saved_at)); }}
