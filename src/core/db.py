@@ -220,10 +220,10 @@ class Database:
         # 和 schema_version 写入放在同一脚本事务内，避免迁移中途失败留下半套 schema。
         description = mig.name.replace("'", "''")
         script = (
-            "BEGIN IMMEDIATE;\\n"
+            "BEGIN IMMEDIATE;\n"
             + sql
-            + f"\\nINSERT INTO schema_version (version, description) "
-              f"VALUES ({int(mig.version)}, '{description}');\\n"
+            + f"\nINSERT INTO schema_version (version, description) "
+              f"VALUES ({int(mig.version)}, '{description}');\n"
             + "COMMIT;"
         )
         try:
