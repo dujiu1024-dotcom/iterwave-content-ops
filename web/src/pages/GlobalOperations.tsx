@@ -27,7 +27,7 @@ export default function GlobalOperations() {
       api.globalOperationsSummary(30), api.taskQueue({ scope: "active" }), api.taskQueue({ scope: "failed" }),
     ]);
     if (results[0].status === "fulfilled") setMonitor(results[0].value);
-    if (results[1].status === "fulfilled") { setTasks(results[1].value.items ?? []); setActiveCount(results[1].value.total ?? results[1].value.items.length); }
+    if (results[1].status === "fulfilled") { setTasks(results[1].value.items ?? []); setActiveCount(results[1].value.total ?? results[1].value.items?.length ?? 0); }
     if (results[2].status === "fulfilled") { setFailedCount(results[2].value.total ?? 0); setFailedTasks(results[2].value.items ?? []); }
     const failures = results.flatMap((r, i) => r.status === "rejected"
       ? [`${["账号组汇总", "活跃任务", "失败任务统计"][i]}：${r.reason instanceof Error ? r.reason.message : String(r.reason)}`]
