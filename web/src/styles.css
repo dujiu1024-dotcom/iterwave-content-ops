@@ -787,3 +787,43 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 @media (max-width: 760px) {
   .account-menu-name { max-width: 90px; }
 }
+
+
+/* Calendar compact agenda, side drawers and responsive toolbar */
+.calendar-week-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 8px;
+  align-items: start;
+}
+.calendar-week-grid .calendar-agenda-day { min-width: 0; padding: 9px; }
+.calendar-week-grid .calendar-agenda-date { display: flex; flex-direction: column; gap: 2px; width: 100%; }
+.calendar-week-grid .calendar-agenda-plan,
+.calendar-week-grid .calendar-agenda-event { min-width: 0; }
+.calendar-date-picker { width: 148px; max-width: 100%; min-width: 0; }
+.calendar-drawer-backdrop {
+  position: fixed; inset: 0; z-index: 140; display: flex; justify-content: flex-end;
+  background: rgba(15, 27, 45, .38);
+}
+.calendar-side-drawer {
+  width: min(520px, 100vw); height: 100%; max-height: 100vh; overflow-y: auto;
+  margin: 0; border-radius: 14px 0 0 14px; padding: 22px;
+  box-shadow: -12px 0 40px rgba(15, 27, 45, .16);
+}
+.calendar-side-drawer .calendar-plan-form { display: grid; grid-template-columns: 1fr; gap: 12px; }
+.calendar-side-drawer .calendar-plan-form > label { min-width: 0; }
+.calendar-side-drawer .calendar-plan-form .calendar-plan-platforms > span { display: flex; flex-wrap: wrap; gap: 8px; }
+.calendar-agenda-day[ondrop], .calendar-month-grid > div[ondrop] { transition: background .12s ease; }
+.calendar-agenda-event[draggable="true"], .calendar-event[draggable="true"] { cursor: grab; }
+.calendar-agenda-event[draggable="true"]:active, .calendar-event[draggable="true"]:active { cursor: grabbing; }
+.skill-desc { white-space: pre-line; }
+.sidebar { min-height: 100vh; height: auto; align-self: stretch; }
+@media (max-width: 1100px) {
+  .calendar-week-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .calendar-toolbar { flex-wrap: wrap; justify-content: flex-start; }
+}
+@media (max-width: 760px) {
+  .calendar-week-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .calendar-side-drawer { width: min(100vw, 520px); border-radius: 0; padding: 16px; }
+  .calendar-date-picker { width: 100%; }
+}
