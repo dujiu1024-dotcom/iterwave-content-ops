@@ -168,6 +168,58 @@ class GlobalTaskWorker:
                     logger.exception("关闭任务账号组数据库连接失败")
 
     @staticmethod
+    def _mark_round_failed(conn, round_id: int, reason: str) -> bool:
+        """兜底收口 Worker 捕获到的执行器外异常，避免轮次永久停在 producing。"""
+        if conn is None or not callable(getattr(conn, "execute", None)):
+            return False
+        from src.core.state_machine import RoundStateMachine
+
+        row = conn.execute(
+            "SELECT status FROM spiral_rounds WHERE id=?", (round_id,),
+        ).fetchone()
+        if row is None or row["status"] not in {"producing", "analyzing"}:
+            return False
+        return RoundStateMachine(conn).transition(
+            round_id, "failed", f"Worker 异常兜底收口：{str(reason)[:300]}",
+        )
+
+    def _reconcile_round_failure(self, task: QueuedTask, reason: str) -> None:
+        """重新构建任务所属账号组上下文，对账轮次和内容计划状态。"""
+        if task.task_type != "round_run":
+            return
+        try:
+            round_id = int(task.payload["round_id"])
+            context = self.build_tenant_context(task.tenant_id)
+        except Exception:
+            logger.exception(
+                "Worker 失败后无法重建账号组上下文 task_id=%s tenant_id=%s",
+                task.task_id, task.tenant_id,
+            )
+            return
+        try:
+            conn = context.get("conn")
+            self._mark_round_failed(conn, round_id, reason)
+            self._mark_content_plan_failed(conn, round_id)
+        except Exception:
+            logger.exception(
+                "Worker 失败状态对账异常 task_id=%s tenant_id=%s round_id=%s",
+                task.task_id, task.tenant_id, task.payload.get("round_id"),
+            )
+        finally:
+            scheduler = context.get("scheduler")
+            if scheduler is not None:
+                try:
+                    scheduler.shutdown()
+                except Exception:
+                    logger.exception("关闭失败对账调度器异常")
+            conn = context.get("conn")
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    logger.exception("关闭失败对账数据库连接异常")
+
+    @staticmethod
     def _mark_content_plan_failed(conn, round_id: int) -> None:
         """生产异常时将关联计划标记失败，允许用户修复后重试。"""
         if conn is None or not callable(getattr(conn, "execute", None)):
@@ -292,6 +344,9 @@ class GlobalTaskWorker:
                 )
             except Exception:
                 logger.exception("写入任务失败状态异常 task_id=%s", task.task_id)
+            # 执行器之外的异常（例如快照校验、运行时重建失败）不会经过
+            # RoundExecutor.run() 的失败收尾，Worker 必须额外对账轮次状态。
+            self._reconcile_round_failure(task, safe_message)
         finally:
             if not execution.done():
                 execution.cancel()
