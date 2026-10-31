@@ -844,7 +844,7 @@ export default function Production() {
                 </div>
 
                 {noLogin.length > 0 && (
-                  <div style={{ marginBottom: 8 }}>
+                  <div className="production-run-alert" style={{ marginBottom: 8, maxWidth: "100%", minWidth: 0, overflowWrap: "anywhere" }}>
                     <DemoBadge
                       level="blocked"
                       text={`${noLogin.map((p) => PLATFORM_NAME[p]).join("、")} 未连接真实账号；启用平台存在未登录账号；开启存草稿时阻止启动，关闭存草稿可先干跑`}
