@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useApp } from "../AppContext";
 import EmptyHint from "../components/EmptyHint";
 import { api, ContentPlan, Platform, ScheduleEvent, UnscheduledDraft } from "../api";
@@ -40,6 +40,8 @@ export default function Calendar() {
   const [selected, setSelected] = useState<{ id: string; title: string } | null>(null);
   const [draftTime, setDraftTime] = useState("");
   const [pendingDraft, setPendingDraft] = useState<Record<string, string>>({});
+  const scheduleDrawerRef = useRef<HTMLElement | null>(null);
+  const planDrawerRef = useRef<HTMLElement | null>(null);
 
   // API 查询范围与当前视图一致：月视图覆盖完整日历网格，周/日视图只请求可见日期。
   const visibleStart = useMemo(() => {
@@ -165,6 +167,32 @@ export default function Calendar() {
     }
   };
 
+  useEffect(() => {
+    const drawer = selected ? scheduleDrawerRef.current : planFormOpen ? planDrawerRef.current : null;
+    if (!drawer) return;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusable = () => Array.from(drawer.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    )).filter((element) => element.getAttribute("aria-hidden") !== "true");
+    const items = focusable();
+    (items[0] ?? drawer).focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (selected) { setSelected(null); setDraftTime(""); } else setPlanFormOpen(false);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const current = focusable();
+      if (!current.length) { event.preventDefault(); drawer.focus(); return; }
+      const first = current[0], last = current[current.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => { document.removeEventListener("keydown", onKeyDown); previousFocus?.focus(); };
+  }, [selected, planFormOpen]);
+
   return (
     <>
       <div className="page-head">
@@ -222,14 +250,15 @@ export default function Calendar() {
               {days.map((d) => {
                 const isToday = d.date.toDateString() === today.toDateString();
                 return (
-                  <div key={d.key} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); const id = e.dataTransfer.getData("text/plain"); const event = events.find((item) => item.id === id); if (event) { const oldValue = _toLocalInput(event.scheduled || event.saved_at); const time = oldValue.includes("T") ? oldValue.slice(11, 16) : "09:00"; void saveSchedule(id, `${d.key}T${time}`); } }} style={{
+                  <div key={d.key} className="calendar-month-cell" onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); const id = e.dataTransfer.getData("text/plain"); const event = events.find((item) => item.id === id); if (event) { const oldValue = _toLocalInput(event.scheduled || event.saved_at); const time = oldValue.includes("T") ? oldValue.slice(11, 16) : "09:00"; void saveSchedule(id, `${d.key}T${time}`); } }} style={{
                     border: "1px solid var(--line)", borderRadius: 8, padding: 6, minHeight: 76,
                     background: isToday ? "var(--blue-weak)" : "var(--surface)",
                     opacity: d.inMonth ? 1 : 0.48,
                   }}>
-                    <button className="calendar-day-number" onClick={() => { setPlanDate(d.key); setPlanFormOpen(true); }} aria-label={`在 ${d.key} 新建计划`}>
+                    <button className="calendar-day-number" onClick={() => { setCursorDate(d.date); setViewMode("day"); }} aria-label={`查看 ${d.key} 当天内容`}>
                       {d.date.getDate()}
                     </button>
+                    <button type="button" className="calendar-day-add" aria-label={`在 ${d.key} 新建计划`} onClick={() => { setPlanDate(d.key); setPlanFormOpen(true); }}>＋</button>
                     {loading && <div className="loading" style={{ marginTop: 6, fontSize: 11, color: "var(--muted)" }}><div className="spinner" />加载中...</div>}
                     {d.plans.slice(0, 1).map((plan) => (
                       <button type="button" key={plan.id} className="calendar-plan-chip" title={`${plan.title} · ${plan.planned_count} 篇/平台`} onClick={() => void openPlanDetails(plan.id)}>
@@ -250,9 +279,9 @@ export default function Calendar() {
                         </button>
                       );
                     })}
-                    {(d.plans.length - 1 + Math.max(0, d.events.length - 2) > 0) && (
+                    {(Math.max(0, d.plans.length - 1) + Math.max(0, d.events.length - 2) > 0) && (
                       <button type="button" className="calendar-more-link" onClick={() => { setCursorDate(d.date); setViewMode("day"); }}>
-                        还有 {d.plans.length - 1 + Math.max(0, d.events.length - 2)} 项 · 查看当天
+                        还有 {Math.max(0, d.plans.length - 1) + Math.max(0, d.events.length - 2)} 项 · 查看当天
                       </button>
                     )}
                   </div>
@@ -262,9 +291,9 @@ export default function Calendar() {
           </div>
         ) : (
           <div className={`calendar-agenda ${viewMode === "week" ? "calendar-week-grid" : ""}`}>
-            {days.filter((d) => viewMode !== "week" || d.plans.length > 0 || d.events.length > 0).map((d) => (
+            {days.map((d) => (
               <section className="calendar-agenda-day" key={d.key} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); const id = e.dataTransfer.getData("text/plain"); const event = events.find((item) => item.id === id); if (event) { const oldValue = _toLocalInput(event.scheduled || event.saved_at); const time = oldValue.includes("T") ? oldValue.slice(11, 16) : "09:00"; void saveSchedule(id, `${d.key}T${time}`); } }}>
-                <button className="calendar-agenda-date" onClick={() => { setPlanDate(d.key); setPlanFormOpen(true); }}>
+                <button className="calendar-agenda-date" onClick={() => { if (viewMode === "week") { setCursorDate(d.date); setViewMode("day"); } else { setPlanDate(d.key); setPlanFormOpen(true); } }}>
                   <strong>{d.date.toLocaleDateString("zh-CN", { weekday: "long" })}</strong>
                   <span>{d.key}{d.date.toDateString() === today.toDateString() ? " · 今天" : ""}</span>
                 </button>
@@ -304,7 +333,7 @@ export default function Calendar() {
 
         {selected && (
           <div className="calendar-drawer-backdrop" role="presentation" onClick={() => { setSelected(null); setDraftTime(""); }}>
-          <section className="panel calendar-side-drawer" role="dialog" aria-modal="true" aria-label="排期编辑" onClick={(e) => e.stopPropagation()}>
+          <section ref={scheduleDrawerRef} tabIndex={-1} className="panel calendar-side-drawer" role="dialog" aria-modal="true" aria-label="排期编辑" onClick={(e) => e.stopPropagation()}>
             <div className="panel-head">
               <div>
                 <div className="panel-title"><span className="icon">✎</span>排期编辑 · {selected.title}</div>
@@ -368,7 +397,7 @@ export default function Calendar() {
       )}
 
       {planFormOpen && <div className="calendar-drawer-backdrop" role="presentation" onClick={() => setPlanFormOpen(false)}>
-      <section className="panel calendar-side-drawer calendar-plan-create" role="dialog" aria-modal="true" aria-label="新建内容计划" onClick={(e) => e.stopPropagation()}>
+      <section ref={planDrawerRef} tabIndex={-1} className="panel calendar-side-drawer calendar-plan-create" role="dialog" aria-modal="true" aria-label="新建内容计划" onClick={(e) => e.stopPropagation()}>
         <div className="panel-head">
           <div><div className="panel-title">新建内容计划</div><div className="panel-sub">创建计划不会自动开始生产；加入全局队列后才会生成，发布仍需人工确认。</div></div>
           <button className="btn sm" onClick={() => setPlanFormOpen(false)}>关闭</button>
