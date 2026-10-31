@@ -3978,6 +3978,9 @@ def _register_routes(app: FastAPI) -> None:
             (round_id,),
         ).fetchall()
         result = dict(row)
+        for timestamp_field in ("created_at", "producing_started_at", "collecting_metrics_started_at"):
+            if result.get(timestamp_field):
+                result[timestamp_field] = _api_datetime(result[timestamp_field])
         round_drafts = []
         for draft in drafts:
             item = dict(draft)
