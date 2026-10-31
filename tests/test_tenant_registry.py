@@ -130,3 +130,25 @@ def test_unknown_legacy_active_tenant_blocks_first_migration(tmp_path: Path) -> 
     )
     with pytest.raises(TenantError, match="拒绝自动回退"):
         TenantRegistry(tmp_path).initialize()
+
+
+def test_tenant_registry_migrates_legacy_local_timestamps_to_utc(tmp_path: Path) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "tenant_registry.json").write_text(json.dumps({
+        "version": 1,
+        "tenants": [
+            {"id": "default", "name": "默认账号组", "created_at": "2026-01-01T08:00:00"},
+            {"id": "brand_a", "name": "品牌 A", "created_at": "2026-01-02T08:30:00"},
+        ],
+    }), encoding="utf-8")
+
+    registry = TenantRegistry(tmp_path)
+    registry.initialize()
+
+    assert registry.get("default")["created_at"] == "2026-01-01T00:00:00+00:00"
+    assert registry.get("brand_a")["created_at"] == "2026-01-02T00:30:00+00:00"
+
+    created = registry.create("brand_b", "品牌 B")
+    assert registry.get("brand_b")["created_at"].endswith("+00:00")
+    assert created.tenant_id == "brand_b"
