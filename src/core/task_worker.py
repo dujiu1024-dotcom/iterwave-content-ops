@@ -68,6 +68,20 @@ class GlobalTaskWorker:
             self.queue.release_worker(self.owner)
             logger.info("全局任务消费者退出 worker=%s", self.owner[:8])
 
+    def _sync_terminal_rounds(self) -> None:
+        """收口队列中已中断但轮次仍处于运行态的记录。"""
+        try:
+            tasks, _ = self.queue.list_page(scope="failed", page=1, page_size=500)
+        except Exception:
+            logger.exception("读取终态任务失败")
+            return
+        for task in tasks:
+            if task.status != "interrupted" or task.task_type != "round_run":
+                continue
+            if task.task_id in self._reconciled_interrupted_task_ids:
+                continue
+            self._reconcile_round_failure(task, task.error_message or task.error_code or "任务已中断")
+            self._reconciled_interrupted_task_ids.add(task.task_id)
     async def _wait(self, stop_event: asyncio.Event, seconds: float) -> None:
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=seconds)
