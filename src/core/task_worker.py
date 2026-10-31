@@ -338,15 +338,22 @@ class GlobalTaskWorker:
                 task.task_id, task.tenant_id, safe_message,
             )
             try:
-                self.queue.fail(
+                failed = self.queue.fail(
                     task.task_id, self.owner,
                     error_code=error_code, error_message=safe_message,
                 )
             except Exception:
                 logger.exception("写入任务失败状态异常 task_id=%s", task.task_id)
-            # 执行器之外的异常（例如快照校验、运行时重建失败）不会经过
-            # RoundExecutor.run() 的失败收尾，Worker 必须额外对账轮次状态。
-            self._reconcile_round_failure(task, safe_message)
+                failed = False
+            # 只有当前 Worker 确实提交了队列失败状态，才有权对账轮次；
+            # 租约已丢失时，不能覆盖新 Worker 的执行结果。
+            if failed:
+                self._reconcile_round_failure(task, safe_message)
+            else:
+                logger.warning(
+                    "任务失败状态未由当前租约持有者提交，跳过轮次对账 task_id=%s",
+                    task.task_id,
+                )
         finally:
             if not execution.done():
                 execution.cancel()
