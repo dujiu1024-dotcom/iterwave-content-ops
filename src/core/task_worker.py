@@ -51,10 +51,12 @@ class GlobalTaskWorker:
 
     async def run(self, stop_event: asyncio.Event) -> None:
         logger.info("全局任务消费者启动 worker=%s", self.owner[:8])
+        self._sync_terminal_rounds()
         try:
             while not stop_event.is_set():
                 try:
                     self.queue.recover_expired()
+                    self._sync_terminal_rounds()
                     task = self.queue.claim_next(self.owner, lease_seconds=self.lease_seconds)
                 except Exception:
                     logger.exception("全局任务队列读取失败")
