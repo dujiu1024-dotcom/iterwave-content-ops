@@ -630,10 +630,9 @@ class LlmConfig(BaseModel):
 
 
 class ActivationConfig(BaseModel):
-    """快速体验资源与输入边界；BYOK 仍按供应商实际计费。"""
+    """快速体验输入与单次资源边界；自用不设每日次数上限，BYOK 仍按供应商实际计费。"""
     account_description_min_chars: int = Field(10, ge=1, le=100)
     account_description_max_chars: int = Field(300, ge=20, le=1000)
-    max_runs_per_day: int = Field(5, ge=1, le=100)
     stale_task_timeout_minutes: int = Field(30, ge=5, le=240)
     sample_max_output_tokens: int = Field(1200, ge=128, le=8192)
     max_model_calls_per_run: int = Field(9, ge=3, le=30)

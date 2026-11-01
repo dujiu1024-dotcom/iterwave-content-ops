@@ -158,23 +158,29 @@ def test_activation_sample_success_stays_outside_formal_production(activation_cl
     assert conn.execute("SELECT COUNT(*) FROM drafts").fetchone()[0] == 0
 
 
-def test_daily_quota_is_configured_and_idempotency_precedes_quota(activation_client, conn):
-    main._g_ctx["cfg"].activation.max_runs_per_day = 1
+def test_quick_experience_has_no_daily_run_limit_and_reports_usage(activation_client, conn):
+    """自用不设快速体验每日次数上限：多次体验不返回 429，状态接口只展示今日已体验次数。"""
+    assert not hasattr(main._g_ctx["cfg"].activation, "max_runs_per_day")
     payload = {
         "account_description": "分享产品经理的 AI 工具实践和效率方法",
         "platform": "xhs",
-        "idempotency_key": "daily-quota-1",
+        "idempotency_key": "daily-usage-0",
     }
     first = activation_client.post("/api/activation/samples", json=payload)
     assert first.status_code == 202
     repeated = activation_client.post("/api/activation/samples", json=payload)
     assert repeated.status_code == 202
     assert repeated.json()["deduplicated"] is True
-    second = activation_client.post("/api/activation/samples", json={
-        **payload, "idempotency_key": "daily-quota-2",
-    })
-    assert second.status_code == 429
-    assert conn.execute("SELECT COUNT(*) FROM sample_runs").fetchone()[0] == 1
+    for index in range(1, 8):
+        response = activation_client.post("/api/activation/samples", json={
+            **payload, "idempotency_key": f"daily-usage-{index}",
+        })
+        assert response.status_code == 202, response.text
+    assert conn.execute("SELECT COUNT(*) FROM sample_runs").fetchone()[0] == 8
+    limits = activation_client.get("/api/activation/status").json()["activation_limits"]
+    assert limits["daily_runs_used"] == 8
+    assert "max_runs_per_day" not in limits
+    assert "daily_runs_remaining" not in limits
 
 
 def test_platform_metric_fields_are_enforced(activation_client, seed):

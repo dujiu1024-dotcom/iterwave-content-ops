@@ -462,22 +462,26 @@ export default function Assets() {
               <EmptyHint next="先添加一套结构，例如「痛点引入 → 真实体验 → 证据 → 局限 → 结论」，然后在内容生产的生产线中选择它。">暂无模板</EmptyHint>
             ) : (
               <div className="grid three">
-                {assets.template.map((t) => (
-                  <div className="skill-card" key={t.id} style={{ opacity: (t.is_active === false || t.is_active === 0) ? 0.62 : 1 }}>
-                    <div className="skill-name">{t.title} {t.is_active === false && <span className="tag gray">已停用</span>}</div>
+                {assets.template.map((t) => {
+                  // 后端统一返回 bool；兼容旧数据的 0/1，缺省视为启用。
+                  const inactive = t.is_active !== undefined && t.is_active !== null && !Number(t.is_active);
+                  return (
+                  <div className="skill-card" key={t.id} style={{ opacity: inactive ? 0.62 : 1 }}>
+                    <div className="skill-name">{t.title} {inactive && <span className="tag gray">已停用</span>}</div>
                     <div className="skill-desc" style={{ whiteSpace: "pre-line" }}>{t.body || "（无结构说明）"}</div>
                     <div className="skill-foot">
                       <span>v{t.version ?? 1} · {t.updated_at?.slice(0, 10) ?? t.created_at?.slice(0, 10) ?? "—"}</span>
                       <button className="btn xs" type="button" onClick={() => setEditingTemplate(t)}>编辑模板</button>
                       <button className="btn xs" type="button" onClick={() => void openTemplateVersions(t.id)}>版本历史</button>
-                      {t.is_active === false ? (
+                      {inactive ? (
                         <button className="btn xs" type="button" onClick={async () => { await api.restoreAsset(t.id); await loadAssetPage("template", assetPages.template); }}>恢复</button>
                       ) : (
                         <button className="btn xs" type="button" onClick={async () => { await api.archiveAsset(t.id); await loadAssetPage("template", assetPages.template); }}>停用</button>
                       )}
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
