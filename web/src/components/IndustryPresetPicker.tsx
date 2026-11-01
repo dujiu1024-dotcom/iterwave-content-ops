@@ -68,16 +68,26 @@ export default function IndustryPresetPicker({ onApplied }: { onApplied: () => v
   };
 
   const deletePreset = async (preset: IndustryPreset) => {
-    if (preset.is_builtin || !window.confirm(`永久删除自定义行业模板「${preset.name}」？已应用到账号画像的配置不会回滚。`)) return;
+    if (preset.is_builtin || preset.is_active === false || !window.confirm(`归档自定义行业模板「${preset.name}」？历史版本会保留，可随时恢复。`)) return;
     setBusy(preset.key);
     try {
       await api.deletePreset(preset.key);
       if (editingKey === preset.key) resetEditor();
       await load();
-      showToast("自定义行业模板已删除", "success");
+      showToast("自定义行业模板已归档，历史版本已保留", "success");
     } catch (e) {
-      showToast(`删除失败：${(e as Error).message}`, "error");
+      showToast(`归档失败：${(e as Error).message}`, "error");
     } finally { setBusy(""); }
+  };
+
+  const restorePreset = async (preset: IndustryPreset) => {
+    setBusy(preset.key);
+    try {
+      await api.restorePreset(preset.key);
+      await load();
+      showToast("行业模板已恢复", "success");
+    } catch (e) { showToast(`恢复失败：${(e as Error).message}`, "error"); }
+    finally { setBusy(""); }
   };
 
   const saveCustom = async () => {
@@ -156,14 +166,16 @@ export default function IndustryPresetPicker({ onApplied }: { onApplied: () => v
       <div className="flex wrap" style={{ gap: 8 }}>
         {presets.map((p) => (
           <div key={p.key} className="flex wrap" style={{ gap: 5, alignItems: "center" }}>
-            <button className={p.is_builtin ? "btn sm soft" : "btn sm"} type="button" disabled={busy === p.key}
-              title={p.description} onClick={() => void apply(p)}>
-              {busy === p.key ? "应用中…" : p.name}{!p.is_builtin && " · 自定义"}
+            <button className={p.is_builtin ? "btn sm soft" : "btn sm"} type="button" disabled={busy === p.key || p.is_active === false}
+              title={p.is_active === false ? "已归档，恢复后可应用" : p.description} onClick={() => void apply(p)}>
+              {busy === p.key ? "处理中…" : p.name}{!p.is_builtin && " · 自定义"}{p.is_active === false && " · 已归档"}
             </button>
-            {!p.is_builtin && <>
+            {!p.is_builtin && p.is_active !== false && <>
               <button className="btn xs" type="button" disabled={busy !== ""} onClick={() => beginEdit(p)}>编辑</button>
-              <button className="btn xs danger" type="button" disabled={busy !== ""} onClick={() => void deletePreset(p)}>删除</button>
+              <button className="btn xs danger" type="button" disabled={busy !== ""} onClick={() => void deletePreset(p)}>归档</button>
             </>}
+            {!p.is_builtin && p.is_active === false &&
+              <button className="btn xs primary" type="button" disabled={busy !== ""} onClick={() => void restorePreset(p)}>恢复</button>}
           </div>
         ))}
       </div>
