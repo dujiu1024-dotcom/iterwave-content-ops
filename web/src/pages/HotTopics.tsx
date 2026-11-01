@@ -39,7 +39,7 @@ export default function HotTopics() {
   const [keyword, setKeyword] = useState("");
   const [sortBy, setSortBy] = useState<"heat" | "match">("heat");
   const [page, setPage] = useState(1);
-  const pageSize = 20;
+  const [pageSize, setPageSize] = useState(20);
   const [hot, setHot] = useState<HotTopicsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -433,6 +433,11 @@ export default function HotTopics() {
         <select className="field" value={sortBy} onChange={(e) => { setSortBy(e.target.value as "heat" | "match"); setPage(1); }}>
           <option value="heat">按热度</option>
           <option value="match">按定位关联度</option>
+        </select>
+        <select className="field" aria-label="每页热点数量" value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}>
+          <option value={20}>每页 20 条</option>
+          <option value={50}>每页 50 条</option>
+          <option value={100}>每页 100 条</option>
         </select>
       </div>
 
