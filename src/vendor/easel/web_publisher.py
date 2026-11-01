@@ -471,36 +471,6 @@ def _profile_dir(platform: str, base: str | None) -> Path:
     return root / PLATFORMS[platform]["profile"]
 
 
-def _login_artifact_dir(profile_base: str | None) -> Path:
-    """敏感登录/发布截图跟随租户 data_dir，并限制目录权限。"""
-    if profile_base:
-        path = Path(profile_base).expanduser().resolve().parent / "_login"
-    else:
-        path = Path(__file__).resolve().parents[3] / "outputs" / "_login"
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    try:
-        path.chmod(0o700)
-    except OSError:
-        pass
-    return path
-
-
-def _secure_login_artifact(path: Path) -> None:
-    """截图/二维码可能包含登录态或个人信息，限制为当前用户可读写。"""
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
-
-def _secure_profile_dir(path: Path) -> None:
-    """浏览器 Profile 含 Cookie 与本地存储，目录仅允许当前用户访问。"""
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    try:
-        path.chmod(0o700)
-    except OSError:
-        pass
-
-
 def cmd_platforms(_a) -> int:
     print(f"支持 {len(PLATFORMS)} 个网页发布平台：\n")
     for k, c in PLATFORMS.items():
@@ -1400,7 +1370,7 @@ def _run_browser(a, headed: bool, do_publish: bool) -> int:
     except Exception as e:
         _die(f"需要 playwright：{e}（pip install playwright && playwright install chromium）", 3)
     profile = _profile_dir(a.platform, a.profile_base)
-    _secure_profile_dir(profile)
+    profile.mkdir(parents=True, exist_ok=True)
     cfg = PLATFORMS[a.platform]
     ctx = {"media": a.media or "", "title": a.title or "", "desc": a.desc or "",
            "tags": a.tags or "", "cover": a.cover or ""}
@@ -1583,15 +1553,9 @@ def _run_browser(a, headed: bool, do_publish: bool) -> int:
                         # 截图到指定路径（相对工作目录）
                         import pathlib as _pl
                         _cwd = _pl.Path.cwd()
-                        if val and val.replace("\\", "/").startswith("outputs/_login/"):
-                            _sp = _login_artifact_dir(a.profile_base) / _pl.Path(val).name
-                        elif val:
-                            _sp = _cwd / val
-                        else:
-                            _sp = _login_artifact_dir(a.profile_base) / "debug-screenshot.png"
+                        _sp = _cwd / val if val else _cwd / "outputs/_login/debug-screenshot.png"
                         _sp.parent.mkdir(parents=True, exist_ok=True)
                         page.screenshot(path=str(_sp))
-                        _secure_login_artifact(_sp)
                     elif act == "js_eval":
                         # 直接执行 JS 代码（用于快手等框架按钮，CSS选择器/has-text 匹配不稳定）
                         page.evaluate(val)
@@ -1640,10 +1604,9 @@ def _run_browser(a, headed: bool, do_publish: bool) -> int:
                                            snapshot_ids=snapshot_ids)
                 if verdict.outcome != "verified":
                     try:  # 失败留现场，供排错
-                        fp = _login_artifact_dir(a.profile_base) / f"{a.platform}-publish-fail.png"
+                        fp = Path(__file__).resolve().parents[3] / "outputs" / "_login" / f"{a.platform}-publish-fail.png"
                         fp.parent.mkdir(parents=True, exist_ok=True)
                         page.screenshot(path=str(fp))
-                        _secure_login_artifact(fp)
                     except Exception:
                         pass
                     _ui = "界面判定通过" if ui_ok else "界面判定未通过"
@@ -1658,10 +1621,9 @@ def _run_browser(a, headed: bool, do_publish: bool) -> int:
             elif chk:
                 if not ui_ok:
                     try:  # 仅失败时截图，供排错（正常成功不截）
-                        fp = _login_artifact_dir(a.profile_base) / f"{a.platform}-publish-fail.png"
+                        fp = Path(__file__).resolve().parents[3] / "outputs" / "_login" / f"{a.platform}-publish-fail.png"
                         fp.parent.mkdir(parents=True, exist_ok=True)
                         page.screenshot(path=str(fp))
-                        _secure_login_artifact(fp)
                     except Exception:
                         pass
                     # 识别常见"账号级验证墙"（需短信/绑手机），给精准提示
@@ -1702,10 +1664,9 @@ def _run_browser(a, headed: bool, do_publish: bool) -> int:
         except PWTimeout as e:
             # 超时（常见：选择器失效 / 上传转码慢）——截图 + dump 当前可见输入控件，便于精修选择器
             try:
-                fp = _login_artifact_dir(a.profile_base) / f"{a.platform}-publish-fail.png"
+                fp = Path(__file__).resolve().parents[3] / "outputs" / "_login" / f"{a.platform}-publish-fail.png"
                 fp.parent.mkdir(parents=True, exist_ok=True)
                 page.screenshot(path=str(fp))
-                _secure_login_artifact(fp)
                 print(f"    失败截图：{fp}", file=sys.stderr)
             except Exception:
                 pass
@@ -2079,12 +2040,10 @@ def _crop_qr(page, qr_out, cfg) -> None:
     if best is not None:
         try:
             best[1].screenshot(path=str(qr_out))
-            _secure_login_artifact(qr_out)
             return
         except Exception:
             pass
     page.screenshot(path=str(qr_out))   # 兜底：整页
-    _secure_login_artifact(qr_out)
 
 
 def _capture_qr(page, qr_out, cfg) -> None:
@@ -2255,7 +2214,7 @@ def cmd_login_qr(a) -> int:
     if not cfg:
         _die(f"未知平台：{a.platform}（支持：{', '.join(PLATFORMS)}）")
     profile = _profile_dir(a.platform, a.profile_base)
-    _secure_profile_dir(profile)
+    profile.mkdir(parents=True, exist_ok=True)
     root = Path(__file__).resolve().parents[3] / "outputs" / "_login"
     qr_out = Path(a.qr_out).expanduser() if a.qr_out else root / f"{a.platform}.png"
     sf = a.status_file or str(root / f"{a.platform}.json")
@@ -2491,7 +2450,7 @@ def cmd_whoami(a) -> int:
     try:
         with sync_playwright() as p:
             profile = _profile_dir(a.platform, a.profile_base)
-            _secure_profile_dir(profile)
+            profile.mkdir(parents=True, exist_ok=True)
             browser = p.chromium.launch_persistent_context(
                 str(profile), headless=True, locale="zh-CN",
                 args=LAUNCH_ARGS + ["--no-proxy-server"])
