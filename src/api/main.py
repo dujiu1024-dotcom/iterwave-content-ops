@@ -6325,39 +6325,72 @@ def _register_routes(app: FastAPI) -> None:
         platform: Optional[str] = Query(None),
         action_type: Optional[str] = Query(None),
         status: Optional[str] = Query(None),
+        page: Optional[int] = Query(None, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
         limit: int = Query(100, ge=1, le=500),
     ):
         conn = _g()["conn"]
-        sql = "SELECT * FROM ops_logs WHERE 1=1"
+        where = ["1=1"]
         params: list = []
         if platform:
-            sql += " AND platform = ?"; params.append(platform)
+            where.append("platform = ?")
+            params.append(platform)
         if action_type:
-            sql += " AND action_type = ?"; params.append(action_type)
+            where.append("action_type = ?")
+            params.append(action_type)
         if status:
-            sql += " AND status = ?"; params.append(status)
-        sql += " ORDER BY COALESCE(executed_at, schedule_time) DESC LIMIT ?"
-        params.append(limit)
-        rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
-        return {"items": rows, "total": len(rows)}
+            where.append("status = ?")
+            params.append(status)
+        where_sql = " WHERE " + " AND ".join(where)
+        total = conn.execute("SELECT COUNT(*) FROM ops_logs" + where_sql, params).fetchone()[0]
+        effective_limit = page_size if page is not None else limit
+        effective_offset = (page - 1) * page_size if page is not None else 0
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM ops_logs" + where_sql +
+            " ORDER BY COALESCE(executed_at, schedule_time) DESC, id DESC LIMIT ? OFFSET ?",
+            [*params, effective_limit, effective_offset],
+        ).fetchall()]
+        return {
+            "items": rows, "total": total, "limit": effective_limit, "offset": effective_offset,
+            **({
+                "page": page, "page_size": page_size,
+                "pages": max(1, (total + page_size - 1) // page_size),
+            } if page is not None else {}),
+        }
 
     # --- 任务追踪（task_runs）---
     @app.get("/api/task_runs")
     def list_task_runs(
         task_type: Optional[str] = Query(None),
         status: Optional[str] = Query(None),
+        page: Optional[int] = Query(None, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
         limit: int = Query(100, ge=1, le=500),
     ):
         conn = _g()["conn"]
-        sql = "SELECT * FROM task_runs WHERE 1=1"
+        where = ["1=1"]
         params: list = []
         if task_type:
-            sql += " AND task_type = ?"; params.append(task_type)
+            where.append("task_type = ?")
+            params.append(task_type)
         if status:
-            sql += " AND status = ?"; params.append(status)
-        sql += " ORDER BY id DESC LIMIT ?"
-        params.append(limit)
-        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+            where.append("status = ?")
+            params.append(status)
+        where_sql = " WHERE " + " AND ".join(where)
+        total = conn.execute("SELECT COUNT(*) FROM task_runs" + where_sql, params).fetchone()[0]
+        effective_limit = page_size if page is not None else limit
+        effective_offset = (page - 1) * page_size if page is not None else 0
+        items = [dict(r) for r in conn.execute(
+            "SELECT * FROM task_runs" + where_sql +
+            " ORDER BY id DESC LIMIT ? OFFSET ?",
+            [*params, effective_limit, effective_offset],
+        ).fetchall()]
+        if page is None:
+            return items
+        return {
+            "items": items, "total": total, "page": page, "page_size": page_size,
+            "pages": max(1, (total + page_size - 1) // page_size),
+        }
 
     @app.post("/api/task_runs/{run_id}/resolve")
     def resolve_pending_verify(run_id: int, body: dict):
@@ -6400,16 +6433,27 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/api/notifications")
     def list_notifications(
         level: Optional[str] = Query(None),
+        page: Optional[int] = Query(None, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
         limit: int = Query(50, ge=1, le=200),
     ):
         conn = _g()["conn"]
-        sql = "SELECT * FROM notifications WHERE 1=1"
-        params: list = []
-        if level:
-            sql += " AND level = ?"; params.append(level)
-        sql += " ORDER BY sent_at DESC LIMIT ?"
-        params.append(limit)
-        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+        where = " WHERE level = ?" if level else ""
+        params: list = [level] if level else []
+        total = conn.execute("SELECT COUNT(*) FROM notifications" + where, params).fetchone()[0]
+        effective_limit = page_size if page is not None else limit
+        effective_offset = (page - 1) * page_size if page is not None else 0
+        items = [dict(r) for r in conn.execute(
+            "SELECT * FROM notifications" + where +
+            " ORDER BY sent_at DESC, id DESC LIMIT ? OFFSET ?",
+            [*params, effective_limit, effective_offset],
+        ).fetchall()]
+        if page is None:
+            return items
+        return {
+            "items": items, "total": total, "page": page, "page_size": page_size,
+            "pages": max(1, (total + page_size - 1) // page_size),
+        }
 
     # --- APScheduler 定时任务状态 ---
     # --- 自动闭环（自生长）---
