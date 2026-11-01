@@ -112,8 +112,12 @@ export default function Onboarding() {
       if (!active) return;
       const tenantId = tenants.selected_tenant_id || "default";
       setOnboardingTenantId(tenantId);
-      const saved = Number(window.localStorage.getItem(`iterwave:onboarding-step:${tenantId}`));
-      if (Number.isInteger(saved) && saved >= 0 && saved < STEPS.length) setStepIdx(saved);
+      try {
+        const saved = Number(window.localStorage.getItem(`iterwave:onboarding-step:${tenantId}`));
+        if (Number.isInteger(saved) && saved >= 0 && saved < STEPS.length) setStepIdx(saved);
+      } catch {
+        // Storage may be unavailable in restricted browser contexts; the wizard remains usable.
+      }
     }).catch(() => {
       if (active) setOnboardingTenantId("default");
     });
@@ -122,7 +126,11 @@ export default function Onboarding() {
 
   useEffect(() => {
     if (!onboardingTenantId) return;
-    window.localStorage.setItem(`iterwave:onboarding-step:${onboardingTenantId}`, String(stepIdx));
+    try {
+      window.localStorage.setItem(`iterwave:onboarding-step:${onboardingTenantId}`, String(stepIdx));
+    } catch {
+      // Storage may be unavailable in restricted browser contexts; the wizard remains usable.
+    }
   }, [onboardingTenantId, stepIdx]);
 
   useEffect(() => {
