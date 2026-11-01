@@ -198,19 +198,19 @@ class UltimateGoalConfig(BaseModel):
 
 
 class TimeoutsConfig(BaseModel):
-    round_timeout_hours: int = 48
-    awaiting_publish_timeout_hours: int = 120
-    publish_confirm_timeout_hours: int = 72
-    publish_confirm_grace_hours: int = 48
-    collecting_metrics_timeout_hours: int = 72
-    metrics_initial_delay_hours: int = 24
+    round_timeout_hours: int = Field(48, ge=1, le=720)
+    awaiting_publish_timeout_hours: int = Field(120, ge=2, le=1440)
+    publish_confirm_timeout_hours: int = Field(72, ge=1, le=1440)
+    publish_confirm_grace_hours: int = Field(48, ge=0, le=720)
+    collecting_metrics_timeout_hours: int = Field(72, ge=1, le=1440)
+    metrics_initial_delay_hours: int = Field(24, ge=0, le=720)
     metrics_retry_attempts: int = Field(3, ge=1, le=20)
     metrics_retry_interval_minutes: int = Field(30, ge=1, le=1440)
     login_timeout_seconds: int = Field(240, ge=60, le=1800)
     login_export_timeout_seconds: int = Field(90, ge=10, le=600)
     recovery_retry_delay_minutes: int = Field(1, ge=1, le=60)
-    goal_max_rounds: int = 30
-    round_min_interval_hours: int = 4
+    goal_max_rounds: int = Field(30, ge=1, le=500)
+    round_min_interval_hours: int = Field(4, ge=0, le=720)
 
     @model_validator(mode="after")
     def _check_independent_timeouts(self) -> "TimeoutsConfig":
