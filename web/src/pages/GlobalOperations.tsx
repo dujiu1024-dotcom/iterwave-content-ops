@@ -159,7 +159,7 @@ export default function GlobalOperations() {
           </div>}
         </section>
         <section className="panel">
-          <div className="panel-head"><div><div className="panel-title">异常与待处理</div><div className="panel-sub">当前返回的队列记录中失败或中断的任务。</div></div><span className="tag">{failedCount ?? "—"} 项</span></div>
+          <div className="panel-head"><div><div className="panel-title">异常与待处理</div><div className="panel-sub">全量队列中的失败或中断任务；总数与账号组分布不受当前页影响。</div></div><span className="tag">{failedCount ?? "—"} 项</span></div>
           {failed.length ? <div className="list">{failed.map((task) => <div className="task-row" key={task.task_id}>
             <i className="task-prio red" /><div className="task-main"><div className="task-title">{task.tenant_name} · {STATUS[task.status]}</div><div className="task-desc">{task.error_message || task.task_type}</div></div>
           </div>)}</div> : <div className="empty-state">当前没有失败或中断任务。</div>}
