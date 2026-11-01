@@ -143,10 +143,24 @@ def _profile_dir(base: str | None) -> Path:
 
 
 def _login_artifact_dir(profile_base: str | None) -> Path:
-    """敏感登录/发布截图跟随租户 data_dir，不落入共享 outputs。"""
+    """敏感登录/发布截图跟随租户 data_dir，并限制目录权限。"""
     if profile_base:
-        return Path(profile_base).expanduser().resolve().parent / "_login"
-    return PROJECT_ROOT / "outputs" / "_login"
+        path = Path(profile_base).expanduser().resolve().parent / "_login"
+    else:
+        path = PROJECT_ROOT / "outputs" / "_login"
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
+    return path
+
+
+def _secure_login_artifact(path: Path) -> None:
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
 
 
 def _cloak_executable() -> Path | None:
@@ -902,6 +916,7 @@ def _diag_after_publish(page, artifact_dir: Path | None = None) -> str:
             out = (artifact_dir or _login_artifact_dir(None)) / "xhs-publish-fail.png"
             out.parent.mkdir(parents=True, exist_ok=True)
             page.screenshot(path=str(out))
+            _secure_login_artifact(out)
             shot = f"（调试截图见 {out}）"
         except Exception:
             pass
