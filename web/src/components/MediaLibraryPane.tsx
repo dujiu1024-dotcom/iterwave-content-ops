@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useApp } from "../AppContext";
 import { api, MediaAsset, MediaUsageTarget, MediaGenerationSettings, MediaRecommendation } from "../api";
 import { platformMeta } from "../platforms";
@@ -235,8 +235,7 @@ export default function MediaLibraryPane() {
           await api.generateMediaAsset({ prompt: prompt.trim(), title: genTitle.trim(), tags: [] });
         }
         showToast("已生成，图片在「待审核」里，通过后才能使用", "success");
-        setPrompt(""); setGenTitle(""); setEditTarget(null); setFilter("pending");
-        await load();
+        setPrompt(""); setGenTitle(""); setEditTarget(null); setPage(1); setFilter("pending");
       } catch (e) {
         showToast(e instanceof Error ? e.message : "生成失败", "error");
       }
@@ -304,8 +303,8 @@ export default function MediaLibraryPane() {
       try {
         await api.generateMediaForContent(selectedContentId, usageRole);
         showToast("候选配图已生成，在「待审核」里确认后即可配给这篇内容", "success");
+        setPage(1);
         setFilter("pending");
-        await load();
       } catch (e) {
         showToast(e instanceof Error ? e.message : "生成失败", "error");
       }
