@@ -210,9 +210,13 @@ class GlobalTaskWorker:
                 try:
                     with bind_task_context(task_run_id):
                         result = await getattr(context["scheduler"], method)(*args)
-                except Exception as exc:
+                except Exception:
+                    logger.exception(
+                        "定时任务执行异常 tenant=%s method=%s", task.tenant_id, method,
+                    )
                     self._finish_scheduler_task_run(
-                        context["conn"], context["cfg"], task_run_id, "failed", str(exc)[:500],
+                        context["conn"], context["cfg"], task_run_id, "failed",
+                        "定时任务执行异常，请检查服务端运行日志",
                     )
                     raise
                 else:
