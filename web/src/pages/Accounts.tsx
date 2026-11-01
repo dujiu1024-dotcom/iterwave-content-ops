@@ -110,6 +110,10 @@ export default function Accounts() {
     } catch (e: any) { alert("退出失败：" + e.message); }
   };
 
+  const activeLoginProfile = activeLogin
+    ? registeredAccounts.find((item) => item.platform === activeLogin)
+    : undefined;
+
   return (
     <>
       <div className="page-head">
@@ -137,7 +141,7 @@ export default function Accounts() {
                   <span style={{ fontSize: 28 }}>{PLATFORM_EMOJI[a.platform as Platform]}</span>
                   <div>
                     <div style={{ fontWeight: 700, fontSize: 15 }}>{a.platform_display}</div>
-                    <div style={{ fontSize: 11, color: "var(--muted)" }}>本机登录</div>
+                    <div style={{ fontSize: 11, color: "var(--muted)" }}>本机登录 · 昵称为手动登记的识别信息</div>
                     <div style={{ marginTop: 4 }}>
                       <div style={{ fontSize: 13, fontWeight: 700 }}>{registered?.display_name || registered?.account_handle || "尚未登记账号昵称"}</div>
                       {registered?.account_handle && <div style={{ fontSize: 10, color: "var(--muted)" }}>账号标识：{registered.account_handle}</div>}
@@ -260,6 +264,16 @@ export default function Accounts() {
             <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>
               {PLATFORM_EMOJI[activeLogin]} {loginStatus?.platform_display || "登录中"}
             </div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8 }}>
+              {activeLoginProfile?.display_name || activeLoginProfile?.account_handle
+                ? `本次登录目标：${activeLoginProfile.display_name || activeLoginProfile.account_handle}`
+                : "尚未登记该平台账号昵称，请登录后补充登记，避免多个账号混淆"}
+            </div>
+            {activeLoginProfile?.account_handle && (
+              <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 10 }}>
+                账号标识：{activeLoginProfile.account_handle}
+              </div>
+            )}
             <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16 }}>
               {loginStatus?.message || "准备中..."}
             </div>
