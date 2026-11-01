@@ -142,35 +142,6 @@ def _profile_dir(base: str | None) -> Path:
     return root / PROFILE_NAME
 
 
-def _login_artifact_dir(profile_base: str | None) -> Path:
-    """敏感登录/发布截图跟随租户 data_dir，并限制目录权限。"""
-    if profile_base:
-        path = Path(profile_base).expanduser().resolve().parent / "_login"
-    else:
-        path = PROJECT_ROOT / "outputs" / "_login"
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    try:
-        path.chmod(0o700)
-    except OSError:
-        pass
-    return path
-
-
-def _secure_login_artifact(path: Path) -> None:
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
-
-def _secure_profile_dir(path: Path) -> None:
-    """浏览器 Profile 含 Cookie 与本地存储，目录仅允许当前用户访问。"""
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    try:
-        path.chmod(0o700)
-    except OSError:
-        pass
-
-
 def _cloak_executable() -> Path | None:
     """本机已装的 CloakBrowser 内核。只用 ~/.cloakbrowser，不用调研 profile / 9344 / 9345。
 
@@ -904,7 +875,7 @@ def _wait_publish_clickable(page, timeout_s: int = 15):
     _die(f"等待发布按钮可点击超时{('：' + last) if last else ''}")
 
 
-def _diag_after_publish(page, artifact_dir: Path | None = None) -> str:
+def _diag_after_publish(page) -> str:
     """点发布后失败时，抓屏幕上可见的弹框/报错/toast 文案，供排错。
     截图默认不存（正常使用不截图）；排错时设 EASEL_PUBLISH_DEBUG=1 才会存失败截图。"""
     bits = []
@@ -921,10 +892,9 @@ def _diag_after_publish(page, artifact_dir: Path | None = None) -> str:
     shot = ""
     if os.environ.get("EASEL_PUBLISH_DEBUG"):
         try:
-            out = (artifact_dir or _login_artifact_dir(None)) / "xhs-publish-fail.png"
+            out = PROJECT_ROOT / "outputs" / "_login" / "xhs-publish-fail.png"
             out.parent.mkdir(parents=True, exist_ok=True)
             page.screenshot(path=str(out))
-            _secure_login_artifact(out)
             shot = f"（调试截图见 {out}）"
         except Exception:
             pass
@@ -949,7 +919,7 @@ def _confirm_publish_dialog(page) -> None:
         page.wait_for_timeout(500)
 
 
-def _wait_publish_success(page, timeout_s: int = 40, artifact_dir: Path | None = None) -> None:
+def _wait_publish_success(page, timeout_s: int = 40) -> None:
     """发布成功校验：小红书发布成功后**原地清空表单回到上传页**（不换 URL）。
     成功信号任一：跳离 /publish/publish、出现「成功」toast、或编辑表单已重置（标题框+图片预览消失）。"""
     deadline = time.time() + timeout_s
@@ -974,7 +944,7 @@ def _wait_publish_success(page, timeout_s: int = 40, artifact_dir: Path | None =
         except Exception:
             pass
         page.wait_for_timeout(500)
-    _die("发布未确认成功：点击发布后未跳离发布页/未见成功提示。" + _diag_after_publish(page, artifact_dir))
+    _die("发布未确认成功：点击发布后未跳离发布页/未见成功提示。" + _diag_after_publish(page))
 
 
 def _normalize_content(text: str) -> str:
@@ -987,7 +957,7 @@ def _normalize_content(text: str) -> str:
     return text.strip("\n")
 
 
-def _fill_and_submit(page, title, content, tags, *, artifact_dir: Path | None = None):
+def _fill_and_submit(page, title, content, tags):
     """标题→正文→话题→长度校验→发布→成功校验。"""
     content = _normalize_content(content)         # 修连续空行导致的发布失败
     title_el = page.query_selector(SELECTORS["title_input"])
@@ -1021,7 +991,7 @@ def _fill_and_submit(page, title, content, tags, *, artifact_dir: Path | None = 
             btn.click()
     page.wait_for_timeout(1000)
     _confirm_publish_dialog(page)   # 若弹二次确认框，点确认
-    _wait_publish_success(page, 40, artifact_dir=artifact_dir)
+    _wait_publish_success(page, 40)
 
 
 # --------------------------------------------------------------------------- #
@@ -1029,7 +999,7 @@ def _fill_and_submit(page, title, content, tags, *, artifact_dir: Path | None = 
 # --------------------------------------------------------------------------- #
 def _launch(p, headed: bool, base: str | None, proxy: str | None, *, login_assets: bool = True):
     profile = _profile_dir(base)
-    _secure_profile_dir(profile)
+    profile.mkdir(parents=True, exist_ok=True)
     args = list(LAUNCH_ARGS)
     kwargs = dict(headless=not headed,
                   locale="zh-CN",
@@ -1367,7 +1337,7 @@ def _publish(a, kind: str) -> int:
                     _click_publish_tab(page, "上传视频")
                     page.wait_for_timeout(1000)
                     _upload_video(page, media[0])
-                _fill_and_submit(page, a.title, a.content or "", tags, artifact_dir=_login_artifact_dir(a.profile_base))
+                _fill_and_submit(page, a.title, a.content or "", tags)
             except PWTimeout as e:
                 _die(f"步骤超时（选择器可能已失效，检查 SELECTORS）：{e}")
             finally:
