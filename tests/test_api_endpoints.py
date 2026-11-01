@@ -2590,3 +2590,16 @@ def test_kb_source_preview_failure_hides_server_paths(client, monkeypatch):
     assert "/srv/iterwave" not in detail
     assert "tenant-a" not in detail
 
+
+
+def test_plan_signature_history_exposes_business_round_number(client):
+    tc, conn, _ = client
+    created = tc.post("/api/rounds", json={"topic_count": 3})
+    assert created.status_code == 200
+    body = created.json()
+
+    response = tc.get("/api/plans")
+    assert response.status_code == 200
+    history = response.json()["history"]
+    entry = next(item for item in history if item["round_id"] == body["id"])
+    assert entry["round_number"] == body["round_number"]
