@@ -870,6 +870,8 @@ export interface IndustryPreset {
   key: string;
   is_builtin?: boolean;
   version?: number;
+  is_active?: boolean;
+  archived_at?: string | null;
   name: string;
   description: string;
   positioning: string;
@@ -1745,6 +1747,10 @@ export const api = {
     fetchJson<ContentPlan>(`/api/content-plans/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
   cancelContentPlan: (id: string, version: number) =>
     fetchJson<{ id: string; status: string }>(`/api/content-plans/${id}?version=${version}`, { method: "DELETE" }),
+  archiveContentPlan: (id: string, version: number) =>
+    fetchJson<{ id: string; status: ContentPlan["status"]; version: number }>(`/api/content-plans/${id}/archive?version=${version}`, { method: "POST" }),
+  restoreContentPlan: (id: string, version: number) =>
+    fetchJson<{ id: string; status: ContentPlan["status"]; version: number }>(`/api/content-plans/${id}/restore?version=${version}`, { method: "POST" }),
   startContentPlan: (id: string) =>
     fetchJson<{ plan_id: string; round_id: number; task_id: string; status: string; queued: boolean }>(
       `/api/content-plans/${id}/start`, { method: "POST" },
@@ -1890,6 +1896,10 @@ export const api = {
     fetchJson<IndustryPreset>(`/api/presets/${encodeURIComponent(key)}`, { method: "PUT", body: JSON.stringify(data) }),
   deletePreset: (key: string) =>
     fetchJson<{ key: string; deleted: boolean }>(`/api/presets/${encodeURIComponent(key)}`, { method: "DELETE" }),
+  restorePreset: (key: string) =>
+    fetchJson<IndustryPreset>(`/api/presets/${encodeURIComponent(key)}/restore`, { method: "POST" }),
+  presetVersions: (key: string) =>
+    fetchJson<{ items: { version: number; snapshot: IndustryPreset; created_at: string }[] }>(`/api/presets/${encodeURIComponent(key)}/versions`),
   applyPreset: (key: string) =>
     fetchJson<{ key: string; message: string; dimensions: string[]; platform_notes: Record<string, string> }>(
       `/api/presets/${key}/apply`, { method: "POST" },

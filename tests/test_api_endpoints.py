@@ -1960,7 +1960,11 @@ def test_custom_industry_preset_can_be_edited_and_deleted_but_builtin_is_protect
     deleted = tc.delete("/api/presets/test-custom")
     assert deleted.status_code == 200
     assert deleted.json()["deleted"] is True
-    assert tc.delete("/api/presets/test-custom").status_code == 404
+    # 软归档：重复归档幂等，记录保留且仍为归档状态；不存在的模板才是 404。
+    assert tc.delete("/api/presets/test-custom").status_code == 200
+    archived = next(i for i in tc.get("/api/presets").json()["items"] if i["key"] == "test-custom")
+    assert archived["is_active"] is False
+    assert tc.delete("/api/presets/no-such-custom").status_code == 404
 
     builtin_key = tc.get("/api/presets").json()["items"][0]["key"]
     assert tc.delete(f"/api/presets/{builtin_key}").status_code == 409
@@ -2641,3 +2645,81 @@ def test_content_template_versions_and_lifecycle_are_preserved(client):
     assert restored.json()["is_active"] is True
     assert tc.get("/api/assets?asset_type=template").json()["total"] == 1
     assert tc.get("/api/assets?asset_type=template&page=1").json()["items"][0]["is_active"] is True
+
+
+# ---------------------------------------------------------------- P1-12 content plan lifecycle
+def _insert_content_plan(conn, plan_id: str, status: str = "reviewed"):
+    conn.execute(
+        "INSERT INTO content_plans(id,title,topic,platforms_json,planned_count,scheduled_date,status,notes,version,created_at,updated_at) "
+        "VALUES(?, 'P1 lifecycle test', 'topic', '[]', 1, '2026-11-01', ?, '', 1, '2026-11-01T00:00:00', '2026-11-01T00:00:00')",
+        (plan_id, status),
+    )
+    conn.commit()
+
+
+def test_content_plan_archive_and_restore_are_versioned_and_keep_history(client):
+    tc, conn, _ = client
+    _insert_content_plan(conn, "p1-plan-archive", "reviewed")
+    conn.execute(
+        "INSERT INTO content_plan_rounds(plan_id,round_id,task_id,created_at) VALUES(?, 77, 'task-77', '2026-11-01T00:00:00')",
+        ("p1-plan-archive",),
+    )
+    conn.commit()
+
+    archived = tc.post("/api/content-plans/p1-plan-archive/archive?version=1")
+    assert archived.status_code == 200
+    assert archived.json()["status"] == "archived"
+    assert archived.json()["version"] == 2
+
+    stale = tc.post("/api/content-plans/p1-plan-archive/restore?version=1")
+    assert stale.status_code == 409
+
+    restored = tc.post("/api/content-plans/p1-plan-archive/restore?version=2")
+    assert restored.status_code == 200
+    assert restored.json()["status"] == "reviewed"
+    assert restored.json()["version"] == 3
+    link = conn.execute(
+        "SELECT round_id,task_id FROM content_plan_rounds WHERE plan_id=?",
+        ("p1-plan-archive",),
+    ).fetchone()
+    assert tuple(link) == (77, "task-77")
+
+
+def test_content_plan_cancelled_can_be_restored_without_deleting_record(client):
+    tc, conn, _ = client
+    _insert_content_plan(conn, "p1-plan-cancelled", "cancelled")
+    restored = tc.post("/api/content-plans/p1-plan-cancelled/restore?version=1")
+    assert restored.status_code == 200
+    assert restored.json()["status"] == "planned"
+    row = conn.execute(
+        "SELECT status,version FROM content_plans WHERE id=?",
+        ("p1-plan-cancelled",),
+    ).fetchone()
+    assert tuple(row) == ("planned", 2)
+
+
+def test_archived_industry_preset_cannot_be_applied_until_restored(client, conn):
+    tc, _, _ = client
+    from src.core.industry_presets_repository import seed_builtins
+
+    seed_builtins(conn)
+    payload = {
+        "name": "归档测试模板",
+        "positioning": "为目标用户提供可执行建议",
+        "persona_keywords": ["测试"],
+        "forbidden_directions": [],
+        "extra_redlines": [],
+        "dimensions": ["问题"],
+        "platform_notes": {},
+    }
+    assert tc.put("/api/presets/archived-apply", json=payload).status_code == 200
+    assert tc.delete("/api/presets/archived-apply").status_code == 200
+
+    blocked = tc.post("/api/presets/archived-apply/apply")
+    assert blocked.status_code == 409
+    assert "已归档" in blocked.json()["detail"]
+
+    assert tc.post("/api/presets/archived-apply/restore").status_code == 200
+    applied = tc.post("/api/presets/archived-apply/apply")
+    assert applied.status_code == 200
+    assert applied.json()["positioning"] == "为目标用户提供可执行建议"

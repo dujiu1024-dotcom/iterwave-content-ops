@@ -26,6 +26,7 @@ export default function Calendar() {
   const [plans, setPlans] = useState<ContentPlan[]>([]);
   const [planDetail, setPlanDetail] = useState<(ContentPlan & { drafts: Array<{ draft_id: string; platform: Platform; status: string; title: string; round_id: number | null }>; rounds: Array<{ round_id: number; task_id: string | null; created_at: string }> }) | null>(null);
   const [planDetailLoading, setPlanDetailLoading] = useState(false);
+  const [showArchivedPlans, setShowArchivedPlans] = useState(false);
   const [planTitle, setPlanTitle] = useState("");
   const [planTopic, setPlanTopic] = useState("");
   const [planDate, setPlanDate] = useState(_fmt(today));
@@ -106,10 +107,10 @@ export default function Calendar() {
     for (let d = new Date(visibleStart); d < visibleEndExclusive; d.setDate(d.getDate() + 1)) {
       const date = new Date(d);
       const key = _fmt(date);
-      result.push({ date, key, events: events.filter((event) => _eventDate(event) === key), plans: plans.filter((plan) => plan.scheduled_date === key && plan.status !== "cancelled" && plan.status !== "archived"), inMonth: date.getMonth() === month });
+      result.push({ date, key, events: events.filter((event) => _eventDate(event) === key), plans: plans.filter((plan) => plan.scheduled_date === key && (showArchivedPlans || (plan.status !== "cancelled" && plan.status !== "archived"))), inMonth: date.getMonth() === month });
     }
     return result;
-  }, [visibleStart, visibleEndExclusive, events, plans, month]);
+  }, [visibleStart, visibleEndExclusive, events, plans, month, showArchivedPlans]);
 
   const openPlanDetails = async (planId: string) => {
     setPlanDetailLoading(true);
@@ -146,6 +147,27 @@ export default function Calendar() {
       showToast("计划已取消", "success");
       await load();
     } catch (e: any) { showToast(`取消失败：${e?.message ?? e}`, "error"); }
+  };
+
+  const archivePlan = async (plan: ContentPlan) => {
+    if (!window.confirm(`归档计划「${plan.title}」？生产轮次和关联草稿都会保留，可随时恢复。`)) return;
+    try {
+      const result = await withPending(`content-plan:archive:${plan.id}`, () => api.archiveContentPlan(plan.id, plan.version));
+      if (!result) return;
+      showToast("计划已归档", "success");
+      setPlanDetail(null);
+      await load();
+    } catch (e: any) { showToast(`归档失败：${e?.message ?? e}`, "error"); }
+  };
+
+  const restorePlan = async (plan: ContentPlan) => {
+    try {
+      const result = await withPending(`content-plan:restore:${plan.id}`, () => api.restoreContentPlan(plan.id, plan.version));
+      if (!result) return;
+      showToast(`计划已恢复为「${PLAN_STATUS_LABEL[result.status]}」`, "success");
+      setPlanDetail(null);
+      await load();
+    } catch (e: any) { showToast(`恢复失败：${e?.message ?? e}`, "error"); }
   };
 
   const load = async () => {
@@ -262,6 +284,9 @@ export default function Calendar() {
           <button className="btn sm" onClick={() => setCursorDate((d) => shiftCalendarDate(d, viewMode, 1))}>下一{viewMode === "month" ? "月" : viewMode === "week" ? "周" : "日"}</button>
           <input aria-label="选择日历日期" className="field calendar-date-picker" type="date" value={_fmt(cursorDate)} onChange={(e) => { if (e.target.value) { const [y, m, d] = e.target.value.split("-").map(Number); setCursorDate(new Date(y, m - 1, d)); } }} />
           <button className="btn sm primary" onClick={() => { setPlanDate(_fmt(cursorDate)); setPlanFormOpen(true); }}>＋ 新建计划</button>
+          <label className="calendar-plan-check" title="在日历中同时显示已归档和已取消的计划">
+            <input type="checkbox" checked={showArchivedPlans} onChange={(e) => setShowArchivedPlans(e.target.checked)} />显示已归档
+          </label>
           <button className="btn sm" onClick={load} disabled={loading}>↻ 刷新</button>
         </div>
       </div>
@@ -424,6 +449,16 @@ export default function Calendar() {
               <div><div className="panel-title">{planDetail.title}</div><div className="panel-sub">{planDetail.scheduled_date} · {planDetail.planned_count} 篇/平台 · {PLAN_STATUS_LABEL[planDetail.status]}</div></div>
               <div style={{ display: "flex", gap: 8 }}>
                 {(planDetail.status === "planned" || planDetail.status === "failed") && <button className="btn sm primary" onClick={() => beginEditPlan(planDetail)}>编辑计划</button>}
+                {(["generated", "reviewed", "failed", "cancelled"] as ContentPlan["status"][]).includes(planDetail.status) && (
+                  <button className="btn sm" disabled={isPending(`content-plan:archive:${planDetail.id}`)} onClick={() => void archivePlan(planDetail)}>
+                    {isPending(`content-plan:archive:${planDetail.id}`) ? "归档中…" : "归档"}
+                  </button>
+                )}
+                {(planDetail.status === "archived" || planDetail.status === "cancelled") && (
+                  <button className="btn sm" disabled={isPending(`content-plan:restore:${planDetail.id}`)} onClick={() => void restorePlan(planDetail)}>
+                    {isPending(`content-plan:restore:${planDetail.id}`) ? "恢复中…" : "恢复"}
+                  </button>
+                )}
                 <button className="btn sm" onClick={() => setPlanDetail(null)}>关闭</button>
               </div>
             </div>

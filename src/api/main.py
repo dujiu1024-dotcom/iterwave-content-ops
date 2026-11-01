@@ -6451,6 +6451,51 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(409, "计划状态已变化，请刷新后重试")
         return {"id": plan_id, "status": "cancelled"}
 
+    @app.post("/api/content-plans/{plan_id}/archive")
+    def archive_content_plan(plan_id: str, version: int = Query(..., ge=1)):
+        """归档已结束计划；只做状态变更，保留所有历史关联。"""
+        conn = _g()["conn"]
+        row = conn.execute("SELECT status, version FROM content_plans WHERE id=?", (plan_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "计划不存在")
+        if int(row["version"]) != version:
+            raise HTTPException(409, "计划已被其他窗口修改，请刷新后重试")
+        if row["status"] not in ("generated", "reviewed", "failed", "cancelled"):
+            raise HTTPException(409, "只有已结束的计划可以归档")
+        now = _now().isoformat(timespec="seconds")
+        cursor = conn.execute(
+            "UPDATE content_plans SET status='archived',version=version+1,updated_at=? "
+            "WHERE id=? AND version=? AND status IN ('generated','reviewed','failed','cancelled')",
+            (now, plan_id, version),
+        )
+        conn.commit()
+        if cursor.rowcount != 1:
+            raise HTTPException(409, "计划状态已变化，请刷新后重试")
+        return {"id": plan_id, "status": "archived", "version": version + 1}
+
+    @app.post("/api/content-plans/{plan_id}/restore")
+    def restore_content_plan(plan_id: str, version: int = Query(..., ge=1)):
+        """恢复归档或已停用计划；历史轮次、任务和草稿关联保持不变。"""
+        conn = _g()["conn"]
+        row = conn.execute("SELECT status, version FROM content_plans WHERE id=?", (plan_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "计划不存在")
+        if int(row["version"]) != version:
+            raise HTTPException(409, "计划已被其他窗口修改，请刷新后重试")
+        restore_to = {"archived": "reviewed", "cancelled": "planned"}.get(str(row["status"]))
+        if restore_to is None:
+            raise HTTPException(409, "只有已归档或已停用的计划可以恢复")
+        now = _now().isoformat(timespec="seconds")
+        cursor = conn.execute(
+            "UPDATE content_plans SET status=?,version=version+1,updated_at=? "
+            "WHERE id=? AND version=? AND status=?",
+            (restore_to, now, plan_id, version, row["status"]),
+        )
+        conn.commit()
+        if cursor.rowcount != 1:
+            raise HTTPException(409, "计划状态已变化，请刷新后重试")
+        return {"id": plan_id, "status": restore_to, "version": version + 1}
+
     # --- 内容日历排期（§24.3）---
     @app.get("/api/schedule")
     def list_schedule(
@@ -7815,12 +7860,32 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(404, "自定义行业模板不存在")
         return {"key": key, "deleted": True}
 
+    @app.post("/api/presets/{key}/restore")
+    def restore_custom_preset(key: str):
+        from src.core.industry_presets_repository import restore_custom_preset as _restore
+        try:
+            item = _restore(_g()["conn"], key)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if item is None:
+            raise HTTPException(404, "行业模板不存在")
+        return item
+
+    @app.get("/api/presets/{key}/versions")
+    def get_preset_versions(key: str):
+        from src.core.industry_presets_repository import get_preset, list_preset_versions
+        if get_preset(_g()["conn"], key) is None:
+            raise HTTPException(404, "行业模板不存在")
+        return {"items": list_preset_versions(_g()["conn"], key)}
+
     @app.post("/api/presets/{key}/apply")
     def apply_preset(key: str):
         from src.core.industry_presets_repository import get_preset
         preset = get_preset(_g()["conn"], key)
         if preset is None:
             raise HTTPException(404, "行业模板不存在")
+        if not preset.get("is_active", True):
+            raise HTTPException(409, "该行业模板已归档，请先恢复后再应用")
         cfg = _g()["cfg"]
         updates = {
             "ultimate_goal.positioning": preset["positioning"],
