@@ -16,7 +16,7 @@ def tmp_login(tmp_path, monkeypatch):
     monkeypatch.setattr(al, "LOGIN_DIR", tmp_path / "_login")
     monkeypatch.setattr(al, "PROFILE_BASE", tmp_path / "_profiles")
     monkeypatch.setattr(al, "STORAGE_STATE_DIR", tmp_path / "login_states")
-    monkeypatch.setattr(al, "_schedule_export", lambda platform: None)
+    monkeypatch.setattr(al, "_schedule_export", lambda platform, data_dir=None: None)
     monkeypatch.delenv("ITERWAVE_LOGIN_HEADED", raising=False)
     al._LOGIN_PROCESSES.clear()
     al._ensure_dirs()
@@ -265,3 +265,23 @@ def test_storage_state_export_uses_tenant_profile_and_output(tmp_login, tmp_path
     command = captured["command"]
     assert command[command.index("--profile-base") + 1] == str(tenant / "_profiles")
     assert command[command.index("--out") + 1] == str(tenant / "login_states" / "xhs.json")
+
+
+
+def test_success_login_status_exports_to_same_tenant_directory(tmp_login, tmp_path, monkeypatch):
+    tenant_data = tmp_path / "tenants" / "brand_a" / "data"
+    al._ensure_dirs(tenant_data)
+    al._files("xhs", tenant_data)["status"].write_text(
+        json.dumps({"state": "success", "message": "ok", "qr": "", "ts": 1}),
+        encoding="utf-8",
+    )
+    captured = {}
+    monkeypatch.setattr(
+        al, "_schedule_export",
+        lambda platform, data_dir=None: captured.update(platform=platform, data_dir=data_dir),
+    )
+
+    status = al.get_login_status("xhs", data_dir=tenant_data)
+
+    assert status["state"] == "success"
+    assert captured == {"platform": "xhs", "data_dir": tenant_data}
