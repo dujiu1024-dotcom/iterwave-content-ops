@@ -760,3 +760,13 @@ A-02、A-04、B-05、D-07、D-08、F-01 至 F-08、G-01 至 G-06。
 - [ ] 建立唯一最终整改 PR，确认迁移后再清理旧分支。
 
 **执行限制说明：** 本轮连接器可读取 GitHub commit/patch、比较 refs、更新文件和创建 Git 对象，但没有本地仓库工作树及可运行 shell 的 Git 环境，无法可靠执行交互式 rebase/cherry-pick、冲突解决、pytest、Ruff 或 npm build。GitHub API 也没有提供本轮可用的 branch 删除操作。为避免把未测试的整文件覆盖伪装成合并，本轮没有强制移动分支、合并 PR 或删除分支。第一阶段的审计与迁移清单已细化，但 Git 历史整合和 CI 验证仍未完成；不得标记第一阶段完成。
+
+
+### 12.5 数量与基线校正（以本轮最新 compare 结果为准）
+
+上一小节 12.1 的 PR #65 / PR #70 ahead/behind 数字是中间快照，现以 2026-11-01 本次重新查询结果校正：
+- PR #65 整改分支相对 main：**116 ahead / 1 behind**；merge base 为 `a06f768f3f365939d6a337311b4b54404b896973`，即 PR #64 合并前的主线节点。当前 main HEAD 为 `6b538b2d22797ca9ac64327b3ffc5b742b7fa71b`，唯一 behind 是 PR #64 合并提交。
+- PR #70 v3 相对 PR #65：**27 ahead / 75 behind**，merge base 为 `6746f731acc54c7508dc056c5e37a2ff9c635ed0`；17 个文件有差异。
+- v3 相对 `feat/ux-detail-pages-20261101`：**3 ahead / 0 behind**，merge base 为 `9b4d587f7ffa51b700b48ecdf4918bac912842f7`，变更仅涉及 Assets、GlobalOperations、HotTopics。
+- operations 分支相对 main：**26 ahead / 0 behind**，merge base 正是 main HEAD `6b538b2d22797ca9ac64327b3ffc5b742b7fa71b`，涉及 16 个文件。
+- 由此确认：PR #65 并不是“仅落后 1 个普通提交”这么简单；它从 PR #64 merge 前的主线分叉，且 116 个独有提交必须完整保留。同步 main 时应纳入 PR #64 merge 节点，不得 reset 到 main 或覆盖整改提交。
