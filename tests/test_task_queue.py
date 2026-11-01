@@ -652,3 +652,107 @@ def test_failed_task_resolution_rejects_active_tasks_and_conflicting_actions(tmp
         assert "不允许反向修改" in str(exc)
     else:
         raise AssertionError("conflicting resolution must be rejected")
+
+
+def test_expired_worker_cannot_commit_after_recovery_and_manual_retry_is_required(tmp_path):
+    """租约过期后旧 worker 失去写入权；恢复只能经人工核验创建新任务。"""
+    queue = make_queue(tmp_path)
+    original, _ = queue.enqueue(
+        task_type="round_run", tenant_id="tenant-a", aggregate_id="round-700",
+        payload={"round_id": 700, "execution_snapshot": {"platform": "xhs"}},
+    )
+    claimed = queue.claim_next("worker-old", lease_seconds=15)
+    assert claimed is not None and claimed.task_id == original.task_id
+
+    conn = queue._connect()
+    try:
+        conn.execute(
+            "UPDATE global_task_queue SET lease_expires_at='2000-01-01T00:00:00+00:00' WHERE task_id=?",
+            (original.task_id,),
+        )
+        conn.execute(
+            "UPDATE global_task_worker_lease SET expires_at='2000-01-01T00:00:00+00:00' WHERE singleton_id=1"
+        )
+    finally:
+        conn.close()
+
+    assert queue.recover_expired() == {"interrupted": 1}
+    recovered = queue.get(original.task_id)
+    assert recovered is not None and recovered.status == "interrupted"
+    assert recovered.error_code == "worker_lost"
+    conn = queue._connect()
+    try:
+        lease_owner = conn.execute(
+            "SELECT lease_owner FROM global_task_queue WHERE task_id=?",
+            (original.task_id,),
+        ).fetchone()["lease_owner"]
+    finally:
+        conn.close()
+    assert lease_owner is None
+
+    # 即使旧进程恢复执行，也不能把已中断任务提交为成功。
+    assert queue.finish(original.task_id, "worker-old", result={"published": True}) is False
+    assert queue.fail(
+        original.task_id, "worker-old",
+        error_code="late_failure", error_message="late worker",
+    ) is False
+    assert queue.get(original.task_id).status == "interrupted"
+
+    # 没有人工确认平台未执行之前，不得重新入队。
+    try:
+        queue.retry_after_manual_verification(
+            original.task_id, confirmed_by="operator",
+            confirmation_note="尚未核验平台记录",
+            confirmed_not_executed=False,
+        )
+    except ValueError as exc:
+        assert "必须明确确认平台侧未执行" in str(exc)
+    else:
+        raise AssertionError("recovery must not replay side-effecting task automatically")
+
+    retry, created = queue.retry_after_manual_verification(
+        original.task_id, confirmed_by="operator",
+        confirmation_note="已核实平台侧没有创建或发布记录",
+        confirmed_not_executed=True,
+    )
+    assert created is True
+    assert retry.status == "queued"
+    assert retry.retry_of_task_id == original.task_id
+    assert retry.tenant_id == original.tenant_id
+    assert retry.payload == original.payload
+    assert queue.get(original.task_id).status == "interrupted"
+
+
+def test_recover_expired_is_idempotent_and_preserves_nonexpired_running_task(tmp_path):
+    queue = make_queue(tmp_path)
+    expired, _ = queue.enqueue(
+        task_type="round_run", tenant_id="tenant-a", aggregate_id="expired",
+        payload={"round_id": 1},
+    )
+    active, _ = queue.enqueue(
+        task_type="round_run", tenant_id="tenant-b", aggregate_id="active",
+        payload={"round_id": 2},
+    )
+    first = queue.claim_next("worker-a", lease_seconds=15)
+    assert first is not None and first.task_id == expired.task_id
+
+    # 人为让第一条任务过期，再让新 worker 接管并领取第二条任务。
+    conn = queue._connect()
+    try:
+        conn.execute(
+            "UPDATE global_task_queue SET lease_expires_at='2000-01-01T00:00:00+00:00' WHERE task_id=?",
+            (expired.task_id,),
+        )
+        conn.execute(
+            "UPDATE global_task_worker_lease SET expires_at='2000-01-01T00:00:00+00:00' WHERE singleton_id=1"
+        )
+    finally:
+        conn.close()
+    assert queue.recover_expired() == {"interrupted": 1}
+    second = queue.claim_next("worker-b", lease_seconds=120)
+    assert second is not None and second.task_id == active.task_id
+
+    assert queue.recover_expired() == {"interrupted": 0}
+    assert queue.get(expired.task_id).status == "interrupted"
+    assert queue.get(active.task_id).status == "running"
+    assert queue.finish(active.task_id, "worker-b", result={"ok": True})
