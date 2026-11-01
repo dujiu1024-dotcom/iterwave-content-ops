@@ -167,6 +167,7 @@ class RoundExecutor:
                 raise RoundPreconditionError("所选内容模板快照无效，请重新选择模板")
             template_data = {
                 "id": int(template_data.get("id") or 0),
+                "version": int(template_data.get("version") or 1),
                 "title": str(template_data.get("title") or "")[:200],
                 "body": str(template_data.get("body") or "")[:8000],
             }
@@ -883,8 +884,8 @@ class RoundExecutor:
                 self.conn.execute(
                     "INSERT INTO contents (id, round_id, topic_id, platform, title, body, "
                     "tags, image_paths, word_count, card_style, guard_outcome, guard_reason, "
-                    "visual_status, visual_reason, template_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'degraded', ?, ?)",
+                    "visual_status, visual_reason, template_id, template_version, template_snapshot_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'degraded', ?, ?, ?, ?)",
                     (
                         content_id, round_id, topic.id, platform.value, title, body,
                         json.dumps(tags, ensure_ascii=False),
@@ -892,6 +893,8 @@ class RoundExecutor:
                         len(body), "knowledge", outcome.result.value, outcome.reason,
                         "仅使用本地模板卡片的文字排版与渐变背景，尚未选用正式视觉素材",
                         template_data["id"] if template_data else None,
+                        template_data["version"] if template_data else None,
+                        json.dumps(template_data, ensure_ascii=False) if template_data else None,
                     ),
                 )
 
