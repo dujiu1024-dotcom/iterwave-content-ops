@@ -15,11 +15,13 @@ export default function GlobalOperations() {
   const [tasks, setTasks] = useState<GlobalTaskQueueItem[]>([]);
   const [activeCount, setActiveCount] = useState<number | null>(null);
   const [activeCounts, setActiveCounts] = useState<Record<string, number>>({});
+  const [activeByTenant, setActiveByTenant] = useState<Record<string, Record<string, number>>>({});
   const [activePage, setActivePage] = useState(1);
   const [activePages, setActivePages] = useState(1);
   const activePageSize = 8;
   const [failedCount, setFailedCount] = useState<number | null>(null);
   const [failedCounts, setFailedCounts] = useState<Record<string, number>>({});
+  const [failedByTenant, setFailedByTenant] = useState<Record<string, Record<string, number>>>({});
   const [failedTasks, setFailedTasks] = useState<GlobalTaskQueueItem[]>([]);
   const [failedPage, setFailedPage] = useState(1);
   const failedPageSize = 8;
@@ -40,12 +42,14 @@ export default function GlobalOperations() {
       setActiveCount(response.total ?? response.items?.length ?? 0);
       setActivePages(response.pages ?? 1);
       setActiveCounts(response.counts?.by_status ?? {});
+      setActiveByTenant(response.counts?.by_tenant ?? {});
     }
     if (results[2].status === "fulfilled") {
       const total = results[2].value.total ?? 0;
       setFailedCount(total);
       setFailedTasks(results[2].value.items ?? []);
       setFailedCounts(results[2].value.counts?.by_status ?? {});
+      setFailedByTenant(results[2].value.counts?.by_tenant ?? {});
       const lastPage = Math.max(1, Math.ceil(total / failedPageSize));
       if (failedPage > lastPage) setFailedPage(lastPage);
     }
@@ -67,20 +71,20 @@ export default function GlobalOperations() {
   const failed = failedTasks;
   const byTenant = useMemo(() => {
     const map = new Map<string, { queued: number; running: number; failed: number }>();
-    for (const [tenantId, counts] of Object.entries(monitor?.queue_counts?.active_by_tenant ?? {})) {
+    for (const [tenantId, counts] of Object.entries(activeByTenant)) {
       map.set(tenantId, {
         queued: counts.queued ?? 0,
         running: counts.running ?? 0,
         failed: 0,
       });
     }
-    for (const [tenantId, counts] of Object.entries(monitor?.queue_counts?.failed_by_tenant ?? {})) {
+    for (const [tenantId, counts] of Object.entries(failedByTenant)) {
       const value = map.get(tenantId) ?? { queued: 0, running: 0, failed: 0 };
       value.failed = (counts.failed ?? 0) + (counts.interrupted ?? 0);
       map.set(tenantId, value);
     }
     return map;
-  }, [monitor]);
+  }, [activeByTenant, failedByTenant]);
 
   return (
     <div className="page global-operations-page">
