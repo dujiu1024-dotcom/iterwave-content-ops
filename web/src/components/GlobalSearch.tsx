@@ -75,7 +75,7 @@ export default function GlobalSearch({ onNavigate }: Props) {
         api.hotTopics(),
         api.actionItems(),
         api.rounds(),
-        api.drafts(),
+        api.draftsAll(),
       ]);
 
       if (cancelled) return;
