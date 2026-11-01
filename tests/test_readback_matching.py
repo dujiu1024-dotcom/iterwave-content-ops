@@ -38,7 +38,7 @@ def test_match_work_rejects_arbitrary_substring_match():
 def test_readback_failure_message_does_not_expose_internal_path_or_token(cfg, conn, monkeypatch):
     import asyncio
     from src.adapters.base import FetchStatus
-    from src.adapters.xhs import XhsAdapter
+    from src.adapters.xhs import XiaohongshuAdapter
     from src.adapters import readback
 
     def fail_read(*args, **kwargs):
@@ -47,7 +47,7 @@ def test_readback_failure_message_does_not_expose_internal_path_or_token(cfg, co
         )
 
     monkeypatch.setattr(readback, "read_works_sync", fail_read)
-    snapshot = asyncio.run(XhsAdapter(cfg, conn).fetch_metrics(None, "测试标题"))
+    snapshot = asyncio.run(XiaohongshuAdapter(cfg, conn).fetch_metrics(None, "测试标题"))
     assert snapshot.fetch_status == FetchStatus.FAILED
     assert snapshot.error_msg == "平台作品列表读取不可用，请检查登录状态或服务状态后重试"
     assert "/srv/iterwave" not in snapshot.error_msg
