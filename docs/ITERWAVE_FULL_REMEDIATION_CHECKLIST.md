@@ -476,3 +476,11 @@ A-02、A-04、B-05、D-07、D-08、F-01 至 F-08、G-01 至 G-06。
   - 前端 Commit：`88014604aaaf3046c23cbff632a9b97d0be50bd8`
   - 清理未使用 hook Commit：`be81d8de3f3c201b2da95f520522cb3e4ba5b5f4`
 - **验证状态**：已回读核对后端聚合返回和前端矩阵改为读取聚合结果；未运行自动化测试。
+
+
+### 2026-11-01 — 队列聚合回归用例
+
+- 新增 `test_queue_status_counts_are_aggregated_by_tenant`，覆盖 queued/running/failed/interrupted 状态及按账号组聚合结果。
+- Test Commit：`1073fd3dee7a7dd27b38596773f9b6f640a9e64b`
+- 测试变量清理 Commit：`bb830827bd0c8cfdbda266a7dc337b6946719b39`
+- 当前仅新增测试代码，尚未运行 pytest。
