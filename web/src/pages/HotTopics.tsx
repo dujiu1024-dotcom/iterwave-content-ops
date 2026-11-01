@@ -38,6 +38,7 @@ export default function HotTopics() {
   const [pageTab, setPageTab] = useUrlTab<PageTab>(PAGE_TABS, "list");
   const [keyword, setKeyword] = useState("");
   const [sortBy, setSortBy] = useState<"heat" | "match">("heat");
+  const [sourceFilter, setSourceFilter] = useState("all");
   const [page, setPage] = useState(1);
   const [hot, setHot] = useState<HotTopicsResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -50,7 +51,7 @@ export default function HotTopics() {
   const [gates, setGates] = useState({ heat: "", heatOn: true, hours: "", timeOn: true });
   const [importingKey, setImportingKey] = useState<string | null>(null);
 
-  useEffect(() => { setPage(1); }, [tab, keyword, sortBy]);
+  useEffect(() => { setPage(1); }, [tab, keyword, sortBy, sourceFilter]);
 
   /** 热点转选题必须带来源与原文链接；敏感热点必须由操作人二次确认。 */
   async function importTopic(h: HotTopicItem) {
@@ -221,12 +222,14 @@ export default function HotTopics() {
         : tab === "matched" ? h.dimension_match === true
           : tab === "urgent" ? h.time_sensitive === 1
             : h.time_sensitive === null)
+    .filter((h) => sourceFilter === "all" || h.source === sourceFilter)
     .filter((h) => !kw || h.title.includes(kw))
     .slice()
     .sort((a, b) => sortBy === "match"
       ? (b.match_score ?? -1) - (a.match_score ?? -1)
       : (b.heat ?? -1) - (a.heat ?? -1));
 
+  const sourceOptions = Array.from(new Set(items.map((item) => item.source))).sort();
   const pageSize = 20;
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
   const pageItems = filtered.slice((page - 1) * pageSize, page * pageSize);
@@ -425,7 +428,7 @@ export default function HotTopics() {
             { k: "urgent", l: "窗口短" },
             { k: "unknown", l: "时效未知" },
           ].map((t) => (
-            <button key={t.k} type="button" className={`tab ${tab === t.k ? "active" : ""}`} onClick={() => { setTab(t.k as TabKey); setLimit(20); }}>
+            <button key={t.k} type="button" className={`tab ${tab === t.k ? "active" : ""}`} onClick={() => setTab(t.k as TabKey)}>
               {t.l}
             </button>
           ))}
@@ -435,6 +438,10 @@ export default function HotTopics() {
         <select className="field" value={sortBy} onChange={(e) => setSortBy(e.target.value as "heat" | "match")}>
           <option value="heat">按热度</option>
           <option value="match">按定位关联度</option>
+        </select>
+        <select className="field" value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
+          <option value="all">全部来源</option>
+          {sourceOptions.map((source) => <option key={source} value={source}>{platformLabel(source.split("/").pop() || source)} · {source}</option>)}
         </select>
       </div>
 
