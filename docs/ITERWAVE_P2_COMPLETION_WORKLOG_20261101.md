@@ -46,10 +46,10 @@
 
 ## 验证状态
 
-- GitHub Actions 在提交 `b834b2b` 对应分支头上：前端构建通过，后端测试通过。
-- 后端测试已覆盖新增 Skills 注册状态、全局运营最近执行、业务轮次编号和 KPI 聚合/未知值语义。
-- 随后的客户端 4xx 内部错误信息过滤变更仍在等待最新 CI 完成。
-- Ruff/安全导入检查以最新 CI 为准；尚未进行浏览器或真机验收。
+- GitHub Actions 在提交 `ef6836a` 对应分支头上全绿：前端 Build、后端 pytest、Python 源码编译和安全边界导入/命名检查全部通过。
+- 后端测试覆盖 Skills 生命周期、全局运营最近执行、业务轮次编号、KPI 聚合/去重/未知值语义和安全错误摘要。
+- 随后仅有全局未知任务类型显示文案及整改记录更新；对应最新 CI 正在执行。
+- 尚未进行浏览器或真机验收。
 - CI 通过不等于所有 P2 事项完成；P2-01 沙箱、平台发布回执、全仓后端泄露审查和交互验收仍未闭环。
 
 ## 第二批已实施变更
@@ -139,7 +139,36 @@
 
 - 前端统一 API 客户端进一步对 4xx 错误正文做内部信息检测；堆栈、Python 文件路径、SQLite/SQLAlchemy 内部异常、关键环境变量名和绝对路径统一替换为安全提示，保留 HTTP 状态码与业务错误码。
 
-## 第三批：PR #97 评审修订（2026-11-01，已合并 main@eb7dc0f）
+- 修正热点采集关闭时的 HTTP 错误文案，不再向界面显示内部配置键 `hot_topics.enabled`，改为用户可理解的设置提示。
+
+- Agent Skill 契约测试界面不再显示内部 `manifest_version` 修订计数，改为显示 Skill 名称和对用户有意义的语义版本。
+
+- 新增 `safe_error_summary`，对适配器读回和 Playwright 存草稿错误做服务端摘要脱敏：堆栈/数据库异常/环境密钥名返回通用提示，绝对路径隐藏，保留短的业务错误首行。
+- 新增 `tests/test_safe_error_summary.py` 覆盖用户提示保留、堆栈/路径/环境变量脱敏和长度限制。
+
+- 将安全摘要扩展到平台读回失败、草稿保存失败和图片上传失败路径；本地图片缺失错误只显示文件名，不显示绝对路径。
+- 读回适配器在返回失败快照前统一做脱敏，避免 vendor 异常信息直接进入业务 API 的 error_msg。
+
+- 登录状态 API 对子进程状态消息使用安全摘要；异常退出不再拼接日志尾行或原始异常详情，避免暴露浏览器路径、运行环境信息。
+
+- 热点采集/研判后台任务状态不再将原始异常文本直接写入前端轮询状态；错误详情保留在服务端日志，页面收到安全摘要。
+
+- CI 回归发现登录异常退出测试依赖展示退出码；已保留安全的数值退出码，同时继续隐藏原始日志尾行。对应修复等待最新 CI 复验。
+
+- Analytics 经营 KPI 增加 7/30/90/365 天统计周期选择；生产、草稿、确认发布、互动汇总和粉丝增长共用同一统计窗口。
+
+- KPI 时间口径修正：确认发布量按 `user_confirmed_at` 落在统计窗口计算。（第三批修订：草稿确认发布率已删除。）
+
+- 对前端 41 个 TS/TSX 文件进行占位交互静态扫描，未发现空 `onClick`、`href="#"` 或明确标注“暂未实现”的按钮处理器；此结果不替代浏览器逐项点击和视口验收。
+
+- ~~将业务经营 KPI 与激活/TTV 指标拆成独立区块~~（第三批修订：激活/TTV 等增长指标已从总览移除）；统计周期选择器作用于经营 KPI。
+- 发布量卡片改名为“确认发布量（窗口内）”，明确其时间范围。
+
+- Analytics 经营 KPI 网格新增移动端两列响应式规则，周期选择器允许换行；避免固定三列在窄屏挤压。
+
+- 全局运营矩阵对未识别的后台任务类型使用通用标签，不直接展示内部 task_type 枚举值。
+
+## 第三批：PR #97 评审修订（2026-11-01，已合并 main@eb7dc0f 及分支最新提交 6cfb4e7）
 
 ### 缺口采纳（P2-07）
 - `web/src/pages/Gaps.tsx`：覆盖缺口（`audience=user` 且 `gap_type=coverage_gap`）卡片恢复「采纳到母计划」按钮；支持勾选多条后「批量采纳到母计划」及全选；调用已有 `api.adoptGaps`（`POST /api/plan_adjustments/adopt`），成功后提示影响的活跃轮次数并重新加载。
@@ -148,12 +177,12 @@
 - 页头新增「复盘轮次」选择器：默认“最新一轮”，选项来自 `GET /api/rounds?page=1&page_size=100`，显示「第 N 轮」业务编号，请求 `/api/gaps?round_id=<id>`。
 
 ### 错误提示（P2-06）
-- `web/src/api.ts` 新增 `clientErrorMessage(status, detail)`：后端 JSON detail 原样保留（含 5xx 的中文业务提示，如「图片生成服务暂时不可用…」）；仅在 detail 为空，或含 traceback、源码/配置文件扩展名、绝对路径、URL、Bearer/token/密钥、长随机串、驱动异常类名、HTML 页等内部特征时，5xx 替换为「服务暂时不可用，请稍后重试」，4xx 替换为安全提示。5xx 的非 JSON 响应体（网关 HTML/框架默认文本）视为无 detail。
+- `web/src/api.ts` 新增 `clientErrorMessage(status, detail)`：后端 JSON detail 原样保留（含 5xx 的中文业务提示，如「图片生成服务暂时不可用…」）；仅在 detail 为空，或含 traceback、源码/配置文件扩展名、绝对路径、URL、Bearer/token/密钥、长随机串、驱动异常类名、SQLite 约束/表结构/锁错误、HTML 页等内部特征时，5xx 替换为「服务暂时不可用，请稍后重试」，4xx 替换为安全提示。5xx 的非 JSON 响应体（网关 HTML/框架默认文本）视为无 detail。
 
 ### 经营指标（P2-04）
 - 删除「草稿确认发布率」「平台发布成功率」：`GET /api/analytics/business-summary` 不再返回 `publish_eligible`、`draft_publish_confirmation_rate`、`platform_publish_success_rate`、`platform_publish_success_note`（无其他使用方）；前端类型同步删除。
 - Analytics 总览移除 TTV、7 日激活率、首次发布率、数据回流完成率、快速体验完成率、周采纳发布数、周有效复盘数及体验分布；页面不再调用 `/api/activation/metrics`（接口保留）。
-- 总览 KPI 行：内容生产量、草稿产出量、确认发布量、平均互动率、粉丝净增长（有基线平台合计）、目标完成率；下方保留互动分项与按平台粉丝增长明细。
+- 总览 KPI 行：内容生产量、草稿产出量、确认发布量（按 `user_confirmed_at` 落在窗口内）、平均互动率、粉丝净增长（有基线平台合计）、目标完成率；下方保留互动分项与按平台粉丝增长明细；保留 7/30/90/365 天经营统计周期选择器及移动端两列布局。
 - `docs/analytics-kpi-contract.md` 同步更新。
 
 ### 新手引导进度（P2-08）
@@ -170,6 +199,6 @@
 - `test_global_task_queue_exposes_business_round_number_not_db_id`：轮次主键与业务编号不同时返回业务编号。
 
 ### 第三批验证
-- 后端：`pytest -q -p no:cacheprovider` 全部通过（tests/ 共 591 项；因单次命令时限，按文件分组执行，覆盖 tests/ 全部 63 个测试文件）。
+- 后端：`pytest -q -p no:cacheprovider` 全部通过（tests/ 共 595 项全部通过；因单次命令 120 秒时限，按文件分组并行执行，覆盖 tests/ 全部 64 个测试文件）。
 - 前端：`npx tsc --noEmit` 通过；`npx vite build` 通过（仅有既有的 chunk 体积提示）。
 - 尚未进行浏览器 / 真机验收。

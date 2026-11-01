@@ -836,7 +836,9 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
   .calendar-date-picker { width: 100%; }
 }
 
+.analytics-business-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 @media (max-width: 760px) {
+  .analytics-business-kpis,
   .analytics-activation-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
   .production-run-alert { max-width: 100%; min-width: 0; overflow-wrap: anywhere; }
   .production-run-alert > * { max-width: 100%; }

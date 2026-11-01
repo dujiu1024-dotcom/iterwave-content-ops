@@ -2662,6 +2662,7 @@ def test_business_analytics_summary_uses_latest_metric_per_draft(client):
     now = datetime.now()
     created = now.strftime("%Y-%m-%d %H:%M:%S")
     earlier = (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    old_created = (now - timedelta(days=40)).strftime("%Y-%m-%d %H:%M:%S")
     conn.execute(
         "INSERT INTO contents(id, platform, title, body, created_at) VALUES(?,?,?,?,?)",
         ("kpi-content-1", "xhs", "KPI 测试内容", "测试正文", created),
@@ -2670,6 +2671,15 @@ def test_business_analytics_summary_uses_latest_metric_per_draft(client):
         "INSERT INTO drafts(id, content_id, platform, status, user_confirmed_at, created_at) "
         "VALUES(?,?,?,?,?,?)",
         ("kpi-draft-1", "kpi-content-1", "xhs", "user_published", created, created),
+    )
+    conn.execute(
+        "INSERT INTO contents(id, platform, title, body, created_at) VALUES(?,?,?,?,?)",
+        ("kpi-content-old", "xhs", "历史内容", "历史正文", old_created),
+    )
+    conn.execute(
+        "INSERT INTO drafts(id, content_id, platform, status, user_confirmed_at, created_at) "
+        "VALUES(?,?,?,?,?,?)",
+        ("kpi-draft-old", "kpi-content-old", "xhs", "user_published", created, old_created),
     )
     conn.execute(
         "INSERT INTO metrics(draft_id, content_id, platform, fetch_status, fetched_at, views, likes, collects, comments, shares, new_followers) "
@@ -2688,7 +2698,7 @@ def test_business_analytics_summary_uses_latest_metric_per_draft(client):
     body = response.json()
     assert body["contents_created"] == 1
     assert body["drafts_created"] == 1
-    assert body["confirmed_published"] == 1
+    assert body["confirmed_published"] == 2
     assert body["interactions"]["sample_count"] == 1
     assert body["interactions"]["views"] == 120
     assert body["interactions"]["likes"] == 12

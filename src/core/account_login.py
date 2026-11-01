@@ -35,7 +35,7 @@ import threading
 import time
 from pathlib import Path
 
-from .redact import redact
+from .redact import redact, safe_error_summary
 
 logger = logging.getLogger(__name__)
 
@@ -368,7 +368,7 @@ def get_login_status(platform: str, data_dir: Path | str | None = None) -> dict:
     f = _files(platform, data_dir)
     raw = _read_status_file(f["status"])
     state = raw.get("state", "unknown")
-    message = redact(str(raw.get("message") or ""))
+    message = safe_error_summary(raw.get("message"), "登录遇到问题，请重新发起扫码登录")
 
     proc = _LOGIN_PROCESSES.get(_process_key(platform, data_dir))
     proc_alive = proc is not None and proc.poll() is None
@@ -377,8 +377,7 @@ def get_login_status(platform: str, data_dir: Path | str | None = None) -> dict:
         state, message = "error", "登录流程已中断，请重新发起扫码登录"
     elif proc is not None and not proc_alive and state not in TERMINAL_STATES:
         # 与 Easel 一致：runner 没写终态就退出 → 明确的 error，而不是无限转圈的 unknown
-        tail = redact(_last_log_line(f["log"]))
-        state, message = "error", f"登录程序异常退出（退出码 {proc.returncode}）" + (f"：{tail}" if tail else "")
+        state, message = "error", f"登录程序异常退出（退出码 {proc.returncode}），请重新发起扫码登录"
     elif proc_alive and state == "unknown":
         state, message = "starting", "正在启动浏览器并准备二维码…"
 

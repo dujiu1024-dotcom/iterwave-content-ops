@@ -26,6 +26,8 @@ from typing import Optional
 
 from playwright.async_api import Page, BrowserContext, async_playwright
 
+from src.core.redact import safe_error_summary
+
 from .base import (
     Platform, DraftResult, ContentToPublish,
     CircuitBreakerReason, FetchStatus, MetricsSnapshot,
@@ -342,7 +344,7 @@ class DraftSaver:
             if missing:
                 return DraftResult(
                     success=False,
-                    error_msg=f"图片文件不存在: {missing[0]} (共 {len(missing)} 个缺失)",
+                    error_msg=f"图片文件不存在: {os.path.basename(missing[0])} (共 {len(missing)} 个缺失)",
                 )
 
             # —— 小红书/抖音/快手：默认停在视频 tab，先切到图文 tab ——
@@ -426,7 +428,7 @@ class DraftSaver:
             if failure_evidence:
                 return DraftResult(
                     success=False,
-                    error_msg=f"平台反馈保存失败: {failure_evidence}",
+                    error_msg=f"平台反馈保存失败: {safe_error_summary(failure_evidence, '平台未确认草稿保存成功')}",
                 )
 
             evidence = await self._wait_save_success(
@@ -464,7 +466,7 @@ class DraftSaver:
 
         except Exception as exc:
             logger.exception("❌ 平台 %s 存草稿失败: %s", self.platform, exc)
-            return DraftResult(success=False, error_msg=str(exc))
+            return DraftResult(success=False, error_msg=safe_error_summary(exc, "平台存草稿失败，请检查登录状态后重试"))
 
     # ------------------------------------------------------------------
     # 内部辅助
@@ -609,7 +611,7 @@ class DraftSaver:
             )
         except Exception as exc:  # noqa: BLE001 — 上传失败要如实回报
             logger.warning("视频号图片上传失败: %s", exc)
-            return DraftResult(success=False, error_msg=f"图片上传失败: {exc}"[:200])
+            return DraftResult(success=False, error_msg=f"图片上传失败: {safe_error_summary(exc, '图片上传失败，请检查图片格式和网络后重试')}"[:200])
         await page.wait_for_timeout(5000)
 
         await self.fill_first_visible(target, self.selectors["title"], content.title)

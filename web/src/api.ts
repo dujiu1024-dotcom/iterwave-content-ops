@@ -1443,6 +1443,7 @@ const INTERNAL_DETAIL_PATTERNS: RegExp[] = [
   /\b[A-Za-z0-9_]{40,}\b/,
   /\b[A-Z][A-Z0-9]*_(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|URL)\b/,
   /\b(?:sqlite3|sqlalchemy|psycopg2?|pymysql)\.|\b(?:OperationalError|ProgrammingError|IntegrityError|KeyError|TypeError|ValueError|AttributeError|RuntimeError|Exception)\b/,
+  /constraint failed|no such (?:table|column)|database is locked/i,
   /<\/?(?:html|body|head|title)\b/i,
 ];
 

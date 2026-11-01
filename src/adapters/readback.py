@@ -18,6 +18,8 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
+from src.core.redact import safe_error_summary
+
 from .base import Platform, FetchStatus, MetricsSnapshot
 from ..vendor.easel import VENDOR_DIR, ensure_vendor_path
 
@@ -418,7 +420,7 @@ def pending_snapshot(platform: Platform, reason: str) -> MetricsSnapshot:
     return MetricsSnapshot(
         platform=platform,
         fetch_status=FetchStatus.PENDING,
-        error_msg=reason,
+        error_msg=safe_error_summary(reason, "平台数据读取失败，请检查登录状态后重试"),
     )
 
 
@@ -426,5 +428,5 @@ def failed_snapshot(platform: Platform, reason: str) -> MetricsSnapshot:
     return MetricsSnapshot(
         platform=platform,
         fetch_status=FetchStatus.FAILED,
-        error_msg=reason,
+        error_msg=safe_error_summary(reason, "平台数据读取失败，请检查登录状态后重试"),
     )
