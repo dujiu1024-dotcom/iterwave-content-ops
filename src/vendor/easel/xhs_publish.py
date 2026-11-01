@@ -919,6 +919,23 @@ def _confirm_publish_dialog(page) -> None:
         page.wait_for_timeout(500)
 
 
+def _publish_result_without_readback(*, allow_ui_only_success: bool = False) -> str:
+    """小红书平台作品读回尚未实现；UI 成功信号不能升级为已发布。"""
+    if not allow_ui_only_success:
+        _die(
+            "界面提交信号已出现，但小红书平台作品读回核验尚未实现；"
+            "本次结果保持未核实，禁止自动重发。请先在创作者中心核对作品记录，"
+            "确认已发布则人工收口，确认未执行后才可人工恢复。",
+            5,
+        )
+    print(
+        "⚠️ 仅检测到界面提交信号，未取得平台作品读回证据；"
+        "结果为 unverified，请人工核对后再处理，禁止盲目重发。",
+        file=sys.stderr,
+    )
+    return "unverified"
+
+
 def _wait_publish_success(page, timeout_s: int = 40) -> None:
     """发布成功校验：小红书发布成功后**原地清空表单回到上传页**（不换 URL）。
     成功信号任一：跳离 /publish/publish、出现「成功」toast、或编辑表单已重置（标题框+图片预览消失）。"""
@@ -957,7 +974,7 @@ def _normalize_content(text: str) -> str:
     return text.strip("\n")
 
 
-def _fill_and_submit(page, title, content, tags):
+def _fill_and_submit(page, title, content, tags, *, allow_ui_only_success: bool = False):
     """标题→正文→话题→长度校验→发布→成功校验。"""
     content = _normalize_content(content)         # 修连续空行导致的发布失败
     title_el = page.query_selector(SELECTORS["title_input"])
@@ -992,6 +1009,7 @@ def _fill_and_submit(page, title, content, tags):
     page.wait_for_timeout(1000)
     _confirm_publish_dialog(page)   # 若弹二次确认框，点确认
     _wait_publish_success(page, 40)
+    _publish_result_without_readback(allow_ui_only_success=allow_ui_only_success)
 
 
 # --------------------------------------------------------------------------- #
@@ -1337,7 +1355,10 @@ def _publish(a, kind: str) -> int:
                     _click_publish_tab(page, "上传视频")
                     page.wait_for_timeout(1000)
                     _upload_video(page, media[0])
-                _fill_and_submit(page, a.title, a.content or "", tags)
+                _fill_and_submit(
+                    page, a.title, a.content or "", tags,
+                    allow_ui_only_success=getattr(a, "allow_ui_only_success", False),
+                )
             except PWTimeout as e:
                 _die(f"步骤超时（选择器可能已失效，检查 SELECTORS）：{e}")
             finally:
@@ -1490,6 +1511,8 @@ def main() -> int:
         p.add_argument("--exec", action="store_true", help="真正发布（默认 dry-run）")
         p.add_argument("--allow-unsafe", action="store_true",
                        help="放行内容安全闸门（检出内部设置泄露也照发，谨慎）")
+        p.add_argument("--allow-ui-only-success", action="store_true",
+                       help="明确接受小红书仅有界面提交信号、没有平台读回核验的未核实结果（不推荐）")
         p.add_argument("--headed", action="store_true", help="有头模式（首次校验选择器用）")
         p.add_argument("--keep-open", action="store_true", help="发布后不关浏览器")
 
