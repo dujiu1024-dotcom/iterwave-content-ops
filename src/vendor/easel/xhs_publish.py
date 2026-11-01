@@ -162,6 +162,14 @@ def _secure_login_artifact(path: Path) -> None:
     except OSError:
         pass
 
+def _secure_profile_dir(path: Path) -> None:
+    """浏览器 Profile 含 Cookie 与本地存储，目录仅允许当前用户访问。"""
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
+
 
 def _cloak_executable() -> Path | None:
     """本机已装的 CloakBrowser 内核。只用 ~/.cloakbrowser，不用调研 profile / 9344 / 9345。
@@ -1021,7 +1029,7 @@ def _fill_and_submit(page, title, content, tags, *, artifact_dir: Path | None = 
 # --------------------------------------------------------------------------- #
 def _launch(p, headed: bool, base: str | None, proxy: str | None, *, login_assets: bool = True):
     profile = _profile_dir(base)
-    profile.mkdir(parents=True, exist_ok=True)
+    _secure_profile_dir(profile)
     args = list(LAUNCH_ARGS)
     kwargs = dict(headless=not headed,
                   locale="zh-CN",
