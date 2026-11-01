@@ -427,13 +427,13 @@ class HotTopicCollector:
         summary_row = self.conn.execute(
             base + """
                 SELECT
-                  SUM(CASE WHEN match_version = ? AND forbidden_hit = 1 THEN 1 ELSE 0 END) AS forbidden_count,
-                  SUM(CASE WHEN match_version = ? AND forbidden_hit = 0 AND match_score IS NOT NULL
+                  SUM(CASE WHEN match_version = ? AND COALESCE(forbidden_hit, 0) = 1 THEN 1 ELSE 0 END) AS forbidden_count,
+                  SUM(CASE WHEN match_version = ? AND COALESCE(forbidden_hit, 0) = 0 AND match_score IS NOT NULL
                                 AND match_score >= ? THEN 1 ELSE 0 END) AS matched_count,
                   SUM(CASE WHEN match_version = ? AND forbidden_hit = 0 AND match_score IS NOT NULL
                                 AND match_score < ? THEN 1 ELSE 0 END) AS rejected_count,
                   SUM(CASE WHEN match_version IS NULL OR match_version != ?
-                                OR (forbidden_hit = 0 AND match_score IS NULL) THEN 1 ELSE 0 END) AS pending_count,
+                                OR (COALESCE(forbidden_hit, 0) = 0 AND match_score IS NULL) THEN 1 ELSE 0 END) AS pending_count,
                   (SELECT match_method FROM visible WHERE match_method IS NOT NULL
                    ORDER BY heat_score DESC NULLS LAST, id DESC LIMIT 1) AS method
                 FROM visible
@@ -527,7 +527,7 @@ class HotTopicCollector:
             )
             item["also_on"] = also_on.get(item["id"], [])
             items.append(item)
-        urgent_total = self.conn.execute(base + " SELECT COUNT(*) FROM visible WHERE time_sensitive = 1", (*gate_params[:3],)).fetchone()[0]
+        urgent_total = self.conn.execute(base + " SELECT COUNT(*) FROM visible WHERE time_sensitive = 1", gate_params).fetchone()[0]
         return items, list(sources.values()) + list(failed.values()), total, match_summary, urgent_total
 
     def refresh(self, on_progress: Optional[Callable[[dict], None]] = None) -> dict:
