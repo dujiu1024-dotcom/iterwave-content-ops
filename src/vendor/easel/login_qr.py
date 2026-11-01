@@ -75,6 +75,10 @@ def save_qr(image_bytes: bytes, output: Path, *, minimum_size: int = 0) -> bool:
             temporary = Path(stream.name)
             stream.write(png_bytes)
         os.replace(temporary, output)
+        try:
+            output.chmod(0o600)
+        except OSError:
+            pass
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
