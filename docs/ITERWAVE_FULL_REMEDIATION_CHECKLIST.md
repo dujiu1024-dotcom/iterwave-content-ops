@@ -559,7 +559,7 @@ A-02、A-04、B-05、D-07、D-08、F-01 至 F-08、G-01 至 G-06。
 #### A-01：生产轮次列表
 - `GET /api/rounds`新增 `page` / `page_size` 参数；分页请求执行独立 `COUNT(*)` 与 SQL `LIMIT/OFFSET`，排序为 `created_at DESC, id DESC`，每页默认 20 条。
 - 未传 `page` 时保留旧数组响应与 50 条兼容上限，避免破坏旧调用方；生产页面已切换 `roundsPage`，显示真实总数与页码。
-- 提交：后端 `d33425766cd0dec76748917997cd89fa71c141af`；API 类型/方法 `7dddff56df68ebd95a9845b1ab2364f9834979e8`；页面 `465339ea8ba2ebb2b0c98ca081a0dd993a0f9808`；分页 effect 修正 `667f7495b3168de24bd11dc82041d3653bf8b0ea`。
+- 提交：后端 `d33425766cd0dec76748917997cd89fa71c141af`；API 类型/方法 `7dddff56df68ebd95a9845b1ab2364f9834979e8`；页面 `465339ea8ba2ebb2b0c98ca081a0dd993a0f9808`；分页 effect 修正 `667f7495b3168de24bd11dc82041d3653bf8b0ea`；避免初次加载重复请求 `f497aaf5aeeec57d426863940c429907e05ae446`。
 
 #### A-01：内容资产列表
 - `GET /api/assets`新增分页参数；按 `asset_type` 过滤后独立统计 total，再执行稳定排序和数据库分页。兼容旧响应结构，旧调用仍有 100 条兼容上限。
