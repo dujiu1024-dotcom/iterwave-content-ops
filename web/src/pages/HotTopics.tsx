@@ -569,15 +569,17 @@ function HotSourceManager({ onSaved }: { onSaved: () => void }) {
       .finally(() => setLoading(false));
   }, [showToast]);
 
-  const save = async (next: HotSource[], successText: string) => {
+  const save = async (next: HotSource[], successText: string): Promise<boolean> => {
     setBusy(true);
     try {
       const res = await api.saveHotSources(next);
       setItems(res.items);
       showToast(successText, "success");
       onSaved();
+      return true;
     } catch (e) {
       showToast((e as Error).message, "error");
+      return false;
     } finally {
       setBusy(false);
     }
@@ -597,7 +599,8 @@ function HotSourceManager({ onSaved }: { onSaved: () => void }) {
     const nextItems = editingIndex == null
       ? [...items, nextSource]
       : items.map((item, index) => index === editingIndex ? nextSource : item);
-    await save(nextItems, editingIndex == null ? "行业源已添加" : "来源配置已更新");
+    const saved = await save(nextItems, editingIndex == null ? "行业源已添加" : "来源配置已更新");
+    if (!saved) return;
     setName(""); setUrl(""); setPlatform(""); setEditingIndex(null);
   };
 
