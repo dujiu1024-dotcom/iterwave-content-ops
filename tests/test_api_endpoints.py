@@ -2635,3 +2635,22 @@ def test_skills_registry_distinguishes_registration_enablement_and_runnability(c
     listed = tc.get("/api/skills").json()
     custom = next(item for item in listed["items"] if item["skill_id"] == "safe_manifest_check")
     assert custom["runnable_state"] == "blocked_no_sandbox"
+
+
+def test_business_analytics_summary_preserves_unknown_rates_and_metrics(client):
+    tc, _, _ = client
+    response = tc.get("/api/analytics/business-summary?days=30")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["window_days"] == 30
+    assert body["contents_created"] >= 0
+    assert body["drafts_created"] >= 0
+    assert body["confirmed_published"] >= 0
+    assert body["publish_eligible"] >= body["confirmed_published"]
+    if body["publish_eligible"] == 0:
+        assert body["draft_publish_confirmation_rate"] is None
+    assert body["platform_publish_success_rate"] is None
+    assert body["interactions"]["sample_count"] >= 0
+    if body["interactions"]["sample_count"] == 0:
+        assert body["interactions"]["views"] is None
+    assert set(body["followers_growth_by_platform"]) <= {"xhs", "douyin", "kuaishou", "wechat_channels"}
