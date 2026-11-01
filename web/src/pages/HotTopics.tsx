@@ -438,7 +438,7 @@ export default function HotTopics() {
         <div className="loading"><div className="spinner" />加载热点...</div>
       ) : error ? (
         <div className="panel"><div className="panel-sub" style={{ color: "var(--red)" }}>热点接口异常：{error}</div></div>
-      ) : filtered.length === 0 ? (
+      ) : items.length === 0 ? (
         <div className="panel">
           {hot?.enabled === false ? (
             <EmptyHint next="到「系统设置」开启热点采集，再点右上角「立即采集」">
