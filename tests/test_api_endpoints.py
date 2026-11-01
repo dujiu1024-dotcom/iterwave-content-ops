@@ -1390,3 +1390,66 @@ def test_config_audit_endpoint_rejects_invalid_pagination(client):
     tc, _, _ = client
     assert tc.get("/api/config/audit?page=0").status_code == 422
     assert tc.get("/api/config/audit?page=1&page_size=101").status_code == 422
+
+
+# ---------------------------------------------------------------- 热点雷达数据库分页
+def test_hot_topics_database_pagination_and_server_filters(client):
+    tc, conn, _ = client
+    for index in range(45):
+        conn.execute(
+            "INSERT INTO hot_topics "
+            "(id, source, evidence_status, title, heat_score, time_sensitive, last_seen_at) "
+            "VALUES (?, ?, 'collected', ?, ?, 1, ?)",
+            (f"paging-hot-{index:03d}", "test/xhs", f"分页热点-{index:03d}",
+             float(index + 1), f"2026-11-01 10:{index // 60:02d}:{index % 60:02d}"),
+        )
+    conn.commit()
+
+    first = tc.get("/api/hot_topics?page=1&page_size=20")
+    second = tc.get("/api/hot_topics?page=2&page_size=20")
+    third = tc.get("/api/hot_topics?page=3&page_size=20")
+    assert first.status_code == second.status_code == third.status_code == 200
+    a, b, c = first.json(), second.json(), third.json()
+    assert [a["total"], b["total"], c["total"]] == [45, 45, 45]
+    assert [len(a["items"]), len(b["items"]), len(c["items"])] == [20, 20, 5]
+    ids = [item["id"] for body in (a, b, c) for item in body["items"]]
+    assert len(ids) == len(set(ids)) == 45
+    assert a["items"][0]["heat"] == 45
+    assert a["urgent_total"] == b["urgent_total"] == c["urgent_total"] == 45
+    assert a["match"] == b["match"] == c["match"]
+    assert "test/xhs" in a["source_options"]
+
+    filtered = tc.get("/api/hot_topics?page=1&page_size=20&source=test%2Fxhs&keyword=热点-1")
+    assert filtered.status_code == 200
+    result = filtered.json()
+    assert result["total"] == 11
+    assert all("热点-1" in item["title"] for item in result["items"])
+
+
+def test_hot_topics_database_pagination_preserves_latest_batch_and_failure_suppression(client):
+    tc, conn, _ = client
+    conn.execute(
+        "INSERT INTO hot_topics (id, source, evidence_status, title, heat_score, last_seen_at) "
+        "VALUES ('old-batch', 'batch/xhs', 'collected', '旧批次', 999, '2026-10-30 10:00:00')"
+    )
+    conn.execute(
+        "INSERT INTO hot_topics (id, source, evidence_status, title, heat_score, last_seen_at) "
+        "VALUES ('new-batch', 'batch/xhs', 'collected', '最新批次', 20, '2026-11-01 10:00:00')"
+    )
+    conn.execute(
+        "INSERT INTO hot_topics (id, source, evidence_status, title, discovered_at) "
+        "VALUES ('failed-source', 'broken/douyin', 'failed', '采集失败', '2026-11-01 10:01:00')"
+    )
+    conn.execute(
+        "INSERT INTO hot_topics (id, source, evidence_status, title, heat_score, last_seen_at) "
+        "VALUES ('old-failed-platform', 'broken/douyin', 'collected', '失败平台旧数据', 88, '2026-11-01 09:00:00')"
+    )
+    conn.commit()
+
+    response = tc.get("/api/hot_topics?page=1&page_size=20")
+    assert response.status_code == 200
+    ids = {item["id"] for item in response.json()["items"]}
+    assert "old-batch" not in ids
+    assert "new-batch" in ids
+    assert "old-failed-platform" not in ids
+    assert any(source["status"] == "failed" for source in response.json()["sources"])
