@@ -13,7 +13,7 @@ import {
   api, AssetItem, AssetType, Draft, HotTopicItem, KbInspect, ScoredTopic, SystemConfigView,
 } from "../api";
 
-type Tab = "topics" | "scoring" | "created" | "media" | "sources" | "voice" | "templates" | "mapping";
+type Tab = "topics" | "scoring" | "created" | "media" | "sources" | "voice" | "industry" | "templates" | "mapping";
 
 const TABS: { key: Tab; label: string }[] = [
   { key: "topics", label: "选题池" },
@@ -22,6 +22,7 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "media", label: "图片素材库" },
   { key: "sources", label: "外部参考" },
   { key: "voice", label: "个人观点与画像" },
+  { key: "industry", label: "行业预设" },
   { key: "templates", label: "内容模板" },
   { key: "mapping", label: "知识库来源" },
 ];
@@ -329,8 +330,6 @@ export default function Assets() {
             </div>
           </div>
 
-          <IndustryPresetPicker onApplied={load} />
-
           <AssetForm
             type="voice"
             titleLabel="观点标题"
@@ -362,6 +361,16 @@ export default function Assets() {
               </div>
             )}
           </div>
+        </>
+      )}
+
+      {tab === "industry" && (
+        <>
+          <div className="panel">
+            <div className="panel-title">行业预设</div>
+            <div className="panel-sub">选择适合当前账号组的行业配置模板；应用后会更新目标与策略配置。</div>
+          </div>
+          <IndustryPresetPicker onApplied={load} />
         </>
       )}
 
