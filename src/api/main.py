@@ -3649,13 +3649,14 @@ def _register_routes(app: FastAPI) -> None:
                     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
                     if "task_runs" in tables:
                         latest_run = conn.execute(
-                            "SELECT task_type, status, started_at, finished_at, created_at "
+                            "SELECT task_type, status, started_at, finished_at, created_at, error_msg "
                             "FROM task_runs ORDER BY COALESCE(started_at, created_at) DESC, id DESC LIMIT 1"
                         ).fetchone()
                         if latest_run is not None:
                             row["recent_execution"] = {
                                 "task_type": str(latest_run["task_type"]),
                                 "status": str(latest_run["status"]),
+                                "has_error_detail": bool(latest_run["error_msg"]),
                                 "started_at": latest_run["started_at"],
                                 "finished_at": latest_run["finished_at"],
                                 "created_at": latest_run["created_at"],
