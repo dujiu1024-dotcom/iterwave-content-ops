@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import EmptyHint from "../components/EmptyHint";
-import { api, MetricsResponse, MetricRow, Platform, SpiralAnalysis, Draft, WeeklyReport, ActivationMetrics, ActivationStatus, GoalSummary } from "../api";
+import { api, MetricsResponse, MetricRow, Platform, SpiralAnalysis, Draft, WeeklyReport, ActivationMetrics, ActivationStatus, GoalSummary, BusinessAnalyticsSummary } from "../api";
 
 const PLATFORM_NAME: Record<Platform, string> = {
   xhs: "小红书", douyin: "抖音",
@@ -37,7 +37,6 @@ export default function Analytics() {
   const [platformFilter, setPlatformFilter] = useState<Platform | "">("");
   const [metricsPage, setMetricsPage] = useState(1);
   const [publishedDrafts, setPublishedDrafts] = useState<Draft[]>([]);
-  const [publishEligibleCount, setPublishEligibleCount] = useState(0);
   const [backfillBusy, setBackfillBusy] = useState<string | null>(null);
   const [backfillValues, setBackfillValues] = useState<Record<string, {
     note_url: string; measured_at: string; correction_of: string;
@@ -49,6 +48,7 @@ export default function Analytics() {
   const [activationMetrics, setActivationMetrics] = useState<ActivationMetrics | null>(null);
   const [activationStatus, setActivationStatus] = useState<ActivationStatus | null>(null);
   const [goalSummary, setGoalSummary] = useState<GoalSummary | null>(null);
+  const [businessSummary, setBusinessSummary] = useState<BusinessAnalyticsSummary | null>(null);
   const [reportError, setReportError] = useState<string | null>(null);
   const [snapshotHistory, setSnapshotHistory] = useState<Record<string, {
     id: string; source: string; measured_at: string; recorded_at: string;
@@ -87,6 +87,7 @@ export default function Analytics() {
   useEffect(() => { loadGaps(); }, []);
   useEffect(() => {
     api.goalsSummary().then(setGoalSummary).catch((e) => setReportError(e.message));
+    api.businessAnalyticsSummary(30).then(setBusinessSummary).catch((e) => setReportError(e.message));
   }, []);
   useEffect(() => {
     loadMetrics(platformFilter, detailView === "details" ? metricsPage : undefined);
@@ -98,9 +99,6 @@ export default function Analytics() {
       const metrics = await api.activationMetrics();
       const published = allDrafts.filter((d) => !!d.user_confirmed_at);
       setPublishedDrafts(published);
-      setPublishEligibleCount(allDrafts.filter((d) =>
-        ["draft_saved", "user_published", "data_fetching", "published"].includes(d.status),
-      ).length);
       setWeeklyReport(report);
       setActivationMetrics(metrics);
       setActivationStatus(status);
@@ -166,9 +164,6 @@ export default function Analytics() {
       }
       const refreshed = await api.draftsAll();
       setPublishedDrafts(refreshed.filter((d) => !!d.user_confirmed_at));
-      setPublishEligibleCount(refreshed.filter((d) =>
-        ["draft_saved", "user_published", "data_fetching", "published"].includes(d.status),
-      ).length);
       setBackfillValues((prev) => ({ ...prev, [draft.id]: {
         ...prev[draft.id], views: "", likes: "", collects: "", comments: "", shares: "",
         correction_of: "",
@@ -215,6 +210,16 @@ export default function Analytics() {
           <div className="metric-foot">近 {metrics?.z_window_days ?? 90} 天有效指标记录，不代表生产量</div>
         </div>
         <div className="metric">
+          <div className="metric-top"><span className="metric-label">近 30 天内容生产量</span></div>
+          <div className="metric-val">{businessSummary?.contents_created ?? "—"} <span className="metric-unit">篇</span></div>
+          <div className="metric-foot">按内容创建时间统计</div>
+        </div>
+        <div className="metric">
+          <div className="metric-top"><span className="metric-label">近 30 天草稿产出量</span></div>
+          <div className="metric-val">{businessSummary?.drafts_created ?? "—"} <span className="metric-unit">篇</span></div>
+          <div className="metric-foot">按草稿创建时间统计，含平台变体</div>
+        </div>
+        <div className="metric">
           <div className="metric-top"><span className="metric-label">平均互动率</span><span className="metric-icon" aria-hidden="true">↗</span></div>
           <div className="metric-val">{avgRate == null ? "—" : `${(avgRate * 100).toFixed(2)}%`}</div>
           <div className="metric-foot">{avgRate == null ? "暂无有效样本" : `基于 ${rateCount} 篇有效样本`}</div>
@@ -235,13 +240,18 @@ export default function Analytics() {
         <div className="metric"><div className="metric-label">首次价值时间 TTV</div><div className="metric-val">{activationMetrics?.ttv_seconds == null ? "—" : `${Math.round(activationMetrics.ttv_seconds)} 秒`}</div><div className="metric-foot">输入 {activationMetrics?.activation_input_wait_seconds == null ? "—" : Math.round(activationMetrics.activation_input_wait_seconds)} 秒 · 排队 {activationMetrics?.model_queue_wait_seconds == null ? "—" : Math.round(activationMetrics.model_queue_wait_seconds)} 秒 · 生成 {activationMetrics?.generation_processing_seconds == null ? "—" : Math.round(activationMetrics.generation_processing_seconds)} 秒</div><div className="metric-foot">P50 {activationMetrics?.ttv_p50_seconds == null ? "—" : Math.round(activationMetrics.ttv_p50_seconds)} 秒 · P90 {activationMetrics?.ttv_p90_seconds == null ? "—" : Math.round(activationMetrics.ttv_p90_seconds)} 秒 · 样本 {activationMetrics?.ttv_sample_count ?? 0}</div><div className="metric-foot">{activationMetrics?.ttv_percentile_scope || "分位数范围待定"}</div></div>
         <div className="metric">
           <div className="metric-label">累计确认发布量</div>
-          <div className="metric-val">{publishedDrafts.length}</div>
-          <div className="metric-foot">用户确认已发布的草稿总数</div>
+          <div className="metric-val">{businessSummary?.confirmed_published ?? "—"}</div>
+          <div className="metric-foot">近 30 天用户确认已发布的草稿</div>
         </div>
         <div className="metric">
           <div className="metric-label">草稿确认发布率</div>
-          <div className="metric-val">{publishEligibleCount > 0 ? `${(publishedDrafts.length / publishEligibleCount * 100).toFixed(1)}%` : "—"}</div>
-          <div className="metric-foot">确认发布 / 已保存及已发布草稿；不等同平台发布成功率</div>
+          <div className="metric-val">{businessSummary?.draft_publish_confirmation_rate == null ? "—" : `${(businessSummary.draft_publish_confirmation_rate * 100).toFixed(1)}%`}</div>
+          <div className="metric-foot">近 30 天创建的已保存/已发布草稿中确认发布比例</div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">平台发布成功率</div>
+          <div className="metric-val">{businessSummary?.platform_publish_success_rate == null ? "暂不可计算" : `${(businessSummary.platform_publish_success_rate * 100).toFixed(1)}%`}</div>
+          <div className="metric-foot">{businessSummary?.platform_publish_success_note ?? "等待数据加载"}</div>
         </div>
         <div className="metric">
           <div className="metric-label">活跃目标完成率</div>
@@ -258,6 +268,43 @@ export default function Analytics() {
       {activationMetrics?.platform_model_breakdown?.length ? <div className="panel-sub" style={{ marginBottom: 15 }}>
         体验分布：{activationMetrics.platform_model_breakdown.map((item) => `${PLATFORM_NAME[item.platform]} / ${item.model_mode}：${item.ready_count}/${item.run_count} 完成`).join("；")}
       </div> : null}
+      <div className="grid two" style={{ marginBottom: 15 }}>
+        <div className="panel">
+          <div className="panel-head"><div><div className="panel-title">近 30 天互动汇总</div><div className="panel-sub">每篇草稿仅采用窗口内最新一次成功/部分成功采集快照；未知字段不按零计算</div></div></div>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>指标</th><th>合计</th><th>有效样本</th></tr></thead>
+              <tbody>
+                <tr><td>曝光</td><td>{businessSummary?.interactions.views ?? "—"}</td><td>{businessSummary?.interactions.known_samples.views ?? 0}</td></tr>
+                <tr><td>点赞</td><td>{businessSummary?.interactions.likes ?? "—"}</td><td>{businessSummary?.interactions.known_samples.likes ?? 0}</td></tr>
+                <tr><td>收藏</td><td>{businessSummary?.interactions.collects ?? "—"}</td><td>{businessSummary?.interactions.known_samples.collects ?? 0}</td></tr>
+                <tr><td>评论</td><td>{businessSummary?.interactions.comments ?? "—"}</td><td>{businessSummary?.interactions.known_samples.comments ?? 0}</td></tr>
+                <tr><td>分享</td><td>{businessSummary?.interactions.shares ?? "—"}</td><td>{businessSummary?.interactions.known_samples.shares ?? 0}</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div className="panel-sub" style={{ padding: 12 }}>有效草稿样本：{businessSummary?.interactions.sample_count ?? "—"}</div>
+        </div>
+        <div className="panel">
+          <div className="panel-head"><div><div className="panel-title">粉丝净增长</div><div className="panel-sub">近 30 天最新快照减去窗口开始前最近基线；无基线时显示未知</div></div></div>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>平台</th><th>净增长</th><th>基线时间</th><th>最新时间</th></tr></thead>
+              <tbody>
+                {Object.entries(businessSummary?.followers_growth_by_platform ?? {}).map(([platform, growth]) => (
+                  <tr key={platform}>
+                    <td>{PLATFORM_NAME[platform as Platform] ?? platform}</td>
+                    <td>{growth == null ? "—" : `${growth.growth > 0 ? "+" : ""}${growth.growth}`}</td>
+                    <td>{growth?.baseline_at ?? "—"}</td>
+                    <td>{growth?.latest_at ?? "—"}</td>
+                  </tr>
+                ))}
+                {businessSummary && Object.keys(businessSummary.followers_growth_by_platform).length === 0 && <tr><td colSpan={4}>暂无账号快照</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
       <div className="panel" style={{ marginBottom: 15 }}>
         <div className="panel-head">
           <div>
