@@ -45,6 +45,19 @@ def client(cfg, conn, seed, test_auth):
 
 
 # ---------------------------------------------------------------- R-2 采纳缺口
+def test_rhythm_config_exposes_quota_slots_for_all_supported_platforms(client):
+    tc, _, _ = client
+    response = tc.get("/api/rhythm")
+    assert response.status_code == 200
+    body = response.json()
+    supported = {"xhs", "douyin", "kuaishou", "wechat_channels"}
+    assert set(body["quotas"]) == supported
+    assert set(body["posting_windows"]) == supported
+    for quota in body["quotas"].values():
+        assert all(isinstance(quota[key], int) and quota[key] >= 0 for key in (
+            "passive_replies", "active_comments", "follows",
+        ))
+
 def test_tenant_write_requires_explicit_context_and_rejects_stale_context(client):
     tc, conn, _ = client
     before = conn.execute("SELECT COUNT(*) FROM spiral_rounds").fetchone()[0]

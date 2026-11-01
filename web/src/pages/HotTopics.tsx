@@ -40,6 +40,7 @@ export default function HotTopics() {
   const [sortBy, setSortBy] = useState<"heat" | "match">("heat");
   const [sourceFilter, setSourceFilter] = useState("all");
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const [hot, setHot] = useState<HotTopicsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -90,7 +91,7 @@ export default function HotTopics() {
     setError(null);
     try {
       const data = await api.hotTopics(false, {
-        page, pageSize: 20, tab, source: sourceFilter === "all" ? undefined : sourceFilter,
+        page, pageSize, tab, source: sourceFilter === "all" ? undefined : sourceFilter,
         keyword, sortBy,
       });
       setHot(data);
@@ -138,7 +139,7 @@ export default function HotTopics() {
     const t = setInterval(async () => {
       try {
         const data = await api.hotTopics(false, {
-          page, pageSize: 20, tab, source: sourceFilter === "all" ? undefined : sourceFilter,
+          page, pageSize, tab, source: sourceFilter === "all" ? undefined : sourceFilter,
           keyword, sortBy,
         });
         setHot(data);
@@ -163,9 +164,9 @@ export default function HotTopics() {
       } catch { /* 下次轮询重试 */ }
     }, 2000);
     return () => clearInterval(t);
-  }, [refreshing, researching, page, tab, keyword, sortBy, sourceFilter]);
+  }, [refreshing, researching, page, pageSize, tab, keyword, sortBy, sourceFilter]);
 
-  useEffect(() => { loadHot(); }, [page, tab, keyword, sortBy, sourceFilter]);
+  useEffect(() => { loadHot(); }, [page, pageSize, tab, keyword, sortBy, sourceFilter]);
   useEffect(() => {
     if (hot?.pages && page > hot.pages) setPage(hot.pages);
   }, [hot?.pages, page]);
@@ -425,14 +426,19 @@ export default function HotTopics() {
           ))}
         </div>
         <div className="grow" />
-        <input className="field" placeholder="搜索热点关键词" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
-        <select className="field" value={sortBy} onChange={(e) => setSortBy(e.target.value as "heat" | "match")}>
+        <input className="field" placeholder="搜索热点关键词" value={keyword} onChange={(e) => { setKeyword(e.target.value); setPage(1); }} />
+        <select className="field" value={sortBy} onChange={(e) => { setSortBy(e.target.value as "heat" | "match"); setPage(1); }}>
           <option value="heat">按热度</option>
           <option value="match">按定位关联度</option>
         </select>
-        <select className="field" value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
+        <select className="field" value={sourceFilter} onChange={(e) => { setSourceFilter(e.target.value); setPage(1); }}>
           <option value="all">全部来源</option>
           {sourceOptions.map((source) => <option key={source} value={source}>{platformLabel(source.split("/").pop() || source)} · {source}</option>)}
+        </select>
+        <select className="field" aria-label="每页热点数量" value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}>
+          <option value={20}>每页 20 条</option>
+          <option value={50}>每页 50 条</option>
+          <option value={100}>每页 100 条</option>
         </select>
       </div>
 

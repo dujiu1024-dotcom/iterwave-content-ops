@@ -498,6 +498,8 @@ function LogsPane({ logs, total, page, pages, onPageChange, onResolved, targetId
 function PublishPane() {
   const { showToast, withPending } = useApp();
   const [drafts, setDrafts] = useState<Draft[]>([]);
+  const [page, setPage] = useState(1);
+  const pageSize = 10;
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // 已发布笔记链接：被动评论轮询用它定位笔记；不填则该篇跳过轮询
@@ -515,6 +517,7 @@ function PublishPane() {
         d.status === "draft_pending" || d.status === "draft_saved" ||
         d.status === "user_published" || d.status === "data_fetching" || d.status === "published"
       ));
+      setPage(1);
       setError(null);
     } catch (e: any) {
       setError(e?.message ?? "加载草稿失败");
@@ -586,6 +589,9 @@ function PublishPane() {
     }
   };
 
+  const pageCount = Math.max(1, Math.ceil(drafts.length / pageSize));
+  const visibleDrafts = drafts.slice((page - 1) * pageSize, page * pageSize);
+
   return (
     <div className="panel">
       <div className="panel-head">
@@ -607,7 +613,7 @@ function PublishPane() {
         <EmptyHint next="可勾选「执行存草稿」后在此确认；干跑内容可复制到平台手动发布，再回来登记">暂无待确认发布的内容</EmptyHint>
       ) : (
         <div className="list">
-          {drafts.map((d) => (
+          {visibleDrafts.map((d) => (
             <div key={d.id} className="task-row">
               <i className={`task-prio ${d.status === "user_published" ? "green" : "orange"}`} />
               <div className="task-main">
@@ -727,6 +733,15 @@ function PublishPane() {
               </div>
             </div>
           ))}
+        </div>
+      )}
+      {drafts.length > pageSize && (
+        <div className="pagination-bar">
+          <span className="pagination-summary">共 {drafts.length} 条 · 第 {page}/{pageCount} 页</span>
+          <div className="pagination-actions">
+            <button className="btn sm" disabled={page <= 1} onClick={() => setPage((v) => v - 1)}>上一页</button>
+            <button className="btn sm" disabled={page >= pageCount} onClick={() => setPage((v) => v + 1)}>下一页</button>
+          </div>
         </div>
       )}
     </div>
@@ -1126,7 +1141,12 @@ function RhythmPane({ rhythm, onSaved }: { rhythm: RhythmConfig | null; onSaved?
         <div key={p} className="panel">
           <div className="panel-head">
             <div className="panel-title"><span className="icon">♪</span>{PLATFORM_NAME[p]} · 节奏配置</div>
-            <div className="head-actions"><span className="tag gray">平台独立配额</span></div>
+            <div className="head-actions">
+              <span className="tag gray">平台独立配额</span>
+              <span className={rhythm.enabled_platforms.includes(p) ? "tag green" : "tag orange"}>
+                {rhythm.enabled_platforms.includes(p) ? "平台已启用" : "平台未启用 · 配置保存后待启用生效"}
+              </span>
+            </div>
           </div>
           <div className="grid three" style={{ gap: 8 }}>
             {([
