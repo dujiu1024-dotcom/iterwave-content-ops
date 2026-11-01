@@ -3857,7 +3857,7 @@ def _register_routes(app: FastAPI) -> None:
             tasks, total = _task_queue.list_page(
                 page=page,
                 page_size=page_size,
-                scope=scope, task_type=task_type if scope == "history" else None,
+                scope=scope, task_type=task_type,
             )
         items = []
         for task in tasks:
