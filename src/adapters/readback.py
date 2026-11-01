@@ -18,8 +18,9 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
-from .base import Platform, FetchStatus, MetricsSnapshot
 from src.core.redact import safe_error_summary
+
+from .base import Platform, FetchStatus, MetricsSnapshot
 from ..vendor.easel import VENDOR_DIR, ensure_vendor_path
 
 logger = logging.getLogger(__name__)
