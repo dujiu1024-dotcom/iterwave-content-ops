@@ -137,6 +137,7 @@ class GlobalTaskWorker:
         context = self.build_tenant_context(task.tenant_id)
         from src.core import login_manager
         from src.core.notify import bind_context_notifier
+        from src.core.task_context import bind_config
 
         data_dir = Path(context["cfg"].resolve_path(context["cfg"].paths.data_dir))
         try:
@@ -149,7 +150,11 @@ class GlobalTaskWorker:
                 from src.core.task_snapshot import validate_execution_snapshot
                 validate_execution_snapshot(snapshot, context["cfg"], context["conn"])
             # 后台通知必须与任务 tenant_id 绑定，不能读取前台切换时更新的模块级通知器。
-            with login_manager.tenant_login_dir(data_dir), bind_context_notifier(context.get("notifier")):
+            with (
+                login_manager.tenant_login_dir(data_dir),
+                bind_context_notifier(context.get("notifier")),
+                bind_config(context["cfg"]),
+            ):
                 if task.task_type == "round_run":
                     round_id = int(task.payload["round_id"])
                     operation = task.payload.get("operation", "run")

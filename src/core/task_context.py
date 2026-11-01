@@ -21,6 +21,22 @@ def business_timestamp(cfg) -> float:
 
 _task_run_id: ContextVar[Optional[int]] = ContextVar("iterwave_task_run_id", default=None)
 _round_id: ContextVar[Optional[int]] = ContextVar("iterwave_round_id", default=None)
+_config_context: ContextVar[object | None] = ContextVar("iterwave_config_context", default=None)
+
+
+def current_config():
+    """Return the tenant config bound to the current background task, if any."""
+    return _config_context.get()
+
+
+@contextmanager
+def bind_config(cfg) -> Iterator[None]:
+    """Bind a tenant-specific config for nested helpers that lack an explicit cfg arg."""
+    token = _config_context.set(cfg)
+    try:
+        yield
+    finally:
+        _config_context.reset(token)
 
 
 def current_task_run_id() -> Optional[int]:

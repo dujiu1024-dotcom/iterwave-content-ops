@@ -11,8 +11,11 @@ from PIL import Image, ImageStat
 def score_image(raw: bytes, cfg=None) -> dict:
     """返回 0–100 的启发式质量分与可解释指标。评分用于初筛，不代替人工审核。"""
     if cfg is None:
-        from src.core.config import get_config
-        cfg = get_config()
+        from src.core.task_context import current_config
+        cfg = current_config()
+        if cfg is None:
+            from src.core.config import get_config
+            cfg = get_config()
     policy = cfg.media_quality
     with Image.open(io.BytesIO(raw)) as source:
         image = source.convert("RGB")

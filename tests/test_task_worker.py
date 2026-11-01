@@ -8,6 +8,7 @@ from src.adapters.base import Platform
 from src.core import login_manager
 from src.core.task_queue import GlobalTaskQueue
 from src.core.task_worker import GlobalTaskWorker
+from src.core.task_context import current_config
 
 
 def test_worker_uses_task_tenant_context_not_active_login_directory(tmp_path):
@@ -111,16 +112,18 @@ def test_worker_executes_queued_scheduler_job_in_its_tenant_context(tmp_path):
     class FakeScheduler:
         async def _job_daily_ops(self):
             observed["login_path"] = login_manager._platform_state_path(Platform.XHS)
+            observed["config"] = current_config()
             return None
 
         def shutdown(self):
             return None
 
+    tenant_cfg = SimpleNamespace(
+        paths=SimpleNamespace(data_dir=str(tmp_path / "tenant-b" / "data")),
+        resolve_path=lambda value: value,
+    )
     context = {
-        "cfg": SimpleNamespace(
-            paths=SimpleNamespace(data_dir=str(tmp_path / "tenant-b" / "data")),
-            resolve_path=lambda value: value,
-        ),
+        "cfg": tenant_cfg,
         "scheduler": FakeScheduler(),
         "conn": SimpleNamespace(close=lambda: None),
     }
@@ -129,6 +132,7 @@ def test_worker_executes_queued_scheduler_job_in_its_tenant_context(tmp_path):
 
     assert result == {"completed": True}
     assert observed["login_path"] == tmp_path / "tenant-b" / "data" / "login_states" / "xhs.json"
+    assert observed["config"] is tenant_cfg
     saved = queue.get(task.task_id)
     assert saved is not None and saved.status == "running"
 
