@@ -643,3 +643,5 @@ A-02、A-04、B-05、D-07、D-08、F-01 至 F-08、G-01 至 G-06。
 #### 验证边界
 - 已回读 API SQL、分页类型、Analytics 页码控件、draftsAll 调用及测试代码。
 - 尚未运行项目 pytest、Ruff、TypeScript 构建、CI 或浏览器测试；逐篇数据分页与完整回填仍需自动化和真机验收。
+- 旧草稿列表调用方继续盘点：Analytics 发布回填、Assets、Operations 发布确认列表、GlobalSearch 均从 api.drafts() 迁移为 draftsAll()，避免各页面静默漏掉第 101 条以后的记录；draftsAll 以每批最多 5 个并发分页请求读取，避免一次性发起大量请求。
+- 追加提交：Operations `2c88047`；Assets `352c698`；GlobalSearch `06546ef`；draftsAll 并发限流 `4a40293`。
