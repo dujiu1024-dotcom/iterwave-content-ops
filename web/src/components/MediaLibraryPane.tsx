@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useApp } from "../AppContext";
 import { api, MediaAsset, MediaUsageTarget, MediaGenerationSettings, MediaRecommendation } from "../api";
 import { platformMeta } from "../platforms";
@@ -53,6 +53,10 @@ function assetState(item: MediaAsset): Filter {
 export default function MediaLibraryPane() {
   const { showToast, withPending, isPending } = useApp();
   const [items, setItems] = useState<MediaAsset[]>([]);
+  const [total, setTotal] = useState(0);
+  const [serverCounts, setServerCounts] = useState<{ all: number; pending: number; approved: number; rejected: number; archived: number } | null>(null);
+  const [page, setPage] = useState(1);
+  const pageSize = 24;
   const [targets, setTargets] = useState<MediaUsageTarget[]>([]);
   const [selectedContentId, setSelectedContentId] = useState("");
   const [usageRole, setUsageRole] = useState<UsageRole>("illustration");
@@ -88,10 +92,16 @@ export default function MediaLibraryPane() {
     setLoading(true);
     setError("");
     try {
+      const status = filter === "archived" ? "archived" : "active";
+      const reviewStatus = filter === "pending" ? "pending_review"
+        : filter === "approved" ? "approved" : filter === "rejected" ? "rejected" : "all";
       const [result, targetResult, settingsResult] = await Promise.all([
-        api.mediaAssets(query, "all"), api.mediaUsageTargets(), api.mediaGenerationSettings(),
+        api.mediaAssets(query, status, reviewStatus, pageSize, (page - 1) * pageSize),
+        api.mediaUsageTargets(), api.mediaGenerationSettings(),
       ]);
       setItems(result.items);
+      setTotal(result.total ?? 0);
+      setServerCounts(result.counts ?? null);
       setTargets(targetResult.items);
       setSettings(settingsResult);
       const requestedContentId = new URLSearchParams(window.location.search).get("focusContent");
@@ -114,32 +124,22 @@ export default function MediaLibraryPane() {
     } finally {
       setLoading(false);
     }
-  }, [query]);
+  }, [query, filter, page]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void load(); }, 250);
     return () => window.clearTimeout(timer);
   }, [load]);
 
-  const counts = useMemo(() => {
-    const c: Record<Filter, number> = { all: 0, pending: 0, approved: 0, rejected: 0, archived: 0 };
-    for (const item of items) {
-      const state = assetState(item);
-      c[state] += 1;
-      if (state !== "archived") c.all += 1;
-    }
-    return c;
-  }, [items]);
-
-  const visible = useMemo(() => items.filter((item) => {
-    const state = assetState(item);
-    return filter === "all" ? state !== "archived" : state === filter;
-  }), [items, filter]);
+  const counts = serverCounts ?? { all: 0, pending: 0, approved: 0, rejected: 0, archived: 0 };
+  const visible = items;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  useEffect(() => { setPage((current) => Math.min(current, pageCount)); }, [pageCount]);
 
   const aiReady = Boolean(settings?.enabled && settings?.provider_configured);
   const aiBlockedReason = !settings ? "正在加载 AI 配图设置" : !settings.provider_configured
     ? "服务器尚未配置图片服务，请联系管理员" : !settings.enabled ? "AI 配图未启用，可在「AI 设置」中开启" : "";
-  const quotaLeft = settings ? Math.max(0, settings.monthly_quota - settings.used_this_month) : 0;
+  
   const selectedTarget = targets.find((t) => t.id === selectedContentId);
 
   const togglePanel = (next: Panel) => setPanel((current) => (current === next ? "none" : next));
@@ -320,7 +320,7 @@ export default function MediaLibraryPane() {
             <div className="ml-stats">
               <span>可用 <b>{counts.approved}</b></span>
               <span className={counts.pending ? "warn" : ""}>待审核 <b>{counts.pending}</b></span>
-              {settings && <span>本月 AI 额度剩余 <b>{quotaLeft}</b>/{settings.monthly_quota}</span>}
+              {settings && <span>本月已用 <b>{settings.used_this_month}</b> 次 · 不限次数</span>}
             </div>
           </div>
           <div className="ml-actions">
@@ -439,11 +439,10 @@ export default function MediaLibraryPane() {
                   <option value="1536x1024">横图 1536 × 1024</option>
                 </select>
               </label>
-              <label className="ml-field">
-                <span>每月额度 <em>本月已成功生成 {settings.used_this_month} 次，失败不计</em></span>
-                <input type="number" min={0} max={1000} value={settings.monthly_quota}
-                  onChange={(e) => setSettings({ ...settings, monthly_quota: Math.max(0, Math.min(1000, Number(e.target.value) || 0)) })} />
-              </label>
+              <div className="ml-field">
+                <span>使用统计</span>
+                <div className="ml-hint">本月已成功生成 {settings.used_this_month} 次。个人素材库不设剩余额度或月度次数上限；失败请求不计入使用量。</div>
+              </div>
               <label className="ml-field">
                 <span>模型</span>
                 <input value={settings.model} maxLength={120} onChange={(e) => setSettings({ ...settings, model: e.target.value })} />
@@ -529,12 +528,12 @@ export default function MediaLibraryPane() {
         <div className="ml-toolbar">
           <div className="ml-filters" role="tablist">
             {([["all", "全部"], ["pending", "待审核"], ["approved", "可用"], ["rejected", "已驳回"], ["archived", "已归档"]] as [Filter, string][]).map(([key, label]) => (
-              <button key={key} role="tab" aria-selected={filter === key} className={filter === key ? "on" : ""} onClick={() => setFilter(key)}>
+              <button key={key} role="tab" aria-selected={filter === key} className={filter === key ? "on" : ""} onClick={() => { setFilter(key); setPage(1); }}>
                 {label}<span className={key === "pending" && counts.pending ? "badge warn" : "badge"}>{counts[key]}</span>
               </button>
             ))}
           </div>
-          <input className="ml-search" type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索名称、标签、描述" />
+          <input className="ml-search" type="search" value={query} onChange={(e) => { setQuery(e.target.value); setPage(1); }} placeholder="搜索名称、标签、描述" />
         </div>
 
         {error && <div className="note orange" role="alert">{error}</div>}
@@ -597,6 +596,13 @@ export default function MediaLibraryPane() {
             })}
           </div>
         )}
+        {total > pageSize && <div className="pagination-bar">
+          <span className="pagination-summary">共 {total} 张 · 第 {page}/{pageCount} 页 · 每页 {pageSize} 张</span>
+          <div className="pagination-actions">
+            <button className="btn sm" disabled={page <= 1 || loading} onClick={() => setPage((v) => v - 1)}>上一页</button>
+            <button className="btn sm" disabled={page >= pageCount || loading} onClick={() => setPage((v) => v + 1)}>下一页</button>
+          </div>
+        </div>}
       </section>
     </div>
   );
