@@ -5964,6 +5964,10 @@ def _register_routes(app: FastAPI) -> None:
                 except (TypeError, ValueError):
                     item[target] = []
             item["enabled"] = bool(item["enabled"])
+            item["installation_state"] = "registered"
+            item["enabled_state"] = "enabled" if item["enabled"] else "disabled"
+            item["runnable_state"] = "blocked_no_sandbox"
+            item["execution_mode"] = "metadata_only"
             items.append(item)
         from src.core.skills_registry import builtin_skills_catalog
         builtin_items = builtin_skills_catalog()
