@@ -511,3 +511,10 @@ A-02、A-04、B-05、D-07、D-08、F-01 至 F-08、G-01 至 G-06。
   - Commit：`908e141ebf81a6b6dbafd9451d7c336b255176d9`
   - 页码边界修正：`f2984ca37acab458bfe867cb0c05e6ae3fffb5c8`
 - **验证状态**：源码回读待进行；未运行前端构建和浏览器测试。
+
+
+### 2026-11-01 — CI 触发状态复核
+
+- 分支中已存在 `.github/workflows/ci.yml`，包含 Python 3.11 后端 pytest/compileall/定向 Ruff 检查，以及 Node 20 前端 `npm ci` + `npm run build`。
+- 最新整改提交查询到的 workflow runs 和 commit statuses 均为空；因此不能声称 CI 已执行或通过。
+- 后续需确认 GitHub Actions 是否在仓库设置中被禁用、PR 是否允许 Actions、以及该 workflow 是否已存在于 PR base 分支。未获得运行记录前，自动化验收保持未完成。
