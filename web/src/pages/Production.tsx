@@ -757,7 +757,7 @@ export default function Production() {
                       {plan.history.map((h, i) => (
                         <tr key={i}>
                           <td style={{ fontFamily: "monospace", fontSize: 11 }}>{h.plan_signature.slice(0, 16)}…</td>
-                          <td>{h.round_id != null ? `轮次 ${h.round_id}` : "母计划"}</td>
+                          <td>{h.round_number != null ? `第 ${h.round_number} 轮` : h.round_id != null ? "关联轮次已归档" : "母计划"}</td>
                           <td>{AUTHOR_LABEL[(h.author ?? "").split(":")[0]] ?? h.author ?? "—"}</td>
                           <td style={{ fontSize: 11 }}>{h.created_at}</td>
                         </tr>
