@@ -3878,8 +3878,8 @@ def _register_routes(app: FastAPI) -> None:
             total = None
         else:
             tasks, total = _task_queue.list_page(
-                page=1 if scope in {"active", "failed"} else page,
-                page_size=500 if scope in {"active", "failed"} else page_size,
+                page=page,
+                page_size=page_size,
                 scope=scope, task_type=task_type if scope == "history" else None,
             )
         items = []
@@ -3901,9 +3901,9 @@ def _register_routes(app: FastAPI) -> None:
         response = {"items": items}
         if scope != "all":
             response.update({
-                "total": total, "page": 1 if scope == "active" else page,
-                "page_size": 500 if scope == "active" else page_size,
-                "pages": 1 if scope == "active" else max(1, (total + page_size - 1) // page_size),
+                "total": total, "page": page, "page_size": page_size,
+                "pages": max(1, (total + page_size - 1) // page_size),
+                "counts": _task_queue.status_counts(scope=scope),
             })
         return response
 
