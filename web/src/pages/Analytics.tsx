@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import EmptyHint from "../components/EmptyHint";
-import { api, MetricsResponse, MetricRow, Platform, SpiralAnalysis, Draft, WeeklyReport, ActivationMetrics, ActivationStatus, GoalSummary, BusinessAnalyticsSummary } from "../api";
+import { api, MetricsResponse, MetricRow, Platform, SpiralAnalysis, Draft, WeeklyReport, ActivationStatus, GoalSummary, BusinessAnalyticsSummary } from "../api";
 
 const PLATFORM_NAME: Record<Platform, string> = {
   xhs: "小红书", douyin: "抖音",
@@ -45,7 +45,6 @@ export default function Analytics() {
   }>>({});
   const [weeklyReport, setWeeklyReport] = useState<WeeklyReport | null>(null);
   const [weeklyActionBusy, setWeeklyActionBusy] = useState<string | null>(null);
-  const [activationMetrics, setActivationMetrics] = useState<ActivationMetrics | null>(null);
   const [activationStatus, setActivationStatus] = useState<ActivationStatus | null>(null);
   const [goalSummary, setGoalSummary] = useState<GoalSummary | null>(null);
   const [businessSummary, setBusinessSummary] = useState<BusinessAnalyticsSummary | null>(null);
@@ -94,13 +93,11 @@ export default function Analytics() {
   }, [platformFilter, metricsPage, detailView]);
   useEffect(() => {
     Promise.all([api.draftsAll(), api.weeklyReport()]).then(async ([allDrafts, report]) => {
-      // 先建立/读取 cohort，再计算 activation 指标，避免首次进入 Analytics 时发生初始化竞态。
+      // activation status 提供各平台可回填的指标字段。
       const status = await api.activationStatus();
-      const metrics = await api.activationMetrics();
       const published = allDrafts.filter((d) => !!d.user_confirmed_at);
       setPublishedDrafts(published);
       setWeeklyReport(report);
-      setActivationMetrics(metrics);
       setActivationStatus(status);
       setBackfillValues(Object.fromEntries(published.map((d) => [d.id, {
         note_url: d.platform_note_url || "", measured_at: "", correction_of: "",
@@ -153,9 +150,7 @@ export default function Analytics() {
         });
       }
       if (metricsSubmitted) {
-        const [report, activation] = await Promise.all([api.weeklyReport(), api.activationMetrics()]);
-        setWeeklyReport(report);
-        setActivationMetrics(activation);
+        setWeeklyReport(await api.weeklyReport());
         setSnapshotHistory((prev) => {
           const next = { ...prev };
           delete next[draft.id];
@@ -169,7 +164,6 @@ export default function Analytics() {
         correction_of: "",
       }}));
       setWeeklyReport(await api.weeklyReport());
-      setActivationMetrics(await api.activationMetrics());
     } catch (e: any) {
       setReportError(e?.message || "保存失败");
     } finally {
@@ -183,6 +177,10 @@ export default function Analytics() {
   const rateRows = rows.filter((r) => typeof r.interaction_rate === "number");
   const rateCount = rateRows.length;
   const avgRate = rateCount ? rateRows.reduce((s, r) => s + (r.interaction_rate as number), 0) / rateCount : null;
+  const followerEntries = Object.entries(businessSummary?.followers_growth_by_platform ?? {});
+  const followerPlatforms = followerEntries.map(([platform]) => platform);
+  const followerKnown = followerEntries.filter(([, g]) => g != null).map(([, g]) => g!.growth);
+  const followerTotal = followerKnown.reduce((sum, g) => sum + g, 0);
   const zPlatforms = new Set(zStats.filter((z) => z.sample_count >= 2).map((z) => z.platform)).size;
 
   return (
@@ -203,21 +201,22 @@ export default function Analytics() {
       </div>
 
       {detailView === "overview" && <>
+      {/* 总览只放经营指标：生产量、互动、粉丝增长、目标完成率。增长漏斗类（TTV、激活率、首次发布率等）不在此展示。 */}
       <div className="grid kpis" style={{ marginBottom: 15 }}>
         <div className="metric">
-          <div className="metric-top"><span className="metric-label">指标采集记录</span><span className="metric-icon" aria-hidden="true">▤</span></div>
-          <div className="metric-val">{metrics ? metrics.total : "—"} <span className="metric-unit">条</span></div>
-          <div className="metric-foot">近 {metrics?.z_window_days ?? 90} 天指标记录（含采集失败记录），不代表生产量</div>
-        </div>
-        <div className="metric">
-          <div className="metric-top"><span className="metric-label">近 30 天内容生产量</span></div>
+          <div className="metric-top"><span className="metric-label">内容生产量</span><span className="metric-icon" aria-hidden="true">▤</span></div>
           <div className="metric-val">{businessSummary?.contents_created ?? "—"} <span className="metric-unit">篇</span></div>
-          <div className="metric-foot">按内容创建时间统计</div>
+          <div className="metric-foot">近 {businessSummary?.window_days ?? 30} 天按内容创建时间统计</div>
         </div>
         <div className="metric">
-          <div className="metric-top"><span className="metric-label">近 30 天草稿产出量</span></div>
+          <div className="metric-top"><span className="metric-label">草稿产出量</span><span className="metric-icon" aria-hidden="true">▦</span></div>
           <div className="metric-val">{businessSummary?.drafts_created ?? "—"} <span className="metric-unit">篇</span></div>
           <div className="metric-foot">按草稿创建时间统计，含平台变体</div>
+        </div>
+        <div className="metric">
+          <div className="metric-top"><span className="metric-label">确认发布量</span><span className="metric-icon" aria-hidden="true">✓</span></div>
+          <div className="metric-val">{businessSummary?.confirmed_published ?? "—"} <span className="metric-unit">篇</span></div>
+          <div className="metric-foot">近 {businessSummary?.window_days ?? 30} 天创建且由你确认已发布的草稿</div>
         </div>
         <div className="metric">
           <div className="metric-top"><span className="metric-label">平均互动率</span><span className="metric-icon" aria-hidden="true">↗</span></div>
@@ -225,49 +224,16 @@ export default function Analytics() {
           <div className="metric-foot">{avgRate == null ? "暂无有效样本" : `基于 ${rateCount} 篇有效样本`}</div>
         </div>
         <div className="metric">
-          <div className="metric-top"><span className="metric-label">可做对比的平台</span><span className="metric-icon" aria-hidden="true">◎</span></div>
-          <div className="metric-val">{zPlatforms} <span className="metric-unit">个</span></div>
-          <div className="metric-foot">至少 2 篇有效样本才参与平台内对比</div>
+          <div className="metric-top"><span className="metric-label">粉丝净增长</span><span className="metric-icon" aria-hidden="true">◎</span></div>
+          <div className="metric-val">{followerKnown.length === 0 ? "—" : `${followerTotal > 0 ? "+" : ""}${followerTotal}`}</div>
+          <div className="metric-foot">{businessSummary ? `${followerKnown.length}/${followerPlatforms.length} 个平台有同账号基线，分平台计算后汇总` : "等待数据加载"}</div>
         </div>
         <div className="metric">
-          <div className="metric-top"><span className="metric-label">复盘建议</span><span className="metric-icon" aria-hidden="true">✦</span></div>
-          <div className="metric-val">{adjustments.length} <span className="metric-unit">条</span></div>
-          <div className="metric-foot">来自最近一轮复盘</div>
-        </div>
-      </div>
-
-      <div className="grid kpis analytics-activation-kpis" style={{ marginBottom: 15, gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
-        <div className="metric"><div className="metric-label">首次价值时间 TTV</div><div className="metric-val">{activationMetrics?.ttv_seconds == null ? "—" : `${Math.round(activationMetrics.ttv_seconds)} 秒`}</div><div className="metric-foot">输入 {activationMetrics?.activation_input_wait_seconds == null ? "—" : Math.round(activationMetrics.activation_input_wait_seconds)} 秒 · 排队 {activationMetrics?.model_queue_wait_seconds == null ? "—" : Math.round(activationMetrics.model_queue_wait_seconds)} 秒 · 生成 {activationMetrics?.generation_processing_seconds == null ? "—" : Math.round(activationMetrics.generation_processing_seconds)} 秒</div><div className="metric-foot">P50 {activationMetrics?.ttv_p50_seconds == null ? "—" : Math.round(activationMetrics.ttv_p50_seconds)} 秒 · P90 {activationMetrics?.ttv_p90_seconds == null ? "—" : Math.round(activationMetrics.ttv_p90_seconds)} 秒 · 样本 {activationMetrics?.ttv_sample_count ?? 0}</div><div className="metric-foot">{activationMetrics?.ttv_percentile_scope || "分位数范围待定"}</div></div>
-        <div className="metric">
-          <div className="metric-label">累计确认发布量</div>
-          <div className="metric-val">{businessSummary?.confirmed_published ?? "—"}</div>
-          <div className="metric-foot">近 30 天用户确认已发布的草稿</div>
-        </div>
-        <div className="metric">
-          <div className="metric-label">草稿确认发布率</div>
-          <div className="metric-val">{businessSummary?.draft_publish_confirmation_rate == null ? "—" : `${(businessSummary.draft_publish_confirmation_rate * 100).toFixed(1)}%`}</div>
-          <div className="metric-foot">近 30 天创建的已保存/已发布草稿中确认发布比例</div>
-        </div>
-        <div className="metric">
-          <div className="metric-label">平台发布成功率</div>
-          <div className="metric-val">{businessSummary?.platform_publish_success_rate == null ? "暂不可计算" : `${(businessSummary.platform_publish_success_rate * 100).toFixed(1)}%`}</div>
-          <div className="metric-foot">{businessSummary?.platform_publish_success_note ?? "等待数据加载"}</div>
-        </div>
-        <div className="metric">
-          <div className="metric-label">活跃目标完成率</div>
+          <div className="metric-top"><span className="metric-label">目标完成率</span><span className="metric-icon" aria-hidden="true">✦</span></div>
           <div className="metric-val">{goalSummary?.percent == null ? "—" : `${goalSummary.percent.toFixed(1)}%`}</div>
           <div className="metric-foot">{goalSummary ? `已纳入统计 ${goalSummary.counted_goals}/${goalSummary.active_goals} 个目标` : "目标进度尚未加载"}</div>
         </div>
-        <div className="metric"><div className="metric-label">7 日激活率</div><div className="metric-val">{activationMetrics?.seven_day_activation_rate == null ? "观察中" : `${(activationMetrics.seven_day_activation_rate * 100).toFixed(0)}%`}</div><div className="metric-foot">复制或保存至少一篇合格样稿</div></div>
-        <div className="metric"><div className="metric-label">首次发布率</div><div className="metric-val">{activationMetrics?.first_publish_rate == null ? "观察中" : `${(activationMetrics.first_publish_rate * 100).toFixed(0)}%`}</div><div className="metric-foot">初始化后 7 日内确认发布</div></div>
-        <div className="metric"><div className="metric-label">数据回流完成率</div><div className="metric-val">{activationMetrics?.data_return_rate == null ? "—" : `${(activationMetrics.data_return_rate * 100).toFixed(0)}%`}</div><div className="metric-foot">发布满 7 天且 7 日内补填链接或提交有效指标</div></div>
-        <div className="metric"><div className="metric-label">快速体验完成率</div><div className="metric-val">{activationMetrics?.quick_experience_completion_rate == null ? "—" : `${(activationMetrics.quick_experience_completion_rate * 100).toFixed(0)}%`}</div><div className="metric-foot">成功展示三篇合格样稿的账号组</div></div>
-        <div className="metric"><div className="metric-label">周采纳发布数</div><div className="metric-val">{activationMetrics?.weekly_adopted_published ?? 0}</div><div className="metric-foot">用户确认采纳并发布的内容</div></div>
-        <div className="metric"><div className="metric-label">周有效复盘数</div><div className="metric-val">{activationMetrics?.weekly_effective_review_count ?? 0}</div><div className="metric-foot">近 7 天有有效指标的已发布内容</div></div>
       </div>
-      {activationMetrics?.platform_model_breakdown?.length ? <div className="panel-sub" style={{ marginBottom: 15 }}>
-        体验分布：{activationMetrics.platform_model_breakdown.map((item) => `${PLATFORM_NAME[item.platform]} / ${item.model_mode}：${item.ready_count}/${item.run_count} 完成`).join("；")}
-      </div> : null}
       <div className="grid two" style={{ marginBottom: 15 }}>
         <div className="panel">
           <div className="panel-head"><div><div className="panel-title">近 30 天互动汇总</div><div className="panel-sub">每篇草稿仅采用窗口内最新一次成功/部分成功采集快照；未知字段不按零计算</div></div></div>

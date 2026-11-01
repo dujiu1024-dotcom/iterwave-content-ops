@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, GlobalTaskQueueItem } from "../api";
 import { useApp } from "../AppContext";
+import { roundTaskLabel } from "../roundLabel";
 
 const STATUS_LABEL: Record<GlobalTaskQueueItem["status"], string> = {
   queued: "等待执行",
@@ -33,10 +34,7 @@ const SCHEDULER_JOB_LABEL: Record<string, string> = {
 
 function aggregateLabel(task: GlobalTaskQueueItem) {
   if (!task.aggregate_id) return "—";
-  if (task.task_type === "round_run") {
-    const [, operation] = task.aggregate_id.split(":");
-    return operation === "save_pending_drafts" ? "恢复存草稿任务" : "轮次生产任务";
-  }
+  if (task.task_type === "round_run") return roundTaskLabel(task);
   if (task.task_type !== "scheduler_job") {
     return "关联业务任务";
   }

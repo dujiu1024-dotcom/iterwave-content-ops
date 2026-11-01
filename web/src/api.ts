@@ -19,6 +19,8 @@ export interface GlobalTaskQueueItem {
   tenant_id: string;
   tenant_name: string;
   aggregate_id: string | null;
+  /** round_run 任务对应的业务轮次编号（spiral_rounds.round_number）；无法解析时为 null */
+  round_number?: number | null;
   status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "interrupted";
   created_at: string;
   available_at: string;
@@ -183,16 +185,18 @@ export interface SpiralRoundPage {
   pages: number;
 }
 
+export interface OnboardingProgress {
+  step_key: string | null;
+  step_index: number | null;
+  updated_at: string | null;
+}
+
 export interface BusinessAnalyticsSummary {
   window_days: number;
   since: string;
   contents_created: number;
   drafts_created: number;
   confirmed_published: number;
-  publish_eligible: number;
-  draft_publish_confirmation_rate: number | null;
-  platform_publish_success_rate: number | null;
-  platform_publish_success_note: string;
   interactions: {
     sample_count: number;
     views: number | null;
@@ -1421,6 +1425,38 @@ async function ensureTenantContext(): Promise<void> {
   await tenantContextInitialization;
 }
 
+/**
+ * 错误提示透传规则：后端写好的中文业务提示（包括 5xx，如「图片生成服务暂时不可用…」）原样展示；
+ * 仅当 detail 为空，或含堆栈、源码/绝对路径、URL、token/密钥、驱动异常类名等内部特征时，
+ * 才替换为通用提示，避免内部诊断信息泄露到浏览器。
+ */
+const INTERNAL_DETAIL_PATTERNS: RegExp[] = [
+  /\btraceback\b/i,
+  /File ["'][^"']+["'], line \d+/i,
+  /\.(?:py|pyc|db|sqlite3?|ya?ml|env|log|ini|toml)\b(?::\d+)?/i,
+  /(?:^|[\s"'(=:])\/(?:home|root|tmp|var|usr|opt|etc|srv|app|workspace|Users|private|data)\//,
+  /\b[A-Za-z]:\\[^\s]/,
+  /\b(?:https?|wss?|ftp|file|sqlite|postgres(?:ql)?|mysql|redis):\/\/\S+/i,
+  /\b(?:bearer|authorization)\b\s*[:=]?\s*[A-Za-z0-9._~+/-]{8,}/i,
+  /\b(?:api[_-]?key|access[_-]?token|secret|password|passwd|token)\s*[:=]\s*\S+/i,
+  /\b(?:sk|ak|ghp|gho|xox[abp])-[A-Za-z0-9_-]{8,}/,
+  /\b[A-Za-z0-9_]{40,}\b/,
+  /\b[A-Z][A-Z0-9]*_(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|URL)\b/,
+  /\b(?:sqlite3|sqlalchemy|psycopg2?|pymysql)\.|\b(?:OperationalError|ProgrammingError|IntegrityError|KeyError|TypeError|ValueError|AttributeError|RuntimeError|Exception)\b/,
+  /<\/?(?:html|body|head|title)\b/i,
+];
+
+/** 把后端错误 detail 转成可展示给用户的提示（导出以便单测/复用）。 */
+export function clientErrorMessage(status: number, rawDetail: string | null | undefined): string {
+  const detail = (rawDetail ?? "").trim();
+  const generic = status >= 500
+    ? "服务暂时不可用，请稍后重试"
+    : "操作失败，内部诊断信息已记录，请检查配置或联系管理员";
+  if (!detail) return status >= 500 ? generic : "请求失败，请稍后重试";
+  if (INTERNAL_DETAIL_PATTERNS.some((re) => re.test(detail))) return generic;
+  return detail;
+}
+
 async function fetchJson<T>(path: string, options?: RequestInit): Promise<T> {
   const method = (options?.method || "GET").toUpperCase();
   if (method !== "GET" && !path.startsWith("/api/auth/")) {
@@ -1440,26 +1476,28 @@ async function fetchJson<T>(path: string, options?: RequestInit): Promise<T> {
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    let detail = text || res.statusText;
+    let detail = "";
     let errorCode = "";
+    let parsedJson = false;
     try {
       const parsed = JSON.parse(text);
+      parsedJson = true;
       const payload = parsed?.detail ?? parsed;
       if (typeof payload === "string") {
         detail = payload;
         // FastAPI 常见结构：detail 是字符串，业务错误码放在响应顶层。
         errorCode = String(parsed?.code || "");
       } else if (payload && typeof payload === "object") {
-        detail = String(payload.message || payload.detail || detail);
+        detail = String(payload.message || payload.detail || "");
         errorCode = String(payload.code || parsed?.code || "");
       }
     } catch {
-      // 非 JSON 错误体，保留原文
+      // 非 JSON 错误体（如网关 HTML 页、纯文本 Internal Server Error）
     }
-    // 服务端异常、堆栈、绝对路径和内部配置标识不得透传到浏览器。
-    const internalDetail = /traceback|File ["'][^"']+\.py["']|sqlite3?\.|sqlalchemy|operationalerror|programmingerror|OPENAI_API_KEY|DATABASE_URL|(?:\/home\/|\/root\/|\/tmp\/|\/var\/|\/Users\/|[A-Za-z]:\\)/i.test(detail);
-    if (res.status >= 500) detail = "服务暂时不可用，请稍后重试";
-    else if (internalDetail) detail = "操作失败，内部诊断信息已记录，请检查配置或联系管理员";
+    // 5xx 的非 JSON 响应体来自网关/框架默认页，不是后端业务提示，按“无 detail”处理；
+    // 4xx 的非 JSON 文本保留原文，但仍要过内部特征检查。
+    if (!parsedJson && res.status < 500) detail = text || res.statusText || "";
+    detail = clientErrorMessage(res.status, detail);
     const error = new Error(detail) as Error & { status?: number; code?: string };
     error.status = res.status;
     error.code = errorCode;
@@ -1736,6 +1774,14 @@ export const api = {
     fetchJson<{ id: string; imported: boolean; message?: string; manual_confirmation_recorded?: boolean }>("/api/hot_topics/import", {
       method: "POST",
       body: JSON.stringify(payload),
+    }),
+  /** 正式运营设置向导进度（按账号组存后端 app_settings） */
+  onboardingProgress: () =>
+    fetchJson<OnboardingProgress>("/api/onboarding/progress"),
+  saveOnboardingProgress: (step_key: string, step_index: number) =>
+    fetchJson<OnboardingProgress>("/api/onboarding/progress", {
+      method: "PUT",
+      body: JSON.stringify({ step_key, step_index }),
     }),
   businessAnalyticsSummary: (days = 30) =>
     fetchJson<BusinessAnalyticsSummary>(`/api/analytics/business-summary?days=${days}`),
