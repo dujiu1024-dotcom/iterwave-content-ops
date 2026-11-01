@@ -40,6 +40,8 @@ export interface GlobalTaskQueueResponse {
     by_status: Record<string, number>;
     by_tenant: Record<string, Record<string, number>>;
   };
+  status_counts?: { queued?: number; running?: number; failed?: number; interrupted?: number };
+  tenant_status_counts?: Record<string, { queued?: number; running?: number; failed?: number; interrupted?: number }>;
 }
 
 export interface QueueTaskSubmission {
@@ -1290,6 +1292,7 @@ async function fetchJson<T>(path: string, options?: RequestInit): Promise<T> {
     }
     throw error;
   }
+  if (res.status === 204) return undefined as T;
   return res.json();
 }
 
@@ -1845,6 +1848,8 @@ export const api = {
     fetchJson<RegisteredPlatformAccount>(id == null ? "/api/platform-accounts" : `/api/platform-accounts/${id}`, {
       method: id == null ? "POST" : "PUT", body: JSON.stringify(data),
     }),
+  deletePlatformAccount: (id: number) =>
+    fetchJson<void>(`/api/platform-accounts/${id}`, { method: "DELETE" }),
   /** 启动扫码登录；restart=true 会先结束仍在运行的旧登录进程 */
   startLogin: (platform: Platform, restart = false) =>
     fetchJson<LoginStatus>(`/api/accounts/${platform}/login${restart ? "?restart=true" : ""}`, { method: "POST" }),

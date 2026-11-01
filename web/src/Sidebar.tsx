@@ -70,7 +70,7 @@ export default function Sidebar({ current, onChange, brokenPlatforms, loggedIn, 
         </div>
       </div>
 
-      <nav aria-label="页面" className="sidebar-nav">
+      <nav className="sidebar-nav" aria-label="页面">
         {Object.entries(sections).map(([section, items]) => (
           <div key={section} role="group" aria-label={section}>
             <div className="group-label">{section}</div>

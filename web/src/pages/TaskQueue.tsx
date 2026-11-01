@@ -106,13 +106,14 @@ export default function TaskQueue() {
   const [activeTotal, setActiveTotal] = useState(0);
   const [activePages, setActivePages] = useState(1);
   const [activePage, setActivePage] = useState(1);
-  const [activeCounts, setActiveCounts] = useState<Record<string, number>>({});
-  const activePageSize = 20;
+  const [activeCounts, setActiveCounts] = useState({ queued: 0, running: 0 });
   const [historyItems, setHistoryItems] = useState<GlobalTaskQueueItem[]>([]);
   const [historyTotal, setHistoryTotal] = useState(0);
   const [historyPages, setHistoryPages] = useState(1);
   const [historyPage, setHistoryPage] = useState(1);
   const [historyType, setHistoryType] = useState<"all" | "round_run" | "scheduler_job">("round_run");
+  const [historyStatus, setHistoryStatus] = useState<"all" | "failed">("all");
+  const activePageSize = 20;
   const historyPageSize = 20;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -122,23 +123,29 @@ export default function TaskQueue() {
     try {
       const [activeResponse, historyResponse] = await Promise.all([
         api.taskQueue({ scope: "active", page: activePage, pageSize: activePageSize }),
-        api.taskQueue({ scope: "history", page: historyPage, pageSize: historyPageSize, taskType: historyType === "all" ? undefined : historyType }),
+        api.taskQueue({ scope: historyStatus === "failed" ? "failed" : "history", page: historyPage, pageSize: historyPageSize, taskType: historyType === "all" ? undefined : historyType }),
       ]);
       setActiveItems(activeResponse.items || []);
-      setActiveTotal(activeResponse.total ?? activeResponse.items?.length ?? 0);
-      setActivePages(activeResponse.pages ?? 1);
-      if (activePage > (activeResponse.pages ?? 1)) setActivePage(activeResponse.pages ?? 1);
-      setActiveCounts(activeResponse.counts?.by_status ?? {});
+      setActiveTotal(activeResponse.total ?? 0);
+      const nextActivePages = activeResponse.pages ?? 1;
+      setActivePages(nextActivePages);
+      if (activePage > nextActivePages) setActivePage(nextActivePages);
+      setActiveCounts({
+        queued: activeResponse.status_counts?.queued ?? 0,
+        running: activeResponse.status_counts?.running ?? 0,
+      });
       setHistoryItems(historyResponse.items || []);
       setHistoryTotal(historyResponse.total ?? 0);
-      setHistoryPages(historyResponse.pages ?? 1);
+      const nextHistoryPages = historyResponse.pages ?? 1;
+      setHistoryPages(nextHistoryPages);
+      if (historyPage > nextHistoryPages) setHistoryPage(nextHistoryPages);
       setError("");
     } catch (err) {
       setError((err as Error).message || "任务队列读取失败");
     } finally {
       setLoading(false);
     }
-  }, [activePage, historyPage, historyType]);
+  }, [activePage, historyPage, historyType, historyStatus]);
 
   useEffect(() => {
     void refresh();
@@ -182,9 +189,9 @@ export default function TaskQueue() {
       </div>
 
       <div className="queue-summary-grid" style={{ marginBottom: 18 }}>
-        <div className="panel stat-card"><div className="muted">排队与执行</div><div className="stat-value">{activeTotal}</div></div>
-        <div className="panel stat-card"><div className="muted">正在执行</div><div className="stat-value">{activeCounts.running ?? 0}</div></div>
-        <div className="panel stat-card"><div className="muted">等待执行</div><div className="stat-value">{activeCounts.queued ?? 0}</div></div>
+        <div className="panel stat-card"><div className="muted">排队与执行</div><div className="stat-value">{activeCounts.queued + activeCounts.running}</div></div>
+        <div className="panel stat-card"><div className="muted">正在执行</div><div className="stat-value">{activeCounts.running}</div></div>
+        <div className="panel stat-card"><div className="muted">等待执行</div><div className="stat-value">{activeCounts.queued}</div></div>
       </div>
 
       {error && <div className="notice danger" role="alert">{error}</div>}
@@ -196,29 +203,32 @@ export default function TaskQueue() {
         {loading ? <div className="empty-state">正在读取队列…</div> : active.length ? (
           <div>{active.map((task) => <TaskRow key={task.task_id} task={task} onCancel={cancel} cancelling={cancellingId === task.task_id} />)}</div>
         ) : <div className="empty-state">当前没有等待或执行中的任务。</div>}
-        {activeTotal > activePageSize && <div className="panel-foot" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "12px 16px" }}>
-          <span className="muted">每页 {activePageSize} 条 · 当前显示 {active.length} 条</span>
+        <div className="panel-foot" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "12px 16px" }}>
+          <span className="muted">每页 {activePageSize} 条，队列列表由服务端分页读取。</span>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <button className="btn sm" disabled={activePage <= 1 || loading} onClick={() => setActivePage((p) => Math.max(1, p - 1))}>上一页</button>
             <span className="muted">{activePage} / {activePages}</span>
             <button className="btn sm" disabled={activePage >= activePages || loading} onClick={() => setActivePage((p) => Math.min(activePages, p + 1))}>下一页</button>
           </div>
-        </div>}
+        </div>
       </section>
 
       <section className="panel">
         <div className="panel-head">
-          <div><h2>最近任务</h2><div className="muted">仅展示用户发起的内容生产任务；系统后台调度任务不混入历史列表。</div></div>
+          <div><h2>最近任务</h2><div className="muted">支持按任务类型和失败状态筛选；系统后台调度任务可单独查看。</div></div>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <select aria-label="历史任务类型" value={historyType} onChange={(event) => { setHistoryType(event.target.value as "all" | "round_run" | "scheduler_job"); setHistoryPage(1); }}>
               <option value="round_run">内容生产</option><option value="scheduler_job">系统后台任务</option><option value="all">全部任务类型</option>
+            </select>
+            <select aria-label="历史任务状态" value={historyStatus} onChange={(event) => { setHistoryStatus(event.target.value as "all" | "failed"); setHistoryPage(1); }}>
+              <option value="all">全部状态</option><option value="failed">失败 / 中断待处理</option>
             </select>
             <span className="muted">共 {historyTotal} 项 · 第 {historyPage}/{historyPages} 页</span>
           </div>
         </div>
         {history.length ? <div>{history.map((task) => <TaskRow key={task.task_id} task={task} onCancel={cancel} cancelling={false} />)}</div> : <div className="empty-state">暂无历史任务。</div>}
         <div className="panel-foot" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "12px 16px" }}>
-          <span className="muted">每页 {historyPageSize} 条，历史记录由服务端分页读取。</span>
+          <span className="muted">每页 {historyPageSize} 条，历史记录与失败任务均由服务端分页读取。</span>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <button className="btn sm" disabled={historyPage <= 1 || loading} onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}>上一页</button>
             <span className="muted">{historyPage} / {historyPages}</span>

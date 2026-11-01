@@ -399,7 +399,7 @@ def get_login_status(platform: str, data_dir: Path | str | None = None) -> dict:
                 qr_b64 = ""
 
     if state == "success" and not proc_alive:
-        _schedule_export(platform)
+        _schedule_export(platform, data_dir=data_dir)
 
     data_uri = f"data:image/png;base64,{qr_b64}" if qr_b64 else ""
     return {

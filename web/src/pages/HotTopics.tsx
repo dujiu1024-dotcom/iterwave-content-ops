@@ -38,6 +38,7 @@ export default function HotTopics() {
   const [pageTab, setPageTab] = useUrlTab<PageTab>(PAGE_TABS, "list");
   const [keyword, setKeyword] = useState("");
   const [sortBy, setSortBy] = useState<"heat" | "match">("heat");
+  const [sourceFilter, setSourceFilter] = useState("all");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [hot, setHot] = useState<HotTopicsResponse | null>(null);
@@ -50,6 +51,8 @@ export default function HotTopics() {
   const [cfgError, setCfgError] = useState<string | null>(null);
   const [gates, setGates] = useState({ heat: "", heatOn: true, hours: "", timeOn: true });
   const [importingKey, setImportingKey] = useState<string | null>(null);
+
+  useEffect(() => { setPage(1); }, [tab, keyword, sortBy, sourceFilter]);
 
   /** 热点转选题必须带来源与原文链接；敏感热点必须由操作人二次确认。 */
   async function importTopic(h: HotTopicItem) {
@@ -220,15 +223,23 @@ export default function HotTopics() {
         : tab === "matched" ? h.dimension_match === true
           : tab === "urgent" ? h.time_sensitive === 1
             : h.time_sensitive === null)
+    .filter((h) => sourceFilter === "all" || h.source === sourceFilter)
     .filter((h) => !kw || h.title.includes(kw))
     .slice()
     .sort((a, b) => sortBy === "match"
       ? (b.match_score ?? -1) - (a.match_score ?? -1)
       : (b.heat ?? -1) - (a.heat ?? -1));
 
+  const sourceOptions = Array.from(new Set(items.map((item) => item.source))).sort();
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
   const pageItems = filtered.slice((page - 1) * pageSize, page * pageSize);
-  useEffect(() => { setPage((current) => Math.min(current, pageCount)); }, [pageCount]);
+
+  // 切换筛选条件或每页条数后回到第一页，避免停留在不存在的页码。
+  useEffect(() => { setPage(1); }, [tab, sourceFilter, keyword, sortBy, pageSize]);
+  useEffect(() => {
+    if (page > pageCount) setPage(pageCount);
+  }, [page, pageCount]);
+
   const sources = hot?.sources || [];
   const failedSources = sources.filter((s) => s.status === "failed");
   const matched = hot?.match?.matched ?? items.filter((h) => h.dimension_match === true).length;
@@ -423,7 +434,7 @@ export default function HotTopics() {
             { k: "urgent", l: "窗口短" },
             { k: "unknown", l: "时效未知" },
           ].map((t) => (
-            <button key={t.k} type="button" className={`tab ${tab === t.k ? "active" : ""}`} onClick={() => { setTab(t.k as TabKey); setPage(1); }}>
+            <button key={t.k} type="button" className={`tab ${tab === t.k ? "active" : ""}`} onClick={() => setTab(t.k as TabKey)}>
               {t.l}
             </button>
           ))}
@@ -433,6 +444,10 @@ export default function HotTopics() {
         <select className="field" value={sortBy} onChange={(e) => { setSortBy(e.target.value as "heat" | "match"); setPage(1); }}>
           <option value="heat">按热度</option>
           <option value="match">按定位关联度</option>
+        </select>
+        <select className="field" value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
+          <option value="all">全部来源</option>
+          {sourceOptions.map((source) => <option key={source} value={source}>{platformLabel(source.split("/").pop() || source)} · {source}</option>)}
         </select>
         <select className="field" aria-label="每页热点数量" value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}>
           <option value={20}>每页 20 条</option>
@@ -558,6 +573,7 @@ function HotSourceManager({ onSaved }: { onSaved: () => void }) {
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [platform, setPlatform] = useState("");
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
 
   useEffect(() => {
     api.hotSources()
@@ -566,30 +582,48 @@ function HotSourceManager({ onSaved }: { onSaved: () => void }) {
       .finally(() => setLoading(false));
   }, [showToast]);
 
-  const save = async (next: HotSource[], successText: string) => {
+  const save = async (next: HotSource[], successText: string): Promise<boolean> => {
     setBusy(true);
     try {
       const res = await api.saveHotSources(next);
       setItems(res.items);
       showToast(successText, "success");
       onSaved();
+      return true;
     } catch (e) {
       showToast((e as Error).message, "error");
+      return false;
     } finally {
       setBusy(false);
     }
   };
 
-  const add = async () => {
+  const saveForm = async () => {
     if (!name.trim() || !url.trim()) {
       showToast("来源名称和地址都要填", "error");
       return;
     }
-    await save(
-      [...items, { name: name.trim(), type, url: url.trim(), platform: platform.trim() || name.trim(), enabled: true }],
-      "行业源已添加",
-    );
-    setName(""); setUrl(""); setPlatform("");
+    const existing = editingIndex == null ? null : items[editingIndex];
+    const nextSource: HotSource = {
+      name: name.trim(), type, url: url.trim(),
+      platform: platform.trim() || name.trim(),
+      enabled: existing?.enabled ?? true,
+    };
+    const nextItems = editingIndex == null
+      ? [...items, nextSource]
+      : items.map((item, index) => index === editingIndex ? nextSource : item);
+    const saved = await save(nextItems, editingIndex == null ? "行业源已添加" : "来源配置已更新");
+    if (!saved) return;
+    setName(""); setUrl(""); setPlatform(""); setEditingIndex(null);
+  };
+
+  const beginEdit = (source: HotSource, index: number) => {
+    if (source.type !== "rss" && source.type !== "json") return;
+    setEditingIndex(index);
+    setType(source.type);
+    setName(source.name);
+    setUrl(source.url);
+    setPlatform(source.platform ?? "");
   };
 
   return (
@@ -615,6 +649,8 @@ function HotSourceManager({ onSaved }: { onSaved: () => void }) {
                   <td>{s.enabled === false ? <span className="tag gray">停用</span> : <span className="tag green">启用</span>}</td>
                   <td>
                     <div className="flex wrap" style={{ gap: 6 }}>
+                      {s.type !== "aggregate" && <button className="btn xs" type="button" disabled={busy}
+                        onClick={() => beginEdit(s, i)}>编辑</button>}
                       <button className="btn xs soft" type="button" disabled={busy}
                         onClick={() => save(items.map((x, idx) => idx === i ? { ...x, enabled: x.enabled === false } : x),
                           s.enabled === false ? "来源已启用" : "来源已停用")}>
@@ -649,7 +685,12 @@ function HotSourceManager({ onSaved }: { onSaved: () => void }) {
         <input className="field" style={{ flex: 1, minWidth: 220 }} placeholder="https://example.com/feed.xml"
           value={url} onChange={(e) => setUrl(e.target.value)} />
         <input className="field" style={{ width: 110 }} placeholder="平台（可选）" value={platform} onChange={(e) => setPlatform(e.target.value)} />
-        <button className="btn sm" type="button" disabled={busy} onClick={add}>添加来源</button>
+        <button className="btn sm" type="button" disabled={busy} onClick={saveForm}>
+          {editingIndex == null ? "添加来源" : "保存修改"}
+        </button>
+        {editingIndex != null && <button className="btn sm" type="button" disabled={busy} onClick={() => {
+          setEditingIndex(null); setName(""); setUrl(""); setPlatform("");
+        }}>取消编辑</button>}
       </div>
     </div>
   );
