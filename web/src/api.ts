@@ -1150,6 +1150,14 @@ export interface OpsKpiResponse {
   window_days?: number;
 }
 
+export interface PageResult<T> {
+  items: T[];
+  total: number;
+  page: number;
+  page_size: number;
+  pages: number;
+}
+
 export interface OpsLogItem {
   id: number;
   round_id: number | null;
@@ -1779,17 +1787,23 @@ export const api = {
     if (status) p.set("status", status);
     return fetchJson<{ items: OpsLogItem[]; total: number }>(`/api/ops_logs?${p}`);
   },
+  opsLogsPage: (page: number, pageSize = 20) =>
+    fetchJson<PageResult<OpsLogItem>>(`/api/ops_logs?page=${page}&page_size=${pageSize}`),
   taskRuns: (taskType?: string, status?: string, limit = 100) => {
     const p = new URLSearchParams({ limit: String(limit) });
     if (taskType) p.set("task_type", taskType);
     if (status) p.set("status", status);
     return fetchJson<TaskRunItem[]>(`/api/task_runs?${p}`);
   },
+  taskRunsPage: (page: number, pageSize = 20) =>
+    fetchJson<PageResult<TaskRunItem>>(`/api/task_runs?page=${page}&page_size=${pageSize}`),
   notifications: (level?: string, limit = 50) => {
     const p = new URLSearchParams({ limit: String(limit) });
     if (level) p.set("level", level);
     return fetchJson<NotificationItem[]>(`/api/notifications?${p}`);
   },
+  notificationsPage: (page: number, pageSize = 20) =>
+    fetchJson<PageResult<NotificationItem>>(`/api/notifications?page=${page}&page_size=${pageSize}`),
   schedulerJobs: () => fetchJson<{ jobs: SchedulerJob[]; count: number; running: boolean }>("/api/scheduler/jobs"),
   /** R17：pending_verify 人工核实收口（sent=已发出 / not_sent=未发出） */
   resolveTaskRun: (id: number, action: "sent" | "not_sent") =>
