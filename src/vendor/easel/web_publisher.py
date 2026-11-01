@@ -471,6 +471,13 @@ def _profile_dir(platform: str, base: str | None) -> Path:
     return root / PLATFORMS[platform]["profile"]
 
 
+def _login_artifact_dir(profile_base: str | None) -> Path:
+    """敏感登录/发布截图跟随租户 data_dir，不落入共享 outputs。"""
+    if profile_base:
+        return Path(profile_base).expanduser().resolve().parent / "_login"
+    return Path(__file__).resolve().parents[3] / "outputs" / "_login"
+
+
 def cmd_platforms(_a) -> int:
     print(f"支持 {len(PLATFORMS)} 个网页发布平台：\n")
     for k, c in PLATFORMS.items():
@@ -1553,7 +1560,12 @@ def _run_browser(a, headed: bool, do_publish: bool) -> int:
                         # 截图到指定路径（相对工作目录）
                         import pathlib as _pl
                         _cwd = _pl.Path.cwd()
-                        _sp = _cwd / val if val else _cwd / "outputs/_login/debug-screenshot.png"
+                        if val and val.replace("\\", "/").startswith("outputs/_login/"):
+                            _sp = _login_artifact_dir(a.profile_base) / _pl.Path(val).name
+                        elif val:
+                            _sp = _cwd / val
+                        else:
+                            _sp = _login_artifact_dir(a.profile_base) / "debug-screenshot.png"
                         _sp.parent.mkdir(parents=True, exist_ok=True)
                         page.screenshot(path=str(_sp))
                     elif act == "js_eval":
@@ -1604,7 +1616,7 @@ def _run_browser(a, headed: bool, do_publish: bool) -> int:
                                            snapshot_ids=snapshot_ids)
                 if verdict.outcome != "verified":
                     try:  # 失败留现场，供排错
-                        fp = Path(__file__).resolve().parents[3] / "outputs" / "_login" / f"{a.platform}-publish-fail.png"
+                        fp = _login_artifact_dir(a.profile_base) / f"{a.platform}-publish-fail.png"
                         fp.parent.mkdir(parents=True, exist_ok=True)
                         page.screenshot(path=str(fp))
                     except Exception:
@@ -1621,7 +1633,7 @@ def _run_browser(a, headed: bool, do_publish: bool) -> int:
             elif chk:
                 if not ui_ok:
                     try:  # 仅失败时截图，供排错（正常成功不截）
-                        fp = Path(__file__).resolve().parents[3] / "outputs" / "_login" / f"{a.platform}-publish-fail.png"
+                        fp = _login_artifact_dir(a.profile_base) / f"{a.platform}-publish-fail.png"
                         fp.parent.mkdir(parents=True, exist_ok=True)
                         page.screenshot(path=str(fp))
                     except Exception:
@@ -1664,7 +1676,7 @@ def _run_browser(a, headed: bool, do_publish: bool) -> int:
         except PWTimeout as e:
             # 超时（常见：选择器失效 / 上传转码慢）——截图 + dump 当前可见输入控件，便于精修选择器
             try:
-                fp = Path(__file__).resolve().parents[3] / "outputs" / "_login" / f"{a.platform}-publish-fail.png"
+                fp = _login_artifact_dir(a.profile_base) / f"{a.platform}-publish-fail.png"
                 fp.parent.mkdir(parents=True, exist_ok=True)
                 page.screenshot(path=str(fp))
                 print(f"    失败截图：{fp}", file=sys.stderr)
