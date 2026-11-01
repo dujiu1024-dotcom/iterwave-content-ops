@@ -779,7 +779,9 @@ export default function Production() {
               <div className="panel-title"><span className="icon">⌗</span>平台分项计划</div>
               <div className="panel-sub">
                 {currentRoundId
-                  ? `第 ${roundDetail?.round_number ?? currentRoundId} 轮的逐平台变体（每选题 × 每平台一篇）`
+                  ? roundDetail?.round_number != null
+                    ? `第 ${roundDetail.round_number} 轮的逐平台变体（每选题 × 每平台一篇）`
+                    : "正在加载轮次信息…"
                   : "选择一轮后展示逐平台变体"}
               </div>
             </div>
