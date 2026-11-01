@@ -38,7 +38,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.date import DateTrigger
 from zoneinfo import ZoneInfo
-from ..timezone import business_now, business_timestamp
+from ..timezone import business_now, business_timestamp, business_zone
 
 logger = logging.getLogger(__name__)
 
@@ -315,6 +315,12 @@ class SchedulerEngine:
         self, draft_id: str, run_at: datetime, attempt: int = 1,
     ) -> None:
         """安排发布后的数据采集；优先写入全局持久化队列，保证非活动账号组也可恢复。"""
+        # business_now() intentionally returns a naive business-wall-clock datetime
+        # for legacy DB compatibility, while GlobalTaskQueue requires an aware instant.
+        # Normalize at this single scheduling boundary so publish confirmation,
+        # startup backfill, and retry paths cannot enqueue an invalid timestamp.
+        if run_at.tzinfo is None:
+            run_at = run_at.replace(tzinfo=business_zone(self.cfg))
         if self.task_queue is not None and self.tenant_id:
             self.task_queue.enqueue(
                 task_type="scheduler_job",
