@@ -20,7 +20,6 @@ export default function GlobalOperations() {
   const [activePages, setActivePages] = useState(1);
   const activePageSize = 8;
   const [failedCount, setFailedCount] = useState<number | null>(null);
-  const [failedCounts, setFailedCounts] = useState<Record<string, number>>({});
   const [failedByTenant, setFailedByTenant] = useState<Record<string, Record<string, number>>>({});
   const [failedTasks, setFailedTasks] = useState<GlobalTaskQueueItem[]>([]);
   const [failedPage, setFailedPage] = useState(1);
@@ -48,7 +47,6 @@ export default function GlobalOperations() {
       const total = results[2].value.total ?? 0;
       setFailedCount(total);
       setFailedTasks(results[2].value.items ?? []);
-      setFailedCounts(results[2].value.counts?.by_status ?? {});
       setFailedByTenant(results[2].value.counts?.by_tenant ?? {});
       const lastPage = Math.max(1, Math.ceil(total / failedPageSize));
       if (failedPage > lastPage) setFailedPage(lastPage);
