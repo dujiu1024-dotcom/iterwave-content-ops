@@ -234,7 +234,7 @@ class HotTopicCollector:
     # 对外入口
     # ------------------------------------------------------------------
 
-    def overview(self, force: bool = False) -> dict:
+    def overview(self, force: bool = False, *, page: int | None = None, page_size: int = 20, tab: str = 'all', source: str | None = None, keyword: str | None = None, sort_by: str = 'heat') -> dict:
         """返回热点雷达数据（只读库）。force 参数保留兼容，后台刷新由调用方触发。"""
         if self.hcfg.enabled is False:
             return {
@@ -246,7 +246,20 @@ class HotTopicCollector:
                 "message": "热点采集已在配置中关闭（hot_topics.enabled=false）",
             }
 
-        items, sources = self._load()
+        if page is None:
+            items, sources = self._load()
+            total = len(items)
+            match_summary = self._match_summary(items)
+            urgent_total = sum(1 for item in items if item.get("time_sensitive") == 1)
+            pagination = {}
+        else:
+            items, sources, total, match_summary, urgent_total = self._load_page(
+                page, page_size, tab=tab, source=source, keyword=keyword, sort_by=sort_by,
+            )
+            pagination = {
+                "total": total, "page": page, "page_size": page_size,
+                "pages": max(1, (total + page_size - 1) // page_size),
+            }
         last = self._last_collected_at()
         return {
             "enabled": True,
@@ -263,7 +276,9 @@ class HotTopicCollector:
             },
             "sources": sources,
             "items": items,
-            "match": self._match_summary(items),
+            "match": match_summary,
+            "urgent_total": urgent_total,
+            **pagination,
             "filters": {
                 "heat_threshold": self.hcfg.filters.get("heat_threshold"),
                 "heat_filter_enabled": self.hcfg.filters.get("heat_filter_enabled", True),
