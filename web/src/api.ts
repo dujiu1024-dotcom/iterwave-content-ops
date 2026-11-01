@@ -673,6 +673,7 @@ export interface GlobalMonitorTenant {
   recent_execution?: {
     task_type: string;
     status: string;
+    has_error_detail: boolean;
     started_at: string | null;
     finished_at: string | null;
     created_at: string | null;
