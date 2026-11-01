@@ -103,6 +103,11 @@ function TaskRow({
 export default function TaskQueue() {
   const { showToast } = useApp();
   const [activeItems, setActiveItems] = useState<GlobalTaskQueueItem[]>([]);
+  const [activeTotal, setActiveTotal] = useState(0);
+  const [activePages, setActivePages] = useState(1);
+  const [activePage, setActivePage] = useState(1);
+  const [activeCounts, setActiveCounts] = useState<Record<string, number>>({});
+  const activePageSize = 20;
   const [historyItems, setHistoryItems] = useState<GlobalTaskQueueItem[]>([]);
   const [historyTotal, setHistoryTotal] = useState(0);
   const [historyPages, setHistoryPages] = useState(1);
@@ -116,10 +121,13 @@ export default function TaskQueue() {
   const refresh = useCallback(async () => {
     try {
       const [activeResponse, historyResponse] = await Promise.all([
-        api.taskQueue({ scope: "active" }),
+        api.taskQueue({ scope: "active", page: activePage, pageSize: activePageSize }),
         api.taskQueue({ scope: "history", page: historyPage, pageSize: historyPageSize, taskType: historyType === "all" ? undefined : historyType }),
       ]);
       setActiveItems(activeResponse.items || []);
+      setActiveTotal(activeResponse.total ?? activeResponse.items?.length ?? 0);
+      setActivePages(activeResponse.pages ?? 1);
+      setActiveCounts(activeResponse.counts?.by_status ?? {});
       setHistoryItems(historyResponse.items || []);
       setHistoryTotal(historyResponse.total ?? 0);
       setHistoryPages(historyResponse.pages ?? 1);
@@ -129,7 +137,7 @@ export default function TaskQueue() {
     } finally {
       setLoading(false);
     }
-  }, [historyPage, historyType]);
+  }, [activePage, historyPage, historyType]);
 
   useEffect(() => {
     void refresh();
@@ -173,20 +181,28 @@ export default function TaskQueue() {
       </div>
 
       <div className="queue-summary-grid" style={{ marginBottom: 18 }}>
-        <div className="panel stat-card"><div className="muted">排队与执行</div><div className="stat-value">{active.length}</div></div>
-        <div className="panel stat-card"><div className="muted">正在执行</div><div className="stat-value">{active.filter((item) => item.status === "running").length}</div></div>
-        <div className="panel stat-card"><div className="muted">等待执行</div><div className="stat-value">{active.filter((item) => item.status === "queued").length}</div></div>
+        <div className="panel stat-card"><div className="muted">排队与执行</div><div className="stat-value">{activeTotal}</div></div>
+        <div className="panel stat-card"><div className="muted">正在执行</div><div className="stat-value">{activeCounts.running ?? 0}</div></div>
+        <div className="panel stat-card"><div className="muted">等待执行</div><div className="stat-value">{activeCounts.queued ?? 0}</div></div>
       </div>
 
       {error && <div className="notice danger" role="alert">{error}</div>}
       <section className="panel" style={{ marginBottom: 20 }}>
         <div className="panel-head">
           <div><h2>待执行任务</h2><div className="muted">已到执行时间的任务按入队顺序执行；延迟任务到期后参与排序，同一时刻只执行一个队列任务。</div></div>
-          <span className="muted">{active.length} 项</span>
+          <span className="muted">共 {activeTotal} 项 · 第 {activePage}/{activePages} 页</span>
         </div>
         {loading ? <div className="empty-state">正在读取队列…</div> : active.length ? (
           <div>{active.map((task) => <TaskRow key={task.task_id} task={task} onCancel={cancel} cancelling={cancellingId === task.task_id} />)}</div>
         ) : <div className="empty-state">当前没有等待或执行中的任务。</div>}
+        {activeTotal > activePageSize && <div className="panel-foot" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "12px 16px" }}>
+          <span className="muted">每页 {activePageSize} 条 · 当前显示 {active.length} 条</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <button className="btn sm" disabled={activePage <= 1 || loading} onClick={() => setActivePage((p) => Math.max(1, p - 1))}>上一页</button>
+            <span className="muted">{activePage} / {activePages}</span>
+            <button className="btn sm" disabled={activePage >= activePages || loading} onClick={() => setActivePage((p) => Math.min(activePages, p + 1))}>下一页</button>
+          </div>
+        </div>}
       </section>
 
       <section className="panel">
