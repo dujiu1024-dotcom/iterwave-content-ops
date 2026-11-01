@@ -1453,3 +1453,33 @@ def test_hot_topics_database_pagination_preserves_latest_batch_and_failure_suppr
     assert "new-batch" in ids
     assert "old-failed-platform" not in ids
     assert any(source["status"] == "failed" for source in response.json()["sources"])
+
+
+# ---------------------------------------------------------------- 逐篇指标数据库分页
+def test_metrics_endpoint_database_pagination_and_filtered_total(client):
+    tc, conn, _ = client
+    for index in range(45):
+        conn.execute(
+            "INSERT INTO metrics (platform, fetch_status, fetched_at, views, likes, interaction_rate) "
+            "VALUES ('xhs', 'success', ?, ?, ?, ?)",
+            (f"2026-11-01 10:{index // 60:02d}:{index % 60:02d}",
+             100 + index, 10 + index, (index + 1) / 1000),
+        )
+    conn.commit()
+
+    first = tc.get("/api/metrics?page=1&page_size=20&fetch_status=success")
+    second = tc.get("/api/metrics?page=2&page_size=20&fetch_status=success")
+    third = tc.get("/api/metrics?page=3&page_size=20&fetch_status=success")
+    assert first.status_code == second.status_code == third.status_code == 200
+    a, b, c = first.json(), second.json(), third.json()
+    assert [a["total"], b["total"], c["total"]] == [45, 45, 45]
+    assert [len(a["items"]), len(b["items"]), len(c["items"])] == [20, 20, 5]
+    ids = [item["id"] for body in (a, b, c) for item in body["items"]]
+    assert len(ids) == len(set(ids)) == 45
+    assert a["pages"] == 3 and c["page"] == 3
+    assert a["z_stats"] == b["z_stats"] == c["z_stats"]
+
+    filtered = tc.get("/api/metrics?page=1&page_size=20&platform=xhs&fetch_status=failed")
+    assert filtered.status_code == 200
+    assert filtered.json()["total"] == 0
+    assert filtered.json()["items"] == []
