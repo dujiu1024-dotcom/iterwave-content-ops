@@ -46,3 +46,32 @@ def test_hot_topic_trend_rerun_keeps_update_statement():
     conn.execute("INSERT INTO hot_topics (heat_score) VALUES (42)")
     conn.executescript(Database._skip_existing_columns(conn, _sql("hot_topic_trend")))
     assert conn.execute("SELECT heat_peak FROM hot_topics").fetchone()[0] == 42
+
+
+def test_migration_schema_changes_and_version_record_are_atomic(tmp_path):
+    from src.core.db import Migration
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, description TEXT NOT NULL)"
+    )
+    broken = tmp_path / "099_broken.sql"
+    broken.write_text(
+        "CREATE TABLE migration_probe (id INTEGER PRIMARY KEY);"
+        "INSERT INTO migration_probe(id) VALUES (1);"
+        "THIS IS NOT VALID SQL;",
+        encoding="utf-8",
+    )
+    db = Database.__new__(Database)
+
+    try:
+        db._run_migration(conn, Migration(99, broken, "broken"))
+        raise AssertionError("failed migrations must raise")
+    except sqlite3.OperationalError:
+        pass
+
+    assert conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='migration_probe'"
+    ).fetchone() is None
+    assert conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 0
+    conn.close()

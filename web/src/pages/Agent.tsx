@@ -439,15 +439,23 @@ function SkillsPane() {
   const register = async () => {
     await withPending("skill:register", async () => {
       try {
+        const inputs: unknown = JSON.parse(skillInputsJson);
+        const outputs: unknown = JSON.parse(skillOutputsJson);
+        const validSchemaList = (value: unknown): value is Array<Record<string, unknown>> =>
+          Array.isArray(value) && value.length <= 30
+          && value.every((item) => Boolean(item) && typeof item === "object" && !Array.isArray(item));
+        if (!validSchemaList(inputs) || !validSchemaList(outputs)) {
+          throw new Error("输入和输出 Schema 必须是最多 30 项的 JSON 对象数组");
+        }
         await api.registerTenantSkill({
           skill_id: skillId.trim().toLowerCase(),
           name: skillName.trim(),
           version: skillVersion.trim(),
           description: skillDescription.trim(),
           category: skillCategory.trim().toLowerCase() || "custom",
-          inputs: [],
-          outputs: [],
-          permissions: [],
+          inputs,
+          outputs,
+          permissions: skillPermissions,
         });
         showToast("Skill manifest 已登记，默认停用且不会执行代码", "success");
         setSkillId(""); setSkillName(""); setSkillDescription(""); setSkillVersion("1.0.0");

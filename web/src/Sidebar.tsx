@@ -27,8 +27,6 @@ export const NAV_ITEMS: NavItem[] = [
 
   { page: "agent",      label: "Agent 编排与诊断", icon: "⎇", section: "Agent 中枢" },
   { page: "task-queue", label: "全局任务队列", icon: "⇅", section: "Agent 中枢", hidden: true },
-  { page: "accounts",   label: "账号与登录", icon: "◉", section: "Agent 中枢" },
-  { page: "settings",   label: "系统设置",   icon: "⚙", section: "Agent 中枢" },
   { page: "onboarding", label: "新手引导 / 快速配置", icon: "☷", section: "Agent 中枢", hidden: true },
 ];
 

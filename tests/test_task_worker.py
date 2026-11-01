@@ -478,3 +478,110 @@ def test_worker_heartbeat_runs_in_background_thread(tmp_path):
     loop.close()
     assert not thread.is_alive()
     assert len(renewed) >= 2
+
+
+def test_worker_fallback_marks_producing_round_failed():
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE spiral_rounds (id INTEGER PRIMARY KEY, status TEXT, "
+        "transition_log TEXT, producing_started_at TEXT, collecting_metrics_started_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO spiral_rounds(id,status,transition_log) VALUES(1,'producing','[]')"
+    )
+    conn.commit()
+
+    assert GlobalTaskWorker._mark_round_failed(conn, 1, "snapshot validation failed")
+    row = conn.execute("SELECT status,transition_log FROM spiral_rounds WHERE id=1").fetchone()
+    assert row["status"] == "failed"
+    assert '"to": "failed"' in row["transition_log"]
+    conn.close()
+
+
+def test_worker_fallback_does_not_override_terminal_round():
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE spiral_rounds (id INTEGER PRIMARY KEY, status TEXT, "
+        "transition_log TEXT, producing_started_at TEXT, collecting_metrics_started_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO spiral_rounds(id,status,transition_log) VALUES(1,'completed','[]')"
+    )
+    conn.commit()
+
+    assert not GlobalTaskWorker._mark_round_failed(conn, 1, "late failure")
+    row = conn.execute("SELECT status FROM spiral_rounds WHERE id=1").fetchone()
+    assert row["status"] == "completed"
+    conn.close()
+
+
+
+def test_worker_reconciles_interrupted_round_tasks_on_startup(tmp_path, monkeypatch):
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    task, _ = queue.enqueue(
+        task_type="round_run", tenant_id="tenant-kill", aggregate_id="41",
+        payload={"round_id": 41, "operation": "run"},
+    )
+    claimed = queue.claim_next("worker-before-exit", lease_seconds=30)
+    assert claimed is not None
+    assert queue.interrupt(claimed.task_id, "worker-before-exit", error_message="模拟进程意外退出")
+
+    observed = []
+    worker = GlobalTaskWorker(queue, lambda tenant_id: {})
+    monkeypatch.setattr(worker, "_reconcile_round_failure", lambda item, reason: observed.append((item.task_id, item.tenant_id, reason)))
+    worker._sync_terminal_rounds()
+
+    assert observed == [(task.task_id, "tenant-kill", "模拟进程意外退出")]
+    worker._sync_terminal_rounds()
+    assert len(observed) == 1
+
+
+def test_worker_reconciles_interrupted_rounds_beyond_first_500_queue_rows():
+    from src.core.task_queue import QueuedTask
+
+    all_tasks = [
+        QueuedTask(
+            queue_order=index,
+            task_id=f"task-{index}",
+            task_type="round_run",
+            tenant_id="tenant-a",
+            aggregate_id=str(index),
+            payload={"round_id": index},
+            status="interrupted",
+            created_at="2026-11-01T00:00:00+00:00",
+            available_at="2026-11-01T00:00:00+00:00",
+            started_at=None,
+            finished_at="2026-11-01T00:01:00+00:00",
+            attempts=1,
+            result=None,
+            error_code="worker_restarted",
+            error_message="worker restarted",
+        )
+        for index in range(501)
+    ]
+    calls = []
+
+    class FakeQueue:
+        def list_page(self, *, scope, page, page_size):
+            assert scope == "failed"
+            assert page_size == 500
+            calls.append(page)
+            start = (page - 1) * page_size
+            return all_tasks[start:start + page_size], len(all_tasks)
+
+    worker = GlobalTaskWorker(FakeQueue(), lambda _tenant_id: {})
+    reconciled = []
+    worker._reconcile_round_failure = lambda task, _reason: reconciled.append(task.task_id)
+
+    worker._sync_terminal_rounds()
+
+    assert calls == [1, 2]
+    assert len(reconciled) == 501
+    assert len(set(reconciled)) == 501
