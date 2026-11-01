@@ -29,11 +29,11 @@ export default function DemoBadge({
         display: "inline-flex", alignItems: "center", gap: 4,
         fontSize: 11, lineHeight: 1.5, padding: "2px 8px", borderRadius: 999,
         color: meta.color, background: meta.bg,
-        border: `1px solid ${meta.color}33`, whiteSpace: "nowrap",
+        border: `1px solid ${meta.color}33`, whiteSpace: "normal", maxWidth: "100%", minWidth: 0, overflowWrap: "anywhere",
       }}
     >
-      <span>{meta.icon}</span>
-      <span>{text}</span>
+      <span style={{ flex: "0 0 auto" }}>{meta.icon}</span>
+      <span style={{ minWidth: 0, whiteSpace: "normal", overflowWrap: "anywhere" }}>{text}</span>
     </span>
   );
 }

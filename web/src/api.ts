@@ -1203,11 +1203,39 @@ export interface RhythmConfig {
 
 // ===== fetch wrapper =====
 let activeTenantId: string | null = null;
+let tenantContextInitialization: Promise<void> | null = null;
 // vite import.meta.env.BASE_URL 在 base: "/iterwave/" 时为 "/iterwave/"
 // 本地 vite dev 时 BASE_URL 为 "/"，去掉尾部斜杠 → ""，等价于原来的空字符串
 const API = import.meta.env.BASE_URL?.replace(/\/$/, "") ?? "";
 
+async function ensureTenantContext(): Promise<void> {
+  if (activeTenantId) return;
+  if (!tenantContextInitialization) {
+    tenantContextInitialization = (async () => {
+      // 不通过 fetchJson，避免初始化请求递归；该 GET 不需要账号组请求头。
+      const response = await fetch(API + "/api/tenants", {
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!response.ok) {
+        throw new Error("账号组初始化失败，请刷新页面后重试");
+      }
+      const result = await response.json() as TenantListResponse;
+      activeTenantId = result.runtime_tenant_id || result.selected_tenant_id || null;
+      if (!activeTenantId) {
+        throw new Error("未能确定当前运行账号组，请刷新页面后重试");
+      }
+    })().finally(() => {
+      tenantContextInitialization = null;
+    });
+  }
+  await tenantContextInitialization;
+}
+
 async function fetchJson<T>(path: string, options?: RequestInit): Promise<T> {
+  const method = (options?.method || "GET").toUpperCase();
+  if (method !== "GET" && !path.startsWith("/api/auth/")) {
+    await ensureTenantContext();
+  }
   let res: Response;
   try {
     const headers = new Headers(options?.headers);
@@ -1364,7 +1392,7 @@ export const api = {
     fetchJson<{ id: number; round_number: number; status: string }>("/api/rounds", {
       method: "POST", body: JSON.stringify(data),
     }),
-  runRound: (id: number, data: { topic_count?: number; platforms?: Platform[]; save_drafts?: boolean } = {}) =>
+  runRound: (id: number, data: { topic_count?: number; platforms?: Platform[]; save_drafts?: boolean; template_id?: number } = {}) =>
     fetchJson<QueueTaskSubmission>(`/api/rounds/${id}/run`, {
       method: "POST", body: JSON.stringify(data),
     }),

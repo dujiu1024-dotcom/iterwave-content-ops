@@ -7,6 +7,11 @@ const PLATFORM_NAME: Record<Platform, string> = {
   kuaishou: "快手", wechat_channels: "视频号",
 };
 
+/** 中文描述统一使用中文句号，避免英文句点混入页面文案。 */
+function zhSentence(value: string): string {
+  return value.replace(/\s*\.$/, "。");
+}
+
 /** R3：NULL 显示灰色「—」，0 显示正常 0 */
 function Num({ value }: { value: number | null | undefined }) {
   if (value === null || value === undefined) return <span style={{ color: "var(--subtle)" }}>—</span>;
@@ -196,7 +201,7 @@ export default function Analytics() {
           <div className="eyebrow">数据复盘</div>
           <h1 className="page-title">数据分析</h1>
           <div className="page-desc">
-            总览看整体表现与本周建议；详细数据查看逐篇原始指标、平台基准和发布后数据回填。 当前视图：{detailView === "overview" ? "经营摘要" : "逐篇数据与回填"}.
+            总览看整体表现与本周建议；详细数据查看逐篇原始指标、平台基准和发布后数据回填。 当前视图：{detailView === "overview" ? "经营摘要" : "逐篇数据与回填"}。
           </div>
         </div>
         <div className="head-actions">
@@ -230,7 +235,7 @@ export default function Analytics() {
         </div>
       </div>
 
-      <div className="grid kpis" style={{ marginBottom: 15 }}>
+      <div className="grid kpis analytics-activation-kpis" style={{ marginBottom: 15, gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
         <div className="metric"><div className="metric-label">首次价值时间 TTV</div><div className="metric-val">{activationMetrics?.ttv_seconds == null ? "—" : `${Math.round(activationMetrics.ttv_seconds)} 秒`}</div><div className="metric-foot">输入 {activationMetrics?.activation_input_wait_seconds == null ? "—" : Math.round(activationMetrics.activation_input_wait_seconds)} 秒 · 排队 {activationMetrics?.model_queue_wait_seconds == null ? "—" : Math.round(activationMetrics.model_queue_wait_seconds)} 秒 · 生成 {activationMetrics?.generation_processing_seconds == null ? "—" : Math.round(activationMetrics.generation_processing_seconds)} 秒</div><div className="metric-foot">P50 {activationMetrics?.ttv_p50_seconds == null ? "—" : Math.round(activationMetrics.ttv_p50_seconds)} 秒 · P90 {activationMetrics?.ttv_p90_seconds == null ? "—" : Math.round(activationMetrics.ttv_p90_seconds)} 秒 · 样本 {activationMetrics?.ttv_sample_count ?? 0}</div><div className="metric-foot">{activationMetrics?.ttv_percentile_scope || "分位数范围待定"}</div></div>
         <div className="metric"><div className="metric-label">7 日激活率</div><div className="metric-val">{activationMetrics?.seven_day_activation_rate == null ? "观察中" : `${(activationMetrics.seven_day_activation_rate * 100).toFixed(0)}%`}</div><div className="metric-foot">复制或保存至少一篇合格样稿</div></div>
         <div className="metric"><div className="metric-label">首次发布率</div><div className="metric-val">{activationMetrics?.first_publish_rate == null ? "观察中" : `${(activationMetrics.first_publish_rate * 100).toFixed(0)}%`}</div><div className="metric-foot">初始化后 7 日内确认发布</div></div>
@@ -242,6 +247,33 @@ export default function Analytics() {
       {activationMetrics?.platform_model_breakdown?.length ? <div className="panel-sub" style={{ marginBottom: 15 }}>
         体验分布：{activationMetrics.platform_model_breakdown.map((item) => `${PLATFORM_NAME[item.platform]} / ${item.model_mode}：${item.ready_count}/${item.run_count} 完成`).join("；")}
       </div> : null}
+      <div className="panel" style={{ marginBottom: 15 }}>
+        <div className="panel-head">
+          <div>
+            <div className="panel-title">互动表现较好的内容</div>
+            <div className="panel-sub">按近 {metrics?.z_window_days ?? 90} 天有效互动率排序；仅展示有有效指标的内容</div>
+          </div>
+        </div>
+        {rateRows.length === 0 ? <EmptyHint next="先在详细数据中为已发布内容补填数据，或等待平台采集完成">暂无可比较的互动率样本</EmptyHint> : (() => {
+          const topRows = [...rateRows].sort((x, y) => (y.interaction_rate ?? 0) - (x.interaction_rate ?? 0)).slice(0, 8);
+          const maxRate = Math.max(...topRows.map((r) => r.interaction_rate ?? 0), 0.0001);
+          return <div style={{ padding: "4px 16px 16px" }}>
+            {topRows.map((item, index) => {
+              const rate = item.interaction_rate ?? 0;
+              return <div key={item.content_id ?? `${item.platform}-${index}`} style={{ display: "grid", gridTemplateColumns: "minmax(110px, 1.5fr) minmax(90px, 3fr) 64px", gap: 10, alignItems: "center", padding: "8px 0", borderBottom: "1px solid var(--line)" }}>
+                <div style={{ minWidth: 0 }}>
+                  <div className="task-title" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.content_title || "未命名内容"}</div>
+                  <div className="task-desc">{PLATFORM_NAME[item.platform]}</div>
+                </div>
+                <div style={{ height: 9, background: "var(--surface-2)", borderRadius: 99, overflow: "hidden" }}>
+                  <div style={{ width: `${Math.max(2, rate / maxRate * 100)}%`, height: "100%", background: "var(--blue)", borderRadius: 99 }} />
+                </div>
+                <div style={{ textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{(rate * 100).toFixed(2)}%</div>
+              </div>;
+            })}
+          </div>;
+        })()}
+      </div>
       </>}
 
       {detailView === "details" && <>
@@ -310,7 +342,7 @@ export default function Analytics() {
             </div>}
             <h3 style={{ marginTop: 14 }}>可能原因</h3>
             {weeklyReport.why_it_may_work.map((item, i) => <div key={i} className="task-row" style={{ display: "block" }}>
-              <p className="panel-sub">{item.statement}（样本 {item.sample_size}）</p>
+              <p className="panel-sub">{zhSentence(item.statement)}（样本 {item.sample_size}）</p>
               <details>
                 <summary className="form-label" style={{ cursor: "pointer" }}>查看证据与适用范围</summary>
                 <div className="panel-sub">平台：{item.platform ? PLATFORM_NAME[item.platform] : "全部"} · 时间范围：{item.time_window ? item.time_window.start + " 至 " + item.time_window.end : "未指定"} · 数据来源：{weeklyReport.data_sources.join("、") || "暂无"}</div>
@@ -321,7 +353,7 @@ export default function Analytics() {
             <h3 style={{ marginTop: 14 }}>下一轮建议</h3>
             {weeklyReport.next_actions.length ? weeklyReport.next_actions.map((item, i) => <div key={item.suggestion_key || i} className="task-row" style={{ display: "block" }}>
               <div className="task-title">{item.action}</div>
-              <div className="task-desc">依据：{item.basis} · 验证：{item.verification}</div>
+              <div className="task-desc">依据：{zhSentence(item.basis)} · 验证：{zhSentence(item.verification)}</div>
               <details><summary className="form-label" style={{ cursor: "pointer" }}>查看建议证据</summary>
                 <div className="panel-sub">平台：{item.platform ? PLATFORM_NAME[item.platform] : "全部"} · 样本：{item.sample_size} · 时间范围：{item.time_window ? item.time_window.start + " 至 " + item.time_window.end : "未指定"}</div>
                 <div className="panel-sub">证据内容 ID：{item.evidence_content_ids?.join("、") || "无"}</div>
@@ -347,7 +379,7 @@ export default function Analytics() {
                 </>}
               </div>
             </div>) : <div className="panel-sub">样本不足，先补充发布数据，再生成策略建议。</div>}
-            <div className="panel-sub" style={{ marginTop: 10 }}>限制：{weeklyReport.limitations.join("；")}</div>
+            <div className="panel-sub" style={{ marginTop: 10 }}>限制：{weeklyReport.limitations.map(zhSentence).join("；")}</div>
           </div>
         </>}
       </div>
