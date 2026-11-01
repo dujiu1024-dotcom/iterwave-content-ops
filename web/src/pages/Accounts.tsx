@@ -156,6 +156,10 @@ export default function Accounts() {
     }
   };
 
+  const activeLoginProfile = activeLogin
+    ? registeredAccounts.find((item) => item.platform === activeLogin)
+    : undefined;
+
   return (
     <>
       <div className="page-head">
@@ -294,6 +298,12 @@ export default function Accounts() {
             <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>
               {PLATFORM_EMOJI[activeLogin]} {loginStatus?.platform_display || "登录中"}
             </div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8 }}>
+              {activeLoginProfile?.display_name || activeLoginProfile?.account_handle
+                ? <>本次登录目标：{activeLoginProfile.display_name || activeLoginProfile.account_handle}</>
+                : "尚未登记该平台账号昵称，请先登记，避免多个账号混淆"}
+            </div>
+            {activeLoginProfile?.account_handle && <div className="tiny" style={{ marginBottom: 10 }}>账号标识：{activeLoginProfile.account_handle}</div>}
             <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16 }}>
               {loginStatus?.message || "准备中..."}
             </div>
