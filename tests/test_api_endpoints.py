@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -2654,3 +2655,45 @@ def test_business_analytics_summary_preserves_unknown_rates_and_metrics(client):
     if body["interactions"]["sample_count"] == 0:
         assert body["interactions"]["views"] is None
     assert set(body["followers_growth_by_platform"]) <= {"xhs", "douyin", "kuaishou", "wechat_channels"}
+
+
+def test_business_analytics_summary_uses_latest_metric_per_draft(client):
+    tc, conn, _ = client
+    now = datetime.now()
+    created = now.strftime("%Y-%m-%d %H:%M:%S")
+    earlier = (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        "INSERT INTO contents(id, platform, title, body, created_at) VALUES(?,?,?,?,?)",
+        ("kpi-content-1", "xhs", "KPI 测试内容", "测试正文", created),
+    )
+    conn.execute(
+        "INSERT INTO drafts(id, content_id, platform, status, user_confirmed_at, created_at) "
+        "VALUES(?,?,?,?,?,?)",
+        ("kpi-draft-1", "kpi-content-1", "xhs", "user_published", created, created),
+    )
+    conn.execute(
+        "INSERT INTO metrics(draft_id, content_id, platform, fetch_status, fetched_at, views, likes, collects, comments, shares, new_followers) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        ("kpi-draft-1", "kpi-content-1", "xhs", "success", earlier, 50, 5, 2, 1, 1, 1),
+    )
+    conn.execute(
+        "INSERT INTO metrics(draft_id, content_id, platform, fetch_status, fetched_at, views, likes, collects, comments, shares, new_followers) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        ("kpi-draft-1", "kpi-content-1", "xhs", "success", created, 120, 12, 6, 3, 2, 4),
+    )
+    conn.commit()
+
+    response = tc.get("/api/analytics/business-summary?days=30")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["contents_created"] == 1
+    assert body["drafts_created"] == 1
+    assert body["confirmed_published"] == 1
+    assert body["publish_eligible"] == 1
+    assert body["draft_publish_confirmation_rate"] == 1.0
+    assert body["interactions"]["sample_count"] == 1
+    assert body["interactions"]["views"] == 120
+    assert body["interactions"]["likes"] == 12
+    assert body["interactions"]["collects"] == 6
+    assert body["interactions"]["comments"] == 3
+    assert body["interactions"]["shares"] == 2
