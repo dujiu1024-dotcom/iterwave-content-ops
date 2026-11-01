@@ -34,10 +34,8 @@ const SCHEDULER_JOB_LABEL: Record<string, string> = {
 function aggregateLabel(task: GlobalTaskQueueItem) {
   if (!task.aggregate_id) return "—";
   if (task.task_type === "round_run") {
-    const [roundId, operation] = task.aggregate_id.split(":");
-    return operation === "save_pending_drafts"
-      ? `第 ${roundId} 轮 · 恢复存草稿`
-      : `第 ${roundId} 轮`;
+    const [, operation] = task.aggregate_id.split(":");
+    return operation === "save_pending_drafts" ? "恢复存草稿任务" : "轮次生产任务";
   }
   if (task.task_type !== "scheduler_job") {
     return task.aggregate_id;
