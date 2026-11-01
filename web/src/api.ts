@@ -35,6 +35,11 @@ export interface GlobalTaskQueueResponse {
   page?: number;
   page_size?: number;
   pages?: number;
+  counts?: {
+    total: number;
+    by_status: Record<string, number>;
+    by_tenant: Record<string, Record<string, number>>;
+  };
 }
 
 export interface QueueTaskSubmission {
