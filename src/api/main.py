@@ -6037,6 +6037,8 @@ def _register_routes(app: FastAPI) -> None:
                 "category": category, "inputs": inputs, "outputs": outputs,
                 "permissions": sorted(set(permissions)), "enabled": False,
                 "manifest_version": 1, "created_at": now, "updated_at": now,
+                "installation_state": "registered", "enabled_state": "disabled",
+                "runnable_state": "blocked_no_sandbox", "execution_mode": "metadata_only",
                 "execution_enabled": False}
 
     @app.patch("/api/skills/{skill_id}")
@@ -6113,6 +6115,9 @@ def _register_routes(app: FastAPI) -> None:
             "inputs": inputs, "outputs": outputs,
             "permissions": sorted(set(permissions)), "enabled": enabled,
             "manifest_version": expected_version + 1, "updated_at": now,
+            "installation_state": "registered",
+            "enabled_state": "enabled" if enabled else "disabled",
+            "runnable_state": "blocked_no_sandbox", "execution_mode": "metadata_only",
             "execution_enabled": False,
         }
 
