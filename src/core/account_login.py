@@ -77,6 +77,26 @@ TERMINAL_STATES = ("success", "expired", "error")
 QR_STATES = ("qr_ready", "window_login")
 
 _LOGIN_PROCESSES: dict[object, subprocess.Popen] = {}
+
+
+# 产品边界：系统只负责生成草稿，发布由用户在平台上手动完成。
+# vendor 脚本保留上游原样（含 publish 子命令），这里在唯一的调用出口做白名单，
+# 任何非登录/只读子命令都会被拒绝，避免误触发自动发布。
+ALLOWED_VENDOR_SUBCOMMANDS = frozenset({"login", "login-qr", "whoami", "check"})
+
+
+class VendorCommandBlocked(RuntimeError):
+    """尝试通过 vendor 脚本执行登录以外的子命令（例如 publish）。"""
+
+
+def guard_vendor_cmd(cmd: list[str]) -> list[str]:
+    """校验 vendor 命令只包含允许的子命令；返回原命令便于链式调用。"""
+    sub = cmd[2] if len(cmd) > 2 else ""
+    if sub not in ALLOWED_VENDOR_SUBCOMMANDS:
+        raise VendorCommandBlocked(
+            f"禁止通过系统执行 vendor 子命令「{sub}」：发布需由用户在平台手动完成"
+        )
+    return cmd
 _PROCESS_LOCK = threading.Lock()
 _EXPORT_LOCK = threading.Lock()
 _EXPORTING: set[object] = set()
@@ -199,7 +219,7 @@ def start_login(platform: str, restart: bool = False, data_dir: Path | str | Non
 
         log_fh = f["log"].open("a", encoding="utf-8")
         try:
-            proc = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT), env=_login_env(),
+            proc = subprocess.Popen(guard_vendor_cmd(cmd), cwd=str(PROJECT_ROOT), env=_login_env(),
                                     stdout=log_fh, stderr=subprocess.STDOUT, close_fds=True)
         except Exception as e:  # noqa: BLE001
             logger.warning("登录进程启动失败 platform=%s error=%s", platform, type(e).__name__)
