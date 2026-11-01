@@ -93,11 +93,10 @@ class GlobalTaskWorker:
                     continue
                 if task.task_id in self._reconciled_interrupted_task_ids:
                     continue
-                reconciled = self._reconcile_round_failure(
+                self._reconcile_round_failure(
                     task, task.error_message or task.error_code or "任务已中断",
                 )
-                if reconciled:
-                    self._reconciled_interrupted_task_ids.add(task.task_id)
+                self._reconciled_interrupted_task_ids.add(task.task_id)
             if not tasks or page * page_size >= total:
                 break
             page += 1
@@ -292,13 +291,10 @@ class GlobalTaskWorker:
             round_id, "failed", f"Worker 异常兜底收口：{str(reason)[:300]}",
         )
 
-    def _reconcile_round_failure(self, task: QueuedTask, reason: str) -> bool:
-        """重新构建任务所属账号组上下文，对账轮次和内容计划状态。
-
-        返回是否完成对账；临时数据库/上下文故障时允许后续轮询重试。
-        """
+    def _reconcile_round_failure(self, task: QueuedTask, reason: str) -> None:
+        """重新构建任务所属账号组上下文，对账轮次和内容计划状态。"""
         if task.task_type != "round_run":
-            return True
+            return
         try:
             round_id = int(task.payload["round_id"])
             context = self.build_tenant_context(task.tenant_id)
@@ -307,13 +303,11 @@ class GlobalTaskWorker:
                 "Worker 失败后无法重建账号组上下文 task_id=%s tenant_id=%s",
                 task.task_id, task.tenant_id,
             )
-            return False
-        reconciled = False
+            return
         try:
             conn = context.get("conn")
             self._mark_round_failed(conn, round_id, reason)
             self._mark_content_plan_failed(conn, round_id)
-            reconciled = True
         except Exception:
             logger.exception(
                 "Worker 失败状态对账异常 task_id=%s tenant_id=%s round_id=%s",
@@ -332,7 +326,6 @@ class GlobalTaskWorker:
                     conn.close()
                 except Exception:
                     logger.exception("关闭失败对账数据库连接异常")
-        return reconciled
 
     @staticmethod
     def _mark_content_plan_failed(conn, round_id: int) -> None:
