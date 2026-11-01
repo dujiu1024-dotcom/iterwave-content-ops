@@ -6694,13 +6694,13 @@ def _register_routes(app: FastAPI) -> None:
         since = (_now() - timedelta(days=days - 1)).strftime("%Y-%m-%d %H:%M:%S")
 
         contents_created = int(conn.execute(
-            "SELECT COUNT(*) FROM contents WHERE created_at >= ?", (since,)
+            "SELECT COUNT(*) FROM contents WHERE datetime(created_at) >= datetime(?)", (since,)
         ).fetchone()[0])
         drafts_created = int(conn.execute(
-            "SELECT COUNT(*) FROM drafts WHERE created_at >= ?", (since,)
+            "SELECT COUNT(*) FROM drafts WHERE datetime(created_at) >= datetime(?)", (since,)
         ).fetchone()[0])
         publish_eligible = int(conn.execute(
-            "SELECT COUNT(*) FROM drafts WHERE created_at >= ? "
+            "SELECT COUNT(*) FROM drafts WHERE datetime(created_at) >= datetime(?) "
             "AND status IN ('draft_saved','user_published','data_fetching','published')",
             (since,),
         ).fetchone()[0])
@@ -6720,7 +6720,7 @@ def _register_routes(app: FastAPI) -> None:
                           ) AS rn
                    FROM metrics
                    WHERE draft_id IS NOT NULL
-                     AND fetched_at >= ?
+                     AND datetime(fetched_at) >= datetime(?)
                      AND fetch_status IN ('success','partial')
                )
                SELECT COUNT(*) AS sample_count,
@@ -6740,13 +6740,13 @@ def _register_routes(app: FastAPI) -> None:
         for platform in _g()["cfg"].platforms.enabled_keys():
             baseline = conn.execute(
                 "SELECT followers, captured_at FROM account_snapshots "
-                "WHERE platform=? AND followers IS NOT NULL AND captured_at < ? "
+                "WHERE platform=? AND followers IS NOT NULL AND datetime(captured_at) < datetime(?) "
                 "ORDER BY captured_at DESC, id DESC LIMIT 1",
                 (platform, since),
             ).fetchone()
             latest = conn.execute(
                 "SELECT followers, captured_at FROM account_snapshots "
-                "WHERE platform=? AND followers IS NOT NULL AND captured_at >= ? "
+                "WHERE platform=? AND followers IS NOT NULL AND datetime(captured_at) >= datetime(?) "
                 "ORDER BY captured_at DESC, id DESC LIMIT 1",
                 (platform, since),
             ).fetchone()
