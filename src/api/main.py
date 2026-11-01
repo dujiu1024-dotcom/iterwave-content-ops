@@ -6066,11 +6066,16 @@ def _register_routes(app: FastAPI) -> None:
 
     # --- 热点雷达（R22：采集失败不显示数字）---
     @app.get("/api/hot_topics")
-    def hot_topics(refresh: bool = Query(False)):
-        """热点雷达：只读库（采集 + 标签匹配由后台定时任务完成）。
-
-        refresh=true 兼容旧前端：触发一次后台刷新后立即返回当前库内数据，不阻塞请求。
-        """
+    def hot_topics(
+        refresh: bool = Query(False),
+        page: Optional[int] = Query(None, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+        tab: str = Query("all", pattern="^(all|matched|urgent|unknown)$"),
+        source: Optional[str] = Query(None, max_length=200),
+        keyword: Optional[str] = Query(None, max_length=200),
+        sort_by: str = Query("heat", pattern="^(heat|match)$"),
+    ):
+        """热点雷达：分页请求在数据库完成筛选和稳定排序；无 page 时兼容旧响应。"""
         from ..core import hot_topic_service
 
         conn = _g()["conn"]
@@ -6080,7 +6085,10 @@ def _register_routes(app: FastAPI) -> None:
             hot_topic_service.trigger_background(
                 cfg, trigger="manual", tenant_id=tenant_id,
             )
-        data = HotTopicCollector(cfg, conn).overview()
+        data = HotTopicCollector(cfg, conn).overview(
+            page=page, page_size=page_size, tab=tab, source=source,
+            keyword=keyword, sort_by=sort_by,
+        )
         data["refresh_job"] = _tenant_scoped_hot_topic_status(
             hot_topic_service.status(), tenant_id,
         )
