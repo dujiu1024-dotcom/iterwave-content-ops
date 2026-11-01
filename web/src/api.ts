@@ -647,9 +647,7 @@ export interface GlobalMonitorTenant {
   registered_accounts?: number;
   registered_accounts_active?: number;
   recent_execution?: {
-    run_id: number;
     task_type: string;
-    biz_id: string | null;
     status: string;
     started_at: string | null;
     finished_at: string | null;
