@@ -6528,18 +6528,29 @@ def _register_routes(app: FastAPI) -> None:
 
     # --- 内容资产（G-13：外部参考 / 个人观点 / 内容模板）---
     @app.get("/api/assets")
-    def list_assets(asset_type: Optional[str] = Query(None)):
+    def list_assets(
+        asset_type: Optional[str] = Query(None),
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+    ):
         conn = _g()["conn"]
         if asset_type and asset_type not in ("reference", "voice", "template"):
             raise HTTPException(400, "asset_type 只能是 reference / voice / template")
-        sql = "SELECT * FROM content_assets"
-        params: list = []
-        if asset_type:
-            sql += " WHERE asset_type = ?"
-            params.append(asset_type)
-        sql += " ORDER BY created_at DESC, id DESC LIMIT 100"
-        rows = conn.execute(sql, params).fetchall()
-        return {"items": [dict(r) for r in rows], "total": len(rows)}
+        where = " WHERE asset_type = ?" if asset_type else ""
+        params: list = [asset_type] if asset_type else []
+        total = int(conn.execute(
+            "SELECT COUNT(*) FROM content_assets" + where, params,
+        ).fetchone()[0])
+        rows = conn.execute(
+            "SELECT * FROM content_assets" + where
+            + " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+            (*params, page_size, (page - 1) * page_size),
+        ).fetchall()
+        return {
+            "items": [dict(r) for r in rows], "total": total,
+            "page": page, "page_size": page_size,
+            "pages": max(1, (total + page_size - 1) // page_size),
+        }
 
     @app.post("/api/assets")
     def create_asset(req: CreateAssetRequest):
