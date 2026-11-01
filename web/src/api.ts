@@ -207,6 +207,14 @@ export interface Draft {
   guard_confirmation_allowed?: boolean;
 }
 
+export interface DraftPage {
+  items: Draft[];
+  total: number;
+  page: number;
+  page_size: number;
+  pages: number;
+}
+
 /** POST /api/rounds/{id}/run 的执行报告（RoundExecutor.run 返回） */
 export interface PendingDraftSaveResult {
   round_id: number;
@@ -1428,6 +1436,12 @@ export const api = {
     if (status) p.set("status", status);
     if (platform) p.set("platform", platform);
     return fetchJson<Draft[]>(`/api/drafts?${p}`);
+  },
+  draftsPage: (status: string | undefined, platform: Platform | undefined, page: number, pageSize = 20) => {
+    const p = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    if (status) p.set("status", status);
+    if (platform) p.set("platform", platform);
+    return fetchJson<DraftPage>(`/api/drafts?${p}`);
   },
   /** noteUrl：已发布笔记链接（可选；不填则该篇跳过被动评论轮询） */
   confirmPublish: (
