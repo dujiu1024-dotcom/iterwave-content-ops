@@ -85,6 +85,8 @@ function Router() {
   };
 
   const currentNav = NAV_ITEMS.find((n) => n.page === page);
+  const currentLabel = currentNav?.label
+    ?? (page === "accounts" ? "账号与登录" : page === "settings" ? "系统设置" : "");
 
   if (!auth) {
     return <div className="app-loading">正在检测访问状态…</div>;
@@ -108,7 +110,7 @@ function Router() {
         statusLoading={!status}
       />
       <div className="main">
-        <Topbar label={currentNav?.label ?? ""} onNavigate={setPage} />
+        <Topbar label={currentLabel} onNavigate={setPage} />
 
         <main className="content" id="main-content">
           <PageBoundary key={page}>{render()}</PageBoundary>
