@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, Platform, AccountInfo, LoginStatus } from "../api";
+import { api, Platform, AccountInfo, LoginStatus, RegisteredPlatformAccount } from "../api";
 
 const PLATFORM_EMOJI: Record<Platform, string> = {
   xhs: "小", douyin: "抖", kuaishou: "快", wechat_channels: "视",
