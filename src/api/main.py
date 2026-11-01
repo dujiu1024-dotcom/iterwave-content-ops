@@ -5965,7 +5965,16 @@ def _register_routes(app: FastAPI) -> None:
                     item[target] = []
             item["enabled"] = bool(item["enabled"])
             items.append(item)
-        return {"items": items, "total": len(items), "execution_enabled": False}
+        from src.core.skills_registry import builtin_skills_catalog
+        builtin_items = builtin_skills_catalog()
+        return {
+            "items": items,
+            "total": len(items),
+            "builtin_items": builtin_items,
+            "builtin_total": len(builtin_items),
+            "execution_enabled": False,
+            "custom_execution_enabled": False,
+        }
 
     @app.post("/api/skills")
     def register_tenant_skill(req: dict):
