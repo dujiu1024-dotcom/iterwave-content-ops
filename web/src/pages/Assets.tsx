@@ -413,7 +413,7 @@ export default function Assets() {
             ) : (
               <div className="grid three">
                 {assets.template.map((t) => (
-                  <div className="skill-card" key={t.id} style={{ opacity: t.is_active === false ? 0.62 : 1 }}>
+                  <div className="skill-card" key={t.id} style={{ opacity: (t.is_active === false || t.is_active === 0) ? 0.62 : 1 }}>
                     <div className="skill-name">{t.title} {t.is_active === false && <span className="tag gray">已停用</span>}</div>
                     <div className="skill-desc" style={{ whiteSpace: "pre-line" }}>{t.body || "（无结构说明）"}</div>
                     <div className="skill-foot">
