@@ -668,6 +668,17 @@ export interface MediaAsset {
   duplicate?: boolean;
 }
 
+export interface MediaAssetPage {
+  items: MediaAsset[];
+  total: number;
+  counts: Record<"all" | "pending" | "approved" | "rejected" | "archived", number>;
+  page: number;
+  page_size: number;
+  pages: number;
+  limit: number;
+  offset: number;
+}
+
 export interface AssetItem {
   id: number;
   asset_type: AssetType;
@@ -1613,10 +1624,21 @@ export const api = {
     return result;
   },
   // === 图片素材库 ===
-  mediaAssets: (query = "", status: "active" | "archived" | "all" = "active") =>
-    fetchJson<{ items: MediaAsset[]; limit: number; offset: number }>(
-      `/api/media?status=${encodeURIComponent(status)}&limit=200${query ? `&query=${encodeURIComponent(query)}` : ""}`,
-    ),
+  mediaAssets: (
+    query = "",
+    status: "active" | "archived" | "all" = "active",
+    reviewStatus: "pending_review" | "approved" | "rejected" | "all" = "all",
+    page?: number,
+    pageSize = 20,
+  ) => {
+    const params = new URLSearchParams({
+      status,
+      review_status: reviewStatus,
+      ...(page ? { page: String(page), page_size: String(pageSize) } : { limit: "200" }),
+    });
+    if (query) params.set("query", query);
+    return fetchJson<MediaAssetPage>(`/api/media?${params.toString()}`);
+  },
   uploadMediaAsset: (data: { filename: string; title?: string; alt_text?: string; tags?: string[]; data_base64: string }) =>
     fetchJson<MediaAsset>("/api/media", { method: "POST", body: JSON.stringify(data) }),
   archiveMediaAsset: (id: number) =>
