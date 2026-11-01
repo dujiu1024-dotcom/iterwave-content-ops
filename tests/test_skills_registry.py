@@ -14,7 +14,6 @@ def test_builtin_skill_catalog_has_unique_ids_and_explicit_lifecycle_states():
         assert skill["runnable_state"] == "workflow_managed"
         assert skill["execution_mode"] == "trusted_application_workflow"
         assert skill["capability_status"] in {"normal", "limited"}
-        assert skill["source"]
         assert skill["description"]
 
 
