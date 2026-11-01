@@ -240,7 +240,7 @@ function Topbar({ label, onNavigate }: { label: string; onNavigate: (p: string, 
     try {
       setTenantData(await api.tenants());
     } catch (error) {
-      console.warn("tenant switcher load failed:", error);
+      // Tenant switcher failures are surfaced by the page-level retry state.
     }
   };
 
@@ -260,7 +260,7 @@ function Topbar({ label, onNavigate }: { label: string; onNavigate: (p: string, 
     const refresh = () => {
       api.tenants()
         .then((data) => { if (!disposed) setTenantData(data); })
-        .catch((error) => console.warn("tenant switcher load failed:", error));
+        .catch(() => { /* keep the last known tenant list; avoid logging response details */ });
     };
     const onVisibilityChange = () => {
       if (document.visibilityState === "visible") refresh();
@@ -469,7 +469,7 @@ class PageBoundary extends Component<{ children: ReactNode }, { err: Error | nul
             </div>
           </div>
           <pre style={{ whiteSpace: "pre-wrap", fontSize: 12, color: "var(--muted)" }}>
-            {this.state.err.message}
+            页面暂时无法显示。请重试或刷新；如问题持续，请联系管理员并提供发生时间。
           </pre>
           <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
             <button className="btn sm" onClick={() => this.setState({ err: null })}>重试</button>
