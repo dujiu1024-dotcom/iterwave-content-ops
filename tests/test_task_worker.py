@@ -836,3 +836,60 @@ def test_worker_dispatches_hot_topic_refresh_as_a_tracked_scheduler_job(tmp_path
     assert row["status"] == "failed"
     assert "热点来源采集失败" in row["error_msg"]
     audit_conn.close()
+
+
+def test_scheduler_exception_audit_uses_safe_message(tmp_path):
+    import sqlite3
+    import pytest
+
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    queue.enqueue(
+        task_type="scheduler_job", tenant_id="tenant-a",
+        aggregate_id="_job_daily_ops",
+        payload={"method": "_job_daily_ops", "args": []},
+    )
+    claimed = queue.claim_next("worker-scheduler-exception")
+    assert claimed is not None
+
+    audit_conn = sqlite3.connect(":memory:")
+    audit_conn.row_factory = sqlite3.Row
+    audit_conn.execute(
+        "CREATE TABLE task_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_type TEXT, "
+        "biz_id TEXT, status TEXT, attempt INTEGER, started_at TEXT, finished_at TEXT, "
+        "error_msg TEXT, created_at TEXT)"
+    )
+    audit_conn.commit()
+
+    class ConnectionProxy:
+        def execute(self, *args):
+            return audit_conn.execute(*args)
+        def commit(self):
+            audit_conn.commit()
+        def close(self):
+            return None
+
+    class BrokenScheduler:
+        async def _job_daily_ops(self):
+            raise RuntimeError("https://internal.example/private?token=secret")
+        def shutdown(self):
+            return None
+
+    context = {
+        "cfg": SimpleNamespace(
+            business_timezone="Asia/Shanghai",
+            paths=SimpleNamespace(data_dir=str(tmp_path / "tenant-a" / "data")),
+            resolve_path=lambda value: value,
+        ),
+        "scheduler": BrokenScheduler(),
+        "conn": ConnectionProxy(),
+    }
+    worker = GlobalTaskWorker(queue, lambda tenant_id: context)
+    with pytest.raises(RuntimeError, match="internal.example"):
+        asyncio.run(worker._run_task(claimed))
+
+    row = audit_conn.execute("SELECT error_msg FROM task_runs").fetchone()
+    assert row["error_msg"] == "定时任务执行异常，请检查服务端运行日志"
+    assert "internal.example" not in row["error_msg"]
+    assert "secret" not in row["error_msg"]
+    audit_conn.close()
