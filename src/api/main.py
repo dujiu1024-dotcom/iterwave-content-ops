@@ -1960,8 +1960,15 @@ def _register_routes(app: FastAPI) -> None:
                     logger.exception("快速体验成功事件记录失败 run=%s", run_id)
             except Exception as exc:
                 logger.exception("快速体验生成失败 run=%s", run_id)
-                code = getattr(exc, "code", "sample_generation_failed")
-                safe_message = str(exc) if getattr(exc, "code", None) else "样稿生成失败，请检查模型配置后重试"
+                # 只有本模块定义的业务异常拥有可展示文案；不能用任意异常的
+                # duck-typed .code 属性作为信任依据，否则底层异常可能泄漏到 API。
+                from src.core.content_pipeline import ContentGenerationError
+                if isinstance(exc, ContentGenerationError):
+                    code = str(exc.code)[:80]
+                    safe_message = str(exc)[:300]
+                else:
+                    code = "sample_generation_failed"
+                    safe_message = "样稿生成失败，请检查模型配置后重试"
                 try:
                     conn_bg.rollback()
                 except Exception:
