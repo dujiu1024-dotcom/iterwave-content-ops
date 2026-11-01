@@ -1457,7 +1457,7 @@ async function fetchJson<T>(path: string, options?: RequestInit): Promise<T> {
       // 非 JSON 错误体，保留原文
     }
     // 服务端异常、堆栈、绝对路径和内部配置标识不得透传到浏览器。
-    const internalDetail = /traceback|File ["'][^"']+\.py["']|sqlite3?\.|sqlalchemy|operationalerror|programmingerror|OPENAI_API_KEY|DATABASE_URL|(?:\/home\/|\/root\/|\/tmp\/|\/var\/|\/Users\/|[A-Za-z]:\\\\)/i.test(detail);
+    const internalDetail = /traceback|File ["'][^"']+\.py["']|sqlite3?\.|sqlalchemy|operationalerror|programmingerror|OPENAI_API_KEY|DATABASE_URL|(?:\/home\/|\/root\/|\/tmp\/|\/var\/|\/Users\/|[A-Za-z]:\\)/i.test(detail);
     if (res.status >= 500) detail = "服务暂时不可用，请稍后重试";
     else if (internalDetail) detail = "操作失败，内部诊断信息已记录，请检查配置或联系管理员";
     const error = new Error(detail) as Error & { status?: number; code?: string };
