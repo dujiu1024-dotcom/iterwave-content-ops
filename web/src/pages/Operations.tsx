@@ -69,6 +69,16 @@ export default function Operations() {
   const [logs, setLogs] = useState<OpsLogItem[]>([]);
   const [tasks, setTasks] = useState<TaskRunItem[]>([]);
   const [notifs, setNotifs] = useState<NotificationItem[]>([]);
+  const [logsPage, setLogsPage] = useState(1);
+  const [logsTotal, setLogsTotal] = useState(0);
+  const [logsPages, setLogsPages] = useState(1);
+  const [tasksPage, setTasksPage] = useState(1);
+  const [tasksTotal, setTasksTotal] = useState(0);
+  const [tasksPages, setTasksPages] = useState(1);
+  const [notifsPage, setNotifsPage] = useState(1);
+  const [notifsTotal, setNotifsTotal] = useState(0);
+  const [notifsPages, setNotifsPages] = useState(1);
+  const historyPageSize = 20;
   const [notifRules, setNotifRules] = useState<NotifyRule[]>([]);
   const [jobs, setJobs] = useState<{ jobs: SchedulerJob[]; running: boolean } | null>(null);
   const [rhythm, setRhythm] = useState<RhythmConfig | null>(null);
@@ -85,9 +95,9 @@ export default function Operations() {
     try {
       const results = await Promise.allSettled([
         show("kpi") || show("logs") ? api.opsKpi(kpiDays) : Promise.resolve(null),
-        show("logs") ? api.opsLogs(undefined, undefined, undefined, 50) : Promise.resolve(null),
-        show("tasks") ? api.taskRuns(undefined, undefined, 50) : Promise.resolve(null),
-        show("notifications") ? api.notifications(undefined, 30) : Promise.resolve(null),
+        show("logs") ? api.opsLogsPage(logsPage, historyPageSize) : Promise.resolve(null),
+        show("tasks") ? api.taskRunsPage(tasksPage, historyPageSize) : Promise.resolve(null),
+        show("notifications") ? api.notificationsPage(notifsPage, historyPageSize) : Promise.resolve(null),
         show("notifications") ? api.notifyRules() : Promise.resolve(null),
         show("scheduler") ? api.schedulerJobs() : Promise.resolve(null),
         show("rhythm") ? api.rhythm() : Promise.resolve(null),
@@ -97,8 +107,16 @@ export default function Operations() {
       setKpi(unpack(results[0]));
       const logsRes = unpack(results[1]);
       setLogs(logsRes?.items ?? []);
-      setTasks(unpack(results[2]) ?? []);
-      setNotifs(unpack(results[3]) ?? []);
+      setLogsTotal(logsRes?.total ?? 0);
+      setLogsPages(logsRes?.pages ?? 1);
+      const tasksRes = unpack(results[2]);
+      setTasks(tasksRes?.items ?? []);
+      setTasksTotal(tasksRes?.total ?? 0);
+      setTasksPages(tasksRes?.pages ?? 1);
+      const notifsRes = unpack(results[3]);
+      setNotifs(notifsRes?.items ?? []);
+      setNotifsTotal(notifsRes?.total ?? 0);
+      setNotifsPages(notifsRes?.pages ?? 1);
       setNotifRules(unpack(results[4]) ?? []);
       setJobs(unpack(results[5]));
       setRhythm(unpack(results[6]));
@@ -117,7 +135,7 @@ export default function Operations() {
     }
   };
 
-  useEffect(() => { refresh(); }, [tab, kpiDays]);
+  useEffect(() => { refresh(); }, [tab, kpiDays, logsPage, tasksPage, notifsPage]);
 
   const testNotify = async () => {
     setNotifBusy(true);
@@ -187,7 +205,7 @@ export default function Operations() {
       {show("kpi") && <KpiPane kpi={kpi} days={kpiDays} onDaysChange={setKpiDays} />}
 
       {/* === 2. 评论日志 === */}
-      {show("logs") && <LogsPane logs={logs} />}
+      {show("logs") && <LogsPane logs={logs} total={logsTotal} page={logsPage} pages={logsPages} onPageChange={setLogsPage} />}
 
       {/* === 3. 发布确认 === */}
       {show("publish") && <PublishPane />}
@@ -211,7 +229,7 @@ export default function Operations() {
       )}
 
       {/* === 5. 任务追踪 === */}
-      {show("tasks") && <TasksPane tasks={tasks} onResolved={refresh} />}
+      {show("tasks") && <TasksPane tasks={tasks} total={tasksTotal} page={tasksPage} pages={tasksPages} onPageChange={setTasksPage} onResolved={refresh} />}
 
       {/* === 6. 定时任务 === */}
       {show("scheduler") && <SchedulerPane jobs={jobs} onTriggered={refresh} />}
@@ -220,7 +238,7 @@ export default function Operations() {
       {show("rhythm") && <RhythmPane rhythm={rhythm} onSaved={refresh} />}
 
       {/* === 8. 通知中心 === */}
-      {show("notifications") && <NotificationsPane items={notifs} rules={notifRules} onChanged={refresh} />}
+      {show("notifications") && <NotificationsPane items={notifs} rules={notifRules} total={notifsTotal} page={notifsPage} pages={notifsPages} onPageChange={setNotifsPage} onChanged={refresh} />}
     </>
   );
 }
@@ -365,13 +383,15 @@ function KpiCard({ label, value, hint, color }: { label: string; value: number; 
   );
 }
 
-function LogsPane({ logs }: { logs: OpsLogItem[] }) {
+function LogsPane({ logs, total, page, pages, onPageChange }: {
+  logs: OpsLogItem[]; total: number; page: number; pages: number; onPageChange: (page: number) => void;
+}) {
   return (
     <div className="panel">
       <div className="panel-head">
         <div>
           <div className="panel-title"><span className="icon">≋</span>运营日志</div>
-          <div className="panel-sub">最近 {logs.length} 条 — 被动回复 / 主动评论 / 关注</div>
+          <div className="panel-sub">共 {total} 条 — 被动回复 / 主动评论 / 关注</div>
         </div>
       </div>
       <div className="table-wrap">
@@ -401,6 +421,7 @@ function LogsPane({ logs }: { logs: OpsLogItem[] }) {
           </tbody>
         </table>
       </div>
+      <HistoryPager total={total} page={page} pages={pages} onPageChange={onPageChange} />
     </div>
   );
 }
@@ -702,13 +723,15 @@ function BreakerPane({
             </tbody>
           </table>
         </div>
+        <HistoryPager total={total} page={page} pages={pages} onPageChange={onPageChange} />
       </div>
     </>
   );
 }
 
-function TasksPane({ tasks, onResolved }: {
+function TasksPane({ tasks, total, page, pages, onPageChange, onResolved }: {
   tasks: TaskRunItem[];
+  total: number; page: number; pages: number; onPageChange: (page: number) => void;
   onResolved?: () => void;
 }) {
   const TYPE_LABEL: Record<string, string> = {
@@ -774,6 +797,7 @@ function TasksPane({ tasks, onResolved }: {
           </tbody>
         </table>
       </div>
+      <HistoryPager total={total} page={page} pages={pages} onPageChange={onPageChange} />
     </div>
   );
 }
@@ -1075,9 +1099,10 @@ function RhythmPane({ rhythm, onSaved }: { rhythm: RhythmConfig | null; onSaved?
   );
 }
 
-function NotificationsPane({ items, rules, onChanged }: {
+function NotificationsPane({ items, rules, total, page, pages, onPageChange, onChanged }: {
   items: NotificationItem[];
   rules: NotifyRule[];
+  total: number; page: number; pages: number; onPageChange: (page: number) => void;
   onChanged?: () => void;
 }) {
   const { showToast } = useApp();
@@ -1244,5 +1269,21 @@ function NotificationsPane({ items, rules, onChanged }: {
         </div>
       </div>
     </>
+  );
+}
+
+
+function HistoryPager({ total, page, pages, onPageChange }: {
+  total: number; page: number; pages: number; onPageChange: (page: number) => void;
+}) {
+  if (total <= 0) return null;
+  return (
+    <div className="flex between center" style={{ padding: "12px 0 0", gap: 10, flexWrap: "wrap" }}>
+      <span className="note">共 {total} 条 · 第 {page}/{pages} 页 · 每页 20 条</span>
+      <div className="flex" style={{ gap: 6 }}>
+        <button className="btn sm" disabled={page <= 1} onClick={() => onPageChange(Math.max(1, page - 1))}>上一页</button>
+        <button className="btn sm" disabled={page >= pages} onClick={() => onPageChange(Math.min(pages, page + 1))}>下一页</button>
+      </div>
+    </div>
   );
 }
