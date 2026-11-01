@@ -60,6 +60,11 @@ export default function MediaLibraryPane() {
   const [panel, setPanel] = useState<Panel>("none");
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [pages, setPages] = useState(1);
+  const [counts, setCounts] = useState<Record<Filter, number>>({ all: 0, pending: 0, approved: 0, rejected: 0, archived: 0 });
+  const pageSize = 20;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [targetWarning, setTargetWarning] = useState("");
@@ -87,11 +92,23 @@ export default function MediaLibraryPane() {
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
+    const status = filter === "archived" ? "archived" : "active";
+    const reviewStatus = filter === "pending" ? "pending_review"
+      : filter === "approved" ? "approved"
+      : filter === "rejected" ? "rejected" : "all";
     try {
       const [result, targetResult, settingsResult] = await Promise.all([
-        api.mediaAssets(query, "all"), api.mediaUsageTargets(), api.mediaGenerationSettings(),
+        api.mediaAssets(query, status, reviewStatus, page, pageSize),
+        api.mediaUsageTargets(), api.mediaGenerationSettings(),
       ]);
       setItems(result.items);
+      setTotal(result.total);
+      setPages(result.pages);
+      setCounts(result.counts);
+      if (page > result.pages) {
+        setPage(result.pages);
+        return;
+      }
       setTargets(targetResult.items);
       setSettings(settingsResult);
       const requestedContentId = new URLSearchParams(window.location.search).get("focusContent");
@@ -114,27 +131,14 @@ export default function MediaLibraryPane() {
     } finally {
       setLoading(false);
     }
-  }, [query]);
+  }, [query, filter, page]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void load(); }, 250);
     return () => window.clearTimeout(timer);
   }, [load]);
 
-  const counts = useMemo(() => {
-    const c: Record<Filter, number> = { all: 0, pending: 0, approved: 0, rejected: 0, archived: 0 };
-    for (const item of items) {
-      const state = assetState(item);
-      c[state] += 1;
-      if (state !== "archived") c.all += 1;
-    }
-    return c;
-  }, [items]);
-
-  const visible = useMemo(() => items.filter((item) => {
-    const state = assetState(item);
-    return filter === "all" ? state !== "archived" : state === filter;
-  }), [items, filter]);
+  const visible = items;
 
   const aiReady = Boolean(settings?.enabled && settings?.provider_configured);
   const aiBlockedReason = !settings ? "正在加载 AI 配图设置" : !settings.provider_configured
@@ -529,12 +533,12 @@ export default function MediaLibraryPane() {
         <div className="ml-toolbar">
           <div className="ml-filters" role="tablist">
             {([["all", "全部"], ["pending", "待审核"], ["approved", "可用"], ["rejected", "已驳回"], ["archived", "已归档"]] as [Filter, string][]).map(([key, label]) => (
-              <button key={key} role="tab" aria-selected={filter === key} className={filter === key ? "on" : ""} onClick={() => setFilter(key)}>
+              <button key={key} role="tab" aria-selected={filter === key} className={filter === key ? "on" : ""} onClick={() => { setFilter(key); setPage(1); }}>
                 {label}<span className={key === "pending" && counts.pending ? "badge warn" : "badge"}>{counts[key]}</span>
               </button>
             ))}
           </div>
-          <input className="ml-search" type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索名称、标签、描述" />
+          <input className="ml-search" type="search" value={query} onChange={(e) => { setQuery(e.target.value); setPage(1); }} placeholder="搜索名称、标签、描述" />
         </div>
 
         {error && <div className="note orange" role="alert">{error}</div>}
@@ -595,6 +599,15 @@ export default function MediaLibraryPane() {
                 </article>
               );
             })}
+          </div>
+        )}
+        {total > 0 && (
+          <div className="flex between center" style={{ padding: "14px 0 2px", gap: 10, flexWrap: "wrap" }}>
+            <span className="ml-hint">共 {total} 张 · 第 {page}/{pages} 页 · 每页 {pageSize} 张{loading ? " · 正在更新…" : ""}</span>
+            <div className="flex" style={{ gap: 6 }}>
+              <button className="btn sm" disabled={loading || page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button>
+              <button className="btn sm" disabled={loading || page >= pages} onClick={() => setPage((value) => Math.min(pages, value + 1))}>下一页</button>
+            </div>
           </div>
         )}
       </section>
