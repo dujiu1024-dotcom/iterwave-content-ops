@@ -407,6 +407,19 @@ function TracePane({ status, runs }: { status: SystemStatus | null; runs: Orches
   );
 }
 
+// 仅检查 manifest 声明是否完整；自定义 Skill 当前没有代码执行沙箱，不能将配置自检伪装成运行测试。
+function inspectSkillManifest(skill: Pick<TenantSkillManifest, "skill_id" | "name" | "version" | "description" | "inputs" | "outputs" | "permissions">) {
+  const checks = [
+    { label: "Skill ID 格式", pass: /^[a-z][a-z0-9_.-]{1,63}$/.test(skill.skill_id) },
+    { label: "名称与说明", pass: Boolean(skill.name.trim() && skill.description.trim()) },
+    { label: "版本号", pass: /^\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.-]+)?$/.test(skill.version) },
+    { label: "输入 Schema", pass: Array.isArray(skill.inputs) && skill.inputs.length <= 30 && skill.inputs.every((v) => Boolean(v) && typeof v === "object" && !Array.isArray(v)) },
+    { label: "输出 Schema", pass: Array.isArray(skill.outputs) && skill.outputs.length <= 30 && skill.outputs.every((v) => Boolean(v) && typeof v === "object" && !Array.isArray(v)) },
+    { label: "只读权限", pass: Array.isArray(skill.permissions) && skill.permissions.every((v) => ["read_content", "read_plan", "read_drafts"].includes(v)) },
+  ];
+  return { checks, passed: checks.filter((item) => item.pass).length, total: checks.length };
+}
+
 // ============================================================ Skills 注册表
 function SkillsPane() {
   const { showToast, withPending, isPending } = useApp();
@@ -421,6 +434,9 @@ function SkillsPane() {
   const [skillInputsJson, setSkillInputsJson] = useState("[]");
   const [skillOutputsJson, setSkillOutputsJson] = useState("[]");
   const [skillPermissions, setSkillPermissions] = useState<string[]>([]);
+  const [draftTest, setDraftTest] = useState<ReturnType<typeof inspectSkillManifest> | null>(null);
+  const [savedTests, setSavedTests] = useState<Record<string, ReturnType<typeof inspectSkillManifest>>>({});
+  const [testingSkill, setTestingSkill] = useState<TenantSkillManifest | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -536,9 +552,27 @@ function SkillsPane() {
               <label key={permission}><input type="checkbox" checked={skillPermissions.includes(permission)} onChange={(e) => setSkillPermissions((old) => e.target.checked ? [...old, permission] : old.filter((p) => p !== permission))} />{permission}</label>
             ))}
           </div>
-          <button className="btn primary" disabled={!skillId.trim() || !skillName.trim() || isPending("skill:register")} onClick={register}>
-            {isPending("skill:register") ? "登记中…" : "登记 Skill"}
-          </button>
+          <div className="flex wrap" style={{ gap: 8, alignItems: "center" }}>
+            <button className="btn" type="button" onClick={() => {
+              try {
+                const inputs = JSON.parse(skillInputsJson);
+                const outputs = JSON.parse(skillOutputsJson);
+                setDraftTest(inspectSkillManifest({
+                  skill_id: skillId.trim().toLowerCase(), name: skillName.trim(), version: skillVersion.trim(),
+                  description: skillDescription.trim(), inputs, outputs, permissions: skillPermissions,
+                }));
+              } catch {
+                setDraftTest({ checks: [{ label: "JSON 语法", pass: false }], passed: 0, total: 1 });
+              }
+            }}>运行配置自检</button>
+            <button className="btn primary" disabled={!skillId.trim() || !skillName.trim() || isPending("skill:register")} onClick={register}>
+              {isPending("skill:register") ? "登记中…" : "登记 Skill"}
+            </button>
+          </div>
+          {draftTest && <div className="note" role="status" style={{ marginTop: 8 }}>
+            自检结果：{draftTest.passed}/{draftTest.total} 项通过。{draftTest.checks.map((item) => <span key={item.label} style={{ display: "inline-block", marginRight: 10, color: item.pass ? "var(--green)" : "var(--red)" }}>{item.pass ? "✓" : "✕"} {item.label}</span>)}
+            <div>此功能只验证 Manifest 配置，不会执行 Skill 代码或调用真实业务工具。</div>
+          </div>}
         </div>
         {loading ? <div className="empty-state">正在加载登记表…</div> : customSkills.length === 0 ? (
           <EmptyHint next="填写上方 manifest 元数据后登记">暂无自定义 Skills</EmptyHint>
@@ -554,18 +588,138 @@ function SkillsPane() {
                   <td>{skill.permissions.length ? skill.permissions.join("、") : "无"}</td>
                   <td><span className={skill.enabled ? "tag green" : "tag gray"}>{skill.enabled ? "已启用（仅登记）" : "已停用"}</span></td>
                   <td><div className="skill-row-actions">
+                    <button className="btn sm" type="button" onClick={() => setSavedTests((old) => ({ ...old, [skill.skill_id]: inspectSkillManifest(skill) }))}>配置自检</button>
+                    <button className="btn sm primary" type="button" onClick={() => { setTestingSkill(skill); setSavedTests((old) => ({ ...old, [skill.skill_id]: inspectSkillManifest(skill) })); }}>独立测试</button>
                     <button className="btn sm" disabled={isPending(`skill:toggle:${skill.skill_id}`)} onClick={() => void toggle(skill)}>{skill.enabled ? "停用" : "启用"}</button>
                     <button className="btn sm" disabled={skill.enabled || isPending(`skill:delete:${skill.skill_id}`)} onClick={() => void remove(skill)}>删除</button>
-                  </div></td>
+                  </div>
+                    {savedTests[skill.skill_id] && <div className="tiny" style={{ marginTop: 5 }}>自检 {savedTests[skill.skill_id].passed}/{savedTests[skill.skill_id].total} 项通过（仅配置检查）</div>}
+                  </td>
                 </tr>
               ))}</tbody>
             </table>
           </div>
         )}
+        {testingSkill && <SkillContractTester key={testingSkill.skill_id + ":" + testingSkill.manifest_version} skill={testingSkill} onClose={() => setTestingSkill(null)} />}
         <div className="note" style={{ marginTop: 10 }}>安全限制：登记记录按账号组隔离；新建默认停用；权限仅允许读取类声明；启用不代表具备执行能力，Agent 当前不会加载或运行用户代码。</div>
       </div>
     </>
   );
+}
+
+
+type SkillContractCheck = { label: string; pass: boolean; detail?: string };
+
+function validateSkillSample(sample: unknown, schemas: Array<Record<string, unknown>>, direction: string): SkillContractCheck[] {
+  if (!schemas.length) return [{ label: `${direction} Schema`, pass: true, detail: "未声明字段，当前无约束" }];
+  const checks: SkillContractCheck[] = [];
+  for (const schema of schemas) {
+    const name = typeof schema.name === "string" ? schema.name : "";
+    if (name) {
+      const required = schema.required === true;
+      const present = Boolean(sample && typeof sample === "object" && !Array.isArray(sample)
+        && Object.prototype.hasOwnProperty.call(sample, name));
+      if (!present) {
+        checks.push({ label: name, pass: !required, detail: required ? "缺少必填字段" : "可选字段未提供" });
+        continue;
+      }
+      const value = (sample as Record<string, unknown>)[name];
+      const expected = typeof schema.type === "string" ? schema.type : "any";
+      const actual = value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+      const typePass = expected === "any" || expected === actual
+        || (expected === "integer" && typeof value === "number" && Number.isInteger(value))
+        || (expected === "number" && typeof value === "number");
+      const enumValues = Array.isArray(schema.enum) ? schema.enum : null;
+      const enumPass = !enumValues || enumValues.some((entry) => JSON.stringify(entry) === JSON.stringify(value));
+      checks.push({
+        label: name,
+        pass: typePass && enumPass,
+        detail: !typePass ? `类型应为 ${expected}，实际为 ${actual}` : !enumPass ? "不在允许值范围内" : "类型与约束通过",
+      });
+      continue;
+    }
+    const required = Array.isArray(schema.required) ? schema.required.filter((v): v is string => typeof v === "string") : [];
+    const properties = schema.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties)
+      ? schema.properties as Record<string, unknown> : {};
+    const objectPass = sample !== null && typeof sample === "object" && !Array.isArray(sample);
+    const missing = objectPass ? required.filter((key) => !Object.prototype.hasOwnProperty.call(sample, key)) : required;
+    const typePass = schema.type !== "object" || objectPass;
+    checks.push({
+      label: typeof schema.title === "string" ? schema.title : `${direction} 对象结构`,
+      pass: typePass && missing.length === 0,
+      detail: !typePass ? "样例应为 JSON 对象" : missing.length ? `缺少必填字段：${missing.join("、")}` : `检查 ${Object.keys(properties).length} 个属性定义`,
+    });
+  }
+  return checks;
+}
+
+function SkillContractTester({ skill, onClose }: { skill: TenantSkillManifest; onClose: () => void }) {
+  const [inputSample, setInputSample] = useState("{}");
+  const [outputSample, setOutputSample] = useState("{}");
+  const [checks, setChecks] = useState<SkillContractCheck[] | null>(null);
+  const [error, setError] = useState("");
+  const run = () => {
+    setError("");
+    try {
+      const input = JSON.parse(inputSample);
+      const output = JSON.parse(outputSample);
+      const result = [
+        ...validateSkillSample(input, skill.inputs, "输入"),
+        ...validateSkillSample(output, skill.outputs, "输出"),
+      ];
+      setChecks(result);
+    } catch (e) {
+      setChecks(null);
+      setError(e instanceof Error ? `JSON 格式错误：${e.message}` : "JSON 格式错误");
+    }
+  };
+  return (
+    <div className="panel skill-contract-tester">
+      <div className="panel-head">
+        <div>
+          <div className="panel-title">独立测试：{skill.name}</div>
+          <div className="panel-sub">填写输入和预期输出样例，验证是否符合已登记的 Schema</div>
+        </div>
+        <button className="btn sm" type="button" onClick={onClose}>关闭测试</button>
+      </div>
+      <div className="grid two">
+        <label className="form-label">输入样例（JSON）
+          <textarea className="field" rows={7} value={inputSample} onChange={(e) => setInputSample(e.target.value)} spellCheck={false} />
+        </label>
+        <label className="form-label">输出样例（JSON）
+          <textarea className="field" rows={7} value={outputSample} onChange={(e) => setOutputSample(e.target.value)} spellCheck={false} />
+        </label>
+      </div>
+      <div className="flex wrap" style={{ alignItems: "center", gap: 10 }}>
+        <button className="btn sm primary" type="button" onClick={run}>运行契约测试</button>
+        <span className="tiny">测试对象：{skill.skill_id} · v{skill.version} · Manifest #{skill.manifest_version}</span>
+      </div>
+      {error && <div className="note" role="alert" style={{ color: "var(--red)" }}>{error}</div>}
+      {checks && <div className="skill-contract-results" role="status">
+        <strong>{checks.filter((item) => item.pass).length}/{checks.length} 项通过</strong>
+        {checks.map((item, index) => <div key={`${item.label}-${index}`} className={item.pass ? "pass" : "fail"}>
+          {item.pass ? "✓" : "✕"} {item.label} · {item.detail}
+        </div>)}
+      </div>}
+      <div className="note" style={{ marginTop: 10 }}>
+        安全边界：这是输入/输出契约测试，不会执行 Skill 代码、调用 Agent 工具或访问外网。当前自定义 Skill 仍是元数据登记，尚无可执行运行时。
+      </div>
+    </div>
+  );
+}
+
+function AuditPagination({ total, page, pageSize, onPageChange }: {
+  total: number; page: number; pageSize: number; onPageChange: (page: number) => void;
+}) {
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  if (total <= pageSize) return null;
+  return <div className="pagination-bar">
+    <span className="pagination-summary">共 {total} 条 · 第 {page}/{pages} 页{total >= 2000 ? " · 当前最多加载最近 2000 条" : ""}</span>
+    <div className="pagination-actions">
+      <button className="btn sm" disabled={page <= 1} onClick={() => onPageChange(page - 1)}>上一页</button>
+      <button className="btn sm" disabled={page >= pages} onClick={() => onPageChange(page + 1)}>下一页</button>
+    </div>
+  </div>;
 }
 
 // ============================================================ AI 审计链
@@ -577,12 +731,14 @@ function AuditPane() {
   const [redlines, setRedlines] = useState<RedlineRecord[] | null>(null);
   const [redlinesError, setRedlinesError] = useState<string | null>(null);
   const [auditTab, setAuditTab] = useState<"ai" | "override" | "redline">("ai");
+  const [auditPage, setAuditPage] = useState(1);
+  const auditPageSize = 25;
 
   const loadAudit = async () => {
     setAiCallsError(null); setOverridesError(null); setRedlinesError(null);
-    try { setAiCalls(await api.aiCalls(200)); } catch (e: any) { setAiCallsError(e.message); }
-    try { setOverrides(await api.userOverride(200)); } catch (e: any) { setOverridesError(e.message); }
-    try { setRedlines(await api.redlineHistory(200)); } catch (e: any) { setRedlinesError(e.message); }
+    try { setAiCalls(await api.aiCalls(2000)); } catch (e: any) { setAiCallsError(e.message); }
+    try { setOverrides(await api.userOverride(2000)); } catch (e: any) { setOverridesError(e.message); }
+    try { setRedlines(await api.redlineHistory(2000)); } catch (e: any) { setRedlinesError(e.message); }
   };
   useEffect(() => { loadAudit(); }, []);
 
@@ -605,7 +761,7 @@ function AuditPane() {
           ] as const).map((t) => (
             <button
               key={t.key}
-              onClick={() => setAuditTab(t.key)}
+              onClick={() => { setAuditTab(t.key); setAuditPage(1); }}
               style={{
                 padding: "6px 14px",
                 fontSize: 12,
@@ -636,7 +792,7 @@ function AuditPane() {
                     <th>Tokens In</th><th>Tokens Out</th><th>延迟</th><th>结果</th>
                   </tr></thead>
                   <tbody>
-                    {aiCalls.slice(0, 100).map((r) => (
+                    {aiCalls.slice((auditPage - 1) * auditPageSize, auditPage * auditPageSize).map((r) => (
                       <tr key={r.id}>
                         <td style={{ fontSize: 11, fontFamily: "monospace", color: "var(--subtle)" }}>{r.called_at}</td>
                         <td style={{ fontSize: 12, fontFamily: "monospace" }}>{r.step}</td>
@@ -652,7 +808,7 @@ function AuditPane() {
                     ))}
                   </tbody>
                 </table>
-                {aiCalls.length > 100 && <div style={{ fontSize: 11, color: "var(--subtle)", marginTop: 6 }}>只显示最近 100 条（共 {aiCalls.length} 条）</div>}
+                <AuditPagination total={aiCalls.length} page={auditPage} pageSize={auditPageSize} onPageChange={setAuditPage} />
               </div>
             )}
           </>
@@ -673,7 +829,7 @@ function AuditPane() {
                     <th>时间</th><th>轮次</th><th>字段</th><th>原值</th><th>新值</th><th>操作人</th><th>原因</th>
                   </tr></thead>
                   <tbody>
-                    {overrides.slice(0, 100).map((r) => (
+                    {overrides.slice((auditPage - 1) * auditPageSize, auditPage * auditPageSize).map((r) => (
                       <tr key={r.id}>
                         <td style={{ fontSize: 11, fontFamily: "monospace", color: "var(--subtle)" }}>{r.overridden_at}</td>
                         <td>{r.round_id ? `#${r.round_id}` : <span style={{ color: "var(--subtle)" }}>—</span>}</td>
@@ -686,6 +842,7 @@ function AuditPane() {
                     ))}
                   </tbody>
                 </table>
+                <AuditPagination total={overrides.length} page={auditPage} pageSize={auditPageSize} onPageChange={setAuditPage} />
               </div>
             )}
           </>
@@ -706,7 +863,7 @@ function AuditPane() {
                     <th>时间</th><th>轮次</th><th>平台</th><th>标题</th><th>拦截类型</th><th>原因</th>
                   </tr></thead>
                   <tbody>
-                    {redlines.slice(0, 100).map((r) => (
+                    {redlines.slice((auditPage - 1) * auditPageSize, auditPage * auditPageSize).map((r) => (
                       <tr key={r.id}>
                         <td style={{ fontSize: 11, fontFamily: "monospace", color: "var(--subtle)" }}>{r.created_at}</td>
                         <td>{r.round_id ? `#${r.round_id}` : "—"}</td>
@@ -725,6 +882,7 @@ function AuditPane() {
                 <div style={{ fontSize: 11, color: "var(--subtle)", marginTop: 6 }}>
                   ✦ 终极目标检查器 → 违反账号定位 → 拦截打回；拦截历史永久审计可追溯
                 </div>
+                <AuditPagination total={redlines.length} page={auditPage} pageSize={auditPageSize} onPageChange={setAuditPage} />
               </div>
             )}
           </>

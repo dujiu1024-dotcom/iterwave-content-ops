@@ -1254,3 +1254,25 @@ def test_orchestration_rejects_unregistered_disabled_and_unsupported_custom_skil
 
     saved = tc.put("/api/orchestration", json={"steps": steps})
     assert saved.status_code == 422
+
+
+def test_assets_endpoint_returns_database_pagination_and_exact_total(client):
+    for index in range(23):
+        response = client.post(
+            "/api/assets",
+            json={"asset_type": "voice", "title": f"voice-{index}", "body": "sample"},
+        )
+        assert response.status_code == 200
+
+    first = client.get("/api/assets?asset_type=voice&page=1&page_size=10")
+    second = client.get("/api/assets?asset_type=voice&page=2&page_size=10")
+    third = client.get("/api/assets?asset_type=voice&page=3&page_size=10")
+
+    assert first.status_code == second.status_code == third.status_code == 200
+    assert first.json()["total"] == 23
+    assert first.json()["pages"] == 3
+    assert len(first.json()["items"]) == 10
+    assert len(second.json()["items"]) == 10
+    assert len(third.json()["items"]) == 3
+    ids = [item["id"] for response in (first, second, third) for item in response.json()["items"]]
+    assert len(ids) == len(set(ids)) == 23
