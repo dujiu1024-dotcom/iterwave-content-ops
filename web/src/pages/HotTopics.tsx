@@ -38,7 +38,7 @@ export default function HotTopics() {
   const [pageTab, setPageTab] = useUrlTab<PageTab>(PAGE_TABS, "list");
   const [keyword, setKeyword] = useState("");
   const [sortBy, setSortBy] = useState<"heat" | "match">("heat");
-  const [limit, setLimit] = useState(20);
+  const [page, setPage] = useState(1);
   const [hot, setHot] = useState<HotTopicsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -49,6 +49,8 @@ export default function HotTopics() {
   const [cfgError, setCfgError] = useState<string | null>(null);
   const [gates, setGates] = useState({ heat: "", heatOn: true, hours: "", timeOn: true });
   const [importingKey, setImportingKey] = useState<string | null>(null);
+
+  useEffect(() => { setPage(1); }, [tab, keyword, sortBy]);
 
   /** 热点转选题必须带来源与原文链接；敏感热点必须由操作人二次确认。 */
   async function importTopic(h: HotTopicItem) {
@@ -224,6 +226,10 @@ export default function HotTopics() {
     .sort((a, b) => sortBy === "match"
       ? (b.match_score ?? -1) - (a.match_score ?? -1)
       : (b.heat ?? -1) - (a.heat ?? -1));
+
+  const pageSize = 20;
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const pageItems = filtered.slice((page - 1) * pageSize, page * pageSize);
 
   const sources = hot?.sources || [];
   const failedSources = sources.filter((s) => s.status === "failed");
@@ -451,7 +457,7 @@ export default function HotTopics() {
       ) : (
         <>
         <div className="hot-grid">
-          {filtered.slice(0, limit).map((h, idx) => {
+          {pageItems.map((h, idx) => {
             const key = `${h.source}|${h.title}`;
             return (
             <div key={`${h.id}-${idx}`} className="hot-card">
@@ -522,9 +528,11 @@ export default function HotTopics() {
             );
           })}
         </div>
-        {filtered.length > limit && (
-          <div style={{ textAlign: "center", marginTop: 14 }}>
-            <button className="btn" onClick={() => setLimit((n) => n + 20)}>再显示 20 条（剩余 {filtered.length - limit} 条）</button>
+        {pageCount > 1 && (
+          <div className="pagination-row" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, flexWrap: "wrap", marginTop: 14 }}>
+            <button className="btn sm" disabled={page <= 1} onClick={() => setPage((n) => Math.max(1, n - 1))}>上一页</button>
+            <span className="tiny">第 {page} / {pageCount} 页 · 共 {filtered.length} 条热点</span>
+            <button className="btn sm" disabled={page >= pageCount} onClick={() => setPage((n) => Math.min(pageCount, n + 1))}>下一页</button>
           </div>
         )}
         </>
