@@ -440,7 +440,7 @@ function PublishPane() {
 
   const fetchDrafts = async () => {
     try {
-      const all = await api.drafts();
+      const all = await api.draftsAll();
       // draft_pending 代表仅保存在本地的干跑/待存内容；用户可以复制到平台手动发布后在这里登记。
       setDrafts(all.filter((d) =>
         d.status === "draft_pending" || d.status === "draft_saved" ||
