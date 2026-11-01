@@ -227,7 +227,6 @@ SCALAR_RULES: dict[str, tuple[type, float | None, float | None]] = {
     "copy_generation.max_output_tokens": (int, 128, 8192),
     "activation.account_description_min_chars": (int, 1, 100),
     "activation.account_description_max_chars": (int, 20, 1000),
-    "activation.max_runs_per_day": (int, 1, 100),
     "activation.stale_task_timeout_minutes": (int, 5, 240),
     "activation.sample_max_output_tokens": (int, 128, 8192),
     "activation.max_model_calls_per_run": (int, 3, 30),

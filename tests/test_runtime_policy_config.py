@@ -356,7 +356,6 @@ def test_llm_copy_and_activation_limits_are_runtime_configurable(cfg, conn):
         "copy_generation.max_output_tokens",
         "activation.account_description_min_chars",
         "activation.account_description_max_chars",
-        "activation.max_runs_per_day",
         "activation.stale_task_timeout_minutes",
         "activation.sample_max_output_tokens",
         "activation.max_model_calls_per_run",
@@ -368,7 +367,6 @@ def test_llm_copy_and_activation_limits_are_runtime_configurable(cfg, conn):
         "llm.retry_attempts": 3,
         "llm.retry_backoff_seconds": 2.5,
         "copy_generation.max_output_tokens": 1800,
-        "activation.max_runs_per_day": 8,
         "activation.stale_task_timeout_minutes": 45,
         "activation.sample_max_output_tokens": 1600,
         "activation.max_model_calls_per_run": 12,
@@ -376,12 +374,12 @@ def test_llm_copy_and_activation_limits_are_runtime_configurable(cfg, conn):
     assert cfg.llm.retry_attempts == 3
     assert cfg.llm.retry_backoff_seconds == 2.5
     assert cfg.copy_generation.max_output_tokens == 1800
-    assert cfg.activation.max_runs_per_day == 8
     assert cfg.activation.stale_task_timeout_minutes == 45
     assert cfg.activation.sample_max_output_tokens == 1600
     assert cfg.activation.max_model_calls_per_run == 12
-    with pytest.raises(ConfigPatchError):
-        patch_config(cfg, conn, {"activation.max_runs_per_day": 0})
+    assert "activation.max_runs_per_day" not in visible
+    with pytest.raises((ConfigNotAllowedError, ConfigPatchError)):
+        patch_config(cfg, conn, {"activation.max_runs_per_day": 8})
 
 
 def test_numeric_output_token_limits_are_not_misclassified_as_credentials():

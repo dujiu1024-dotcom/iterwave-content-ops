@@ -1728,14 +1728,13 @@ def _register_routes(app: FastAPI) -> None:
             "activation_limits": {
                 "account_description_min_chars": cfg.activation.account_description_min_chars,
                 "account_description_max_chars": cfg.activation.account_description_max_chars,
-                "max_runs_per_day": cfg.activation.max_runs_per_day,
                 "sample_max_output_tokens": cfg.activation.sample_max_output_tokens,
                 "max_model_calls_per_run": cfg.activation.max_model_calls_per_run,
                 "max_total_output_tokens_per_run": (
                     cfg.activation.sample_max_output_tokens * cfg.activation.max_model_calls_per_run
                 ),
+                # 自用不设每日次数上限，仅展示今日已体验次数。
                 "daily_runs_used": int(daily_runs_used),
-                "daily_runs_remaining": max(0, cfg.activation.max_runs_per_day - int(daily_runs_used)),
             },
             "model_message": "模型配置已就绪，首次生成时验证连通性" if _llm_available(cfg) else "需要先配置自己的模型服务和 API Key",
             "formal_setup": {
@@ -1772,13 +1771,6 @@ def _register_routes(app: FastAPI) -> None:
         ).fetchone()
         if existing:
             return {"sample_run_id": existing["id"], "status": existing["status"], "deduplicated": True}
-        day_start = _now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat(sep=" ")
-        daily_runs = conn.execute(
-            "SELECT COUNT(*) FROM sample_runs WHERE tenant_id=? AND created_at>=?",
-            (tenant_id, day_start),
-        ).fetchone()[0]
-        if daily_runs >= activation_cfg.max_runs_per_day:
-            raise HTTPException(429, "今日快速体验次数已用完；可明日重试，或继续使用正式运营工作台")
         active = conn.execute(
             "SELECT COUNT(*) FROM sample_runs WHERE tenant_id=? AND status IN ('created','generating','quality_check')",
             (tenant_id,),
@@ -7475,6 +7467,13 @@ def _register_routes(app: FastAPI) -> None:
         return {"ok": True, "has_key": bool(os.environ.get(key_name))}
 
     # --- 内容资产（G-13：外部参考 / 个人观点 / 内容模板）---
+    def _asset_out(row) -> dict:
+        """统一内容资产输出：SQLite 的 is_active 0/1 序列化为 bool，与 archive/restore 返回一致。"""
+        item = dict(row)
+        if "is_active" in item:
+            item["is_active"] = bool(item["is_active"]) if item["is_active"] is not None else True
+        return item
+
     @app.get("/api/assets")
     def list_assets(
         asset_type: Optional[str] = Query(None),
@@ -7501,7 +7500,7 @@ def _register_routes(app: FastAPI) -> None:
                 params,
             ).fetchall()
             total = conn.execute("SELECT COUNT(*) FROM content_assets" + where, params).fetchone()[0]
-            return {"items": [dict(r) for r in rows], "total": total}
+            return {"items": [_asset_out(r) for r in rows], "total": total}
         total = conn.execute("SELECT COUNT(*) FROM content_assets" + where, params).fetchone()[0]
         rows = conn.execute(
             "SELECT * FROM content_assets" + where +
@@ -7509,7 +7508,7 @@ def _register_routes(app: FastAPI) -> None:
             [*params, page_size, (page - 1) * page_size],
         ).fetchall()
         return {
-            "items": [dict(r) for r in rows],
+            "items": [_asset_out(r) for r in rows],
             "total": total,
             "page": page,
             "page_size": page_size,
@@ -7538,7 +7537,7 @@ def _register_routes(app: FastAPI) -> None:
         conn.commit()
         row = conn.execute("SELECT * FROM content_assets WHERE id = ?",
                            (cur.lastrowid,)).fetchone()
-        return dict(row)
+        return _asset_out(row)
 
     @app.put("/api/assets/{asset_id}")
     def update_asset(asset_id: int, req: CreateAssetRequest):
@@ -7575,7 +7574,7 @@ def _register_routes(app: FastAPI) -> None:
             )
         conn.commit()
         row = conn.execute("SELECT * FROM content_assets WHERE id=?", (asset_id,)).fetchone()
-        return dict(row)
+        return _asset_out(row)
 
     @app.get("/api/assets/{asset_id}/versions")
     def list_asset_versions(asset_id: int):
@@ -7621,7 +7620,7 @@ def _register_routes(app: FastAPI) -> None:
             (previous["title"], previous["body"], next_version, now, asset_id),
         )
         conn.commit()
-        return dict(conn.execute("SELECT * FROM content_assets WHERE id=?", (asset_id,)).fetchone())
+        return _asset_out(conn.execute("SELECT * FROM content_assets WHERE id=?", (asset_id,)).fetchone())
 
     @app.post("/api/assets/{asset_id}/archive")
     def archive_asset(asset_id: int):

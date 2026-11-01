@@ -80,7 +80,6 @@ platform_link_domains:
 activation:
   account_description_min_chars: 10
   account_description_max_chars: 300
-  max_runs_per_day: 5
   stale_task_timeout_minutes: 30
   sample_max_output_tokens: 1200
   max_model_calls_per_run: 9

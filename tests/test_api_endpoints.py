@@ -2603,7 +2603,7 @@ def test_content_template_versions_and_lifecycle_are_preserved(client):
     template = created.json()
     template_id = template["id"]
     assert template["version"] == 1
-    assert template["is_active"] == 1
+    assert template["is_active"] is True
 
     updated = tc.put(f"/api/assets/{template_id}", json={
         "asset_type": "template",
@@ -2630,8 +2630,14 @@ def test_content_template_versions_and_lifecycle_are_preserved(client):
     assert archived.json()["is_active"] is False
     assert tc.get("/api/assets?asset_type=template").json()["total"] == 0
     assert tc.get("/api/assets?asset_type=template&include_inactive=true").json()["total"] == 1
+    # 列表接口与 archive/restore 一致返回 bool，前端「已停用」标签和恢复按钮依赖此值。
+    inactive_items = tc.get("/api/assets?asset_type=template&include_inactive=true&page=1").json()["items"]
+    assert inactive_items[0]["is_active"] is False
+    legacy_items = tc.get("/api/assets?asset_type=template&include_inactive=true").json()["items"]
+    assert legacy_items[0]["is_active"] is False
 
     restored = tc.post(f"/api/assets/{template_id}/restore")
     assert restored.status_code == 200
     assert restored.json()["is_active"] is True
     assert tc.get("/api/assets?asset_type=template").json()["total"] == 1
+    assert tc.get("/api/assets?asset_type=template&page=1").json()["items"][0]["is_active"] is True
