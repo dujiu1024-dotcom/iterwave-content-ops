@@ -723,7 +723,6 @@ function BreakerPane({
             </tbody>
           </table>
         </div>
-        <HistoryPager total={total} page={page} pages={pages} onPageChange={onPageChange} />
       </div>
     </>
   );
@@ -1267,6 +1266,7 @@ function NotificationsPane({ items, rules, total, page, pages, onPageChange, onC
             </tbody>
           </table>
         </div>
+        <HistoryPager total={total} page={page} pages={pages} onPageChange={onPageChange} />
       </div>
     </>
   );
