@@ -704,6 +704,11 @@ export interface ConfigMetadataItem {
   description: string;
 }
 
+export interface ConfigAuditItem {
+  id: number; key: string; old_value: string | null; new_value: string | null; changed_at: string | null;
+}
+export interface ConfigAuditPage extends PageResult<ConfigAuditItem> {}
+
 export interface SystemConfigView {
   editable: {
     business_timezone: string;
@@ -1734,6 +1739,8 @@ export const api = {
     }),
   // === G-13 / G-24 运行时配置 ===
   config: () => fetchJson<SystemConfigView>("/api/config"),
+  configAuditPage: (page: number, pageSize = 20) =>
+    fetchJson<ConfigAuditPage>(`/api/config/audit?page=${page}&page_size=${pageSize}`),
   configMetadata: () => fetchJson<{ items: ConfigMetadataItem[] }>("/api/config/metadata"),
   patchConfig: (updates: Record<string, unknown>) =>
     fetchJson<{ changed: { key: string; old: unknown; new: unknown }[]; noop: boolean; restart_required?: boolean; config: SystemConfigView["editable"] }>(
