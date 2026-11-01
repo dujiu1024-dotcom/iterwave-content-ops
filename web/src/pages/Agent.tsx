@@ -434,6 +434,8 @@ function SkillsPane() {
   const [skillInputsJson, setSkillInputsJson] = useState("[]");
   const [skillOutputsJson, setSkillOutputsJson] = useState("[]");
   const [skillPermissions, setSkillPermissions] = useState<string[]>([]);
+  const [editingSkillId, setEditingSkillId] = useState<string | null>(null);
+  const [editingSkillVersion, setEditingSkillVersion] = useState<number | null>(null);
   const [draftTest, setDraftTest] = useState<ReturnType<typeof inspectSkillManifest> | null>(null);
   const [savedTests, setSavedTests] = useState<Record<string, ReturnType<typeof inspectSkillManifest>>>({});
 
@@ -452,7 +454,8 @@ function SkillsPane() {
   useEffect(() => { void load(); }, []);
 
   const register = async () => {
-    await withPending("skill:register", async () => {
+    const pendingKey = editingSkillId ? `skill:update:${editingSkillId}` : "skill:register";
+    await withPending(pendingKey, async () => {
       try {
         const inputs: unknown = JSON.parse(skillInputsJson);
         const outputs: unknown = JSON.parse(skillOutputsJson);
@@ -462,22 +465,40 @@ function SkillsPane() {
         if (!validSchemaList(inputs) || !validSchemaList(outputs)) {
           throw new Error("输入和输出 Schema 必须是最多 30 项的 JSON 对象数组");
         }
-        await api.registerTenantSkill({
-          skill_id: skillId.trim().toLowerCase(),
+        const manifest = {
           name: skillName.trim(),
           version: skillVersion.trim(),
           description: skillDescription.trim(),
           category: skillCategory.trim().toLowerCase() || "custom",
-          inputs,
-          outputs,
-          permissions: skillPermissions,
-        });
-        showToast("Skill manifest 已登记，默认停用且不会执行代码", "success");
+          inputs, outputs, permissions: skillPermissions,
+        };
+        if (editingSkillId && editingSkillVersion != null) {
+          await api.updateTenantSkill(editingSkillId, { ...manifest, manifest_version: editingSkillVersion });
+          showToast("Skill manifest 已更新", "success");
+        } else {
+          await api.registerTenantSkill({ skill_id: skillId.trim().toLowerCase(), ...manifest });
+          showToast("Skill manifest 已登记，默认停用且不会执行代码", "success");
+        }
         setSkillId(""); setSkillName(""); setSkillDescription(""); setSkillVersion("1.0.0");
         setSkillInputsJson("[]"); setSkillOutputsJson("[]"); setSkillPermissions([]);
+        setEditingSkillId(null); setEditingSkillVersion(null); setDraftTest(null);
         await load();
-      } catch (e: any) { showToast(`登记失败：${e?.message ?? e}`, "error"); }
+      } catch (e: any) { showToast(`${editingSkillId ? "更新" : "登记"}失败：${e?.message ?? e}`, "error"); }
     });
+  };
+
+  const editSkill = (skill: TenantSkillManifest) => {
+    setEditingSkillId(skill.skill_id);
+    setEditingSkillVersion(skill.manifest_version);
+    setSkillId(skill.skill_id);
+    setSkillName(skill.name);
+    setSkillVersion(skill.version);
+    setSkillDescription(skill.description);
+    setSkillCategory(skill.category);
+    setSkillInputsJson(JSON.stringify(skill.inputs, null, 2));
+    setSkillOutputsJson(JSON.stringify(skill.outputs, null, 2));
+    setSkillPermissions(skill.permissions);
+    setDraftTest(null);
   };
 
   const toggle = async (skill: TenantSkillManifest) => {
@@ -538,7 +559,7 @@ function SkillsPane() {
         </div>
         {loadError && <div className="note" style={{ color: "var(--red)" }}>加载失败：{loadError}</div>}
         <div className="skill-register-form">
-          <label>Skill ID<input className="field" value={skillId} onChange={(e) => setSkillId(e.target.value)} placeholder="例如 brand_voice_check" /></label>
+          <label>Skill ID<input className="field" disabled={Boolean(editingSkillId)} value={skillId} onChange={(e) => setSkillId(e.target.value)} placeholder="例如 brand_voice_check" /></label>
           <label>名称<input className="field" value={skillName} onChange={(e) => setSkillName(e.target.value)} maxLength={120} placeholder="能力名称" /></label>
           <label>版本<input className="field" value={skillVersion} onChange={(e) => setSkillVersion(e.target.value)} placeholder="1.0.0" /></label>
           <label>分类<input className="field" value={skillCategory} onChange={(e) => setSkillCategory(e.target.value)} placeholder="custom" /></label>
@@ -564,9 +585,10 @@ function SkillsPane() {
                 setDraftTest({ checks: [{ label: "JSON 语法", pass: false }], passed: 0, total: 1 });
               }
             }}>运行配置自检</button>
-            <button className="btn primary" disabled={!skillId.trim() || !skillName.trim() || isPending("skill:register")} onClick={register}>
-              {isPending("skill:register") ? "登记中…" : "登记 Skill"}
+            <button className="btn primary" disabled={!skillId.trim() || !skillName.trim() || isPending(editingSkillId ? `skill:update:${editingSkillId}` : "skill:register")} onClick={register}>
+              {isPending(editingSkillId ? `skill:update:${editingSkillId}` : "skill:register") ? "保存中…" : editingSkillId ? "保存 Skill 修改" : "登记 Skill"}
             </button>
+            {editingSkillId && <button className="btn" type="button" onClick={() => { setEditingSkillId(null); setEditingSkillVersion(null); setSkillId(""); setSkillName(""); setSkillVersion("1.0.0"); setSkillDescription(""); setSkillCategory("custom"); setSkillInputsJson("[]"); setSkillOutputsJson("[]"); setSkillPermissions([]); }}>取消编辑</button>}
           </div>
           {draftTest && <div className="note" role="status" style={{ marginTop: 8 }}>
             自检结果：{draftTest.passed}/{draftTest.total} 项通过。{draftTest.checks.map((item) => <span key={item.label} style={{ display: "inline-block", marginRight: 10, color: item.pass ? "var(--green)" : "var(--red)" }}>{item.pass ? "✓" : "✕"} {item.label}</span>)}
@@ -587,6 +609,7 @@ function SkillsPane() {
                   <td>{skill.permissions.length ? skill.permissions.join("、") : "无"}</td>
                   <td><span className={skill.enabled ? "tag green" : "tag gray"}>{skill.enabled ? "已启用（仅登记）" : "已停用"}</span></td>
                   <td><div className="skill-row-actions">
+                    <button className="btn sm" type="button" onClick={() => editSkill(skill)}>编辑</button>
                     <button className="btn sm" type="button" onClick={() => setSavedTests((old) => ({ ...old, [skill.skill_id]: inspectSkillManifest(skill) }))}>配置自检</button>
                     <button className="btn sm" disabled={isPending(`skill:toggle:${skill.skill_id}`)} onClick={() => void toggle(skill)}>{skill.enabled ? "停用" : "启用"}</button>
                     <button className="btn sm" disabled={skill.enabled || isPending(`skill:delete:${skill.skill_id}`)} onClick={() => void remove(skill)}>删除</button>

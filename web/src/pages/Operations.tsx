@@ -69,15 +69,27 @@ export default function Operations() {
   // 各子页数据源
   const [kpi, setKpi] = useState<OpsKpiResponse | null>(null);
   const [logs, setLogs] = useState<OpsLogItem[]>([]);
-  const [logsTotal, setLogsTotal] = useState(0);
-  const [logsPage, setLogsPage] = useState(1);
-  const [tasksPage, setTasksPage] = useState(1);
-  const [tasksHasMore, setTasksHasMore] = useState(false);
-  const [notifsPage, setNotifsPage] = useState(1);
-  const [notifsHasMore, setNotifsHasMore] = useState(false);
-  const listPageSize = 10;
   const [tasks, setTasks] = useState<TaskRunItem[]>([]);
   const [notifs, setNotifs] = useState<NotificationItem[]>([]);
+  const [logsPage, setLogsPage] = useState(1);
+  const [logsTotal, setLogsTotal] = useState(0);
+  const [logsPages, setLogsPages] = useState(1);
+  const [tasksPage, setTasksPage] = useState(1);
+  const [tasksTotal, setTasksTotal] = useState(0);
+  const [tasksPages, setTasksPages] = useState(1);
+  const [logsPlatform, setLogsPlatform] = useState<Platform | "">("");
+  const [logsStatus, setLogsStatus] = useState("");
+  const [logsDateFrom, setLogsDateFrom] = useState("");
+  const [logsDateTo, setLogsDateTo] = useState("");
+  const [tasksPlatform, setTasksPlatform] = useState<Platform | "">("");
+  const [tasksStatus, setTasksStatus] = useState("");
+  const [tasksType, setTasksType] = useState("");
+  const [tasksDateFrom, setTasksDateFrom] = useState("");
+  const [tasksDateTo, setTasksDateTo] = useState("");
+  const [notifsPage, setNotifsPage] = useState(1);
+  const [notifsTotal, setNotifsTotal] = useState(0);
+  const [notifsPages, setNotifsPages] = useState(1);
+  const historyPageSize = 20;
   const [notifRules, setNotifRules] = useState<NotifyRule[]>([]);
   const [jobs, setJobs] = useState<{ jobs: SchedulerJob[]; running: boolean } | null>(null);
   const [rhythm, setRhythm] = useState<RhythmConfig | null>(null);
@@ -94,9 +106,9 @@ export default function Operations() {
     try {
       const results = await Promise.allSettled([
         show("kpi") || show("logs") ? api.opsKpi(kpiDays) : Promise.resolve(null),
-        show("logs") ? api.opsLogs(undefined, undefined, undefined, listPageSize, (logsPage - 1) * listPageSize) : Promise.resolve(null),
-        show("tasks") ? api.taskRuns(undefined, undefined, listPageSize + 1, (tasksPage - 1) * listPageSize) : Promise.resolve(null),
-        show("notifications") ? api.notifications(undefined, listPageSize + 1, (notifsPage - 1) * listPageSize) : Promise.resolve(null),
+        show("logs") ? api.opsLogsPage(logsPage, historyPageSize, { platform: logsPlatform || undefined, status: logsStatus || undefined, dateFrom: logsDateFrom || undefined, dateTo: logsDateTo || undefined }) : Promise.resolve(null),
+        show("tasks") ? api.taskRunsPage(tasksPage, historyPageSize, { platform: tasksPlatform || undefined, status: tasksStatus || undefined, taskType: tasksType || undefined, dateFrom: tasksDateFrom || undefined, dateTo: tasksDateTo || undefined }) : Promise.resolve(null),
+        show("notifications") ? api.notificationsPage(notifsPage, historyPageSize) : Promise.resolve(null),
         show("notifications") ? api.notifyRules() : Promise.resolve(null),
         show("scheduler") ? api.schedulerJobs() : Promise.resolve(null),
         show("rhythm") ? api.rhythm() : Promise.resolve(null),
@@ -107,12 +119,15 @@ export default function Operations() {
       const logsRes = unpack(results[1]);
       setLogs(logsRes?.items ?? []);
       setLogsTotal(logsRes?.total ?? 0);
-      const taskRows = unpack(results[2]) ?? [];
-      setTasks(taskRows.slice(0, listPageSize));
-      setTasksHasMore(taskRows.length > listPageSize);
-      const notificationRows = unpack(results[3]) ?? [];
-      setNotifs(notificationRows.slice(0, listPageSize));
-      setNotifsHasMore(notificationRows.length > listPageSize);
+      setLogsPages(logsRes?.pages ?? 1);
+      const tasksRes = unpack(results[2]);
+      setTasks(tasksRes?.items ?? []);
+      setTasksTotal(tasksRes?.total ?? 0);
+      setTasksPages(tasksRes?.pages ?? 1);
+      const notifsRes = unpack(results[3]);
+      setNotifs(notifsRes?.items ?? []);
+      setNotifsTotal(notifsRes?.total ?? 0);
+      setNotifsPages(notifsRes?.pages ?? 1);
       setNotifRules(unpack(results[4]) ?? []);
       setJobs(unpack(results[5]));
       setRhythm(unpack(results[6]));
@@ -131,7 +146,7 @@ export default function Operations() {
     }
   };
 
-  useEffect(() => { refresh(); }, [tab, kpiDays, logsPage, tasksPage, notifsPage]);
+  useEffect(() => { refresh(); }, [tab, kpiDays, logsPage, tasksPage, notifsPage, logsPlatform, logsStatus, logsDateFrom, logsDateTo, tasksPlatform, tasksStatus, tasksType, tasksDateFrom, tasksDateTo]);
 
   const testNotify = async () => {
     setNotifBusy(true);
@@ -201,7 +216,7 @@ export default function Operations() {
       {show("kpi") && <KpiPane kpi={kpi} days={kpiDays} onDaysChange={setKpiDays} />}
 
       {/* === 2. 评论日志 === */}
-      {show("logs") && <LogsPane logs={logs} page={logsPage} total={logsTotal} onPageChange={setLogsPage} />}
+      {show("logs") && <LogsPane logs={logs} total={logsTotal} page={logsPage} pages={logsPages} onPageChange={setLogsPage} onResolved={refresh} platform={logsPlatform} status={logsStatus} dateFrom={logsDateFrom} dateTo={logsDateTo} onFiltersChange={(v) => { setLogsPage(1); setLogsPlatform(v.platform); setLogsStatus(v.status); setLogsDateFrom(v.dateFrom); setLogsDateTo(v.dateTo); }} />}
 
       {/* === 3. 发布确认 === */}
       {show("publish") && <PublishPane />}
@@ -225,7 +240,7 @@ export default function Operations() {
       )}
 
       {/* === 5. 任务追踪 === */}
-      {show("tasks") && <TasksPane tasks={tasks} page={tasksPage} hasMore={tasksHasMore} onPageChange={setTasksPage} onResolved={refresh} />}
+      {show("tasks") && <TasksPane tasks={tasks} total={tasksTotal} page={tasksPage} pages={tasksPages} onPageChange={setTasksPage} onResolved={refresh} platform={tasksPlatform} status={tasksStatus} taskType={tasksType} dateFrom={tasksDateFrom} dateTo={tasksDateTo} onFiltersChange={(v) => { setTasksPage(1); setTasksPlatform(v.platform); setTasksStatus(v.status); setTasksType(v.taskType); setTasksDateFrom(v.dateFrom); setTasksDateTo(v.dateTo); }} />}
 
       {/* === 6. 定时任务 === */}
       {show("scheduler") && <SchedulerPane jobs={jobs} onTriggered={refresh} />}
@@ -234,7 +249,7 @@ export default function Operations() {
       {show("rhythm") && <RhythmPane rhythm={rhythm} onSaved={refresh} />}
 
       {/* === 8. 通知中心 === */}
-      {show("notifications") && <NotificationsPane items={notifs} rules={notifRules} page={notifsPage} hasMore={notifsHasMore} onPageChange={setNotifsPage} onChanged={refresh} />}
+      {show("notifications") && <NotificationsPane items={notifs} rules={notifRules} total={notifsTotal} page={notifsPage} pages={notifsPages} onPageChange={setNotifsPage} onChanged={refresh} />}
     </>
   );
 }
@@ -379,25 +394,56 @@ function KpiCard({ label, value, hint, color }: { label: string; value: number; 
   );
 }
 
-function LogsPane({ logs, page, total, onPageChange }: {
-  logs: OpsLogItem[]; page: number; total: number; onPageChange: (page: number) => void;
+function LogsPane({ logs, total, page, pages, onPageChange, onResolved, platform, status, dateFrom, dateTo, onFiltersChange }: {
+  logs: OpsLogItem[]; total: number; page: number; pages: number; onPageChange: (page: number) => void;
+  onResolved?: () => void;
+  platform: Platform | ""; status: string; dateFrom: string; dateTo: string;
+  onFiltersChange: (value: { platform: Platform | ""; status: string; dateFrom: string; dateTo: string }) => void;
 }) {
+  const { showToast } = useApp();
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [resolveError, setResolveError] = useState<string | null>(null);
+  const resolve = async (id: number, action: "sent" | "not_sent") => {
+    setBusyId(id);
+    setResolveError(null);
+    try {
+      const result = await api.resolveOpsLog(id, action);
+      showToast(result.already_resolved ? "该日志已核实" : "运营日志已核实并记录审计", "success");
+      onResolved?.();
+    } catch (error) {
+      setResolveError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusyId(null);
+    }
+  };
   return (
     <div className="panel">
       <div className="panel-head">
         <div>
           <div className="panel-title"><span className="icon">≋</span>运营日志</div>
-          <div className="panel-sub">共 {total} 条 · 当前第 {page} 页</div>
+          <div className="panel-sub">共 {total} 条 — 被动回复 / 主动评论 / 关注；待核实日志可逐条收口并留存审计。</div>
         </div>
+      </div>
+      {resolveError && <div className="panel-sub" style={{ padding: "0 16px 8px", color: "var(--red)" }}>{resolveError}</div>}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "0 16px 12px" }}>
+        <select aria-label="运营日志平台" value={platform} onChange={(e) => onFiltersChange({ platform: e.target.value as Platform | "", status, dateFrom, dateTo })}>
+          <option value="">全部平台</option><option value="xhs">小红书</option><option value="douyin">抖音</option><option value="kuaishou">快手</option><option value="wechat_channels">视频号</option>
+        </select>
+        <select aria-label="运营日志状态" value={status} onChange={(e) => onFiltersChange({ platform, status: e.target.value, dateFrom, dateTo })}>
+          <option value="">全部状态</option><option value="success">成功</option><option value="failed">失败</option><option value="pending_verify">待核实</option><option value="skipped">跳过</option><option value="circuit_broken">熔断拦截</option>
+        </select>
+        <input aria-label="运营日志开始日期" type="date" value={dateFrom} onChange={(e) => onFiltersChange({ platform, status, dateFrom: e.target.value, dateTo })} />
+        <input aria-label="运营日志结束日期" type="date" value={dateTo} onChange={(e) => onFiltersChange({ platform, status, dateFrom, dateTo: e.target.value })} />
+        <button className="btn sm ghost" onClick={() => onFiltersChange({ platform: "", status: "", dateFrom: "", dateTo: "" })}>清空筛选</button>
       </div>
       <div className="table-wrap">
         <table>
           <thead>
-            <tr><th>时间</th><th>平台</th><th>动作</th><th>内容摘要</th><th>状态</th></tr>
+            <tr><th>时间</th><th>平台</th><th>动作</th><th>内容摘要</th><th>状态</th><th>核实操作</th></tr>
           </thead>
           <tbody>
             {logs.length === 0 && (
-              <tr><td colSpan={5}>
+              <tr><td colSpan={6}>
                 <EmptyHint className="" next="到「发布确认与轮询」确认已发布，或等 30min 评论轮询产生日志">暂无运营日志</EmptyHint>
               </td></tr>
             )}
@@ -412,18 +458,16 @@ function LogsPane({ logs, page, total, onPageChange }: {
                   {l.content ?? l.target_author ?? "-"}
                 </td>
                 <td><span className={`demo-status ${STATUS_CLS[l.status] ?? ""}`}>{STATUS_LABEL[l.status] ?? l.status}</span></td>
+                <td>{l.status === "pending_verify" ? <div style={{ display: "flex", gap: 6 }}>
+                  <button className="btn sm" disabled={busyId === l.id} onClick={() => void resolve(l.id, "sent")}>已发出</button>
+                  <button className="btn sm ghost" disabled={busyId === l.id} onClick={() => void resolve(l.id, "not_sent")}>未发出</button>
+                </div> : l.resolution_action ? <span className="muted" title={l.resolution_note ?? ""}>已核实 · {l.resolved_at ? new Date(l.resolved_at).toLocaleString("zh-CN") : ""}</span> : "—"}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      {total > 10 && <div className="pagination-bar">
-        <span className="pagination-summary">第 {page} 页 · 共 {total} 条</span>
-        <div className="pagination-actions">
-          <button className="btn sm" disabled={page <= 1} onClick={() => onPageChange(page - 1)}>上一页</button>
-          <button className="btn sm" disabled={page * 10 >= total} onClick={() => onPageChange(page + 1)}>下一页</button>
-        </div>
-      </div>}
+      <HistoryPager total={total} page={page} pages={pages} onPageChange={onPageChange} />
     </div>
   );
 }
@@ -431,8 +475,6 @@ function LogsPane({ logs, page, total, onPageChange }: {
 function PublishPane() {
   const { showToast, withPending } = useApp();
   const [drafts, setDrafts] = useState<Draft[]>([]);
-  const [page, setPage] = useState(1);
-  const pageSize = 10;
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // 已发布笔记链接：被动评论轮询用它定位笔记；不填则该篇跳过轮询
@@ -444,13 +486,12 @@ function PublishPane() {
 
   const fetchDrafts = async () => {
     try {
-      const all = await api.drafts();
+      const all = await api.draftsAll();
       // draft_pending 代表仅保存在本地的干跑/待存内容；用户可以复制到平台手动发布后在这里登记。
       setDrafts(all.filter((d) =>
         d.status === "draft_pending" || d.status === "draft_saved" ||
         d.status === "user_published" || d.status === "data_fetching" || d.status === "published"
       ));
-      setPage(1);
       setError(null);
     } catch (e: any) {
       setError(e?.message ?? "加载草稿失败");
@@ -522,9 +563,6 @@ function PublishPane() {
     }
   };
 
-  const pageCount = Math.max(1, Math.ceil(drafts.length / pageSize));
-  const visibleDrafts = drafts.slice((page - 1) * pageSize, page * pageSize);
-
   return (
     <div className="panel">
       <div className="panel-head">
@@ -546,7 +584,7 @@ function PublishPane() {
         <EmptyHint next="可勾选「执行存草稿」后在此确认；干跑内容可复制到平台手动发布，再回来登记">暂无待确认发布的内容</EmptyHint>
       ) : (
         <div className="list">
-          {visibleDrafts.map((d) => (
+          {drafts.map((d) => (
             <div key={d.id} className="task-row">
               <i className={`task-prio ${d.status === "user_published" ? "green" : "orange"}`} />
               <div className="task-main">
@@ -668,13 +706,6 @@ function PublishPane() {
           ))}
         </div>
       )}
-      {drafts.length > pageSize && <div className="pagination-bar">
-        <span className="pagination-summary">共 {drafts.length} 条 · 第 {page}/{pageCount} 页</span>
-        <div className="pagination-actions">
-          <button className="btn sm" disabled={page <= 1} onClick={() => setPage((v) => v - 1)}>上一页</button>
-          <button className="btn sm" disabled={page >= pageCount} onClick={() => setPage((v) => v + 1)}>下一页</button>
-        </div>
-      </div>}
     </div>
   );
 }
@@ -743,12 +774,12 @@ function BreakerPane({
   );
 }
 
-function TasksPane({ tasks, page, hasMore, onPageChange, onResolved }: {
+function TasksPane({ tasks, total, page, pages, onPageChange, onResolved, platform, status, taskType, dateFrom, dateTo, onFiltersChange }: {
   tasks: TaskRunItem[];
-  page: number;
-  hasMore: boolean;
-  onPageChange: (page: number) => void;
+  total: number; page: number; pages: number; onPageChange: (page: number) => void;
   onResolved?: () => void;
+  platform: Platform | ""; status: string; taskType: string; dateFrom: string; dateTo: string;
+  onFiltersChange: (value: { platform: Platform | ""; status: string; taskType: string; dateFrom: string; dateTo: string }) => void;
 }) {
   const TYPE_LABEL: Record<string, string> = {
     publish_polling: "发布轮询", data_fetch: "数据采集", daily_ops: "每日运营",
@@ -775,10 +806,24 @@ function TasksPane({ tasks, page, hasMore, onPageChange, onResolved }: {
       <div className="panel-head">
         <div>
           <div className="panel-title"><span className="icon">⌁</span>任务追踪</div>
-          <div className="panel-sub">运行 / 中断 / 待核实 — 崩溃恢复的关键表</div>
+          <div className="panel-sub">共 {total} 条 · 运行 / 中断 / 待核实 — 崩溃恢复的关键表</div>
         </div>
       </div>
       {err && <div className="panel-sub" style={{ padding: "0 16px 8px", color: "var(--red)" }}>{err}</div>}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "0 16px 12px" }}>
+        <select aria-label="任务平台筛选" value={platform} onChange={(e) => onFiltersChange({ platform: e.target.value as Platform | "", status, taskType, dateFrom, dateTo })}>
+          <option value="">全部平台</option><option value="xhs">小红书</option><option value="douyin">抖音</option><option value="kuaishou">快手</option><option value="wechat_channels">视频号</option>
+        </select>
+        <select aria-label="任务状态筛选" value={status} onChange={(e) => onFiltersChange({ platform, status: e.target.value, taskType, dateFrom, dateTo })}>
+          <option value="">全部状态</option><option value="pending">待执行</option><option value="running">执行中</option><option value="interrupted">中断</option><option value="pending_verify">待核实</option><option value="success">成功</option><option value="failed">失败</option><option value="skipped">跳过</option>
+        </select>
+        <select aria-label="任务类型筛选" value={taskType} onChange={(e) => onFiltersChange({ platform, status, taskType: e.target.value, dateFrom, dateTo })}>
+          <option value="">全部任务类型</option><option value="publish_polling">发布轮询</option><option value="data_fetch">数据采集</option><option value="daily_ops">每日运营</option><option value="comment_polling">评论轮询</option><option value="cb_recovery">熔断恢复</option><option value="kb_scan">题库扫描</option><option value="draft_save">存草稿</option><option value="round_pipeline">轮次主流程</option><option value="data_retention_cleanup">数据清理</option>
+        </select>
+        <input aria-label="任务开始日期" type="date" value={dateFrom} onChange={(e) => onFiltersChange({ platform, status, taskType, dateFrom: e.target.value, dateTo })} />
+        <input aria-label="任务结束日期" type="date" value={dateTo} onChange={(e) => onFiltersChange({ platform, status, taskType, dateFrom, dateTo: e.target.value })} />
+        <button className="btn sm ghost" onClick={() => onFiltersChange({ platform: "", status: "", taskType: "", dateFrom: "", dateTo: "" })}>清空筛选</button>
+      </div>
       <div className="table-wrap">
         <table>
           <thead><tr><th>ID</th><th>类型</th><th>平台</th><th>状态</th><th>尝试</th><th>开始</th><th>结束</th><th>错误</th><th>操作</th></tr></thead>
@@ -813,13 +858,7 @@ function TasksPane({ tasks, page, hasMore, onPageChange, onResolved }: {
           </tbody>
         </table>
       </div>
-      {(page > 1 || hasMore) && <div className="pagination-bar">
-        <span className="pagination-summary">任务记录 · 第 {page} 页</span>
-        <div className="pagination-actions">
-          <button className="btn sm" disabled={page <= 1} onClick={() => onPageChange(page - 1)}>上一页</button>
-          <button className="btn sm" disabled={!hasMore} onClick={() => onPageChange(page + 1)}>下一页</button>
-        </div>
-      </div>}
+      <HistoryPager total={total} page={page} pages={pages} onPageChange={onPageChange} />
     </div>
   );
 }
@@ -1121,12 +1160,10 @@ function RhythmPane({ rhythm, onSaved }: { rhythm: RhythmConfig | null; onSaved?
   );
 }
 
-function NotificationsPane({ items, rules, page, hasMore, onPageChange, onChanged }: {
+function NotificationsPane({ items, rules, total, page, pages, onPageChange, onChanged }: {
   items: NotificationItem[];
   rules: NotifyRule[];
-  page: number;
-  hasMore: boolean;
-  onPageChange: (page: number) => void;
+  total: number; page: number; pages: number; onPageChange: (page: number) => void;
   onChanged?: () => void;
 }) {
   const { showToast } = useApp();
@@ -1207,7 +1244,7 @@ function NotificationsPane({ items, rules, page, hasMore, onPageChange, onChange
       <div className="panel">
         <div className="panel-head">
           <div>
-            <div className="panel-title"><span className="icon">⚙</span>通知规则（notify_rules 表）</div>
+            <div className="panel-title"><span className="icon">⚙</span>通知规则</div>
             <div className="panel-sub">
               某场景一旦有规则，就只按规则限定的通道/级别发送；没有规则 → 走 config 默认
             </div>
@@ -1267,7 +1304,7 @@ function NotificationsPane({ items, rules, page, hasMore, onPageChange, onChange
       <div className="panel">
         <div className="panel-head">
           <div className="panel-title"><span className="icon">♧</span>消息通知历史</div>
-          <div className="panel-sub">7 场景 × 4 级 × macOS/企微/飞书</div>
+          <div className="panel-sub">共 {total} 条历史通知 · 7 场景 × 4 级 × macOS/企微/飞书</div>
         </div>
         <div className="table-wrap">
           <table>
@@ -1291,14 +1328,24 @@ function NotificationsPane({ items, rules, page, hasMore, onPageChange, onChange
             </tbody>
           </table>
         </div>
-        {(page > 1 || hasMore) && <div className="pagination-bar">
-          <span className="pagination-summary">通知历史 · 第 {page} 页</span>
-          <div className="pagination-actions">
-            <button className="btn sm" disabled={page <= 1} onClick={() => onPageChange(page - 1)}>上一页</button>
-            <button className="btn sm" disabled={!hasMore} onClick={() => onPageChange(page + 1)}>下一页</button>
-          </div>
-        </div>}
+        <HistoryPager total={total} page={page} pages={pages} onPageChange={onPageChange} />
       </div>
     </>
+  );
+}
+
+
+function HistoryPager({ total, page, pages, onPageChange }: {
+  total: number; page: number; pages: number; onPageChange: (page: number) => void;
+}) {
+  if (total <= 0) return null;
+  return (
+    <div className="flex between center" style={{ padding: "12px 0 0", gap: 10, flexWrap: "wrap" }}>
+      <span className="note">共 {total} 条 · 第 {page}/{pages} 页 · 每页 20 条</span>
+      <div className="flex" style={{ gap: 6 }}>
+        <button className="btn sm" disabled={page <= 1} onClick={() => onPageChange(Math.max(1, page - 1))}>上一页</button>
+        <button className="btn sm" disabled={page >= pages} onClick={() => onPageChange(Math.min(pages, page + 1))}>下一页</button>
+      </div>
+    </div>
   );
 }

@@ -69,6 +69,10 @@ export default function Production() {
   const [tab, setTab] = useUrlTab<TabKey>(TABS.map((t) => t.key), "plan");
 
   const [rounds, setRounds] = useState<SpiralRound[]>([]);
+  const [roundsPage, setRoundsPage] = useState(1);
+  const [roundsTotal, setRoundsTotal] = useState(0);
+  const [roundsPages, setRoundsPages] = useState(1);
+  const roundsPageSize = 20;
   // 全局搜索可传入目标轮次，使跨页面跳转后选中正确轮次，而不是永远回到最新轮。
   const [currentRoundId, setCurrentRoundId] = useState<number | null>(() => {
     const raw = new URLSearchParams(window.location.search).get("focusRound");
@@ -128,8 +132,15 @@ export default function Production() {
   // ---------------------------------------------------------------- 数据加载
   const refresh = async () => {
     try {
-      const r = await api.rounds();
+      const pageResult = await api.roundsPage(roundsPage, roundsPageSize);
+      const r = pageResult.items;
       setRounds(r);
+      setRoundsTotal(pageResult.total);
+      setRoundsPages(pageResult.pages);
+      if (roundsPage > pageResult.pages) {
+        setRoundsPage(pageResult.pages);
+        return;
+      }
       try {
         const pool = await api.topicPool({ status: "active", limit: 1 });
         setAvailableTopicCount(pool.total);
@@ -188,7 +199,6 @@ export default function Production() {
     loadPlan();
     api.assets("template").then((r) => setTemplates(r.items)).catch(() => setTemplates([]));
     api.goals().then((g) => setGoals(g.filter((x) => x.status === "active"))).catch(() => {});
-    refresh().catch((e) => showToast(`加载轮次失败: ${e.message}`, "error"));
     api.status()
       .then((s) => {
         if (s.enabled_platforms?.length) setSelPlatforms(s.enabled_platforms);
@@ -196,6 +206,9 @@ export default function Production() {
       })
       .catch(() => { /* 用默认四平台 */ });
   }, []);
+  useEffect(() => {
+    refresh().catch((e) => showToast(`加载轮次失败: ${e.message}`, "error"));
+  }, [roundsPage]);
 
   useEffect(() => {
     if (currentRoundId) loadRoundData(currentRoundId);
@@ -1353,6 +1366,15 @@ export default function Production() {
                   <span className={`tag ${STATUS_CLS[r.status]}`}>{ROUND_STATUS_LABEL[r.status] ?? r.status}</span>
                 </div>
               ))}
+              {roundsTotal > 0 && (
+                <div className="flex between center" style={{ padding: "12px 0", gap: 10, flexWrap: "wrap" }}>
+                  <span className="note">共 {roundsTotal} 轮 · 第 {roundsPage}/{roundsPages} 页 · 每页 {roundsPageSize} 条</span>
+                  <div className="flex" style={{ gap: 6 }}>
+                    <button className="btn sm" disabled={roundsPage <= 1} onClick={() => setRoundsPage((v) => Math.max(1, v - 1))}>上一页</button>
+                    <button className="btn sm" disabled={roundsPage >= roundsPages} onClick={() => setRoundsPage((v) => Math.min(roundsPages, v + 1))}>下一页</button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 

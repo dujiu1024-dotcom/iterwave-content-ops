@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, GlobalMonitorResponse, GlobalTaskQueueItem } from "../api";
+import { useCallback, useEffect, useState } from "react";
+import { api, GlobalMonitorResponse, GlobalTaskQueueItem, GlobalTodoItem, NotificationItem } from "../api";
 import { navigate } from "../nav";
 
 const STATUS: Record<string, string> = {
@@ -16,8 +16,22 @@ export default function GlobalOperations() {
   const [activeCount, setActiveCount] = useState<number | null>(null);
   const [failedCount, setFailedCount] = useState<number | null>(null);
   const [failedTasks, setFailedTasks] = useState<GlobalTaskQueueItem[]>([]);
+  const [unreadNotifications, setUnreadNotifications] = useState<NotificationItem[]>([]);
+  const [unreadNotificationCount, setUnreadNotificationCount] = useState<number | null>(null);
+  const [todos, setTodos] = useState<GlobalTodoItem[]>([]);
+  const [todoCount, setTodoCount] = useState(0);
+  const [todoCounts, setTodoCounts] = useState<Record<string, number>>({});
+  const [todoPage, setTodoPage] = useState(1);
+  const [todoPages, setTodoPages] = useState(1);
+  const [todoSource, setTodoSource] = useState<GlobalTodoItem["source"] | "all">("all");
+  const [todoTenantId, setTodoTenantId] = useState("");
+  const [todoCapped, setTodoCapped] = useState(false);
+  const [activePage, setActivePage] = useState(1);
   const [failedPage, setFailedPage] = useState(1);
-  const failedPageSize = 8;
+  const [activePages, setActivePages] = useState(1);
+  const [failedPages, setFailedPages] = useState(1);
+  const [activeCounts, setActiveCounts] = useState<{ queued: number; running: number }>({ queued: 0, running: 0 });
+  const [tenantCounts, setTenantCounts] = useState<Record<string, { queued: number; running: number; failed: number }>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
@@ -26,24 +40,61 @@ export default function GlobalOperations() {
     setLoading(true);
     setError("");
     const results = await Promise.allSettled([
-      api.globalOperationsSummary(30), api.taskQueue({ scope: "active", page: 1, pageSize: 30 }), api.taskQueue({ scope: "failed", page: failedPage, pageSize: failedPageSize }),
+      api.globalOperationsSummary(30),
+      api.taskQueue({ scope: "active", page: activePage, pageSize: 12 }),
+      api.taskQueue({ scope: "failed", page: failedPage, pageSize: 12 }),
+      api.notificationsPage(1, 5, "unread"),
+      api.todos(todoPage, 12, todoTenantId.trim() || undefined, todoSource === "all" ? undefined : todoSource),
     ]);
     if (results[0].status === "fulfilled") setMonitor(results[0].value);
-    if (results[1].status === "fulfilled") { setTasks(results[1].value.items ?? []); setActiveCount(results[1].value.total ?? results[1].value.items?.length ?? 0); }
-    if (results[2].status === "fulfilled") {
-      const total = results[2].value.total ?? 0;
-      setFailedCount(total);
-      setFailedTasks(results[2].value.items ?? []);
-      const lastPage = Math.max(1, Math.ceil(total / failedPageSize));
-      if (failedPage > lastPage) setFailedPage(lastPage);
+    if (results[1].status === "fulfilled") {
+      const data = results[1].value;
+      setTasks(data.items ?? []);
+      setActiveCount(data.total ?? data.items?.length ?? 0);
+      setActivePages(data.pages ?? 1);
+      if (activePage > (data.pages ?? 1)) setActivePage(data.pages ?? 1);
+      setActiveCounts({
+        queued: data.status_counts?.queued ?? 0,
+        running: data.status_counts?.running ?? 0,
+      });
     }
+    if (results[2].status === "fulfilled") {
+      const data = results[2].value;
+      setFailedCount(data.total ?? 0);
+      setFailedTasks(data.items ?? []);
+      setFailedPages(data.pages ?? 1);
+      if (failedPage > (data.pages ?? 1)) setFailedPage(data.pages ?? 1);
+    }
+    if (results[3].status === "fulfilled") {
+      setUnreadNotifications(results[3].value.items ?? []);
+      setUnreadNotificationCount(results[3].value.unread_total ?? results[3].value.total ?? 0);
+    }
+    if (results[4].status === "fulfilled") {
+      setTodos(results[4].value.items ?? []);
+      setTodoCount(results[4].value.total ?? 0);
+      setTodoCounts(results[4].value.counts ?? {});
+      setTodoPages(results[4].value.pages ?? 1);
+      setTodoCapped(Boolean(results[4].value.capped));
+      if (todoPage > (results[4].value.pages ?? 1)) setTodoPage(results[4].value.pages ?? 1);
+    }
+    const activeByTenant = results[1].status === "fulfilled" ? results[1].value.tenant_status_counts ?? {} : {};
+    const failedByTenant = results[2].status === "fulfilled" ? results[2].value.tenant_status_counts ?? {} : {};
+    const tenantIds = new Set([...Object.keys(activeByTenant), ...Object.keys(failedByTenant)]);
+    setTenantCounts(Object.fromEntries(Array.from(tenantIds, (tenantId) => [
+      tenantId,
+      {
+        queued: activeByTenant[tenantId]?.queued ?? 0,
+        running: activeByTenant[tenantId]?.running ?? 0,
+        failed: (failedByTenant[tenantId]?.failed ?? 0) + (failedByTenant[tenantId]?.interrupted ?? 0),
+      },
+    ])));
     const failures = results.flatMap((r, i) => r.status === "rejected"
-      ? [`${["账号组汇总", "活跃任务", "失败任务统计"][i]}：${r.reason instanceof Error ? r.reason.message : String(r.reason)}`]
+      ? [`${["账号组汇总", "活跃任务", "失败任务统计", "未读通知", "统一待办"][i]}：${r.reason instanceof Error ? r.reason.message : String(r.reason)}`]
       : []);
     setError(failures.join("；"));
     setUpdatedAt(new Date());
     setLoading(false);
-  }, [failedPage]);
+  }, [activePage, failedPage, todoPage, todoSource, todoTenantId]);
 
   useEffect(() => {
     void refresh();
@@ -51,24 +102,8 @@ export default function GlobalOperations() {
     return () => window.clearInterval(timer);
   }, [refresh]);
 
-  const active = useMemo(() => tasks.filter((t) => t.status === "queued" || t.status === "running"), [tasks]);
+  const active = tasks;
   const failed = failedTasks;
-  const byTenant = useMemo(() => {
-    const map = new Map<string, { queued: number; running: number; failed: number }>();
-    for (const task of tasks) {
-      const value = map.get(task.tenant_id) ?? { queued: 0, running: 0, failed: 0 };
-      if (task.status === "queued") value.queued++;
-      if (task.status === "running") value.running++;
-      map.set(task.tenant_id, value);
-    }
-    for (const task of failedTasks) {
-      const value = map.get(task.tenant_id) ?? { queued: 0, running: 0, failed: 0 };
-      value.failed++;
-      map.set(task.tenant_id, value);
-    }
-    return map;
-  }, [tasks, failedTasks]);
-
   return (
     <div className="page global-operations-page">
       <div className="page-head">
@@ -90,8 +125,8 @@ export default function GlobalOperations() {
 
       <div className="grid four" style={{ marginBottom: 16 }}>
         <div className="metric"><div className="metric-label">账号组</div><div className="metric-val">{monitor?.totals?.tenants ?? "—"}</div><div className="metric-foot">数据库可读取 {monitor?.totals?.available_tenants ?? "—"} 个</div></div>
-        <div className="metric"><div className="metric-label">运行中任务</div><div className="metric-val">{activeCount == null ? "—" : active.filter((t) => t.status === "running").length}</div><div className="metric-foot">来自全局队列当前返回记录</div></div>
-        <div className="metric"><div className="metric-label">等待任务</div><div className="metric-val">{activeCount == null ? "—" : active.filter((t) => t.status === "queued").length}</div><div className="metric-foot">按全局 FIFO 入队顺序</div></div>
+        <div className="metric"><div className="metric-label">运行中任务</div><div className="metric-val">{activeCount == null ? "—" : activeCounts.running}</div><div className="metric-foot">来自全局队列数据库聚合</div></div>
+        <div className="metric"><div className="metric-label">等待任务</div><div className="metric-val">{activeCount == null ? "—" : activeCounts.queued}</div><div className="metric-foot">按全局 FIFO 入队顺序</div></div>
         <div className="metric"><div className="metric-label">失败 / 中断</div><div className="metric-val">{failedCount ?? "—"}</div><div className="metric-foot">失败/中断记录（总数由数据库计数）</div></div>
       </div>
 
@@ -103,9 +138,9 @@ export default function GlobalOperations() {
         {loading && !monitor ? <div className="empty-state">正在汇总账号组…</div> : !monitor ? <div className="empty-state">账号组数据暂不可用。</div> : (
           <div className="table-wrap">
             <table>
-              <thead><tr><th>账号组</th><th>数据库</th><th>平台账号</th><th>平台登录</th><th>运行中</th><th>排队中</th><th>本页失败 / 中断</th><th>定时调度</th><th>活跃轮次</th><th>操作</th></tr></thead>
+              <thead><tr><th>账号组</th><th>数据库</th><th>平台账号</th><th>平台登录</th><th>运行中</th><th>排队中</th><th>失败 / 中断</th><th>定时调度</th><th>活跃轮次</th><th>操作</th></tr></thead>
               <tbody>{(monitor.tenants ?? []).map((tenant) => {
-                const q = byTenant.get(tenant.tenant_id) ?? { queued: 0, running: 0, failed: 0 };
+                const q = tenantCounts[tenant.tenant_id] ?? { queued: 0, running: 0, failed: 0 };
                 return <tr key={tenant.tenant_id}>
                   <td><strong>{tenant.tenant_name}</strong><div className="tiny">{tenant.tenant_id}</div></td>
                   <td><span className={tenant.db_status === "uninitialized" ? "tag gray" : tenant.db_available ? "tag green" : "tag red"}>{tenant.db_status === "uninitialized" ? "未初始化" : tenant.db_available ? "可读取" : "不可用"}</span></td>
@@ -137,24 +172,25 @@ export default function GlobalOperations() {
       <div className="grid two">
         <section className="panel">
           <div className="panel-head"><div><div className="panel-title">全局 FIFO 任务</div><div className="panel-sub">运行任务不会因账号组切换而中断。</div></div><button className="btn sm" onClick={() => navigate("task-queue")}>完整队列</button></div>
-          {active.length ? <div className="list">{active.slice(0, 12).map((task) => <div className="task-row" key={task.task_id}>
+          {active.length ? <div className="list">{active.map((task) => <div className="task-row" key={task.task_id}>
             <i className={`task-prio ${task.status === "running" ? "green" : "blue"}`} />
             <div className="task-main"><div className="task-title">{task.tenant_name} · {task.task_type === "round_run" ? "内容生产" : task.task_type}</div><div className="task-desc">#{task.queue_order} · {STATUS[task.status]} · {task.aggregate_id ?? "—"}</div></div>
           </div>)}</div> : <div className="empty-state">当前没有排队或执行中的任务。</div>}
-          {active.length > 12 && <div className="panel-sub">另有 {active.length - 12} 个任务，请进入完整队列查看。</div>}
+          {activePages > 1 && <div className="pagination-row" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, paddingTop: 12 }}>
+            <button className="btn sm" disabled={activePage <= 1 || loading} onClick={() => setActivePage((p) => Math.max(1, p - 1))}>上一页</button>
+            <span className="tiny">第 {activePage} / {activePages} 页 · 共 {activeCount ?? 0} 项</span>
+            <button className="btn sm" disabled={activePage >= activePages || loading} onClick={() => setActivePage((p) => Math.min(activePages, p + 1))}>下一页</button>
+          </div>}
         </section>
         <section className="panel">
-          <div className="panel-head"><div><div className="panel-title">异常与待处理</div><div className="panel-sub">按页查看失败或中断任务，避免异常列表撑长运营总览。</div></div><span className="tag">{failedCount ?? "—"} 项</span></div>
+          <div className="panel-head"><div><div className="panel-title">异常与待处理</div><div className="panel-sub">当前返回的队列记录中失败或中断的任务。</div></div><span className="tag">{failedCount ?? "—"} 项</span></div>
           {failed.length ? <div className="list">{failed.map((task) => <div className="task-row" key={task.task_id}>
             <i className="task-prio red" /><div className="task-main"><div className="task-title">{task.tenant_name} · {STATUS[task.status]}</div><div className="task-desc">{task.error_message || task.task_type}</div></div>
           </div>)}</div> : <div className="empty-state">当前没有失败或中断任务。</div>}
-          {(failedCount ?? 0) > failedPageSize && <div className="pagination-bar">
-            <span className="pagination-summary">第 {failedPage} / {Math.max(1, Math.ceil((failedCount ?? 0) / failedPageSize))} 页 · 共 {failedCount} 项</span>
-            <div className="pagination-actions">
-              <button className="btn sm" disabled={failedPage <= 1 || loading} onClick={() => setFailedPage((p) => Math.max(1, p - 1))}>上一页</button>
-              <button className="btn sm" disabled={failedPage >= Math.ceil((failedCount ?? 0) / failedPageSize) || loading} onClick={() => setFailedPage((p) => p + 1)}>下一页</button>
-              <button className="btn sm" onClick={() => navigate("task-queue")}>打开完整队列</button>
-            </div>
+          {failedPages > 1 && <div className="pagination-row" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, paddingTop: 12 }}>
+            <button className="btn sm" disabled={failedPage <= 1 || loading} onClick={() => setFailedPage((p) => Math.max(1, p - 1))}>上一页</button>
+            <span className="tiny">第 {failedPage} / {failedPages} 页 · 共 {failedCount ?? 0} 项</span>
+            <button className="btn sm" disabled={failedPage >= failedPages || loading} onClick={() => setFailedPage((p) => Math.min(failedPages, p + 1))}>下一页</button>
           </div>}
         </section>
       </div>
@@ -167,6 +203,70 @@ export default function GlobalOperations() {
           </div>)}
         </div>
         {!monitor && <div className="empty-state">等待汇总数据。</div>}
+      </section>
+
+      <section className="panel" style={{ marginTop: 16 }}>
+        <div className="panel-head">
+          <div><div className="panel-title">统一待办中心</div><div className="panel-sub">汇总各账号组的待核实任务、失败运营日志、素材审核、未读通知和 AI 配图失败。</div></div>
+          <span className="tag">{todoCount} 项待处理</span>
+        </div>
+        <div className="filter-row" style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+          <select aria-label="待办来源筛选" value={todoSource} onChange={(event) => { setTodoSource(event.target.value as GlobalTodoItem["source"] | "all"); setTodoPage(1); }}>
+            <option value="all">全部来源</option>
+            <option value="global_queue">全局任务队列</option>
+            <option value="task_run">任务追踪</option>
+            <option value="ops_log">运营日志</option>
+            <option value="circuit_breaker">平台熔断</option>
+            <option value="hot_topic_source">热点采集失败</option>
+            <option value="media_review">素材审核</option>
+            <option value="notification">通知</option>
+            <option value="media_generation">AI 配图</option>
+          </select>
+          <input aria-label="待办账号组筛选" value={todoTenantId} onChange={(event) => { setTodoTenantId(event.target.value); setTodoPage(1); }} placeholder="账号组 ID" style={{ width: 160 }} />
+          <span className="tiny">队列 {todoCounts.global_queue ?? 0} · 任务 {todoCounts.task_run ?? 0} · 日志 {todoCounts.ops_log ?? 0} · 熔断 {todoCounts.circuit_breaker ?? 0} · 热点 {todoCounts.hot_topic_source ?? 0} · 素材 {todoCounts.media_review ?? 0} · 通知 {todoCounts.notification ?? 0} · 配图 {todoCounts.media_generation ?? 0}</span>
+        </div>
+        {todos.length ? <div className="list">
+          {todos.map((todo) => <div className="task-row" key={todo.id}>
+            <i className={`task-prio ${todo.severity === "high" ? "red" : "blue"}`} />
+            <div className="task-main">
+              <div className="task-title">{todo.title}</div>
+              <div className="task-desc">{todo.tenant_name} · {todo.source_label} · {todo.detail} · {todo.created_at ? new Date(todo.created_at).toLocaleString("zh-CN") : "时间未知"}</div>
+            </div>
+            {todo.source === "notification" ? <button className="btn sm" disabled={loading} onClick={() => {
+              void api.markNotificationRead(Number(todo.record_id)).then(() => refresh()).catch((e) => setError(e instanceof Error ? e.message : String(e)));
+            }}>标记已读</button> : <button className="btn sm" onClick={() => navigate(todo.target_page, todo.target_page === "operations" ? todo.target_tab : undefined)}>处理</button>}
+          </div>)}
+        </div> : <div className="empty-state">当前筛选条件下没有待处理事项。</div>}
+        {todoCapped && <div className="tiny" style={{ marginTop: 8 }}>部分来源记录较多，当前统计已提示截取范围；请缩小账号组或来源筛选。</div>}
+        {todoPages > 1 && <div className="pagination-row" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, paddingTop: 12 }}>
+          <button className="btn sm" disabled={todoPage <= 1 || loading} onClick={() => setTodoPage((p) => Math.max(1, p - 1))}>上一页</button>
+          <span className="tiny">第 {todoPage} / {todoPages} 页 · 共 {todoCount} 项</span>
+          <button className="btn sm" disabled={todoPage >= todoPages || loading} onClick={() => setTodoPage((p) => Math.min(todoPages, p + 1))}>下一页</button>
+        </div>}
+      </section>
+
+      <section className="panel" style={{ marginTop: 16 }}>
+        <div className="panel-head">
+          <div><div className="panel-title">未读通知</div><div className="panel-sub">通知已读状态会持久化；标记已读不会删除通知记录。</div></div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span className="tag">{unreadNotificationCount ?? "—"} 条未读</span>
+            <button className="btn sm" disabled={!unreadNotificationCount || loading} onClick={() => {
+              void api.markAllNotificationsRead().then(() => refresh()).catch((e) => setError(e instanceof Error ? e.message : String(e)));
+            }}>全部标记已读</button>
+          </div>
+        </div>
+        {unreadNotifications.length ? <div className="list">
+          {unreadNotifications.map((notification) => <div className="task-row" key={notification.id}>
+            <i className={`task-prio ${notification.level === "critical" || notification.level === "error" ? "red" : notification.level === "warning" ? "blue" : "green"}`} />
+            <div className="task-main">
+              <div className="task-title">{notification.title}</div>
+              <div className="task-desc">{notification.body || notification.type} · {notification.platform ? (PLATFORMS[notification.platform] ?? notification.platform) : "系统"} · {new Date(notification.sent_at).toLocaleString("zh-CN")}</div>
+            </div>
+            <button className="btn sm" disabled={loading} onClick={() => {
+              void api.markNotificationRead(notification.id).then(() => refresh()).catch((e) => setError(e instanceof Error ? e.message : String(e)));
+            }}>标记已读</button>
+          </div>)}
+        </div> : <div className="empty-state">当前没有未读通知。</div>}
       </section>
     </div>
   );

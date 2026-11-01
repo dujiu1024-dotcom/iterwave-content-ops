@@ -511,7 +511,8 @@ class GlobalTaskQueue:
     def list_page(
         self, *, page: int = 1, page_size: int = 20,
         scope: str = "history", tenant_id: str | None = None,
-        task_type: str | None = None,
+        task_type: str | None = None, error_keyword: str | None = None,
+        date_from: str | None = None, date_to: str | None = None,
     ) -> tuple[list[QueuedTask], int]:
         """Return a stable, database-paginated slice of active or historical tasks."""
         page = max(1, int(page))
@@ -534,6 +535,20 @@ class GlobalTaskQueue:
                 raise ValueError("task_type is invalid")
             where += " AND task_type=?"
             params.append(task_type)
+        if error_keyword is not None:
+            keyword = error_keyword.strip()
+            if not keyword or len(keyword) > 120:
+                raise ValueError("error_keyword is invalid")
+            where += " AND COALESCE(error_message, '') LIKE ?"
+            params.append(f"%{keyword}%")
+        if date_from is not None:
+            where += " AND substr(created_at, 1, 10) >= ?"
+            params.append(date_from)
+        if date_to is not None:
+            where += " AND substr(created_at, 1, 10) <= ?"
+            params.append(date_to)
+        if date_from and date_to and date_from > date_to:
+            raise ValueError("date_from cannot be later than date_to")
         offset = (page - 1) * page_size
         conn = self._connect()
         try:

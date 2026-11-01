@@ -38,6 +38,10 @@ export default function Settings() {
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [cfgView, setCfgView] = useState<SystemConfigView | null>(null);
+  const [auditItems, setAuditItems] = useState<SystemConfigView["audit"]>([]);
+  const [auditTotal, setAuditTotal] = useState(0);
+  const [auditPage, setAuditPage] = useState(1);
+  const [auditPages, setAuditPages] = useState(1);
   // 运行时配置表单（只保留白名单字段，保存时按改动差量提交）
   const [quotas, setQuotas] = useState<Record<string, Record<string, string>>>({});
   const [opsWindow, setOpsWindow] = useState<{ start: string; end: string }>({ start: "", end: "" });
@@ -60,8 +64,14 @@ export default function Settings() {
   /** G-13：运行时配置来自 /api/config（白名单字段 + 审计） */
   const loadConfig = async () => {
     try {
-      const v = await api.config();
+      const [v, audit] = await Promise.all([
+        api.config(),
+        api.configAuditPage(auditPage, 20),
+      ]);
       setCfgView(v);
+      setAuditItems(audit.items);
+      setAuditTotal(audit.total);
+      setAuditPages(audit.pages);
       const q: Record<string, Record<string, string>> = {};
       for (const [p, row] of Object.entries(v.editable.daily_quotas)) {
         q[p] = {
@@ -89,6 +99,13 @@ export default function Settings() {
   };
 
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    api.configAuditPage(auditPage, 20).then((result) => {
+      setAuditItems(result.items);
+      setAuditTotal(result.total);
+      setAuditPages(result.pages);
+    }).catch((e) => setErr(e instanceof Error ? e.message : String(e)));
+  }, [auditPage]);
 
   /** 只提交真正改动的字段（后端按白名单校验，越权 400） */
   const saveConfig = async () => {
@@ -283,12 +300,12 @@ export default function Settings() {
               </span>
             </div>
 
-            {cfgView.audit.length > 0 && (
+            {auditItems.length > 0 && (
               <div className="table-wrap" style={{ marginTop: 14 }}>
                 <table>
                   <thead><tr><th>#</th><th>配置项</th><th>旧值</th><th>新值</th><th>时间</th></tr></thead>
                   <tbody>
-                    {cfgView.audit.map((a) => (
+                    {auditItems.map((a) => (
                       <tr key={a.id}>
                         <td style={{ color: "var(--subtle)", fontSize: 11 }}>{a.id}</td>
                         <td style={{ fontSize: 12 }} title={a.key}>{configKeyLabel(a.key)}</td>
@@ -299,9 +316,16 @@ export default function Settings() {
                     ))}
                   </tbody>
                 </table>
+                <div className="flex between center" style={{ padding: "12px 0 0", gap: 10, flexWrap: "wrap" }}>
+                  <span className="note">共 {auditTotal} 条配置变更 · 第 {auditPage}/{auditPages} 页 · 每页 20 条</span>
+                  <div className="flex" style={{ gap: 6 }}>
+                    <button className="btn sm" disabled={auditPage <= 1} onClick={() => setAuditPage((p) => Math.max(1, p - 1))}>上一页</button>
+                    <button className="btn sm" disabled={auditPage >= auditPages} onClick={() => setAuditPage((p) => Math.min(auditPages, p + 1))}>下一页</button>
+                  </div>
+                </div>
               </div>
             )}
-            {cfgView.audit.length === 0 && (
+            {auditTotal === 0 && (
               <EmptyHint next="修改上方任一配额 / 运营时段 / 门限后点「保存配置」，这里会记录每次变更">
                 暂无配置变更记录
               </EmptyHint>

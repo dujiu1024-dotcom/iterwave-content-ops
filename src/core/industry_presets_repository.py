@@ -147,3 +147,29 @@ def upsert_custom_preset(conn, item: dict[str, Any]) -> dict[str, Any]:
         if lock:
             lock.release()
     return get_preset(conn, key)
+
+
+def delete_custom_preset(conn, key: str) -> bool:
+    """Delete only tenant-owned presets; built-ins are immutable."""
+    lock = getattr(conn, "_lock", None)
+    if lock:
+        lock.acquire()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT is_builtin FROM industry_presets WHERE key = ?", (key,)
+        ).fetchone()
+        if existing is None:
+            conn.commit()
+            return False
+        if existing["is_builtin"]:
+            raise ValueError("内置模板不可删除")
+        conn.execute("DELETE FROM industry_presets WHERE key = ? AND is_builtin = 0", (key,))
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        if lock:
+            lock.release()
