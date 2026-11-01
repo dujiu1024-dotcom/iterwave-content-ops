@@ -838,7 +838,7 @@ function AuditPane() {
                     {overrides.slice((auditPage - 1) * auditPageSize, auditPage * auditPageSize).map((r) => (
                       <tr key={r.id}>
                         <td style={{ fontSize: 11, fontFamily: "monospace", color: "var(--subtle)" }}>{r.overridden_at}</td>
-                        <td>{r.round_id ? `#${r.round_id}` : <span style={{ color: "var(--subtle)" }}>—</span>}</td>
+                        <td>{r.round_number != null ? `第 ${r.round_number} 轮` : r.round_id ? "关联轮次已归档" : <span style={{ color: "var(--subtle)" }}>—</span>}</td>
                         <td style={{ fontFamily: "monospace", fontSize: 11 }}>{r.override_field ?? "—"}</td>
                         <td style={{ maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.original_value ?? "—"}</td>
                         <td style={{ maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.override_value ?? "—"}</td>
@@ -872,7 +872,7 @@ function AuditPane() {
                     {redlines.slice((auditPage - 1) * auditPageSize, auditPage * auditPageSize).map((r) => (
                       <tr key={r.id}>
                         <td style={{ fontSize: 11, fontFamily: "monospace", color: "var(--subtle)" }}>{r.created_at}</td>
-                        <td>{r.round_id ? `#${r.round_id}` : "—"}</td>
+                        <td>{r.round_number != null ? `第 ${r.round_number} 轮` : r.round_id ? "关联轮次已归档" : "—"}</td>
                         <td>{PLATFORM_LABEL[r.platform] ?? r.platform}</td>
                         <td style={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title}</td>
                         <td>
