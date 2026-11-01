@@ -647,3 +647,4 @@ A-02、A-04、B-05、D-07、D-08、F-01 至 F-08、G-01 至 G-06。
 - 追加提交：Operations `2c88047`；Assets `352c698`；GlobalSearch `06546ef`；draftsAll 并发限流 `4a40293`。
 - 轮次旧调用方盘点：Dashboard 原来使用兼容接口，只读取最近 50 条；已迁移到 `roundsPage(1, 20)`，明确首页只展示最近 20 条摘要，不再请求固定 50 条数组。
 - 追加提交：Dashboard 轮次分页调用 `9e9c016`。
+- 指标分页测试补充覆盖仅按 fetch_status 筛选（不传 platform）的查询，修复并防止该组合的 COUNT SQL 产生无效 AND 子句；同时验证旧 limit 参数仍兼容。追加测试提交 `c398fc2`。
