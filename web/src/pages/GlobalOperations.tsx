@@ -194,7 +194,7 @@ export default function GlobalOperations() {
           <div className="panel-head"><div><div className="panel-title">全局 FIFO 任务</div><div className="panel-sub">运行任务不会因账号组切换而中断。</div></div><button className="btn sm" onClick={() => navigate("task-queue")}>完整队列</button></div>
           {active.length ? <div className="list">{active.map((task) => <div className="task-row" key={task.task_id}>
             <i className={`task-prio ${task.status === "running" ? "green" : "blue"}`} />
-            <div className="task-main"><div className="task-title">{task.tenant_name} · {task.task_type === "round_run" ? "内容生产" : task.task_type}</div><div className="task-desc">#{task.queue_order} · {STATUS[task.status]} · {task.aggregate_id ?? "—"}</div></div>
+            <div className="task-main"><div className="task-title">{task.tenant_name} · {task.task_type === "round_run" ? "内容生产" : task.task_type}</div><div className="task-desc">队列 #{task.queue_order} · {STATUS[task.status]}</div></div>
           </div>)}</div> : <div className="empty-state">当前没有排队或执行中的任务。</div>}
           {activePages > 1 && <div className="pagination-row" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, paddingTop: 12 }}>
             <button className="btn sm" disabled={activePage <= 1 || loading} onClick={() => setActivePage((p) => Math.max(1, p - 1))}>上一页</button>
