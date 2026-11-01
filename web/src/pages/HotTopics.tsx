@@ -234,6 +234,12 @@ export default function HotTopics() {
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
   const pageItems = filtered.slice((page - 1) * pageSize, page * pageSize);
 
+  // 切换筛选条件或每页条数后回到第一页，避免停留在不存在的页码。
+  useEffect(() => { setPage(1); }, [tab, sourceFilter, kw, sortBy, pageSize]);
+  useEffect(() => {
+    if (page > pageCount) setPage(pageCount);
+  }, [page, pageCount]);
+
   const sources = hot?.sources || [];
   const failedSources = sources.filter((s) => s.status === "failed");
   const matched = hot?.match?.matched ?? items.filter((h) => h.dimension_match === true).length;
