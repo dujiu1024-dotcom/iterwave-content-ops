@@ -464,7 +464,10 @@ class DraftSaver:
 
         except Exception as exc:
             logger.exception("❌ 平台 %s 存草稿失败: %s", self.platform, exc)
-            return DraftResult(success=False, error_msg=str(exc))
+            return DraftResult(
+                success=False,
+                error_msg="平台存草稿操作异常，请检查登录状态、网络连接或平台页面后重试",
+            )
 
     # ------------------------------------------------------------------
     # 内部辅助
@@ -608,8 +611,11 @@ class DraftSaver:
                 content.image_paths, timeout=30000,
             )
         except Exception as exc:  # noqa: BLE001 — 上传失败要如实回报
-            logger.warning("视频号图片上传失败: %s", exc)
-            return DraftResult(success=False, error_msg=f"图片上传失败: {exc}"[:200])
+            logger.warning("视频号图片上传失败，异常类型=%s", type(exc).__name__)
+            return DraftResult(
+                success=False,
+                error_msg="视频号图片上传失败，请检查登录状态、网络连接和图片文件后重试",
+            )
         await page.wait_for_timeout(5000)
 
         await self.fill_first_visible(target, self.selectors["title"], content.title)
