@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useState } from "react";
 import { useApp } from "../AppContext";
-import { useUrlTab } from "../nav";
+import { navigate, useUrlTab } from "../nav";
 import {
   api, RunRoundReport, SpiralRound, Draft, Platform, AssetItem,
   PlanResponse, ContentItem, PipelineResponse, RecheckResult, Goal,
@@ -885,7 +885,10 @@ export default function Production() {
 
                 </div>
                 <div style={{ marginTop: 12, padding: 10, border: "1px solid var(--line)", borderRadius: 9 }}>
-                  <label style={{ display: "block", fontSize: 12, fontWeight: 700, marginBottom: 6 }} htmlFor="production-template-select">内容结构模板（可选）</label>
+                  <div className="flex wrap" style={{ alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 6 }}>
+                    <label style={{ display: "block", fontSize: 12, fontWeight: 700 }} htmlFor="production-template-select">内容结构模板（可选）</label>
+                    <button className="btn xs" type="button" onClick={() => navigate("assets", "templates")} disabled={running}>新增 / 管理模板</button>
+                  </div>
                   <select id="production-template-select" className="field" value={selectedTemplateId} onChange={(e) => setSelectedTemplateId(e.target.value)} disabled={running}>
                     <option value="">不使用模板 · 按默认生成逻辑</option>
                     {templates.map((item) => <option key={item.id} value={String(item.id)}>{item.title}</option>)}
