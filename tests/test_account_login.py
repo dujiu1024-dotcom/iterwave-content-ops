@@ -167,7 +167,7 @@ def test_same_platform_logins_are_isolated_by_tenant(tmp_login, tmp_path, monkey
 
     proc_a, proc_b = FakeProcess(), FakeProcess()
     processes = iter((proc_a, proc_b))
-    monkeypatch.setattr(al, "build_cmd", lambda platform, timeout_seconds=None, data_dir=None: ["fake"])
+    monkeypatch.setattr(al, "build_cmd", lambda platform, timeout_seconds=None, data_dir=None: ["python", "fake_script.py", "login"])
     monkeypatch.setattr(al.subprocess, "Popen", lambda *args, **kwargs: next(processes))
 
     al.start_login("xhs", data_dir=tenant_a)
