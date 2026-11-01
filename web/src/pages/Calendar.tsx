@@ -24,7 +24,7 @@ export default function Calendar() {
 
   const [events, setEvents] = useState<ScheduleEvent[]>([]);
   const [plans, setPlans] = useState<ContentPlan[]>([]);
-  const [planDetail, setPlanDetail] = useState<(ContentPlan & { drafts: Array<{ draft_id: string; platform: Platform; status: string; title: string; round_id: number | null }>; rounds: Array<{ round_id: number; task_id: string | null; created_at: string }> }) | null>(null);
+  const [planDetail, setPlanDetail] = useState<(ContentPlan & { drafts: Array<{ draft_id: string; platform: Platform; status: string; title: string; round_id: number | null; round_number: number | null }>; rounds: Array<{ round_id: number; round_number: number | null; task_id: string | null; created_at: string }> }) | null>(null);
   const [planDetailLoading, setPlanDetailLoading] = useState(false);
   const [showArchivedPlans, setShowArchivedPlans] = useState(false);
   const [planTitle, setPlanTitle] = useState("");
@@ -136,7 +136,7 @@ export default function Calendar() {
     try {
       const result = await withPending(`content-plan:start:${plan.id}`, () => api.startContentPlan(plan.id));
       if (!result) return;
-      showToast(`已加入全局 FIFO 队列：第 ${result.round_id} 轮`, "success");
+      showToast("已加入全局 FIFO 队列", "success");
       await load();
     } catch (e: any) { showToast(`启动计划失败：${e?.message ?? e}`, "error"); }
   };
@@ -466,7 +466,7 @@ export default function Calendar() {
             {planDetail.notes && <div className="note">备注：{planDetail.notes}</div>}
             <div className="calendar-plan-detail-grid">
               <div><strong>生产轮次（{planDetail.rounds.length}）</strong>
-                {planDetail.rounds.length ? planDetail.rounds.map((round) => <div className="calendar-plan-detail-row" key={round.round_id}>第 {round.round_id} 轮 · {round.task_id ? `任务 ${round.task_id.slice(0, 8)}` : "尚未入队"}</div>) : <div className="note">尚未启动生产</div>}
+                {planDetail.rounds.length ? planDetail.rounds.map((round) => <div className="calendar-plan-detail-row" key={round.round_id}>{round.round_number != null ? `第 ${round.round_number} 轮` : "轮次信息不可用"} · {round.task_id ? `任务 ${round.task_id.slice(0, 8)}` : "尚未入队"}</div>) : <div className="note">尚未启动生产</div>}
               </div>
               <div><strong>关联草稿（{planDetail.drafts.length}）</strong>
                 {planDetail.drafts.length ? planDetail.drafts.map((draft) => <div className="calendar-plan-detail-row" key={draft.draft_id}>{draft.title || draft.draft_id} · {platformMeta(draft.platform).label} · {draft.status}</div>) : <div className="note">生产完成后自动回写草稿</div>}

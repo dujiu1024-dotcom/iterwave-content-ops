@@ -285,7 +285,7 @@ class RoundExecutor:
                     report["errors"].append("失败收尾：轮次状态未能迁移到 failed")
             except Exception as cleanup_exc:  # noqa: BLE001 — 尽力收尾，不遮盖原始错误
                 logger.exception("轮次失败状态收尾异常 round=%s", round_id)
-                report["errors"].append(f"失败状态收尾异常: {cleanup_exc}")
+                report["errors"].append("失败状态收尾异常，详细原因已记录到服务端日志")
 
         if report["final_status"] == "failed":
             self._finish_task_run(task_run_id, "failed", "；".join(report["errors"]) or None)

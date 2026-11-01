@@ -1,12 +1,25 @@
 import { useEffect, useState } from "react";
 import AsyncPanel from "../components/AsyncPanel";
 import EmptyHint from "../components/EmptyHint";
-import { api, Platform, PlatformInsight, SpiralAnalysis } from "../api";
+import { api, GapSuggestion, Platform, PlatformInsight, SpiralAnalysis, SpiralRound } from "../api";
+import { useApp } from "../AppContext";
 
 const PLATFORM_LABEL: Record<Platform, string> = {
   xhs: "小红书", douyin: "抖音",
   kuaishou: "快手", wechat_channels: "视频号",
 };
+
+const GAP_TYPE_LABEL: Record<string, string> = {
+  coverage_gap: "覆盖缺口",
+  validation_gap: "验证缺口",
+};
+const CONFIDENCE_LABEL: Record<string, string> = {
+  high: "高",
+  medium: "中",
+  low: "低",
+};
+/** 只有覆盖缺口（audience=user）可由用户采纳进母计划；验证缺口由 Agent 内部安排试验 */
+const isAdoptable = (g: GapSuggestion) => g.audience === "user" && g.gap_type === "coverage_gap";
 
 /** R3：NULL 显示灰色「—」，不显示 0 */
 function Pct({ v }: { v: number | null | undefined }) {
@@ -15,16 +28,25 @@ function Pct({ v }: { v: number | null | undefined }) {
 }
 
 export default function Gaps() {
+  const { showToast } = useApp();
   const [analysis, setAnalysis] = useState<SpiralAnalysis | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pf, setPf] = useState<Platform | null>(null);
+  const [rounds, setRounds] = useState<SpiralRound[]>([]);
+  const [roundsError, setRoundsError] = useState<string | null>(null);
+  /** 空字符串 = 最新一轮（后端默认） */
+  const [roundId, setRoundId] = useState<string>("");
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [adopting, setAdopting] = useState<string[] | null>(null);
+  const [adoptMsg, setAdoptMsg] = useState<string | null>(null);
 
-  const load = async () => {
+  const load = async (rid: string = roundId) => {
     setLoading(true);
     setError(null);
     try {
-      setAnalysis(await api.gaps());
+      setAnalysis(await api.gaps(rid ? Number(rid) : undefined));
+      setSelected(new Set());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -32,7 +54,46 @@ export default function Gaps() {
     }
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(""); }, []);
+  useEffect(() => {
+    api.roundsPage(1, 100)
+      .then((page) => setRounds(page.items))
+      .catch((e) => setRoundsError(e instanceof Error ? e.message : String(e)));
+  }, []);
+
+  const changeRound = (rid: string) => {
+    setRoundId(rid);
+    setAdoptMsg(null);
+    load(rid);
+  };
+
+  const adopt = async (dimensions: string[]) => {
+    const dims = Array.from(new Set(dimensions.filter(Boolean)));
+    if (!dims.length) return;
+    setAdopting(dims);
+    setAdoptMsg(null);
+    try {
+      const r = await api.adoptGaps(dims);
+      const msg = `已把「${dims.join("」「")}」写回母计划（影响 ${(r.stale_rounds ?? []).length} 个活跃轮次）`;
+      setAdoptMsg(msg);
+      showToast(msg, "success");
+      await load();
+    } catch (e) {
+      const msg = `采纳失败：${e instanceof Error ? e.message : String(e)}`;
+      setAdoptMsg(msg);
+      showToast(msg, "error");
+    } finally {
+      setAdopting(null);
+    }
+  };
+
+  const toggle = (dimension: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(dimension)) next.delete(dimension); else next.add(dimension);
+      return next;
+    });
+  };
 
   const breakdown: PlatformInsight[] = analysis?.platform_breakdown ?? [];
   // 手动选过平台就尊重选择；否则默认落在第一个有样本的平台上（避免首屏全是「—」）
@@ -51,12 +112,29 @@ export default function Gaps() {
             两类缺口分开展示：<strong>覆盖缺口</strong>（绿色，需要你决定是否补内容）和 <strong>验证缺口</strong>（紫色，Agent 内部安排的小样本试验）。
           </div>
         </div>
+        <div className="head-actions">
+          <label className="form-label" htmlFor="gap-round" style={{ margin: 0 }}>复盘轮次</label>
+          <select
+            id="gap-round"
+            className="field"
+            value={roundId}
+            disabled={loading}
+            onChange={(e) => changeRound(e.target.value)}
+            aria-label="选择复盘轮次"
+          >
+            <option value="">最新一轮</option>
+            {rounds.map((r) => (
+              <option key={r.id} value={String(r.id)}>第 {r.round_number} 轮</option>
+            ))}
+          </select>
+          {roundsError && <span className="tiny" style={{ color: "var(--red)" }}>轮次列表加载失败</span>}
+        </div>
       </div>
 
       <AsyncPanel
         loading={loading}
         error={error}
-        onRetry={load}
+        onRetry={() => load()}
         empty={!analysis}
         emptyText={
           <EmptyHint className="" next="先运行一轮并完成数据采集，再回到本页查看缺口">暂无缺口数据</EmptyHint>
@@ -82,36 +160,91 @@ export default function Gaps() {
             </div>
           </div>
 
+          {adoptMsg && <div className="note" style={{ marginBottom: 12 }}>{adoptMsg}</div>}
+
           {analysis.gaps.length === 0 ? (
             <div className="panel">
               <EmptyHint next="保持当前选题配比，下一轮数据采集后再复查">暂无缺口建议</EmptyHint>
             </div>
           ) : (
+            <>
+            {(() => {
+              const adoptable = analysis.gaps.filter(isAdoptable).map((g) => g.dimension);
+              if (!adoptable.length) return null;
+              const allSelected = adoptable.every((d) => selected.has(d));
+              return (
+                <div className="flex wrap" style={{ gap: 8, alignItems: "center", marginBottom: 12 }}>
+                  <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      onChange={() => setSelected(allSelected ? new Set() : new Set(adoptable))}
+                    />
+                    全选可采纳的覆盖缺口（{adoptable.length}）
+                  </label>
+                  <button
+                    className="btn sm primary"
+                    disabled={selected.size === 0 || adopting !== null}
+                    onClick={() => adopt(Array.from(selected))}
+                  >
+                    {adopting && adopting.length > 1 ? "批量采纳中…" : `批量采纳到母计划（${selected.size}）`}
+                  </button>
+                </div>
+              );
+            })()}
             <div className="grid two">
               {analysis.gaps.map((g, i) => {
                 const isUser = g.audience === "user";
+                const canAdopt = isAdoptable(g);
+                const busy = adopting?.includes(g.dimension) ?? false;
                 return (
-                  <div key={i} className={`gap-card ${isUser ? "user" : "agent"}`}>
+                  <div key={`${g.gap_type}-${g.dimension}-${i}`} className={`gap-card ${isUser ? "user" : "agent"}`}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                      {canAdopt && (
+                        <input
+                          type="checkbox"
+                          aria-label={`选择缺口 ${g.dimension}`}
+                          checked={selected.has(g.dimension)}
+                          disabled={adopting !== null}
+                          onChange={() => toggle(g.dimension)}
+                        />
+                      )}
                       <span className={`tag ${isUser ? "green" : "purple"}`}>
                         {isUser ? "◉ 给用户" : "✳ Agent 内部"}
                       </span>
-                      <span className="tag gray">{g.gap_type}</span>
+                      <span className="tag gray">{GAP_TYPE_LABEL[g.gap_type] ?? "其他缺口"}</span>
                       <span style={{ fontSize: 12, fontWeight: 700 }}>{g.dimension}</span>
                     </div>
                     <div style={{ fontSize: 13, marginBottom: 10 }}>{g.suggestion_text}</div>
-                    <div style={{ display: "flex", gap: 14, fontSize: 11, color: "var(--muted)" }}>
+                    <div style={{ display: "flex", gap: 14, fontSize: 11, color: "var(--muted)", flexWrap: "wrap" }}>
                       <span>库存 {g.current_count}</span>
+                      {g.target_count != null && <span>建议补至 {g.target_count}</span>}
                       <span>样本 {g.sample_count}</span>
                       {g.avg_interaction_rate != null && (
                         <span>互动率 {(g.avg_interaction_rate * 100).toFixed(2)}%</span>
                       )}
-                      <span>置信度 {g.confidence}</span>
+                      <span>置信度 {CONFIDENCE_LABEL[g.confidence] ?? "未知"}</span>
                     </div>
+                    {canAdopt ? (
+                      <div style={{ marginTop: 10 }}>
+                        <button
+                          className="btn sm primary"
+                          disabled={adopting !== null}
+                          onClick={() => adopt([g.dimension])}
+                        >
+                          {busy ? "采纳中…" : "采纳到母计划"}
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="tiny" style={{ marginTop: 10, color: "var(--subtle)" }}>
+                        Agent 内部建议，无需用户采纳，将在下一轮小样本试验中验证
+                      </div>
+                    )}
                   </div>
                 );
               })}
             </div>
+            </>
           )}
 
           {/* G-04 单平台纵深：同口径拆到单平台内部 */}

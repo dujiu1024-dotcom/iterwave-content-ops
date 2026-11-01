@@ -93,6 +93,31 @@ def redact(text: str) -> str:
     return text
 
 
+def safe_error_summary(value: object, fallback: str = "操作失败，请稍后重试") -> str:
+    """生成可展示给用户的短错误摘要；详细异常仅应保留在服务端日志。"""
+    if value is None:
+        return fallback
+    raw = redact(str(value)).strip()
+    if not raw:
+        return fallback
+    if re.search(
+        r"(?i)traceback|File [\"'][^\"']+[\"'], line \d+|"
+        r"(?:sqlite3|sqlalchemy)\.|operationalerror|programmingerror|"
+        r"OPENAI_API_KEY|DATABASE_URL|SECRET_KEY",
+        raw,
+    ):
+        return fallback
+    first_line = raw.splitlines()[0].strip()
+    first_line = re.sub(
+        r"(?<![A-Za-z0-9:])/(?:home|root|tmp|var|opt|srv|app|Users|workspace|usr|etc|mnt)/[^\s\"']+",
+        "服务器内部路径",
+        first_line,
+    )
+    first_line = re.sub(r"[A-Za-z]:\\[^\s\"']+", "本地内部路径", first_line)
+    first_line = first_line[:240].strip()
+    return first_line or fallback
+
+
 def redact_path(path: str | Path | None) -> str:
     """R23 路径脱敏：接口与页面不再暴露服务器绝对路径。
 
