@@ -2590,3 +2590,54 @@ def test_kb_source_preview_failure_hides_server_paths(client, monkeypatch):
     assert "/srv/iterwave" not in detail
     assert "tenant-a" not in detail
 
+
+
+# ---------------------------------------------------------------- P1-12 content plan lifecycle
+def _insert_content_plan(conn, plan_id: str, status: str = "reviewed"):
+    conn.execute(
+        "INSERT INTO content_plans(id,title,topic,platforms_json,planned_count,scheduled_date,status,notes,version,created_at,updated_at) "
+        "VALUES(?, 'P1 lifecycle test', 'topic', '[]', 1, '2026-11-01', ?, '', 1, '2026-11-01T00:00:00', '2026-11-01T00:00:00')",
+        (plan_id, status),
+    )
+    conn.commit()
+
+
+def test_content_plan_archive_and_restore_are_versioned_and_keep_history(client):
+    tc, conn, _ = client
+    _insert_content_plan(conn, "p1-plan-archive", "reviewed")
+    conn.execute(
+        "INSERT INTO content_plan_rounds(plan_id,round_id,task_id,created_at) VALUES(?, 77, 'task-77', '2026-11-01T00:00:00')",
+        ("p1-plan-archive",),
+    )
+    conn.commit()
+
+    archived = tc.post("/api/content-plans/p1-plan-archive/archive?version=1")
+    assert archived.status_code == 200
+    assert archived.json()["status"] == "archived"
+    assert archived.json()["version"] == 2
+
+    stale = tc.post("/api/content-plans/p1-plan-archive/restore?version=1")
+    assert stale.status_code == 409
+
+    restored = tc.post("/api/content-plans/p1-plan-archive/restore?version=2")
+    assert restored.status_code == 200
+    assert restored.json()["status"] == "reviewed"
+    assert restored.json()["version"] == 3
+    link = conn.execute(
+        "SELECT round_id,task_id FROM content_plan_rounds WHERE plan_id=?",
+        ("p1-plan-archive",),
+    ).fetchone()
+    assert tuple(link) == (77, "task-77")
+
+
+def test_content_plan_cancelled_can_be_restored_without_deleting_record(client):
+    tc, conn, _ = client
+    _insert_content_plan(conn, "p1-plan-cancelled", "cancelled")
+    restored = tc.post("/api/content-plans/p1-plan-cancelled/restore?version=1")
+    assert restored.status_code == 200
+    assert restored.json()["status"] == "planned"
+    row = conn.execute(
+        "SELECT status,version FROM content_plans WHERE id=?",
+        ("p1-plan-cancelled",),
+    ).fetchone()
+    assert tuple(row) == ("planned", 2)
