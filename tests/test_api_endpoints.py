@@ -1400,7 +1400,7 @@ def test_hot_topics_database_pagination_and_server_filters(client):
             "INSERT INTO hot_topics "
             "(id, source, evidence_status, title, heat_score, time_sensitive, last_seen_at) "
             "VALUES (?, ?, 'collected', ?, ?, 1, ?)",
-            (f"paging-hot-{index:03d}", "test/xhs", f"分页热点-{index:03d}",
+            (f"paging-hot-{index:03d}", "test/xhs", f"分页热点-{index}",
              float(index + 1), f"2026-11-01 10:{index // 60:02d}:{index % 60:02d}"),
         )
     conn.commit()
@@ -1422,7 +1422,7 @@ def test_hot_topics_database_pagination_and_server_filters(client):
     filtered = tc.get("/api/hot_topics?page=1&page_size=20&source=test%2Fxhs&keyword=热点-1")
     assert filtered.status_code == 200
     result = filtered.json()
-    assert result["total"] == 11
+    assert result["total"] == 15
     assert all("热点-1" in item["title"] for item in result["items"])
 
 
