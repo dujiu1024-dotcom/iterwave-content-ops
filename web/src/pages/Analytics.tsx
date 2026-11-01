@@ -164,8 +164,11 @@ export default function Analytics() {
           return next;
         });
       }
-      const refreshed = await api.drafts();
+      const refreshed = await api.draftsAll();
       setPublishedDrafts(refreshed.filter((d) => !!d.user_confirmed_at));
+      setPublishEligibleCount(refreshed.filter((d) =>
+        ["draft_saved", "user_published", "data_fetching", "published"].includes(d.status),
+      ).length);
       setBackfillValues((prev) => ({ ...prev, [draft.id]: {
         ...prev[draft.id], views: "", likes: "", collects: "", comments: "", shares: "",
         correction_of: "",
