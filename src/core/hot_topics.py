@@ -285,7 +285,7 @@ class HotTopicCollector:
         }
 
 
-    def _load_page(self, page: int, page_size: int) -> tuple[list[dict], list[dict], int, dict]:
+    def _load_page(self, page: int, page_size: int, *, tab: str = 'all', source: str | None = None, keyword: str | None = None, sort_by: str = 'heat') -> tuple[list[dict], list[dict], int, dict, int]:
         """数据库分页读取热点；批次、失败屏蔽、去重、门限和趋势基准均先于分页。"""
         from .hot_topic_matcher import HotTopicMatcher, keyword_judgement
 
@@ -325,20 +325,39 @@ class HotTopicCollector:
                 SELECT * FROM eligible_base
                 WHERE (? = 0 OR heat_score IS NULL OR heat_score >= ?)
                   AND (? = 0 OR time_sensitive IS NULL OR time_sensitive != 0)
+            ),
+            filtered AS (
+                SELECT * FROM visible
+                WHERE (? = 'all'
+                    OR (? = 'urgent' AND time_sensitive = 1)
+                    OR (? = 'unknown' AND time_sensitive IS NULL)
+                    OR (? = 'matched' AND match_version = ? AND COALESCE(forbidden_hit, 0) = 0
+                        AND match_score IS NOT NULL AND match_score >= ?))
+                  AND (? IS NULL OR source = ?)
+                  AND (? IS NULL OR title LIKE ?)
             )
         """
-        gate_params = (int(heat_on), heat_min, int(time_on))
+        keyword = (keyword or '').strip() or None
+        source = source or None
+        gate_params = (
+            int(heat_on), heat_min, int(time_on),
+            tab, tab, tab, tab, current_version, threshold,
+            source, source, keyword, f"%{keyword}%" if keyword else None,
+        )
         total = self.conn.execute(
-            base + " SELECT COUNT(*) FROM visible",
-            (*gate_params[:2], gate_params[2]),
+            base + " SELECT COUNT(*) FROM filtered",
+            gate_params,
         ).fetchone()[0]
         rows = self.conn.execute(
             base + """
-                SELECT * FROM visible
-                ORDER BY heat_score DESC NULLS LAST, id DESC
+                SELECT * FROM filtered
+                ORDER BY
+                  CASE WHEN ? = 'match' THEN match_score END DESC NULLS LAST,
+                  CASE WHEN ? != 'match' THEN heat_score END DESC NULLS LAST,
+                  id DESC
                 LIMIT ? OFFSET ?
             """,
-            (*gate_params, page_size, (page - 1) * page_size),
+            (*gate_params, sort_by, sort_by, page_size, (page - 1) * page_size),
         ).fetchall()
 
         # 来源状态不受当前页和热度/时效门影响。
@@ -349,6 +368,7 @@ class HotTopicCollector:
                 GROUP BY platform_key
                 ORDER BY platform_key
             """,
+            gate_params,
         ).fetchall()
         sources = {
             row["platform_key"]: {
@@ -492,7 +512,8 @@ class HotTopicCollector:
             )
             item["also_on"] = also_on.get(item["id"], [])
             items.append(item)
-        return items, list(sources.values()) + list(failed.values()), total, match_summary
+        urgent_total = self.conn.execute(base + " SELECT COUNT(*) FROM visible WHERE time_sensitive = 1", (*gate_params[:3],)).fetchone()[0]
+        return items, list(sources.values()) + list(failed.values()), total, match_summary, urgent_total
 
     def refresh(self, on_progress: Optional[Callable[[dict], None]] = None) -> dict:
         """并发抓取综合热榜平台 + 自定义 RSS/JSON 行业源 → 落库。返回各来源采集结果。
