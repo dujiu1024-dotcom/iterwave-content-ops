@@ -6869,7 +6869,7 @@ def _register_routes(app: FastAPI) -> None:
 
         cfg = _g()["cfg"]
         if cfg.hot_topics.enabled is False:
-            raise HTTPException(409, "热点采集已在配置中关闭（hot_topics.enabled=false）")
+            raise HTTPException(409, "热点采集已在系统设置中关闭，请先启用后再试")
         tenant_id = _g().get("runtime_tenant_id", "default")
         result = hot_topic_service.trigger_background(cfg, trigger="manual", tenant_id=tenant_id)
         if not result.get("started") and result.get("tenant_id") != tenant_id and result.get("running"):
