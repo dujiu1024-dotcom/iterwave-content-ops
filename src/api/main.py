@@ -8233,7 +8233,9 @@ def _register_routes(app: FastAPI) -> None:
     def list_user_override(limit: int = Query(200, ge=1, le=2000)):
         conn = _g()["conn"]
         rows = conn.execute(
-            "SELECT * FROM user_override ORDER BY overridden_at DESC LIMIT ?", (limit,)
+            "SELECT u.*, r.round_number FROM user_override u "
+            "LEFT JOIN spiral_rounds r ON r.id = u.round_id "
+            "ORDER BY u.overridden_at DESC LIMIT ?", (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -8388,11 +8390,11 @@ def _register_routes(app: FastAPI) -> None:
         """红线拦截历史：从 contents 表中 guard_outcome != 'pass' 的记录聚合"""
         conn = _g()["conn"]
         rows = conn.execute(
-            """SELECT id, round_id, platform, title, guard_outcome, guard_reason,
-                      created_at
-               FROM contents
-               WHERE guard_outcome IN ('warn', 'fail', 'error')
-               ORDER BY created_at DESC LIMIT ?""",
+            """SELECT c.id, c.round_id, r.round_number, c.platform, c.title,
+                      c.guard_outcome, c.guard_reason, c.created_at
+               FROM contents c LEFT JOIN spiral_rounds r ON r.id = c.round_id
+               WHERE c.guard_outcome IN ('warn', 'fail', 'error')
+               ORDER BY c.created_at DESC LIMIT ?""",
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
