@@ -63,7 +63,7 @@ export default function Dashboard() {
     setLoading(true);
     setError(null);
     const r = await Promise.allSettled([
-      api.rounds(),
+      api.roundsPage(1, 20),
       api.goals(),
       api.hotTopics(),
       api.insights(),
@@ -72,7 +72,7 @@ export default function Dashboard() {
       api.config(),
       api.goalsSummary(),
     ]);
-    if (r[0].status === "fulfilled") setRounds(r[0].value);
+    if (r[0].status === "fulfilled") setRounds(r[0].value.items);
     if (r[1].status === "fulfilled") setGoals(r[1].value);
     if (r[2].status === "fulfilled") setHot(r[2].value.items ?? []);
     if (r[3].status === "fulfilled") setInsights(r[3].value.items ?? []);

@@ -35,6 +35,7 @@ export default function Analytics() {
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
   const [metricsError, setMetricsError] = useState<string | null>(null);
   const [platformFilter, setPlatformFilter] = useState<Platform | "">("");
+  const [metricsPage, setMetricsPage] = useState(1);
   const [gapsError, setGapsError] = useState<string | null>(null);
   const [adopting, setAdopting] = useState<string | null>(null);
   const [adoptMsg, setAdoptMsg] = useState<string | null>(null);
@@ -94,15 +95,17 @@ export default function Analytics() {
     }
   };
 
-  const loadMetrics = (p: Platform | "") => {
+  const loadMetrics = (p: Platform | "", page?: number) => {
     setMetricsError(null);
-    api.metrics(p || undefined).then(setMetrics).catch((e) => setMetricsError(e.message));
+    api.metrics(p || undefined, page, 20).then(setMetrics).catch((e) => setMetricsError(e.message));
   };
 
   useEffect(() => { loadGaps(); }, []);
-  useEffect(() => { loadMetrics(platformFilter); }, [platformFilter]);
   useEffect(() => {
-    Promise.all([api.drafts(), api.weeklyReport()]).then(async ([allDrafts, report]) => {
+    loadMetrics(platformFilter, detailView === "details" ? metricsPage : undefined);
+  }, [platformFilter, metricsPage, detailView]);
+  useEffect(() => {
+    Promise.all([api.draftsAll(), api.weeklyReport()]).then(async ([allDrafts, report]) => {
       // 先建立/读取 cohort，再计算 activation 指标，避免首次进入 Analytics 时发生初始化竞态。
       const status = await api.activationStatus();
       const metrics = await api.activationMetrics();
@@ -207,7 +210,7 @@ export default function Analytics() {
         <div className="head-actions">
           <button className={detailView === "overview" ? "btn primary" : "btn"} onClick={() => setDetailView("overview")}>总览</button>
           <button className={detailView === "details" ? "btn primary" : "btn"} onClick={() => setDetailView("details")}>详细数据</button>
-          <button className="btn" onClick={() => { loadMetrics(platformFilter); loadGaps(); }}>↻ 刷新数据</button>
+          <button className="btn" onClick={() => { loadMetrics(platformFilter, detailView === "details" ? metricsPage : undefined); loadGaps(); }}>↻ 刷新数据</button>
         </div>
       </div>
 
@@ -397,9 +400,9 @@ export default function Analytics() {
             </div>
           </div>
           <div style={{ display: "flex", gap: 6 }}>
-            <button className={`btn sm ${platformFilter === "" ? "primary" : ""}`} onClick={() => setPlatformFilter("")}>全部平台</button>
+            <button className={`btn sm ${platformFilter === "" ? "primary" : ""}`} onClick={() => { setPlatformFilter(""); setMetricsPage(1); }}>全部平台</button>
             {(Object.keys(PLATFORM_NAME) as Platform[]).map((p) => (
-              <button key={p} className={`btn sm ${platformFilter === p ? "primary" : ""}`} onClick={() => setPlatformFilter(p)}>
+              <button key={p} className={`btn sm ${platformFilter === p ? "primary" : ""}`} onClick={() => { setPlatformFilter(p); setMetricsPage(1); }}>
                 {PLATFORM_NAME[p]}
               </button>
             ))}
@@ -482,6 +485,14 @@ export default function Analytics() {
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {metrics && metrics.pages && metrics.pages > 1 && (
+          <div className="pagination-row" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, flexWrap: "wrap", marginTop: 14 }}>
+            <button className="btn sm" disabled={(metrics.page ?? metricsPage) <= 1} onClick={() => setMetricsPage((n) => Math.max(1, n - 1))}>上一页</button>
+            <span className="tiny">第 {metrics.page ?? metricsPage} / {metrics.pages} 页 · 共 {metrics.total} 条逐篇数据</span>
+            <button className="btn sm" disabled={(metrics.page ?? metricsPage) >= metrics.pages} onClick={() => setMetricsPage((n) => Math.min(metrics.pages ?? 1, n + 1))}>下一页</button>
           </div>
         )}
 

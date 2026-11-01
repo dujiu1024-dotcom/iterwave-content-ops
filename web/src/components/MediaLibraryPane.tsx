@@ -53,10 +53,6 @@ function assetState(item: MediaAsset): Filter {
 export default function MediaLibraryPane() {
   const { showToast, withPending, isPending } = useApp();
   const [items, setItems] = useState<MediaAsset[]>([]);
-  const [total, setTotal] = useState(0);
-  const [serverCounts, setServerCounts] = useState<{ all: number; pending: number; approved: number; rejected: number; archived: number } | null>(null);
-  const [page, setPage] = useState(1);
-  const pageSize = 24;
   const [targets, setTargets] = useState<MediaUsageTarget[]>([]);
   const [selectedContentId, setSelectedContentId] = useState("");
   const [usageRole, setUsageRole] = useState<UsageRole>("illustration");
@@ -64,6 +60,11 @@ export default function MediaLibraryPane() {
   const [panel, setPanel] = useState<Panel>("none");
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [pages, setPages] = useState(1);
+  const [counts, setCounts] = useState<Record<Filter, number>>({ all: 0, pending: 0, approved: 0, rejected: 0, archived: 0 });
+  const pageSize = 20;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [targetWarning, setTargetWarning] = useState("");
@@ -96,12 +97,17 @@ export default function MediaLibraryPane() {
       const reviewStatus = filter === "pending" ? "pending_review"
         : filter === "approved" ? "approved" : filter === "rejected" ? "rejected" : "all";
       const [result, targetResult, settingsResult] = await Promise.all([
-        api.mediaAssets(query, status, reviewStatus, pageSize, (page - 1) * pageSize),
+        api.mediaAssets(query, status, reviewStatus, page, pageSize),
         api.mediaUsageTargets(), api.mediaGenerationSettings(),
       ]);
       setItems(result.items);
-      setTotal(result.total ?? 0);
-      setServerCounts(result.counts ?? null);
+      setTotal(result.total);
+      setPages(result.pages);
+      setCounts(result.counts);
+      if (page > result.pages) {
+        setPage(result.pages);
+        return;
+      }
       setTargets(targetResult.items);
       setSettings(settingsResult);
       const requestedContentId = new URLSearchParams(window.location.search).get("focusContent");
@@ -131,10 +137,7 @@ export default function MediaLibraryPane() {
     return () => window.clearTimeout(timer);
   }, [load]);
 
-  const counts = serverCounts ?? { all: 0, pending: 0, approved: 0, rejected: 0, archived: 0 };
   const visible = items;
-  const pageCount = Math.max(1, Math.ceil(total / pageSize));
-  useEffect(() => { setPage((current) => Math.min(current, pageCount)); }, [pageCount]);
 
   const aiReady = Boolean(settings?.enabled && settings?.provider_configured);
   const aiBlockedReason = !settings ? "正在加载 AI 配图设置" : !settings.provider_configured
@@ -231,8 +234,7 @@ export default function MediaLibraryPane() {
           await api.generateMediaAsset({ prompt: prompt.trim(), title: genTitle.trim(), tags: [] });
         }
         showToast("已生成，图片在「待审核」里，通过后才能使用", "success");
-        setPrompt(""); setGenTitle(""); setEditTarget(null); setFilter("pending");
-        await load();
+        setPrompt(""); setGenTitle(""); setEditTarget(null); setPage(1); setFilter("pending");
       } catch (e) {
         showToast(e instanceof Error ? e.message : "生成失败", "error");
       }
@@ -300,8 +302,8 @@ export default function MediaLibraryPane() {
       try {
         await api.generateMediaForContent(selectedContentId, usageRole);
         showToast("候选配图已生成，在「待审核」里确认后即可配给这篇内容", "success");
+        setPage(1);
         setFilter("pending");
-        await load();
       } catch (e) {
         showToast(e instanceof Error ? e.message : "生成失败", "error");
       }
@@ -596,13 +598,15 @@ export default function MediaLibraryPane() {
             })}
           </div>
         )}
-        {total > pageSize && <div className="pagination-bar">
-          <span className="pagination-summary">共 {total} 张 · 第 {page}/{pageCount} 页 · 每页 {pageSize} 张</span>
-          <div className="pagination-actions">
-            <button className="btn sm" disabled={page <= 1 || loading} onClick={() => setPage((v) => v - 1)}>上一页</button>
-            <button className="btn sm" disabled={page >= pageCount || loading} onClick={() => setPage((v) => v + 1)}>下一页</button>
+        {total > 0 && (
+          <div className="flex between center" style={{ padding: "14px 0 2px", gap: 10, flexWrap: "wrap" }}>
+            <span className="ml-hint">共 {total} 张 · 第 {page}/{pages} 页 · 每页 {pageSize} 张{loading ? " · 正在更新…" : ""}</span>
+            <div className="flex" style={{ gap: 6 }}>
+              <button className="btn sm" disabled={loading || page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button>
+              <button className="btn sm" disabled={loading || page >= pages} onClick={() => setPage((value) => Math.min(pages, value + 1))}>下一页</button>
+            </div>
           </div>
-        </div>}
+        )}
       </section>
     </div>
   );

@@ -234,7 +234,17 @@ class HotTopicCollector:
     # 对外入口
     # ------------------------------------------------------------------
 
-    def overview(self, force: bool = False) -> dict:
+    def overview(
+        self,
+        force: bool = False,
+        *,
+        page: int | None = None,
+        page_size: int = 20,
+        tab: str = "all",
+        source: str | None = None,
+        keyword: str | None = None,
+        sort_by: str = "heat",
+    ) -> dict:
         """返回热点雷达数据（只读库）。force 参数保留兼容，后台刷新由调用方触发。"""
         if self.hcfg.enabled is False:
             return {
@@ -246,7 +256,20 @@ class HotTopicCollector:
                 "message": "热点采集已在配置中关闭（hot_topics.enabled=false）",
             }
 
-        items, sources = self._load()
+        if page is None:
+            items, sources = self._load()
+            total = len(items)
+            match_summary = self._match_summary(items)
+            urgent_total = sum(1 for item in items if item.get("time_sensitive") == 1)
+            pagination = {}
+        else:
+            items, sources, total, match_summary, urgent_total, source_options = self._load_page(
+                page, page_size, tab=tab, source=source, keyword=keyword, sort_by=sort_by,
+            )
+            pagination = {
+                "total": total, "page": page, "page_size": page_size,
+                "pages": max(1, (total + page_size - 1) // page_size),
+            }
         last = self._last_collected_at()
         return {
             "enabled": True,
@@ -263,7 +286,10 @@ class HotTopicCollector:
             },
             "sources": sources,
             "items": items,
-            "match": self._match_summary(items),
+            "match": match_summary,
+            "urgent_total": urgent_total,
+            **({"source_options": source_options} if page is not None else {}),
+            **pagination,
             "filters": {
                 "heat_threshold": self.hcfg.filters.get("heat_threshold"),
                 "heat_filter_enabled": self.hcfg.filters.get("heat_filter_enabled", True),
@@ -283,6 +309,259 @@ class HotTopicCollector:
             "pending": sum(1 for i in items if i["dimension_match"] is None),
             "method": next((i["match_method"] for i in items if i.get("match_method")), None),
         }
+
+
+    def _load_page(
+        self,
+        page: int,
+        page_size: int,
+        *,
+        tab: str = "all",
+        source: str | None = None,
+        keyword: str | None = None,
+        sort_by: str = "heat",
+    ) -> tuple[list[dict], list[dict], int, dict, int, list[str]]:
+        """数据库分页读取热点；批次、失败屏蔽、去重、门限和趋势基准均先于分页。"""
+        from .hot_topic_matcher import HotTopicMatcher, keyword_judgement
+
+        filters = self.hcfg.filters
+        heat_on = filters.get("heat_filter_enabled", True)
+        heat_min = float(filters.get("heat_threshold") or 0)
+        time_on = filters.get("time_filter_enabled", True)
+        matcher = HotTopicMatcher(self.cfg, self.conn, use_default_llm=True)
+        current_version = matcher.version
+        threshold = self.cfg.hot_topic_matcher.match_threshold
+        platform_expr = (
+            "CASE WHEN instr(COALESCE(h.source, ''), '/') > 0 "
+            "THEN substr(h.source, instr(h.source, '/') + 1) ELSE COALESCE(h.source, '') END"
+        )
+        base = f"""
+            WITH latest AS (
+                SELECT source, MAX(COALESCE(last_seen_at, discovered_at, '')) AS seen
+                FROM hot_topics WHERE evidence_status = 'collected' GROUP BY source
+            ),
+            eligible_base AS (
+                SELECT h.*, {platform_expr} AS platform_key
+                FROM hot_topics h
+                LEFT JOIN latest l ON l.source = h.source
+                WHERE h.evidence_status != 'failed'
+                  AND (h.evidence_status != 'collected'
+                       OR COALESCE(h.last_seen_at, h.discovered_at, '') = l.seen)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM hot_topics f
+                      WHERE f.evidence_status = 'failed'
+                        AND (CASE WHEN instr(COALESCE(f.source, ''), '/') > 0
+                             THEN substr(f.source, instr(f.source, '/') + 1)
+                             ELSE COALESCE(f.source, '') END) = {platform_expr}
+                  )
+                  AND h.duplicate_of IS NULL
+            ),
+            visible AS (
+                SELECT * FROM eligible_base
+                WHERE (? = 0 OR heat_score IS NULL OR heat_score >= ?)
+                  AND (? = 0 OR time_sensitive IS NULL OR time_sensitive != 0)
+            ),
+            filtered AS (
+                SELECT * FROM visible
+                WHERE (? = 'all'
+                    OR (? = 'urgent' AND time_sensitive = 1)
+                    OR (? = 'unknown' AND time_sensitive IS NULL)
+                    OR (? = 'matched' AND match_version = ? AND COALESCE(forbidden_hit, 0) = 0
+                        AND match_score IS NOT NULL AND match_score >= ?))
+                  AND (? IS NULL OR source = ?)
+                  AND (? IS NULL OR instr(COALESCE(title, ''), ?) > 0)
+            )
+        """
+        keyword = (keyword or '').strip() or None
+        source = source or None
+        gate_params = (
+            int(heat_on), heat_min, int(time_on),
+            tab, tab, tab, tab, current_version, threshold,
+            source, source, keyword, keyword,
+        )
+        total = self.conn.execute(
+            base + " SELECT COUNT(*) FROM filtered",
+            gate_params,
+        ).fetchone()[0]
+        rows = self.conn.execute(
+            base + """
+                SELECT * FROM filtered
+                ORDER BY
+                  CASE WHEN ? = 'match' THEN match_score END DESC NULLS LAST,
+                  CASE WHEN ? != 'match' THEN heat_score END DESC NULLS LAST,
+                  id DESC
+                LIMIT ? OFFSET ?
+            """,
+            (*gate_params, sort_by, sort_by, page_size, (page - 1) * page_size),
+        ).fetchall()
+
+        # 来源状态不受当前页和热度/时效门影响。
+        source_rows = self.conn.execute(
+            base + """
+                SELECT platform_key, source, evidence_status, discovered_at
+                FROM (
+                    SELECT platform_key, source, evidence_status, discovered_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY platform_key
+                               ORDER BY heat_score DESC NULLS LAST, id DESC
+                           ) AS source_rank
+                    FROM eligible_base
+                )
+                WHERE source_rank = 1
+                ORDER BY platform_key
+            """,
+            gate_params,
+        ).fetchall()
+        source_options = [
+            redact(row["source"]) for row in self.conn.execute(
+                base + " SELECT DISTINCT source FROM eligible_base ORDER BY source",
+                gate_params,
+            ).fetchall()
+        ]
+        sources = {
+            row["platform_key"]: {
+                "platform": redact(row["platform_key"]),
+                "source": redact(row["source"]),
+                "status": row["evidence_status"],
+                "message": None,
+                "discovered_at": _api_utc(row["discovered_at"]),
+            }
+            for row in source_rows
+        }
+
+        failed_rows = self.conn.execute(
+            "SELECT source, title, discovered_at FROM hot_topics "
+            "WHERE evidence_status = 'failed' ORDER BY discovered_at DESC, id DESC"
+        ).fetchall()
+        failed: dict[str, dict] = {}
+        for row in failed_rows:
+            source = row["source"] or ""
+            platform = source.rsplit("/", 1)[-1] if "/" in source else source
+            if platform not in failed:
+                failed[platform] = {
+                    "platform": redact(platform), "source": redact(source),
+                    "status": "failed", "message": redact(row["title"] or ""),
+                    "discovered_at": _api_utc(row["discovered_at"]),
+                }
+                sources.pop(platform, None)
+
+        # 趋势中位数必须使用完整可见集合，而不是当前页。
+        heat_rows = self.conn.execute(
+            base + " SELECT platform_key, heat_score FROM visible WHERE heat_score IS NOT NULL",
+            (*gate_params,),
+        ).fetchall()
+        heats: dict[str, list[float]] = {}
+        for row in heat_rows:
+            key = redact(row["platform_key"])
+            heats.setdefault(key, []).append(float(row["heat_score"]))
+        medians = {key: statistics.median(values) for key, values in heats.items() if values}
+
+        # KPI 同样基于完整可见集合，不随翻页变化。
+        summary_row = self.conn.execute(
+            base + """
+                SELECT
+                  SUM(CASE WHEN match_version = ? AND COALESCE(forbidden_hit, 0) = 1 THEN 1 ELSE 0 END) AS forbidden_count,
+                  SUM(CASE WHEN match_version = ? AND COALESCE(forbidden_hit, 0) = 0 AND match_score IS NOT NULL
+                                AND match_score >= ? THEN 1 ELSE 0 END) AS matched_count,
+                  SUM(CASE WHEN match_version = ? AND forbidden_hit = 0 AND match_score IS NOT NULL
+                                AND match_score < ? THEN 1 ELSE 0 END) AS rejected_count,
+                  SUM(CASE WHEN match_version IS NULL OR match_version != ?
+                                OR (COALESCE(forbidden_hit, 0) = 0 AND match_score IS NULL) THEN 1 ELSE 0 END) AS pending_count,
+                  (SELECT match_method FROM visible WHERE match_method IS NOT NULL
+                   ORDER BY heat_score DESC NULLS LAST, id DESC LIMIT 1) AS method
+                FROM visible
+            """,
+            (*gate_params, current_version, current_version, threshold,
+             current_version, threshold, current_version),
+        ).fetchone()
+        match_summary = {
+            "threshold": threshold,
+            "matched": int(summary_row["matched_count"] or 0),
+            "rejected": int((summary_row["rejected_count"] or 0) + (summary_row["forbidden_count"] or 0)),
+            "pending": int(summary_row["pending_count"] or 0),
+            "method": summary_row["method"],
+        }
+
+        page_ids = [row["id"] for row in rows]
+        also_on: dict[str, list[dict]] = {}
+        if page_ids:
+            marks = ",".join("?" for _ in page_ids)
+            duplicate_rows = self.conn.execute(
+                f"""
+                WITH latest AS (
+                    SELECT source, MAX(COALESCE(last_seen_at, discovered_at, '')) AS seen
+                    FROM hot_topics WHERE evidence_status = 'collected' GROUP BY source
+                )
+                SELECT h.* FROM hot_topics h LEFT JOIN latest l ON l.source = h.source
+                WHERE h.duplicate_of IN ({marks}) AND h.evidence_status != 'failed'
+                  AND (h.evidence_status != 'collected'
+                       OR COALESCE(h.last_seen_at, h.discovered_at, '') = l.seen)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM hot_topics f WHERE f.evidence_status = 'failed'
+                      AND (CASE WHEN instr(COALESCE(f.source, ''), '/') > 0
+                           THEN substr(f.source, instr(f.source, '/') + 1)
+                           ELSE COALESCE(f.source, '') END) =
+                          (CASE WHEN instr(COALESCE(h.source, ''), '/') > 0
+                           THEN substr(h.source, instr(h.source, '/') + 1)
+                           ELSE COALESCE(h.source, '') END)
+                  )
+                """,
+                page_ids,
+            ).fetchall()
+            for row in duplicate_rows:
+                platform = (row["source"] or "").rsplit("/", 1)[-1]
+                also_on.setdefault(row["duplicate_of"], []).append({
+                    "platform": redact(platform), "title": row["title"],
+                    "url": row["raw_url"], "heat": row["heat_score"],
+                    "heat_unit": row["heat_unit"],
+                })
+
+        redlines = [key for key in self.cfg.ultimate_goal.redline_keywords if key]
+        items: list[dict] = []
+        for row in rows:
+            source = row["source"] or ""
+            platform = source.rsplit("/", 1)[-1] if "/" in source else source
+            title = row["title"] or ""
+            hit_redline = [key for key in redlines if key in title]
+            sensitive_hits = _sensitive_topic_hits(title)
+            kj = keyword_judgement(matcher.persona, title)
+            fresh = row["match_version"] == current_version
+            if not fresh or row["match_version"] is None or row["match_score"] is None:
+                dimension_match = None
+            elif row["forbidden_hit"]:
+                dimension_match = False
+            else:
+                dimension_match = row["match_score"] >= threshold
+            forbidden = bool(fresh and row["forbidden_hit"])
+            publishability_status = _publishability_status(
+                title, hit_redline, forbidden, dimension_match, fresh,
+            )
+            item = {
+                "id": row["id"], "title": title, "source": redact(source),
+                "platform": redact(platform), "discovered_at": _api_utc(row["discovered_at"]),
+                "last_seen_at": _api_utc(row["last_seen_at"]),
+                "collected_at": _api_utc(row["last_seen_at"] or row["discovered_at"]),
+                "seen_count": row["seen_count"], "heat_prev": row["heat_prev"],
+                "heat_peak": row["heat_peak"], "url": row["raw_url"],
+                "heat": row["heat_score"], "heat_unit": row["heat_unit"],
+                "time_sensitive": row["time_sensitive"], "evidence_status": row["evidence_status"],
+                "dimension": (row["match_dimension"] if fresh else None) or row["dimension"],
+                "dimension_match": dimension_match, "dimension_hits": kj["keyword_hits"],
+                "match_score": row["match_score"] if fresh else None,
+                "match_angle": row["match_angle"] if fresh else None,
+                "match_reason": row["match_reason"] if fresh else None,
+                "match_method": row["match_method"] if fresh else None,
+                "publishable": publishability_status == "可发布",
+                "publishability_status": publishability_status,
+                "sensitive_hits": sensitive_hits, "redline_hits": hit_redline,
+            }
+            item["trend"], item["trend_reason"] = _trend_of(
+                item, medians.get(item["platform"]), self.hcfg,
+            )
+            item["also_on"] = also_on.get(item["id"], [])
+            items.append(item)
+        urgent_total = self.conn.execute(base + " SELECT COUNT(*) FROM visible WHERE time_sensitive = 1", gate_params).fetchone()[0]
+        return items, list(sources.values()) + list(failed.values()), total, match_summary, urgent_total, source_options
 
     def refresh(self, on_progress: Optional[Callable[[dict], None]] = None) -> dict:
         """并发抓取综合热榜平台 + 自定义 RSS/JSON 行业源 → 落库。返回各来源采集结果。

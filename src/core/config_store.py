@@ -18,11 +18,9 @@ import re
 import sqlite3
 import tempfile
 import threading
-import tempfile
-import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from src.core.config import DEFAULT_JOB_SCHEDULES, JOB_DESCRIPTIONS, Config, PlatformPersonaConfig, validate_cron
 from src.core.redact import redact, redact_path
@@ -1029,6 +1027,38 @@ def current_config_view(cfg: Config, conn) -> dict[str, Any]:
                 "FROM config_changes ORDER BY id DESC LIMIT 20"
             ).fetchall()
         ],
+    }
+
+
+
+def config_audit_page(conn, page: int = 1, page_size: int = 20) -> dict[str, Any]:
+    """Return a paginated, redacted view of configuration change history."""
+    total = conn.execute("SELECT COUNT(*) FROM config_changes").fetchone()[0]
+    rows = conn.execute(
+        "SELECT id, key, old_value, new_value, changed_at "
+        "FROM config_changes ORDER BY id DESC LIMIT ? OFFSET ?",
+        (page_size, (page - 1) * page_size),
+    ).fetchall()
+    items = [
+        {
+            **dict(row),
+            "old_value": (
+                "已隐藏" if row["key"] in _INTERNAL_ENDPOINT_KEYS and row["old_value"]
+                else _redact_public_value(row["old_value"])
+            ),
+            "new_value": (
+                "已隐藏" if row["key"] in _INTERNAL_ENDPOINT_KEYS and row["new_value"]
+                else _redact_public_value(row["new_value"])
+            ),
+        }
+        for row in rows
+    ]
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": max(1, (total + page_size - 1) // page_size),
     }
 
 

@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from src.api import main as api_main
 from src.core import media_generation
 from src.core.tenant_registry import TenantRegistry
+from src.core.timezone import business_now
 
 
 def _client(test_auth):
@@ -249,7 +250,7 @@ def test_legacy_monthly_quota_does_not_block_additional_generation(
     conn.execute(
         "INSERT INTO media_generation_jobs (prompt, final_prompt, model, status, created_at) "
         "VALUES ('previous', 'previous', 'test-model', 'succeeded', ?)",
-        (api_main._now().strftime("%Y-%m-%d %H:%M:%S"),),
+        (business_now(cfg).strftime("%Y-%m-%d %H:%M:%S"),),
     )
     conn.commit()
 
