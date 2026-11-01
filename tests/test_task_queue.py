@@ -368,3 +368,37 @@ def test_queue_history_can_filter_by_task_type(tmp_path):
     assert rounds_total == 1 and [item.task_id for item in rounds] == [round_task.task_id]
     assert scheduler_total == 1 and [item.task_id for item in scheduler] == [scheduler_task.task_id]
     assert all_total == 2 and {item.task_id for item in all_items} == {round_task.task_id, scheduler_task.task_id}
+
+
+def test_queue_status_counts_are_aggregated_by_tenant(tmp_path):
+    queue = make_queue(tmp_path)
+    queued_a, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={"n": 1})
+    running_a, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={"n": 2})
+    failed_b, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-b", payload={"n": 3})
+    interrupted_b, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-b", payload={"n": 4})
+
+    conn = queue._connect()
+    try:
+        conn.executemany(
+            "UPDATE global_task_queue SET status=? WHERE task_id=?",
+            [
+                ("running", running_a.task_id),
+                ("failed", failed_b.task_id),
+                ("interrupted", interrupted_b.task_id),
+            ],
+        )
+    finally:
+        conn.close()
+
+    active = queue.status_counts(scope="active")
+    failed = queue.status_counts(scope="failed")
+
+    assert active["total"] == 2
+    assert active["by_status"] == {"queued": 1, "running": 1}
+    assert active["by_tenant"] == {
+        "tenant-a": {"queued": 1, "running": 1},
+    }
+    assert failed["total"] == 2
+    assert failed["by_tenant"] == {
+        "tenant-b": {"failed": 1, "interrupted": 1},
+    }
