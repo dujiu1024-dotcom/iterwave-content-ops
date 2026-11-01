@@ -102,7 +102,8 @@ def safe_error_summary(value: object, fallback: str = "操作失败，请稍后�
         return fallback
     if re.search(
         r"(?i)traceback|File [\"'][^\"']+[\"'], line \d+|"
-        r"(?:sqlite3|sqlalchemy)\.|operationalerror|programmingerror",
+        r"(?:sqlite3|sqlalchemy)\.|operationalerror|programmingerror|"
+        r"OPENAI_API_KEY|DATABASE_URL|SECRET_KEY",
         raw,
     ):
         return fallback
