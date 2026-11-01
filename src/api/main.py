@@ -6685,6 +6685,111 @@ def _register_routes(app: FastAPI) -> None:
             "platform_only_metrics": raw_metrics,
         }
 
+    @app.get("/api/analytics/business-summary")
+    def analytics_business_summary(days: int = Query(30, ge=1, le=365)):
+        """业务经营 KPI 汇总；只返回有明确定义的数据，未知值保留为 null。"""
+        from datetime import timedelta
+
+        conn = _g()["conn"]
+        since = (_now() - timedelta(days=days - 1)).strftime("%Y-%m-%d %H:%M:%S")
+
+        contents_created = int(conn.execute(
+            "SELECT COUNT(*) FROM contents WHERE created_at >= ?", (since,)
+        ).fetchone()[0])
+        drafts_created = int(conn.execute(
+            "SELECT COUNT(*) FROM drafts WHERE created_at >= ?", (since,)
+        ).fetchone()[0])
+        publish_eligible = int(conn.execute(
+            "SELECT COUNT(*) FROM drafts WHERE created_at >= ? "
+            "AND status IN ('draft_saved','user_published','data_fetching','published')",
+            (since,),
+        ).fetchone()[0])
+        confirmed_published = int(conn.execute(
+            "SELECT COUNT(*) FROM drafts WHERE created_at >= ? "
+            "AND status IN ('draft_saved','user_published','data_fetching','published') "
+            "AND user_confirmed_at IS NOT NULL",
+            (since,),
+        ).fetchone()[0])
+
+        # 每篇草稿仅取窗口内最新一条成功/部分成功快照，避免重复采集被重复求和。
+        metric_row = conn.execute(
+            """WITH ranked AS (
+                   SELECT draft_id, views, likes, collects, comments, shares, new_followers,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY draft_id ORDER BY fetched_at DESC, id DESC
+                          ) AS rn
+                   FROM metrics
+                   WHERE draft_id IS NOT NULL
+                     AND fetched_at >= ?
+                     AND fetch_status IN ('success','partial')
+               )
+               SELECT COUNT(*) AS sample_count,
+                      SUM(views) AS views, SUM(likes) AS likes,
+                      SUM(collects) AS collects, SUM(comments) AS comments,
+                      SUM(shares) AS shares, SUM(new_followers) AS new_followers,
+                      SUM(CASE WHEN views IS NOT NULL THEN 1 ELSE 0 END) AS views_samples,
+                      SUM(CASE WHEN likes IS NOT NULL THEN 1 ELSE 0 END) AS likes_samples,
+                      SUM(CASE WHEN collects IS NOT NULL THEN 1 ELSE 0 END) AS collects_samples,
+                      SUM(CASE WHEN comments IS NOT NULL THEN 1 ELSE 0 END) AS comments_samples,
+                      SUM(CASE WHEN shares IS NOT NULL THEN 1 ELSE 0 END) AS shares_samples
+               FROM ranked WHERE rn = 1""",
+            (since,),
+        ).fetchone()
+
+        followers_growth: dict[str, dict | None] = {}
+        for platform in _g()["cfg"].platforms.enabled_keys():
+            baseline = conn.execute(
+                "SELECT followers, captured_at FROM account_snapshots "
+                "WHERE platform=? AND followers IS NOT NULL AND captured_at < ? "
+                "ORDER BY captured_at DESC, id DESC LIMIT 1",
+                (platform, since),
+            ).fetchone()
+            latest = conn.execute(
+                "SELECT followers, captured_at FROM account_snapshots "
+                "WHERE platform=? AND followers IS NOT NULL AND captured_at >= ? "
+                "ORDER BY captured_at DESC, id DESC LIMIT 1",
+                (platform, since),
+            ).fetchone()
+            followers_growth[platform] = (
+                {
+                    "growth": int(latest["followers"]) - int(baseline["followers"]),
+                    "baseline_at": baseline["captured_at"],
+                    "latest_at": latest["captured_at"],
+                }
+                if baseline is not None and latest is not None else None
+            )
+
+        return {
+            "window_days": days,
+            "since": since,
+            "contents_created": contents_created,
+            "drafts_created": drafts_created,
+            "confirmed_published": confirmed_published,
+            "publish_eligible": publish_eligible,
+            "draft_publish_confirmation_rate": (
+                confirmed_published / publish_eligible if publish_eligible else None
+            ),
+            "platform_publish_success_rate": None,
+            "platform_publish_success_note": "当前没有覆盖所有平台的权威发布尝试/成功回执分母，暂不可计算",
+            "interactions": {
+                "sample_count": int(metric_row["sample_count"] or 0),
+                "views": metric_row["views"],
+                "likes": metric_row["likes"],
+                "collects": metric_row["collects"],
+                "comments": metric_row["comments"],
+                "shares": metric_row["shares"],
+                "new_followers": metric_row["new_followers"],
+                "known_samples": {
+                    "views": int(metric_row["views_samples"] or 0),
+                    "likes": int(metric_row["likes_samples"] or 0),
+                    "collects": int(metric_row["collects_samples"] or 0),
+                    "comments": int(metric_row["comments_samples"] or 0),
+                    "shares": int(metric_row["shares_samples"] or 0),
+                },
+            },
+            "followers_growth_by_platform": followers_growth,
+        }
+
     # --- 选题评分 ---
     @app.get("/api/topics/score")
     def score_topics(limit: int = Query(20, ge=1, le=200)):
