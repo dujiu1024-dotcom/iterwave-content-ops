@@ -372,7 +372,7 @@ def test_queue_history_can_filter_by_task_type(tmp_path):
 
 def test_queue_status_counts_are_aggregated_by_tenant(tmp_path):
     queue = make_queue(tmp_path)
-    queued_a, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={"n": 1})
+    queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={"n": 1})
     running_a, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={"n": 2})
     failed_b, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-b", payload={"n": 3})
     interrupted_b, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-b", payload={"n": 4})
