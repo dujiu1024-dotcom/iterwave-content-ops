@@ -1063,7 +1063,12 @@ function RhythmPane({ rhythm, onSaved }: { rhythm: RhythmConfig | null; onSaved?
         <div key={p} className="panel">
           <div className="panel-head">
             <div className="panel-title"><span className="icon">♪</span>{PLATFORM_NAME[p]} · 节奏配置</div>
-            <div className="head-actions"><span className="tag gray">平台独立配额</span></div>
+            <div className="head-actions">
+              <span className="tag gray">平台独立配额</span>
+              <span className={rhythm.enabled_platforms.includes(p) ? "tag green" : "tag orange"}>
+                {rhythm.enabled_platforms.includes(p) ? "平台已启用" : "平台未启用 · 配置保存后待启用生效"}
+              </span>
+            </div>
           </div>
           <div className="grid three" style={{ gap: 8 }}>
             {([

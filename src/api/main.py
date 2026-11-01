@@ -3878,8 +3878,8 @@ def _register_routes(app: FastAPI) -> None:
             total = None
         else:
             tasks, total = _task_queue.list_page(
-                page=1 if scope in {"active", "failed"} else page,
-                page_size=500 if scope in {"active", "failed"} else page_size,
+                page=page,
+                page_size=page_size,
                 scope=scope, task_type=task_type if scope == "history" else None,
             )
         items = []
@@ -3901,9 +3901,9 @@ def _register_routes(app: FastAPI) -> None:
         response = {"items": items}
         if scope != "all":
             response.update({
-                "total": total, "page": 1 if scope == "active" else page,
-                "page_size": 500 if scope == "active" else page_size,
-                "pages": 1 if scope == "active" else max(1, (total + page_size - 1) // page_size),
+                "total": total, "page": page, "page_size": page_size,
+                "pages": max(1, (total + page_size - 1) // page_size),
+                "counts": _task_queue.status_counts(scope=scope),
             })
         return response
 
@@ -6451,18 +6451,20 @@ def _register_routes(app: FastAPI) -> None:
         ops_win = windows.get("ops")
         ops_range = f"{ops_win.start_hour:02d}:00-{ops_win.end_hour:02d}:00" if ops_win else "08:00-23:00"
 
-        # 每平台 posting_windows：目前四平台共用 ops 窗口（后续可分平台配）
-        posting_windows = {p: [ops_range] for p in enabled}
+        # 节奏配置对所有受支持平台都可见和可编辑；平台启停状态单独返回，
+        # 避免未启用平台（尤其快手）被误认为没有节奏控制能力。
+        supported_platforms = ("xhs", "douyin", "kuaishou", "wechat_channels")
+        posting_windows = {p: [ops_range] for p in supported_platforms}
 
         return {
             "enabled_platforms": enabled,
             "quotas": {
                 p: {
-                    "passive_replies": getattr(quotas_map.get(p), "passive_replies", None),
-                    "active_comments": getattr(quotas_map.get(p), "active_comments", None),
-                    "follows": getattr(quotas_map.get(p), "follows", None),
+                    "passive_replies": getattr(quotas_map.get(p), "passive_replies", 0),
+                    "active_comments": getattr(quotas_map.get(p), "active_comments", 0),
+                    "follows": getattr(quotas_map.get(p), "follows", 0),
                 }
-                for p in enabled
+                for p in supported_platforms
             },
             "posting_windows": posting_windows,
             "ops_window": (
@@ -6526,18 +6528,29 @@ def _register_routes(app: FastAPI) -> None:
 
     # --- 内容资产（G-13：外部参考 / 个人观点 / 内容模板）---
     @app.get("/api/assets")
-    def list_assets(asset_type: Optional[str] = Query(None)):
+    def list_assets(
+        asset_type: Optional[str] = Query(None),
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+    ):
         conn = _g()["conn"]
         if asset_type and asset_type not in ("reference", "voice", "template"):
             raise HTTPException(400, "asset_type 只能是 reference / voice / template")
-        sql = "SELECT * FROM content_assets"
-        params: list = []
-        if asset_type:
-            sql += " WHERE asset_type = ?"
-            params.append(asset_type)
-        sql += " ORDER BY created_at DESC, id DESC LIMIT 100"
-        rows = conn.execute(sql, params).fetchall()
-        return {"items": [dict(r) for r in rows], "total": len(rows)}
+        where = " WHERE asset_type = ?" if asset_type else ""
+        params: list = [asset_type] if asset_type else []
+        total = int(conn.execute(
+            "SELECT COUNT(*) FROM content_assets" + where, params,
+        ).fetchone()[0])
+        rows = conn.execute(
+            "SELECT * FROM content_assets" + where
+            + " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+            (*params, page_size, (page - 1) * page_size),
+        ).fetchall()
+        return {
+            "items": [dict(r) for r in rows], "total": total,
+            "page": page, "page_size": page_size,
+            "pages": max(1, (total + page_size - 1) // page_size),
+        }
 
     @app.post("/api/assets")
     def create_asset(req: CreateAssetRequest):
