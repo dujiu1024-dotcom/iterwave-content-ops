@@ -207,7 +207,7 @@ export default function Analytics() {
         <div className="metric">
           <div className="metric-top"><span className="metric-label">指标采集记录</span><span className="metric-icon" aria-hidden="true">▤</span></div>
           <div className="metric-val">{metrics ? metrics.total : "—"} <span className="metric-unit">条</span></div>
-          <div className="metric-foot">近 {metrics?.z_window_days ?? 90} 天有效指标记录，不代表生产量</div>
+          <div className="metric-foot">近 {metrics?.z_window_days ?? 90} 天指标记录（含采集失败记录），不代表生产量</div>
         </div>
         <div className="metric">
           <div className="metric-top"><span className="metric-label">近 30 天内容生产量</span></div>
