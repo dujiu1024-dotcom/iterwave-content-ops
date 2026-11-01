@@ -33,6 +33,8 @@ export default function Calendar() {
   const [planPlatforms, setPlanPlatforms] = useState<Platform[]>([]);
   const [planNotes, setPlanNotes] = useState("");
   const [planFormOpen, setPlanFormOpen] = useState(false);
+  const [editingPlanId, setEditingPlanId] = useState<string | null>(null);
+  const [editingPlanVersion, setEditingPlanVersion] = useState<number | null>(null);
   const [unscheduled, setUnscheduled] = useState<UnscheduledDraft[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -86,6 +88,19 @@ export default function Calendar() {
     try { setPlanDetail(await api.contentPlan(planId)); }
     catch (e: any) { showToast(`加载计划详情失败：${e?.message ?? e}`, "error"); }
     finally { setPlanDetailLoading(false); }
+  };
+
+  const beginEditPlan = (plan: ContentPlan) => {
+    setEditingPlanId(plan.id);
+    setEditingPlanVersion(plan.version);
+    setPlanTitle(plan.title);
+    setPlanTopic(plan.topic ?? "");
+    setPlanDate(plan.scheduled_date);
+    setPlanCount(String(plan.planned_count));
+    setPlanPlatforms(plan.platforms ?? []);
+    setPlanNotes(plan.notes ?? "");
+    setPlanDetail(null);
+    setPlanFormOpen(true);
   };
 
   const startPlan = async (plan: ContentPlan) => {
@@ -179,7 +194,7 @@ export default function Calendar() {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        if (selected) { setSelected(null); setDraftTime(""); } else setPlanFormOpen(false);
+        if (selected) { setSelected(null); setDraftTime(""); } else { setPlanFormOpen(false); setEditingPlanId(null); setEditingPlanVersion(null); }
         return;
       }
       if (event.key !== "Tab") return;
@@ -379,7 +394,10 @@ export default function Calendar() {
           <section className="panel" onClick={(e) => e.stopPropagation()}>
             <div className="panel-head">
               <div><div className="panel-title">{planDetail.title}</div><div className="panel-sub">{planDetail.scheduled_date} · {planDetail.planned_count} 篇/平台 · {PLAN_STATUS_LABEL[planDetail.status]}</div></div>
-              <button className="btn sm" onClick={() => setPlanDetail(null)}>关闭</button>
+              <div style={{ display: "flex", gap: 8 }}>
+                {(planDetail.status === "planned" || planDetail.status === "failed") && <button className="btn sm primary" onClick={() => beginEditPlan(planDetail)}>编辑计划</button>}
+                <button className="btn sm" onClick={() => setPlanDetail(null)}>关闭</button>
+              </div>
             </div>
             {planDetail.topic && <div className="note">{planDetail.topic}</div>}
             {planDetail.notes && <div className="note">备注：{planDetail.notes}</div>}
@@ -396,11 +414,11 @@ export default function Calendar() {
         </div>
       )}
 
-      {planFormOpen && <div className="calendar-drawer-backdrop" role="presentation" onClick={() => setPlanFormOpen(false)}>
-      <section ref={planDrawerRef} tabIndex={-1} className="panel calendar-side-drawer calendar-plan-create" role="dialog" aria-modal="true" aria-label="新建内容计划" onClick={(e) => e.stopPropagation()}>
+      {planFormOpen && <div className="calendar-drawer-backdrop" role="presentation" onClick={() => { setPlanFormOpen(false); setEditingPlanId(null); setEditingPlanVersion(null); }}>
+      <section ref={planDrawerRef} tabIndex={-1} className="panel calendar-side-drawer calendar-plan-create" role="dialog" aria-modal="true" aria-label={editingPlanId ? "编辑内容计划" : "新建内容计划"} onClick={(e) => e.stopPropagation()}>
         <div className="panel-head">
-          <div><div className="panel-title">新建内容计划</div><div className="panel-sub">创建计划不会自动开始生产；加入全局队列后才会生成，发布仍需人工确认。</div></div>
-          <button className="btn sm" onClick={() => setPlanFormOpen(false)}>关闭</button>
+          <div><div className="panel-title">{editingPlanId ? "编辑内容计划" : "新建内容计划"}</div><div className="panel-sub">{editingPlanId ? "编辑仅影响后续执行，不会回写已经生成的历史草稿。" : "创建计划不会自动开始生产；加入全局队列后才会生成，发布仍需人工确认。"}</div></div>
+          <button className="btn sm" onClick={() => { setPlanFormOpen(false); setEditingPlanId(null); setEditingPlanVersion(null); }}>关闭</button>
         </div>
         <div className="calendar-plan-form">
           <label>计划名称<input className="field" value={planTitle} maxLength={160} onChange={(e) => setPlanTitle(e.target.value)} placeholder="例如：本周产品功能系列" /></label>
@@ -413,15 +431,22 @@ export default function Calendar() {
             ))}</span>
           </label>
           <label className="calendar-plan-notes">备注<textarea className="field" rows={2} value={planNotes} maxLength={4000} onChange={(e) => setPlanNotes(e.target.value)} placeholder="可选" /></label>
-          <button className="btn primary" disabled={!planTitle.trim() || !planDate || Number(planCount) < 1 || Number(planCount) > 50 || isPending("content-plan:create")} onClick={async () => {
+          <button className="btn primary" disabled={!planTitle.trim() || !planDate || Number(planCount) < 1 || Number(planCount) > 100 || isPending(editingPlanId ? `content-plan:update:${editingPlanId}` : "content-plan:create")} onClick={async () => {
+            const payload = { title: planTitle.trim(), topic: planTopic.trim(), platforms: planPlatforms, planned_count: Number(planCount), scheduled_date: planDate, notes: planNotes.trim() };
             try {
-              await withPending("content-plan:create", () => api.createContentPlan({ title: planTitle.trim(), topic: planTopic.trim(), platforms: planPlatforms, planned_count: Number(planCount), scheduled_date: planDate, notes: planNotes.trim() }));
-              showToast("内容计划已创建", "success");
-              setPlanTitle(""); setPlanTopic(""); setPlanCount("1"); setPlanPlatforms([]); setPlanNotes(""); setPlanFormOpen(false);
+              if (editingPlanId && editingPlanVersion != null) {
+                await withPending(`content-plan:update:${editingPlanId}`, () => api.updateContentPlan(editingPlanId, { ...payload, version: editingPlanVersion }));
+                showToast("内容计划已更新", "success");
+              } else {
+                await withPending("content-plan:create", () => api.createContentPlan(payload));
+                showToast("内容计划已创建", "success");
+              }
+              setPlanTitle(""); setPlanTopic(""); setPlanCount("1"); setPlanPlatforms([]); setPlanNotes("");
+              setPlanFormOpen(false); setEditingPlanId(null); setEditingPlanVersion(null);
               setCursorDate(new Date(`${planDate}T12:00:00`));
               await load();
-            } catch (e: any) { showToast(`创建计划失败：${e?.message ?? e}`, "error"); }
-          }}>{isPending("content-plan:create") ? "创建中…" : "创建计划"}</button>
+            } catch (e: any) { showToast(`${editingPlanId ? "更新" : "创建"}计划失败：${e?.message ?? e}`, "error"); }
+          }}>{isPending(editingPlanId ? `content-plan:update:${editingPlanId}` : "content-plan:create") ? "保存中…" : editingPlanId ? "保存修改" : "创建计划"}</button>
         </div>
       </section></div>}
 

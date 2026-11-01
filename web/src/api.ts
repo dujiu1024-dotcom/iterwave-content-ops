@@ -35,6 +35,34 @@ export interface GlobalTaskQueueResponse {
   page?: number;
   page_size?: number;
   pages?: number;
+  status_counts?: { queued?: number; running?: number; failed?: number; interrupted?: number };
+  tenant_status_counts?: Record<string, { queued?: number; running?: number; failed?: number; interrupted?: number }>;
+}
+
+export interface GlobalTodoItem {
+  id: string;
+  record_id: number | string;
+  source: "global_queue" | "task_run" | "ops_log" | "circuit_breaker" | "hot_topic_source" | "media_review" | "notification" | "media_generation";
+  source_label: string;
+  tenant_id: string;
+  tenant_name: string;
+  title: string;
+  detail: string;
+  status: string;
+  created_at: string | null;
+  severity: "high" | "medium";
+  target_page: "task-queue" | "operations" | "assets";
+  target_tab: string;
+}
+
+export interface GlobalTodoResponse {
+  items: GlobalTodoItem[];
+  total: number;
+  counts: Record<GlobalTodoItem["source"], number>;
+  page: number;
+  page_size: number;
+  pages: number;
+  capped: boolean;
 }
 
 export interface QueueTaskSubmission {
@@ -138,6 +166,14 @@ export interface SpiralRound {
   collecting_metrics_started_at: string | null;
 }
 
+export interface SpiralRoundPage {
+  items: SpiralRound[];
+  total: number;
+  page: number;
+  page_size: number;
+  pages: number;
+}
+
 export interface MetricsResponse {
   items: MetricRow[];
   total: number;
@@ -150,6 +186,7 @@ export interface MetricsResponse {
   cross_platform_comparable: string[];
   /** 只允许平台内 z 的原始计数指标 */
   platform_only_metrics: string[];
+  page?: number; page_size?: number; pages?: number;
 }
 
 export interface MetricRow {
@@ -203,6 +240,14 @@ export interface Draft {
   platform_content_sync?: "local_only" | "matched" | "stale" | "unknown" | null;
   /** 当前文案是否可按正常路径确认发布；质检/人工审核未放行时需要显式例外原因。 */
   guard_confirmation_allowed?: boolean;
+}
+
+export interface DraftPage {
+  items: Draft[];
+  total: number;
+  page: number;
+  page_size: number;
+  pages: number;
 }
 
 /** POST /api/rounds/{id}/run 的执行报告（RoundExecutor.run 返回） */
@@ -460,6 +505,7 @@ export interface HotTopicsResponse {
   storage?: { rows: number; retention_days: number; max_rows: number };
   sources: HotSourceStatus[];
   items: HotTopicItem[];
+  total?: number; page?: number; page_size?: number; pages?: number; urgent_total?: number; source_options?: string[];
   filters?: Record<string, unknown>;
   message?: string;
 }
@@ -522,6 +568,14 @@ export interface UnscheduledDraft {
 
 /** G-13 内容资产（外部参考 / 个人观点 / 内容模板） */
 export type AssetType = "reference" | "voice" | "template";
+
+export interface AssetPage {
+  items: AssetItem[];
+  total: number;
+  page: number;
+  page_size: number;
+  pages: number;
+}
 
 export interface TenantItem {
   id: string;
@@ -642,6 +696,17 @@ export interface MediaAsset {
   duplicate?: boolean;
 }
 
+export interface MediaAssetPage {
+  items: MediaAsset[];
+  total: number;
+  counts: Record<"all" | "pending" | "approved" | "rejected" | "archived", number>;
+  page: number;
+  page_size: number;
+  pages: number;
+  limit: number;
+  offset: number;
+}
+
 export interface AssetItem {
   id: number;
   asset_type: AssetType;
@@ -666,6 +731,11 @@ export interface ConfigMetadataItem {
   sensitive: boolean;
   description: string;
 }
+
+export interface ConfigAuditItem {
+  id: number; key: string; old_value: string | null; new_value: string | null; changed_at: string | null;
+}
+export interface ConfigAuditPage extends PageResult<ConfigAuditItem> {}
 
 export interface SystemConfigView {
   editable: {
@@ -1026,14 +1096,6 @@ export interface PipelineResponse {
 }
 
 // ===== 账号管理 =====
-export interface RegisteredPlatformAccount {
-  id: number;
-  platform: Platform;
-  account_handle: string;
-  display_name: string;
-  status: "active" | "inactive";
-  notes: string;
-}
 export interface AccountInfo {
   platform: Platform;
   platform_display: string;
@@ -1045,6 +1107,17 @@ export interface AccountInfo {
   has_storage_state: boolean;
   /** 扫码中的 QR（data:image/png;base64,xxx） */
   qr_base64?: string | null;
+}
+
+export interface RegisteredPlatformAccount {
+  id: number;
+  platform: Platform;
+  account_handle: string;
+  display_name: string;
+  status: "active" | "inactive";
+  notes: string;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface LoginStatus {
@@ -1112,6 +1185,14 @@ export interface OpsKpiResponse {
   window_days?: number;
 }
 
+export interface PageResult<T> {
+  items: T[];
+  total: number;
+  page: number;
+  page_size: number;
+  pages: number;
+}
+
 export interface OpsLogItem {
   id: number;
   round_id: number | null;
@@ -1122,8 +1203,12 @@ export interface OpsLogItem {
   content: string | null;
   schedule_time: string | null;
   executed_at: string | null;
-  status: "success" | "failed" | "skipped" | "circuit_broken";
+  status: "success" | "failed" | "skipped" | "circuit_broken" | "pending_verify";
   error_msg: string | null;
+  resolved_at?: string | null;
+  resolved_by?: string | null;
+  resolution_action?: "sent" | "not_sent" | null;
+  resolution_note?: string | null;
   rhythm_wait_seconds: number | null;
 }
 
@@ -1140,6 +1225,9 @@ export interface TaskRunItem {
   next_run_at: string | null;
   error_msg: string | null;
   created_at: string;
+  resolved_at?: string | null;
+  resolved_by?: string | null;
+  resolution_action?: "sent" | "not_sent" | null;
 }
 
 export interface NotificationItem {
@@ -1151,6 +1239,7 @@ export interface NotificationItem {
   body: string | null;
   channel: string | null;
   sent_at: string;
+  read_at: string | null;
 }
 
 export interface SchedulerJob {
@@ -1285,6 +1374,7 @@ async function fetchJson<T>(path: string, options?: RequestInit): Promise<T> {
     }
     throw error;
   }
+  if (res.status === 204) return undefined as T;
   return res.json();
 }
 
@@ -1381,12 +1471,16 @@ export const api = {
     fetchJson<{ updated: Record<string, number | null>; goals: Goal[]; summary: GoalSummary }>(
       "/api/goals/progress/refresh", { method: "POST" },
     ),
-  taskQueue: (params: { scope?: "all" | "active" | "history" | "failed"; page?: number; pageSize?: number; taskType?: string } = {}) => {
+  taskQueue: (params: { scope?: "all" | "active" | "history" | "failed"; page?: number; pageSize?: number; taskType?: string; tenantId?: string; errorKeyword?: string; dateFrom?: string; dateTo?: string } = {}) => {
     const query = new URLSearchParams();
     if (params.scope) query.set("scope", params.scope);
     if (params.page != null) query.set("page", String(params.page));
     if (params.pageSize != null) query.set("page_size", String(params.pageSize));
     if (params.taskType) query.set("task_type", params.taskType);
+    if (params.tenantId) query.set("tenant_id", params.tenantId);
+    if (params.errorKeyword) query.set("error_keyword", params.errorKeyword);
+    if (params.dateFrom) query.set("date_from", params.dateFrom);
+    if (params.dateTo) query.set("date_to", params.dateTo);
     const encoded = query.toString();
     const suffix = encoded ? `?${encoded}` : "";
     return fetchJson<GlobalTaskQueueResponse>(`/api/task-queue${suffix}`);
@@ -1397,6 +1491,11 @@ export const api = {
     }),
   rounds: (status?: string) =>
     fetchJson<SpiralRound[]>(status ? `/api/rounds?status=${status}` : "/api/rounds"),
+  roundsPage: (page: number, pageSize = 20, status?: string) => {
+    const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    if (status) params.set("status", status);
+    return fetchJson<SpiralRoundPage>(`/api/rounds?${params.toString()}`);
+  },
   round: (id: number) => fetchJson<SpiralRound & { drafts: Draft[] }>(`/api/rounds/${id}`),
   createRound: (data: { topic_count?: number; platforms?: Platform[]; goal_id?: string }) =>
     fetchJson<{ id: number; round_number: number; status: string }>("/api/rounds", {
@@ -1424,6 +1523,26 @@ export const api = {
     if (status) p.set("status", status);
     if (platform) p.set("platform", platform);
     return fetchJson<Draft[]>(`/api/drafts?${p}`);
+  },
+  draftsPage: (status: string | undefined, platform: Platform | undefined, page: number, pageSize = 20) => {
+    const p = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    if (status) p.set("status", status);
+    if (platform) p.set("platform", platform);
+    return fetchJson<DraftPage>(`/api/drafts?${p}`);
+  },
+  draftsAll: async (status?: string, platform?: Platform): Promise<Draft[]> => {
+    const first = await api.draftsPage(status, platform, 1, 100);
+    const all = [...first.items];
+    for (let start = 2; start <= first.pages; start += 5) {
+      const end = Math.min(first.pages, start + 4);
+      const batch = await Promise.all(
+        Array.from({ length: end - start + 1 }, (_, index) =>
+          api.draftsPage(status, platform, start + index, 100),
+        ),
+      );
+      all.push(...batch.flatMap((result) => result.items));
+    }
+    return all;
   },
   /** noteUrl：已发布笔记链接（可选；不填则该篇跳过被动评论轮询） */
   confirmPublish: (
@@ -1461,8 +1580,21 @@ export const api = {
   /** 触发后台大模型研判（立即返回，202），只研判当前榜单 */
   researchHotTopics: () =>
     fetchJson<HotResearchJob & { started: boolean }>("/api/hot_topics/research", { method: "POST" }),
-  hotTopics: (refresh = false) =>
-    fetchJson<HotTopicsResponse>(`/api/hot_topics${refresh ? "?refresh=true" : ""}`),
+  hotTopics: (refresh = false, options?: {
+    page?: number; pageSize?: number; tab?: "all" | "matched" | "urgent" | "unknown";
+    source?: string; keyword?: string; sortBy?: "heat" | "match";
+  }) => {
+    const params = new URLSearchParams();
+    if (refresh) params.set("refresh", "true");
+    if (options?.page != null) params.set("page", String(options.page));
+    if (options?.pageSize != null) params.set("page_size", String(options.pageSize));
+    if (options?.tab) params.set("tab", options.tab);
+    if (options?.source) params.set("source", options.source);
+    if (options?.keyword) params.set("keyword", options.keyword);
+    if (options?.sortBy) params.set("sort_by", options.sortBy);
+    const query = params.toString();
+    return fetchJson<HotTopicsResponse>(`/api/hot_topics${query ? `?${query}` : ""}`);
+  },
   gaps: (roundId?: number) =>
     fetchJson<SpiralAnalysis>(roundId ? `/api/gaps?round_id=${roundId}` : "/api/gaps"),
   /** 复盘洞察（螺旋引擎输出，每平台纵深分析 + 结论） */
@@ -1486,8 +1618,16 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
-  metrics: (platform?: Platform) =>
-    fetchJson<MetricsResponse>(`/api/metrics${platform ? `?platform=${platform}` : ""}`),
+  metrics: (platform?: Platform, page?: number, pageSize = 20) => {
+    const params = new URLSearchParams();
+    if (platform) params.set("platform", platform);
+    if (page != null) {
+      params.set("page", String(page));
+      params.set("page_size", String(pageSize));
+    }
+    const query = params.toString();
+    return fetchJson<MetricsResponse>(`/api/metrics${query ? `?${query}` : ""}`);
+  },
   circuitBreaker: () => fetchJson<{ events: CircuitBreakerEvent[]; broken_platforms: Platform[] }>("/api/circuit_breaker"),
   recoverCb: (platform: Platform) =>
     fetchJson<any>(`/api/circuit_breaker/recover?platform=${platform}`, { method: "POST" }),
@@ -1522,6 +1662,10 @@ export const api = {
     fetchJson<{ skill_id: string; enabled: boolean; manifest_version: number; execution_enabled: false }>(
       `/api/skills/${skill_id}`, { method: "PATCH", body: JSON.stringify({ enabled, manifest_version }) },
     ),
+  updateTenantSkill: (skill_id: string, data: Partial<Pick<TenantSkillManifest, "name" | "version" | "description" | "category" | "inputs" | "outputs" | "permissions" | "enabled">> & { manifest_version: number }) =>
+    fetchJson<TenantSkillManifest & { execution_enabled: false }>(
+      `/api/skills/${skill_id}`, { method: "PATCH", body: JSON.stringify(data) },
+    ),
   deleteTenantSkill: (skill_id: string) =>
     fetchJson<{ skill_id: string; deleted: boolean }>(`/api/skills/${skill_id}`, { method: "DELETE" }),
   contentPlan: (id: string) => fetchJson<ContentPlan & { drafts: Array<{ draft_id: string; platform: Platform; status: string; title: string; round_id: number | null }>; rounds: Array<{ round_id: number; task_id: string | null; created_at: string }> }>(`/api/content-plans/${id}`),
@@ -1540,6 +1684,12 @@ export const api = {
       `/api/content-plans/${id}/start`, { method: "POST" },
     ),
   globalOperationsSummary: (days = 30) => fetchJson<GlobalMonitorResponse>(`/api/global-monitor?days=${days}`),
+  todos: (page = 1, pageSize = 20, tenantId?: string, source?: GlobalTodoItem["source"]) => {
+    const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    if (tenantId) params.set("tenant_id", tenantId);
+    if (source) params.set("source", source);
+    return fetchJson<GlobalTodoResponse>(`/api/todos?${params.toString()}`);
+  },
   // === 账号组隔离 ===
   tenants: async () => {
     const result = await fetchJson<TenantListResponse>("/api/tenants");
@@ -1575,19 +1725,30 @@ export const api = {
   },
   // === 图片素材库 ===
   mediaAssets: (
-    query = "", status: "active" | "archived" | "all" = "active",
+    query = "",
+    status: "active" | "archived" | "all" = "active",
     reviewStatus: "pending_review" | "approved" | "rejected" | "all" = "all",
-    limit = 24, offset = 0,
-  ) => fetchJson<{
-    items: MediaAsset[]; limit: number; offset: number; total: number;
-    counts: { all: number; pending: number; approved: number; rejected: number; archived: number };
-  }>(
-    `/api/media?status=${encodeURIComponent(status)}&review_status=${encodeURIComponent(reviewStatus)}&limit=${limit}&offset=${offset}${query ? `&query=${encodeURIComponent(query)}` : ""}`,
-  ),
+    page?: number,
+    pageSize = 20,
+  ) => {
+    const params = new URLSearchParams({
+      status,
+      review_status: reviewStatus,
+      ...(page ? { page: String(page), page_size: String(pageSize) } : { limit: "200" }),
+    });
+    if (query) params.set("query", query);
+    return fetchJson<MediaAssetPage>(`/api/media?${params.toString()}`);
+  },
   uploadMediaAsset: (data: { filename: string; title?: string; alt_text?: string; tags?: string[]; data_base64: string }) =>
     fetchJson<MediaAsset>("/api/media", { method: "POST", body: JSON.stringify(data) }),
   archiveMediaAsset: (id: number) =>
     fetchJson<{ id: number; status: string; already_archived: boolean }>(`/api/media/${id}/archive`, { method: "POST" }),
+  restoreMediaAsset: (id: number) =>
+    fetchJson<{ id: number; status: string; restored?: boolean; already_active?: boolean }>(`/api/media/${id}/restore`, { method: "POST" }),
+  renameMediaAsset: (id: number, title: string) =>
+    fetchJson<{ id: number; title: string }>(`/api/media/${id}`, { method: "PATCH", body: JSON.stringify({ title }) }),
+  deleteMediaAsset: (id: number) =>
+    fetchJson<{ id: number; deleted: boolean; file_removed: boolean }>(`/api/media/${id}`, { method: "DELETE" }),
   mediaUsageTargets: () => fetchJson<{ items: MediaUsageTarget[] }>("/api/media/targets"),
   recommendMediaAssets: (content_id: string, usage_role: "cover" | "illustration" | "background" = "cover") =>
     fetchJson<{ content_id: string; usage_role: string; method: "keyword_match" | "vision_model"; automatic_assignment: false; items: MediaRecommendation[]; message: string }>(
@@ -1615,6 +1776,10 @@ export const api = {
     fetchJson<{ items: AssetItem[]; total: number }>(
       `/api/assets${asset_type ? `?asset_type=${asset_type}` : ""}`,
     ),
+  assetsPage: (asset_type: AssetType, page: number, pageSize = 20) => {
+    const params = new URLSearchParams({ asset_type, page: String(page), page_size: String(pageSize) });
+    return fetchJson<AssetPage>(`/api/assets?${params.toString()}`);
+  },
   createAsset: (data: { asset_type: AssetType; title: string; body?: string; source_url?: string; platform?: Platform }) =>
     fetchJson<AssetItem>("/api/assets", { method: "POST", body: JSON.stringify(data) }),
   updateAsset: (id: number, data: { asset_type: AssetType; title: string; body?: string; source_url?: string; platform?: Platform }) =>
@@ -1652,6 +1817,8 @@ export const api = {
   presets: () => fetchJson<{ items: IndustryPreset[] }>("/api/presets"),
   savePreset: (key: string, data: Omit<IndustryPreset, "key" | "is_builtin" | "version">) =>
     fetchJson<IndustryPreset>(`/api/presets/${encodeURIComponent(key)}`, { method: "PUT", body: JSON.stringify(data) }),
+  deletePreset: (key: string) =>
+    fetchJson<{ key: string; deleted: boolean }>(`/api/presets/${encodeURIComponent(key)}`, { method: "DELETE" }),
   applyPreset: (key: string) =>
     fetchJson<{ key: string; message: string; dimensions: string[]; platform_notes: Record<string, string> }>(
       `/api/presets/${key}/apply`, { method: "POST" },
@@ -1659,6 +1826,10 @@ export const api = {
   hotSources: () => fetchJson<{ items: HotSource[] }>("/api/hot_topics/sources"),
   saveHotSources: (items: HotSource[]) =>
     fetchJson<{ items: HotSource[] }>("/api/hot_topics/sources", { method: "PUT", body: JSON.stringify({ items }) }),
+  testHotSource: (index: number) =>
+    fetchJson<{ ok: boolean; status: "success" | "failed" | "empty"; source: string; item_count: number; sample_titles: string[]; message: string }>(
+      `/api/hot_topics/sources/${index}/test`, { method: "POST" },
+    ),
   saveWebhook: (channel: "wecom" | "feishu", url: string) =>
     fetchJson<{ ok: boolean; channel: string; enabled: boolean; has_webhook_url: boolean }>(
       "/api/notify/webhook", { method: "POST", body: JSON.stringify({ channel, url }) },
@@ -1671,6 +1842,8 @@ export const api = {
     }),
   // === G-13 / G-24 运行时配置 ===
   config: () => fetchJson<SystemConfigView>("/api/config"),
+  configAuditPage: (page: number, pageSize = 20) =>
+    fetchJson<ConfigAuditPage>(`/api/config/audit?page=${page}&page_size=${pageSize}`),
   configMetadata: () => fetchJson<{ items: ConfigMetadataItem[] }>("/api/config/metadata"),
   patchConfig: (updates: Record<string, unknown>) =>
     fetchJson<{ changed: { key: string; old: unknown; new: unknown }[]; noop: boolean; restart_required?: boolean; config: SystemConfigView["editable"] }>(
@@ -1717,24 +1890,54 @@ export const api = {
     fetchJson<{ results: Record<string, "ok" | "failed" | "disabled"> }>("/api/notify/test", {
       method: "POST",
     }),
-  opsLogs: (platform?: Platform, action_type?: string, status?: string, limit = 100, offset = 0) => {
-    const p = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  opsLogs: (platform?: Platform, action_type?: string, status?: string, limit = 100) => {
+    const p = new URLSearchParams({ limit: String(limit) });
     if (platform) p.set("platform", platform);
     if (action_type) p.set("action_type", action_type);
     if (status) p.set("status", status);
     return fetchJson<{ items: OpsLogItem[]; total: number }>(`/api/ops_logs?${p}`);
   },
-  taskRuns: (taskType?: string, status?: string, limit = 100, offset = 0) => {
-    const p = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  resolveOpsLog: (id: number, action: "sent" | "not_sent") =>
+    fetchJson<{ id: number; status: string; resolved_at?: string; already_resolved: boolean }>(
+      `/api/ops_logs/${id}/resolve`, { method: "POST", body: JSON.stringify({ action }) },
+    ),
+  opsLogsPage: (page: number, pageSize = 20, filters: { platform?: Platform; actionType?: string; status?: string; dateFrom?: string; dateTo?: string } = {}) => {
+    const p = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    if (filters.platform) p.set("platform", filters.platform);
+    if (filters.actionType) p.set("action_type", filters.actionType);
+    if (filters.status) p.set("status", filters.status);
+    if (filters.dateFrom) p.set("date_from", filters.dateFrom);
+    if (filters.dateTo) p.set("date_to", filters.dateTo);
+    return fetchJson<PageResult<OpsLogItem>>(`/api/ops_logs?${p.toString()}`);
+  },
+  taskRuns: (taskType?: string, status?: string, limit = 100) => {
+    const p = new URLSearchParams({ limit: String(limit) });
     if (taskType) p.set("task_type", taskType);
     if (status) p.set("status", status);
     return fetchJson<TaskRunItem[]>(`/api/task_runs?${p}`);
   },
-  notifications: (level?: string, limit = 50, offset = 0) => {
-    const p = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  taskRunsPage: (page: number, pageSize = 20, filters: { taskType?: string; status?: string; platform?: Platform; dateFrom?: string; dateTo?: string } = {}) => {
+    const p = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    if (filters.taskType) p.set("task_type", filters.taskType);
+    if (filters.status) p.set("status", filters.status);
+    if (filters.platform) p.set("platform", filters.platform);
+    if (filters.dateFrom) p.set("date_from", filters.dateFrom);
+    if (filters.dateTo) p.set("date_to", filters.dateTo);
+    return fetchJson<PageResult<TaskRunItem>>(`/api/task_runs?${p.toString()}`);
+  },
+  notifications: (level?: string, limit = 50) => {
+    const p = new URLSearchParams({ limit: String(limit) });
     if (level) p.set("level", level);
     return fetchJson<NotificationItem[]>(`/api/notifications?${p}`);
   },
+  notificationsPage: (page: number, pageSize = 20, readStatus: "all" | "unread" | "read" = "all") =>
+    fetchJson<PageResult<NotificationItem> & { unread_total: number }>(
+      `/api/notifications?page=${page}&page_size=${pageSize}&read_status=${readStatus}`,
+    ),
+  markNotificationRead: (id: number) =>
+    fetchJson<{ id: number; read_at: string }>(`/api/notifications/${id}/read`, { method: "POST" }),
+  markAllNotificationsRead: () =>
+    fetchJson<{ updated: number }>("/api/notifications/read-all", { method: "POST" }),
   schedulerJobs: () => fetchJson<{ jobs: SchedulerJob[]; count: number; running: boolean }>("/api/scheduler/jobs"),
   /** R17：pending_verify 人工核实收口（sent=已发出 / not_sent=未发出） */
   resolveTaskRun: (id: number, action: "sent" | "not_sent") =>
@@ -1837,6 +2040,8 @@ export const api = {
     fetchJson<RegisteredPlatformAccount>(id == null ? "/api/platform-accounts" : `/api/platform-accounts/${id}`, {
       method: id == null ? "POST" : "PUT", body: JSON.stringify(data),
     }),
+  deletePlatformAccount: (id: number) =>
+    fetchJson<void>(`/api/platform-accounts/${id}`, { method: "DELETE" }),
   /** 启动扫码登录；restart=true 会先结束仍在运行的旧登录进程 */
   startLogin: (platform: Platform, restart = false) =>
     fetchJson<LoginStatus>(`/api/accounts/${platform}/login${restart ? "?restart=true" : ""}`, { method: "POST" }),

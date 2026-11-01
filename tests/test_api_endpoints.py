@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from src.api import main as api_main
 from src.core.notify import Notifier
+from src.core.metrics import Normalizer
 from src.core.ops.pause import is_ops_paused
 from src.core.plan_version import PlanVersionManager
 from src.core.state_machine import DraftStateMachine, RoundStateMachine
@@ -32,6 +33,7 @@ def client(cfg, conn, seed, test_auth):
         "sm_round": RoundStateMachine(conn),
         "plan_version_manager": PlanVersionManager(cfg, conn),
         "notifier": Notifier(cfg, conn),
+        "normalizer": Normalizer(conn, cfg),
     })
     app = api_main._build_app()
     try:
@@ -919,6 +921,91 @@ def test_ops_kpi_days_param(client):
     assert tc.get("/api/ops_kpi", params={"days": 999}).status_code == 422
 
 
+def test_global_todo_queue_fetches_beyond_first_500_records(client, cfg, tmp_path, monkeypatch):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    tc, _, _ = client
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    queue_conn = queue._connect()
+    queue_conn.executemany(
+        "INSERT INTO global_task_queue "
+        "(queue_order, task_id, task_type, tenant_id, payload_json, status, created_at, "
+        "finished_at, error_code, error_message) "
+        "VALUES (?, ?, 'scheduler_job', 'default', '{}', 'failed', ?, ?, 'TEST', '任务失败')",
+        [(index, f"failed-{index}", f"2026-11-01T12:{index // 60:02d}:{index % 60:02d}",
+          f"2026-11-01T12:{index // 60:02d}:{index % 60:02d}") for index in range(1, 502)],
+    )
+    queue_conn.commit()
+    queue_conn.close()
+
+    db_file = Path(cfg.resolve_path(cfg.paths.db_file))
+
+    class Registry:
+        def list(self):
+            return [{"id": "default", "name": "测试账号组"}]
+
+        def paths(self, _tenant_id, name=None):
+            return SimpleNamespace(db_file=db_file)
+
+    monkeypatch.setitem(api_main._g_ctx, "tenant_registry", Registry())
+    monkeypatch.setattr(api_main, "_task_queue", queue)
+
+    response = tc.get("/api/todos?page=26&page_size=20&source=global_queue")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 501
+    assert body["pages"] == 26
+    assert len(body["items"]) == 1
+    assert body["items"][0]["record_id"] == "failed-1"
+    assert body["capped"] is False
+
+
+def test_operations_history_filters_by_platform_status_type_and_date(client):
+    tc, conn, _ = client
+    conn.executemany(
+        "INSERT INTO ops_logs (platform, action_type, content, executed_at, status) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [
+            ("xhs", "active_comment", "小红书失败日志", "2026-10-30 10:00:00", "failed"),
+            ("xhs", "follow", "小红书待核实日志", "2026-11-01 10:00:00", "pending_verify"),
+            ("douyin", "active_comment", "抖音成功日志", "2026-11-01 11:00:00", "success"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO task_runs (task_type, platform, status, created_at, started_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [
+            ("comment_polling", "xhs", "failed", "2026-10-30 10:00:00", "2026-10-30 10:00:00"),
+            ("data_fetch", "douyin", "success", "2026-11-01 11:00:00", "2026-11-01 11:00:00"),
+            ("comment_polling", "xhs", "pending_verify", "2026-11-01 12:00:00", "2026-11-01 12:00:00"),
+        ],
+    )
+    conn.commit()
+
+    logs = tc.get("/api/ops_logs", params={
+        "page": 1, "page_size": 20, "platform": "xhs",
+        "status": "pending_verify", "date_from": "2026-11-01",
+    })
+    assert logs.status_code == 200
+    assert logs.json()["total"] == 1
+    assert logs.json()["items"][0]["content"] == "小红书待核实日志"
+
+    runs = tc.get("/api/task_runs", params={
+        "page": 1, "page_size": 20, "platform": "xhs",
+        "status": "pending_verify", "task_type": "comment_polling",
+        "date_from": "2026-11-01", "date_to": "2026-11-01",
+    })
+    assert runs.status_code == 200
+    assert runs.json()["total"] == 1
+    assert runs.json()["items"][0]["platform"] == "xhs"
+
+    assert tc.get("/api/ops_logs", params={"date_from": "11-01-2026"}).status_code == 422
+    assert tc.get("/api/task_runs", params={"date_from": "2026-11-02", "date_to": "2026-11-01"}).status_code == 422
+    assert tc.get("/api/task_runs", params={"platform": "unknown"}).status_code == 422
+
+
 # ---------------------------------------------------------------- R-17 pending_verify
 def test_resolve_pending_verify_branching(client):
     tc, conn, _ = client
@@ -932,7 +1019,86 @@ def test_resolve_pending_verify_branching(client):
     assert tc.post(f"/api/task_runs/{run_id}/resolve", json={"action": "bogus"}).status_code == 400
     r = tc.post(f"/api/task_runs/{run_id}/resolve", json={"action": "sent"})
     assert r.status_code == 200
-    assert conn.execute("SELECT status FROM task_runs WHERE id = ?", (run_id,)).fetchone()[0] == "success"
+    assert r.json()["already_resolved"] is False
+    row = conn.execute(
+        "SELECT status, resolved_at, resolved_by, resolution_action FROM task_runs WHERE id = ?",
+        (run_id,),
+    ).fetchone()
+    assert row["status"] == "success"
+    assert row["resolved_at"] and row["resolved_by"] == "operator"
+    assert row["resolution_action"] == "sent"
+    repeated = tc.post(f"/api/task_runs/{run_id}/resolve", json={"action": "sent"})
+    assert repeated.status_code == 200 and repeated.json()["already_resolved"] is True
+    assert tc.post(f"/api/task_runs/{run_id}/resolve", json={"action": "not_sent"}).status_code == 409
+
+
+def test_resolve_pending_ops_log_is_individual_audited_and_idempotent(client):
+    tc, conn, _ = client
+    conn.executemany(
+        "INSERT INTO ops_logs (platform, action_type, content, executed_at, status) "
+        "VALUES ('xhs', 'active_comment', ?, '2026-11-01 12:00:00', 'pending_verify')",
+        [("待核实日志 A",), ("待核实日志 B",), ("待核实日志 C",)],
+    )
+    conn.commit()
+    ids = [row[0] for row in conn.execute(
+        "SELECT id FROM ops_logs ORDER BY id DESC LIMIT 3"
+    ).fetchall()]
+    target_id = ids[0]
+
+    resolved = tc.post(f"/api/ops_logs/{target_id}/resolve", json={"action": "sent"})
+    assert resolved.status_code == 200
+    assert resolved.json()["status"] == "success"
+    row = conn.execute(
+        "SELECT status, resolved_at, resolved_by, resolution_action, resolution_note "
+        "FROM ops_logs WHERE id = ?", (target_id,),
+    ).fetchone()
+    assert row["status"] == "success"
+    assert row["resolved_at"] and row["resolved_by"] == "operator"
+    assert row["resolution_action"] == "sent"
+    assert row["resolution_note"] == "用户核实：已发出"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM ops_logs WHERE status = 'pending_verify' AND platform = 'xhs'"
+    ).fetchone()[0] == 2
+
+    repeated = tc.post(f"/api/ops_logs/{target_id}/resolve", json={"action": "sent"})
+    assert repeated.status_code == 200 and repeated.json()["already_resolved"] is True
+    assert tc.post(f"/api/ops_logs/{target_id}/resolve", json={"action": "not_sent"}).status_code == 409
+    assert tc.post("/api/ops_logs/999999/resolve", json={"action": "sent"}).status_code == 404
+
+
+def test_resolve_pending_verify_does_not_update_unrelated_platform_logs(client):
+    tc, conn, _ = client
+    conn.execute(
+        "INSERT INTO task_runs (task_type, status, platform, started_at) "
+        "VALUES ('comment_polling', 'pending_verify', 'xhs', ?)",
+        ("2026-10-28 07:00:00",),
+    )
+    run_id = conn.execute("SELECT MAX(id) FROM task_runs").fetchone()[0]
+    for index in range(2):
+        conn.execute(
+            "INSERT INTO ops_logs (platform, action_type, content, executed_at, status) "
+            "VALUES ('xhs', 'active_comment', ?, ?, 'pending_verify')",
+            (f"待核实日志 {index}", "2026-10-28 07:01:00"),
+        )
+    conn.execute(
+        "INSERT INTO ops_logs (platform, action_type, content, executed_at, status) "
+        "VALUES ('douyin', 'active_comment', '其他平台日志', ?, 'pending_verify')",
+        ("2026-10-28 07:01:00",),
+    )
+    conn.commit()
+
+    response = tc.post(f"/api/task_runs/{run_id}/resolve", json={"action": "sent"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "success"
+    assert body["ops_logs_sync"] == "manual_review_required"
+    assert body["ops_logs_pending_verify"] == 2
+    assert conn.execute(
+        "SELECT COUNT(*) FROM ops_logs WHERE platform = 'xhs' AND status = 'pending_verify'"
+    ).fetchone()[0] == 2
+    assert conn.execute(
+        "SELECT COUNT(*) FROM ops_logs WHERE platform = 'douyin' AND status = 'pending_verify'"
+    ).fetchone()[0] == 1
 
 
 def test_draft_cancel(client):
@@ -1094,8 +1260,22 @@ def test_skill_registry_registers_metadata_disabled_and_never_executes(client):
     })
     assert stale.status_code == 409
 
+    edited = tc.patch("/api/skills/my_content_audit", json={
+        "name": "内容审阅辅助 v2",
+        "version": "1.1.0",
+        "description": "更新后的只读 manifest",
+        "inputs": [{"name": "content_id", "type": "string"}],
+        "manifest_version": 2,
+    })
+    assert edited.status_code == 200
+    assert edited.json()["name"] == "内容审阅辅助 v2"
+    assert edited.json()["version"] == "1.1.0"
+    assert edited.json()["manifest_version"] == 3
+    assert edited.json()["enabled"] is True
+    assert edited.json()["execution_enabled"] is False
+
     disabled = tc.patch("/api/skills/my_content_audit", json={
-        "enabled": False, "manifest_version": 2,
+        "enabled": False, "manifest_version": 3,
     })
     assert disabled.status_code == 200
     deleted = tc.delete("/api/skills/my_content_audit")
@@ -1112,6 +1292,11 @@ def test_skill_registry_rejects_unsafe_permissions_and_invalid_manifest(client):
         "permissions": ["execute_python"],
     })
     assert unsafe.status_code == 422
+    malformed_permissions = tc.post("/api/skills", json={
+        "skill_id": "malformed_permissions", "name": "错误权限", "version": "1.0.0",
+        "permissions": [{}],
+    })
+    assert malformed_permissions.status_code == 422
 
     invalid_version = tc.post("/api/skills", json={
         "skill_id": "bad_version", "name": "错误版本", "version": "latest",
@@ -1254,3 +1439,536 @@ def test_orchestration_rejects_unregistered_disabled_and_unsupported_custom_skil
 
     saved = tc.put("/api/orchestration", json={"steps": steps})
     assert saved.status_code == 422
+
+
+# ---------------------------------------------------------------- 图片素材库分页与统计
+def test_media_assets_pagination_and_counts_are_database_backed(client):
+    tc, conn, _ = client
+    rows = []
+    review_states = ("pending_review", "approved", "rejected")
+    for index in range(45):
+        rows.append((
+            f"分页素材 {index:02d}",
+            f"asset-{index:02d}.png",
+            f"stored-{index:02d}.png",
+            "image/png",
+            1024,
+            f"sha-{index:02d}",
+            100,
+            100,
+            "archived" if index >= 40 else "active",
+            review_states[index % 3],
+        ))
+    conn.executemany(
+        "INSERT INTO media_assets "
+        "(title, original_filename, stored_filename, mime_type, byte_size, sha256, width, height, status, review_status) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+
+    first = tc.get("/api/media?status=active&review_status=all&page=1&page_size=20")
+    second = tc.get("/api/media?status=active&review_status=all&page=2&page_size=20")
+    assert first.status_code == second.status_code == 200
+    first_body, second_body = first.json(), second.json()
+    assert first_body["total"] == 40
+    assert first_body["page"] == 1 and first_body["pages"] == 2
+    assert len(first_body["items"]) == 20
+    assert len(second_body["items"]) == 20
+    assert {item["id"] for item in first_body["items"]}.isdisjoint(
+        {item["id"] for item in second_body["items"]}
+    )
+    assert first_body["counts"] == {
+        "all": 40, "pending": 14, "approved": 13, "rejected": 13, "archived": 5,
+    }
+
+    pending = tc.get("/api/media?status=active&review_status=pending_review&page=1&page_size=20")
+    assert pending.status_code == 200
+    assert pending.json()["total"] == 14
+    assert all(item["review_status"] == "pending_review" for item in pending.json()["items"])
+
+
+def test_media_assets_search_counts_are_not_limited_to_current_page(client):
+    tc, conn, _ = client
+    for index in range(25):
+        conn.execute(
+            "INSERT INTO media_assets "
+            "(title, original_filename, stored_filename, mime_type, byte_size, sha256, width, height, status, review_status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 'approved')",
+            (f"目标关键词 {index}", f"target-{index}.png", f"target-{index}.png",
+             "image/png", 512, f"target-sha-{index}", 80, 80),
+        )
+    conn.commit()
+
+    response = tc.get("/api/media?query=目标关键词&status=active&page=1&page_size=10")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 25
+    assert body["pages"] == 3
+    assert body["counts"]["all"] == 25
+    assert body["counts"]["approved"] == 25
+
+
+def test_media_asset_lifecycle_rename_restore_and_reference_safe_delete(client, tmp_path):
+    from types import SimpleNamespace
+
+    tc, conn, _ = client
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    stored_name = "lifecycle-test.png"
+    media_file = media_dir / stored_name
+    media_file.write_bytes(b"test-image")
+
+    class Registry:
+        def paths(self, _tenant_id, create=False):
+            return SimpleNamespace(media_dir=media_dir)
+
+    api_main._g_ctx["tenant_registry"] = Registry()
+    cur = conn.execute(
+        "INSERT INTO media_assets "
+        "(title, original_filename, stored_filename, mime_type, byte_size, sha256, width, height, status, review_status) "
+        "VALUES ('旧名称', ?, ?, 'image/png', 10, 'lifecycle-sha', 10, 10, 'active', 'approved')",
+        (stored_name, stored_name),
+    )
+    asset_id = int(cur.lastrowid)
+    conn.commit()
+
+    renamed = tc.patch(f"/api/media/{asset_id}", json={"title": "新名称"})
+    assert renamed.status_code == 200
+    assert renamed.json()["title"] == "新名称"
+
+    archived = tc.post(f"/api/media/{asset_id}/archive")
+    assert archived.status_code == 200
+    assert archived.json()["status"] == "archived"
+
+    restored = tc.post(f"/api/media/{asset_id}/restore")
+    assert restored.status_code == 200
+    assert restored.json()["restored"] is True
+
+    tc.post(f"/api/media/{asset_id}/archive")
+    conn.execute(
+        "INSERT INTO media_asset_usages (media_asset_id, usage_role) VALUES (?, 'cover')",
+        (asset_id,),
+    )
+    conn.commit()
+    blocked = tc.delete(f"/api/media/{asset_id}")
+    assert blocked.status_code == 409
+    assert media_file.exists()
+
+    conn.execute("DELETE FROM media_asset_usages WHERE media_asset_id = ?", (asset_id,))
+    conn.commit()
+    deleted = tc.delete(f"/api/media/{asset_id}")
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] is True
+    assert deleted.json()["file_removed"] is True
+    assert not media_file.exists()
+
+
+# ---------------------------------------------------------------- 运营日志 / 任务追踪 / 通知历史分页
+def test_operations_history_endpoints_return_database_totals_and_pages(client):
+    tc, conn, _ = client
+    for index in range(45):
+        stamp = f"2026-11-01 10:{index // 60:02d}:{index % 60:02d}"
+        conn.execute(
+            "INSERT INTO ops_logs (platform, action_type, content, executed_at, status) "
+            "VALUES ('xhs', 'passive_reply', ?, ?, 'success')",
+            (f"日志 {index}", stamp),
+        )
+        conn.execute(
+            "INSERT INTO task_runs (task_type, status, attempt, max_attempts, created_at) "
+            "VALUES ('data_fetch', 'success', 1, 3, ?)",
+            (stamp,),
+        )
+        conn.execute(
+            "INSERT INTO notifications (level, type, title, channel, sent_at) "
+            "VALUES ('info', 'round_completed', ?, 'macos', ?)",
+            (f"通知 {index}", stamp),
+        )
+    conn.commit()
+
+    endpoints = ("/api/ops_logs", "/api/task_runs", "/api/notifications")
+    for endpoint in endpoints:
+        first = tc.get(f"{endpoint}?page=1&page_size=20")
+        second = tc.get(f"{endpoint}?page=2&page_size=20")
+        assert first.status_code == second.status_code == 200
+        first_body, second_body = first.json(), second.json()
+        assert first_body["total"] == 45
+        assert first_body["page"] == 1 and first_body["pages"] == 3
+        assert len(first_body["items"]) == 20
+        assert len(second_body["items"]) == 20
+        assert {row["id"] for row in first_body["items"]}.isdisjoint(
+            {row["id"] for row in second_body["items"]}
+        )
+
+
+def test_notifications_read_state_filter_and_mark_read_are_idempotent(client):
+    tc, conn, _ = client
+    for index in range(3):
+        conn.execute(
+            "INSERT INTO notifications (level, type, title, channel, sent_at) "
+            "VALUES ('info', 'round_completed', ?, 'macos', ?)",
+            (f"已读测试 {index}", f"2026-11-01 11:00:0{index}"),
+        )
+    conn.commit()
+    ids = [row[0] for row in conn.execute(
+        "SELECT id FROM notifications ORDER BY sent_at, id"
+    ).fetchall()]
+
+    unread = tc.get("/api/notifications?page=1&page_size=10&read_status=unread")
+    assert unread.status_code == 200
+    assert unread.json()["total"] == 3
+    assert unread.json()["unread_total"] == 3
+
+    first = tc.post(f"/api/notifications/{ids[0]}/read")
+    assert first.status_code == 200
+    first_read_at = first.json()["read_at"]
+    again = tc.post(f"/api/notifications/{ids[0]}/read")
+    assert again.status_code == 200
+    assert again.json()["read_at"] == first_read_at
+
+    unread_after = tc.get("/api/notifications?page=1&page_size=10&read_status=unread")
+    read_after = tc.get("/api/notifications?page=1&page_size=10&read_status=read")
+    assert unread_after.json()["total"] == 2
+    assert unread_after.json()["unread_total"] == 2
+    assert read_after.json()["total"] == 1
+
+    all_read = tc.post("/api/notifications/read-all")
+    assert all_read.status_code == 200
+    assert all_read.json()["updated"] == 2
+    assert tc.get("/api/notifications?page=1&page_size=10&read_status=unread").json()["total"] == 0
+    assert tc.post("/api/notifications/999999/read").status_code == 404
+    assert tc.get("/api/notifications?page=1&read_status=invalid").status_code == 400
+
+
+def test_operations_and_task_history_pagination_stress_5000_records(client):
+    tc, conn, _ = client
+    conn.executemany(
+        "INSERT INTO task_runs (task_type, platform, status, created_at, started_at, error_msg) "
+        "VALUES ('comment_polling', 'xhs', 'failed', '2026-11-01 12:00:00', '2026-11-01 12:00:00', '压力测试失败')",
+        [() for _ in range(5000)],
+    )
+    conn.executemany(
+        "INSERT INTO ops_logs (platform, action_type, content, executed_at, status) "
+        "VALUES ('xhs', 'active_comment', '压力测试日志', '2026-11-01 12:00:00', 'failed')",
+        [() for _ in range(5000)],
+    )
+    conn.commit()
+
+    for endpoint in ("/api/task_runs", "/api/ops_logs"):
+        first = tc.get(endpoint, params={"page": 1, "page_size": 100, "status": "failed"})
+        last = tc.get(endpoint, params={"page": 50, "page_size": 100, "status": "failed"})
+        beyond = tc.get(endpoint, params={"page": 51, "page_size": 100, "status": "failed"})
+        assert first.status_code == last.status_code == beyond.status_code == 200
+        assert first.json()["total"] == last.json()["total"] == 5000
+        assert first.json()["pages"] == last.json()["pages"] == 50
+        assert len(first.json()["items"]) == len(last.json()["items"]) == 100
+        assert beyond.json()["items"] == []
+
+    filtered = tc.get("/api/task_runs", params={
+        "page": 1, "page_size": 100, "platform": "xhs",
+        "status": "failed", "date_from": "2026-11-01", "date_to": "2026-11-01",
+    })
+    assert filtered.status_code == 200
+    assert filtered.json()["total"] == 5000
+
+
+def test_notifications_pagination_boundary_and_5000_record_stress(client):
+    tc, conn, _ = client
+    current = 0
+    for target in (0, 1, 12, 50, 100, 500, 5000):
+        if target > current:
+            conn.executemany(
+                "INSERT INTO notifications (level, type, title, channel, sent_at) "
+                "VALUES ('info', 'round_completed', ?, 'macos', ?)",
+                [(f"压力通知 {index}", f"2026-11-01 {12 + index // 3600:02d}:{(index // 60) % 60:02d}:{index % 60:02d}")
+                 for index in range(current, target)],
+            )
+            conn.commit()
+        response = tc.get("/api/notifications?page=1&page_size=20")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["total"] == target
+        assert body["pages"] == max(1, (target + 19) // 20)
+        assert len(body["items"]) == min(target, 20)
+        current = target
+
+    last = tc.get("/api/notifications?page=250&page_size=20")
+    assert last.status_code == 200
+    assert last.json()["total"] == 5000
+    assert len(last.json()["items"]) == 20
+    assert tc.get("/api/notifications?page=251&page_size=20").json()["items"] == []
+    assert tc.get("/api/notifications?page=0&page_size=20").status_code == 422
+    assert tc.get("/api/notifications?page=1&page_size=101").status_code == 422
+
+
+def test_hot_source_single_fetch_returns_diagnostics_without_persisting(client, cfg, monkeypatch):
+    tc, conn, _ = client
+    import src.core.hot_topics as hot_topics
+
+    cfg.hot_topics.sources = [{
+        "name": "测试 JSON 源",
+        "type": "json",
+        "url": "https://example.test/feed.json",
+        "platform": "test-feed",
+        "enabled": False,
+    }]
+    monkeypatch.setattr(
+        hot_topics, "_fetch_public_text",
+        lambda *args, **kwargs: ('{"items":[{"title":"单源测试热点","url":"https://example.test/item"}]}', "application/json"),
+    )
+    before = conn.execute("SELECT COUNT(*) FROM hot_topics").fetchone()[0]
+
+    response = tc.post("/api/hot_topics/sources/0/test")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["status"] == "success"
+    assert body["item_count"] == 1
+    assert body["sample_titles"] == ["单源测试热点"]
+    assert "未写入热点库" in body["message"]
+    assert conn.execute("SELECT COUNT(*) FROM hot_topics").fetchone()[0] == before
+
+
+def test_custom_industry_preset_can_be_edited_and_deleted_but_builtin_is_protected(client, conn):
+    tc, _, _ = client
+    from src.core.industry_presets_repository import seed_builtins
+
+    seed_builtins(conn)
+    payload = {
+        "name": "测试行业模板",
+        "description": "用于验证自定义模板生命周期",
+        "positioning": "为目标用户提供可执行建议",
+        "persona_keywords": ["测试", "实践"],
+        "forbidden_directions": ["虚假承诺"],
+        "extra_redlines": ["夸大效果"],
+        "dimensions": ["问题", "证据", "结论"],
+        "platform_notes": {"xhs": "标题简洁"},
+    }
+    created = tc.put("/api/presets/test-custom", json=payload)
+    assert created.status_code == 200
+    assert created.json()["is_builtin"] is False
+
+    updated = tc.put("/api/presets/test-custom", json={**payload, "name": "更新后的模板"})
+    assert updated.status_code == 200
+    assert updated.json()["name"] == "更新后的模板"
+    assert updated.json()["version"] == 2
+
+    deleted = tc.delete("/api/presets/test-custom")
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] is True
+    assert tc.delete("/api/presets/test-custom").status_code == 404
+
+    builtin_key = tc.get("/api/presets").json()["items"][0]["key"]
+    assert tc.delete(f"/api/presets/{builtin_key}").status_code == 409
+
+
+def test_global_todos_aggregate_tenant_sources_and_paginate(client, cfg, monkeypatch):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    tc, conn, _ = client
+    db_file = Path(cfg.resolve_path(cfg.paths.db_file))
+
+    class Registry:
+        def list(self):
+            return [{"id": "default", "name": "测试账号组"}]
+
+        def paths(self, _tenant_id, name=None):
+            return SimpleNamespace(db_file=db_file)
+
+    monkeypatch.setitem(api_main._g_ctx, "tenant_registry", Registry())
+    monkeypatch.setattr(api_main, "_task_queue", None)
+
+    conn.execute(
+        "INSERT INTO task_runs (task_type, status, platform, error_msg, started_at) "
+        "VALUES ('comment_polling', 'pending_verify', 'xhs', '需要核实发布结果', '2026-11-01 12:00:00')"
+    )
+    conn.execute(
+        "INSERT INTO ops_logs (platform, action_type, content, executed_at, status) "
+        "VALUES ('xhs', 'active_comment', '评论操作待核实', '2026-11-01 12:01:00', 'pending_verify')"
+    )
+    conn.execute(
+        "INSERT INTO media_assets "
+        "(title, original_filename, stored_filename, mime_type, byte_size, sha256, width, height, status, review_status) "
+        "VALUES ('待审核素材', 'todo.png', 'todo.png', 'image/png', 10, 'todo-sha', 10, 10, 'active', 'pending_review')"
+    )
+    conn.execute(
+        "INSERT INTO notifications (level, type, title, channel, sent_at) "
+        "VALUES ('warning', 'round_completed', '待读通知', 'macos', '2026-11-01 12:02:00')"
+    )
+    conn.execute(
+        "INSERT INTO media_generation_jobs (prompt, final_prompt, model, status, error_message) "
+        "VALUES ('prompt', 'final prompt', 'test-model', 'failed', '配图生成失败')"
+    )
+    conn.execute(
+        "INSERT INTO circuit_breaker_events (platform, reason, cooldown_until) "
+        "VALUES ('xhs', 'login_expired', '2026-11-01 13:00:00')"
+    )
+    conn.execute(
+        "INSERT INTO hot_topics (id, source, discovered_at, evidence_status, title) "
+        "VALUES ('hot-failed-test', '60s/xhs', '2026-11-01 12:03:00', 'failed', '热点源抓取超时')"
+    )
+    conn.commit()
+
+    response = tc.get("/api/todos?page=1&page_size=2")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 7
+    assert body["pages"] == 4
+    assert len(body["items"]) == 2
+    assert body["counts"]["task_run"] == 1
+    assert body["counts"]["ops_log"] == 1
+    assert body["counts"]["circuit_breaker"] == 1
+    assert body["counts"]["hot_topic_source"] == 1
+    assert body["counts"]["media_review"] == 1
+    assert body["counts"]["notification"] == 1
+    assert body["counts"]["media_generation"] == 1
+
+    hot_source_only = tc.get("/api/todos?page=1&page_size=10&source=hot_topic_source")
+    assert hot_source_only.status_code == 200
+    assert hot_source_only.json()["total"] == 1
+    assert hot_source_only.json()["items"][0]["title"] == "热点来源采集失败 · 60s/xhs"
+
+    breaker_only = tc.get("/api/todos?page=1&page_size=10&source=circuit_breaker")
+    assert breaker_only.status_code == 200
+    assert breaker_only.json()["total"] == 1
+    assert breaker_only.json()["items"][0]["target_tab"] == "breaker"
+
+    media_only = tc.get("/api/todos?page=1&page_size=10&source=media_review")
+    assert media_only.status_code == 200
+    assert media_only.json()["total"] == 1
+    assert media_only.json()["items"][0]["title"] == "素材待审核 · 待审核素材"
+
+
+# ---------------------------------------------------------------- 配置审计历史分页
+def test_config_audit_endpoint_paginates_all_redacted_changes(client):
+    tc, conn, _ = client
+    for index in range(47):
+        conn.execute(
+            "INSERT INTO config_changes (key, old_value, new_value, changed_at) "
+            "VALUES (?, ?, ?, ?)",
+            (f"rhythm.daily_quotas.xhs.passive_replies.{index}",
+             f"old-{index}", f"new-{index}", f"2026-11-01 11:{index // 60:02d}:{index % 60:02d}"),
+        )
+    conn.commit()
+
+    first = tc.get("/api/config/audit?page=1&page_size=20")
+    second = tc.get("/api/config/audit?page=2&page_size=20")
+    third = tc.get("/api/config/audit?page=3&page_size=20")
+    assert first.status_code == second.status_code == third.status_code == 200
+    a, b, c = first.json(), second.json(), third.json()
+    assert a["total"] == b["total"] == c["total"] == 47
+    assert a["pages"] == 3 and c["page"] == 3
+    assert [len(a["items"]), len(b["items"]), len(c["items"])] == [20, 20, 7]
+    ids = [row["id"] for body in (a, b, c) for row in body["items"]]
+    assert len(ids) == len(set(ids)) == 47
+    assert a["items"][0]["new_value"] == "new-46"
+
+
+def test_config_audit_endpoint_rejects_invalid_pagination(client):
+    tc, _, _ = client
+    assert tc.get("/api/config/audit?page=0").status_code == 422
+    assert tc.get("/api/config/audit?page=1&page_size=101").status_code == 422
+
+
+# ---------------------------------------------------------------- 热点雷达数据库分页
+def test_hot_topics_database_pagination_and_server_filters(client, cfg):
+    tc, conn, _ = client
+    cfg.hot_topics.filters["heat_filter_enabled"] = False
+    cfg.hot_topics.filters["time_filter_enabled"] = False
+    for index in range(45):
+        conn.execute(
+            "INSERT INTO hot_topics "
+            "(id, source, evidence_status, title, heat_score, time_sensitive, last_seen_at) "
+            "VALUES (?, ?, 'collected', ?, ?, 1, ?)",
+            (f"paging-hot-{index:03d}", "test/xhs", f"分页热点-{index}",
+             float(index + 1), "2026-11-01 10:00:00"),
+        )
+    conn.commit()
+
+    first = tc.get("/api/hot_topics?page=1&page_size=20")
+    second = tc.get("/api/hot_topics?page=2&page_size=20")
+    third = tc.get("/api/hot_topics?page=3&page_size=20")
+    assert first.status_code == second.status_code == third.status_code == 200
+    a, b, c = first.json(), second.json(), third.json()
+    assert [a["total"], b["total"], c["total"]] == [45, 45, 45]
+    assert [len(a["items"]), len(b["items"]), len(c["items"])] == [20, 20, 5]
+    ids = [item["id"] for body in (a, b, c) for item in body["items"]]
+    assert len(ids) == len(set(ids)) == 45
+    assert a["items"][0]["heat"] == 45
+    assert a["urgent_total"] == b["urgent_total"] == c["urgent_total"] == 45
+    assert a["match"] == b["match"] == c["match"]
+    assert "test/xhs" in a["source_options"]
+
+    filtered = tc.get("/api/hot_topics?page=1&page_size=20&source=test%2Fxhs&keyword=热点-1")
+    assert filtered.status_code == 200
+    result = filtered.json()
+    assert result["total"] == 11  # "热点-1" also matches 10–19
+    assert all("热点-1" in item["title"] for item in result["items"])
+
+
+def test_hot_topics_database_pagination_preserves_latest_batch_and_failure_suppression(client, cfg):
+    tc, conn, _ = client
+    cfg.hot_topics.filters["heat_filter_enabled"] = False
+    cfg.hot_topics.filters["time_filter_enabled"] = False
+    conn.execute(
+        "INSERT INTO hot_topics (id, source, evidence_status, title, heat_score, time_sensitive, last_seen_at) "
+        "VALUES ('old-batch', 'batch/xhs', 'collected', '旧批次', 999, 1, '2026-10-30 10:00:00')"
+    )
+    conn.execute(
+        "INSERT INTO hot_topics (id, source, evidence_status, title, heat_score, time_sensitive, last_seen_at) "
+        "VALUES ('new-batch', 'batch/xhs', 'collected', '最新批次', 20, 1, '2026-11-01 10:00:00')"
+    )
+    conn.execute(
+        "INSERT INTO hot_topics (id, source, evidence_status, title, discovered_at) "
+        "VALUES ('failed-source', 'broken/douyin', 'failed', '采集失败', '2026-11-01 10:01:00')"
+    )
+    conn.execute(
+        "INSERT INTO hot_topics (id, source, evidence_status, title, heat_score, last_seen_at) "
+        "VALUES ('old-failed-platform', 'broken/douyin', 'collected', '失败平台旧数据', 88, '2026-11-01 09:00:00')"
+    )
+    conn.commit()
+
+    response = tc.get("/api/hot_topics?page=1&page_size=20")
+    assert response.status_code == 200
+    ids = {item["id"] for item in response.json()["items"]}
+    assert "old-batch" not in ids
+    assert "new-batch" in ids
+    assert "old-failed-platform" not in ids
+    assert any(source["status"] == "failed" for source in response.json()["sources"])
+
+
+# ---------------------------------------------------------------- 逐篇指标数据库分页
+def test_metrics_endpoint_database_pagination_and_filtered_total(client):
+    tc, conn, _ = client
+    for index in range(45):
+        conn.execute(
+            "INSERT INTO metrics (platform, fetch_status, fetched_at, views, likes, interaction_rate) "
+            "VALUES ('xhs', 'success', ?, ?, ?, ?)",
+            (f"2026-11-01 10:{index // 60:02d}:{index % 60:02d}",
+             100 + index, 10 + index, (index + 1) / 1000),
+        )
+    conn.commit()
+
+    first = tc.get("/api/metrics?page=1&page_size=20&fetch_status=success")
+    second = tc.get("/api/metrics?page=2&page_size=20&fetch_status=success")
+    third = tc.get("/api/metrics?page=3&page_size=20&fetch_status=success")
+    assert first.status_code == second.status_code == third.status_code == 200
+    a, b, c = first.json(), second.json(), third.json()
+    assert [a["total"], b["total"], c["total"]] == [45, 45, 45]
+    assert [len(a["items"]), len(b["items"]), len(c["items"])] == [20, 20, 5]
+    ids = [item["id"] for body in (a, b, c) for item in body["items"]]
+    assert len(ids) == len(set(ids)) == 45
+    assert a["pages"] == 3 and c["page"] == 3
+    assert a["z_stats"] == b["z_stats"] == c["z_stats"]
+
+    filtered = tc.get("/api/metrics?page=1&page_size=20&platform=xhs&fetch_status=failed")
+    assert filtered.status_code == 200
+    assert filtered.json()["total"] == 0
+    assert filtered.json()["items"] == []
+    status_only = tc.get("/api/metrics?page=1&page_size=20&fetch_status=failed")
+    assert status_only.status_code == 200
+    assert status_only.json()["total"] == 0
+    legacy = tc.get("/api/metrics?limit=1")
+    assert legacy.status_code == 200
+    assert len(legacy.json()["items"]) == 1

@@ -27,22 +27,24 @@ export default function CreatedContentPane() {
   const [platform, setPlatform] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
   const pageSize = 20;
+  const pages = Math.max(1, Math.ceil(total / pageSize));
 
   const load = async () => {
     setError(null);
     try {
-      setDrafts(await api.drafts(status || undefined, (platform || undefined) as any));
+      const result = await api.draftsPage(status || undefined, (platform || undefined) as any, page, pageSize);
+      setDrafts(result.items);
+      setTotal(result.total);
       setSelected(new Set());
-      setPage(1);
+      if (page > Math.max(1, result.pages)) setPage(Math.max(1, result.pages));
     } catch (e: any) { setError(e.message); }
   };
-  useEffect(() => { load(); }, [status, platform]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, [status, platform, page]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const pageCount = Math.max(1, Math.ceil((drafts?.length ?? 0) / pageSize));
-  const visibleDrafts = (drafts ?? []).slice((page - 1) * pageSize, page * pageSize);
-  const visibleDeletable = visibleDrafts.filter((d) => !LOCKED.has(d.status));
-  const allChecked = visibleDeletable.length > 0 && visibleDeletable.every((d) => selected.has(d.content_id));
+  const deletable = (drafts ?? []).filter((d) => !LOCKED.has(d.status));
+  const allChecked = deletable.length > 0 && deletable.every((d) => selected.has(d.content_id));
   const toggle = (cid: string) => setSelected((prev) => {
     const n = new Set(prev);
     n.has(cid) ? n.delete(cid) : n.add(cid);
@@ -69,17 +71,17 @@ export default function CreatedContentPane() {
       <div className="panel-head">
         <div>
           <div className="panel-title"><span className="icon">▣</span>已生产内容</div>
-          <div className="panel-sub">最近 100 条 · 已发布（有数据）的内容受保护不能删除</div>
+          <div className="panel-sub">共 {total.toLocaleString()} 条 · 每页 {pageSize} 条 · 已发布（有数据）的内容受保护不能删除</div>
         </div>
         <button className="btn sm" onClick={() => navigate("production", "review")}>去内容生产编辑 →</button>
       </div>
 
       <div className="toolbar" style={{ marginBottom: 10 }}>
-        <select className="field" aria-label="状态" value={status} onChange={(e) => setStatus(e.target.value)}>
+        <select className="field" aria-label="状态" value={status} onChange={(e) => { setPage(1); setStatus(e.target.value); }}>
           <option value="">全部状态</option>
           {Object.entries(STATUS_LABEL).map(([k, v]) => <option key={k} value={k}>{v.text}</option>)}
         </select>
-        <select className="field" aria-label="平台" value={platform} onChange={(e) => setPlatform(e.target.value)}>
+        <select className="field" aria-label="平台" value={platform} onChange={(e) => { setPage(1); setPlatform(e.target.value); }}>
           <option value="">全部平台</option>
           {["xhs", "douyin", "kuaishou", "wechat_channels"].map((p) => <option key={p} value={p}>{platformMeta(p as any).label}</option>)}
         </select>
@@ -90,18 +92,19 @@ export default function CreatedContentPane() {
       {error && <div className="note" style={{ color: "var(--red)" }}>加载失败：{error} <button className="btn sm" onClick={load}>重试</button></div>}
       {drafts && drafts.length === 0 && <EmptyHint next="到「内容生产 → 生产线」运行一轮">暂无已生产内容</EmptyHint>}
       {drafts && drafts.length > 0 && (
+        <>
         <div className="table-wrap">
           <table>
             <thead><tr>
               <th style={{ width: 32 }}>
                 <input type="checkbox" aria-label="全选可删除" checked={allChecked}
-                  onChange={() => setSelected((old) => { const next = new Set(old); visibleDeletable.forEach((d) => allChecked ? next.delete(d.content_id) : next.add(d.content_id)); return next; })} />
+                  onChange={() => setSelected(allChecked ? new Set() : new Set(deletable.map((d) => d.content_id)))} />
               </th>
               <th>标题</th><th style={{ width: 70 }}>平台</th><th style={{ width: 60 }}>轮次</th>
               <th style={{ width: 110 }}>状态</th><th style={{ width: 110 }}>配图状态</th><th style={{ width: 140 }}>排期 / 存草稿</th><th style={{ width: 70 }}>操作</th>
             </tr></thead>
             <tbody>
-              {visibleDrafts.map((d) => {
+              {drafts.map((d) => {
                 const st = STATUS_LABEL[d.status] ?? { text: d.status, cls: "gray" };
                 const locked = LOCKED.has(d.status);
                 return (
@@ -133,14 +136,15 @@ export default function CreatedContentPane() {
             </tbody>
           </table>
         </div>
-      )}
-      {(drafts?.length ?? 0) > pageSize && <div className="pagination-bar">
-        <span className="pagination-summary">最近 {drafts?.length ?? 0} 条 · 第 {page}/{pageCount} 页 · 每页 {pageSize} 条</span>
-        <div className="pagination-actions">
-          <button className="btn sm" disabled={page <= 1} onClick={() => setPage((v) => v - 1)}>上一页</button>
-          <button className="btn sm" disabled={page >= pageCount} onClick={() => setPage((v) => v + 1)}>下一页</button>
+        <div className="toolbar" style={{ justifyContent: "space-between", marginTop: 12 }}>
+          <span className="note">第 {page} / {pages} 页 · 共 {total.toLocaleString()} 条</span>
+          <div className="toolbar">
+            <button className="btn sm" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>上一页</button>
+            <button className="btn sm" disabled={page >= pages} onClick={() => setPage((p) => Math.min(pages, p + 1))}>下一页</button>
+          </div>
         </div>
-      </div>}
+        </>
+      )}
     </div>
   );
 }
