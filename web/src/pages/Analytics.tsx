@@ -250,7 +250,7 @@ export default function Analytics() {
           <div className="metric-foot">按草稿创建时间统计，含平台变体</div>
         </div>
         <div className="metric">
-          <div className="metric-label">累计确认发布量</div>
+          <div className="metric-label">确认发布量（窗口内）</div>
           <div className="metric-val">{businessSummary?.confirmed_published ?? "—"}</div>
           <div className="metric-foot">近 {businessSummary?.window_days ?? businessDays} 天用户确认已发布的草稿</div>
         </div>
