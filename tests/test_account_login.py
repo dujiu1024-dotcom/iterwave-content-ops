@@ -299,3 +299,50 @@ def test_start_login_hides_process_launch_path_errors(tmp_login, monkeypatch):
     assert result["message"] == "登录进程启动失败，请检查浏览器运行环境或联系管理员"
     assert "/srv/iterwave" not in result["message"]
 
+
+
+def test_whoami_commands_are_read_only_and_tenant_scoped(tmp_login):
+    for platform in al.PLATFORMS:
+        command = al.build_whoami_cmd(platform)
+        assert command[2] == "whoami"
+        assert al.guard_vendor_cmd(command) == command
+        assert str(tmp_login / "_profiles") in command
+    assert "--no-proxy" in al.build_whoami_cmd("xhs")
+    assert "--no-proxy" in al.build_whoami_cmd("douyin")
+    web_command = al.build_whoami_cmd("wechat_channels")
+    assert web_command[web_command.index("--platform") + 1] == "weixin-channels"
+
+
+def test_read_account_identity_parses_safe_profile_fields(tmp_login, monkeypatch):
+    payload = {"loggedIn": True, "name": "测试账号", "avatar": "https://cdn.example.com/avatar.png"}
+    monkeypatch.setattr(
+        al.subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, json.dumps(payload), ""),
+    )
+    result = al.read_account_identity("xhs")
+    assert result == {
+        "platform": "xhs", "logged_in": True, "name": "测试账号",
+        "avatar_url": "https://cdn.example.com/avatar.png", "error": None,
+    }
+
+
+def test_read_account_identity_rejects_unsafe_avatar_and_untrusted_error(tmp_login, monkeypatch):
+    payload = {"loggedIn": True, "name": "账号", "avatar": "javascript:alert(1)"}
+    monkeypatch.setattr(
+        al.subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, json.dumps(payload), ""),
+    )
+    result = al.read_account_identity("xhs")
+    assert result["logged_in"] is True
+    assert result["avatar_url"] is None
+    assert result["name"] == "账号"
+
+
+def test_read_account_identity_handles_timeout_without_leaking_details(tmp_login, monkeypatch):
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs.get("timeout", 30))
+    monkeypatch.setattr(al.subprocess, "run", timeout)
+    result = al.read_account_identity("douyin")
+    assert result["logged_in"] is False
+    assert result["avatar_url"] is None
+    assert "超时" in result["error"]
