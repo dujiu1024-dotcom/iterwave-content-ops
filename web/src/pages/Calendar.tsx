@@ -135,7 +135,7 @@ export default function Calendar() {
     try {
       const result = await withPending(`content-plan:start:${plan.id}`, () => api.startContentPlan(plan.id));
       if (!result) return;
-      showToast(`已加入全局 FIFO 队列：第 ${result.round_id} 轮`, "success");
+      showToast("已加入全局 FIFO 队列", "success");
       await load();
     } catch (e: any) { showToast(`启动计划失败：${e?.message ?? e}`, "error"); }
   };
