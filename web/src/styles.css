@@ -851,14 +851,17 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 /* ===== UX audit: independent fixed-height workspace scrolling ===== */
 .app { height: 100vh; min-height: 0; overflow: hidden; align-items: stretch; }
 .sidebar {
-  position: relative;
-  top: auto;
+  position: sticky;
+  top: 0;
   height: 100vh;
+  height: 100dvh;
   min-height: 0;
   flex: 0 0 242px;
   overflow: hidden;
   overscroll-behavior: contain;
+  align-self: flex-start;
 }
+.sidebar-nav, .side-bottom { scrollbar-width: thin; }
 .sidebar-nav {
   flex: 1 1 auto;
   min-height: 0;
@@ -922,3 +925,61 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
   color: var(--muted);
 }
 .industry-preset-editor textarea { resize: vertical; }
+
+
+/* UX follow-up: clearer template management and isolated Skill contract tests */
+.template-howto { margin-bottom: 14px; }
+.template-howto-steps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+.template-howto-steps > span {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.template-howto-steps b {
+  display: grid;
+  place-items: center;
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--blue-weak);
+  color: var(--blue);
+}
+.industry-preset-list { display: grid; gap: 8px; margin-top: 12px; }
+.industry-preset-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+}
+.industry-preset-copy { display: grid; gap: 3px; min-width: 0; }
+.industry-preset-copy strong { font-size: 12px; }
+.industry-preset-copy span { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.industry-preset-copy small { color: var(--subtle); font-size: 10px; }
+.skill-contract-tester { margin-top: 14px; border-color: var(--blue); }
+.skill-contract-results { display: grid; gap: 5px; margin-top: 10px; font-size: 11px; }
+.skill-contract-results .pass { color: var(--green); }
+.skill-contract-results .fail { color: var(--red); }
+@media (max-width: 900px) {
+  .template-howto-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 620px) {
+  .template-howto-steps { grid-template-columns: 1fr; }
+  .industry-preset-item { align-items: flex-start; flex-direction: column; }
+}

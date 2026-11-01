@@ -35,6 +35,11 @@ export interface GlobalTaskQueueResponse {
   page?: number;
   page_size?: number;
   pages?: number;
+  counts?: {
+    total: number;
+    by_status: Record<string, number>;
+    by_tenant: Record<string, Record<string, number>>;
+  };
 }
 
 export interface QueueTaskSubmission {
@@ -1611,10 +1616,13 @@ export const api = {
       `/api/media/${id}/review`, { method: "POST", body: JSON.stringify({ decision, note }) },
     ),
   // === G-13 内容资产 / 字段映射 ===
-  assets: (asset_type?: AssetType) =>
-    fetchJson<{ items: AssetItem[]; total: number }>(
-      `/api/assets${asset_type ? `?asset_type=${asset_type}` : ""}`,
-    ),
+  assets: (asset_type?: AssetType, page = 1, pageSize = 100) => {
+    const query = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    if (asset_type) query.set("asset_type", asset_type);
+    return fetchJson<{ items: AssetItem[]; total: number; page: number; page_size: number; pages: number }>(
+      `/api/assets?${query.toString()}`,
+    );
+  },
   createAsset: (data: { asset_type: AssetType; title: string; body?: string; source_url?: string; platform?: Platform }) =>
     fetchJson<AssetItem>("/api/assets", { method: "POST", body: JSON.stringify(data) }),
   updateAsset: (id: number, data: { asset_type: AssetType; title: string; body?: string; source_url?: string; platform?: Platform }) =>
