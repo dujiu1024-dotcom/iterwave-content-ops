@@ -5103,12 +5103,26 @@ def _register_routes(app: FastAPI) -> None:
                 conn.execute("UPDATE drafts SET platform_note_url = ? WHERE id = ?", (note_url, draft_id))
                 conn.commit()
         else:
-            ok = _g()["sm_draft"].transition(draft_id, "user_published", reason="用户确认发布")
-            if not ok:
+            # 即使调度器未注入（例如受限测试/维护模式），发布确认仍必须原子化。
+            cur = conn.execute(
+                "UPDATE drafts SET status='user_published', user_confirmed_at=? "
+                "WHERE id=? AND status IN ('draft_saved', 'draft_pending')",
+                (_now().isoformat(timespec="seconds"), draft_id),
+            )
+            if cur.rowcount != 1:
+                latest = conn.execute(
+                    "SELECT status, platform_note_url FROM drafts WHERE id=?", (draft_id,),
+                ).fetchone()
+                if latest and latest["status"] in ("user_published", "data_fetching", "published"):
+                    return {
+                        "draft_id": draft_id, "status": latest["status"],
+                        "note_url": latest["platform_note_url"], "already_confirmed": True,
+                    }
                 raise HTTPException(400, "状态迁移失败")
+            conn.commit()
             if note_url:
                 conn.execute(
-                    "UPDATE drafts SET platform_note_url = ? WHERE id = ?",
+                    "UPDATE drafts SET platform_note_url = COALESCE(platform_note_url, ?) WHERE id = ?",
                     (note_url, draft_id),
                 )
                 conn.commit()
