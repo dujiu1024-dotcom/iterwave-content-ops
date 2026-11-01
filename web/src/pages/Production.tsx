@@ -199,7 +199,6 @@ export default function Production() {
     loadPlan();
     api.assets("template").then((r) => setTemplates(r.items)).catch(() => setTemplates([]));
     api.goals().then((g) => setGoals(g.filter((x) => x.status === "active"))).catch(() => {});
-    refresh().catch((e) => showToast(`加载轮次失败: ${e.message}`, "error"));
     api.status()
       .then((s) => {
         if (s.enabled_platforms?.length) setSelPlatforms(s.enabled_platforms);
