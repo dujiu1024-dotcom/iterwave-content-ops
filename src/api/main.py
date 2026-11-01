@@ -142,6 +142,54 @@ def _enqueue_round_task(*, tenant_id: str, round_id: int, topic_count=None,
     )
 
 
+def _round_id_from_aggregate(task_type: str, aggregate_id) -> Optional[int]:
+    """round_run 任务的 aggregate_id 形如 "<round_id>" 或 "<round_id>:<operation>"（round_id 为数据库主键）。"""
+    if task_type != "round_run" or not aggregate_id:
+        return None
+    head = str(aggregate_id).split(":", 1)[0]
+    return int(head) if head.isdigit() else None
+
+
+def _resolve_task_round_numbers(registry, tasks) -> dict:
+    """把 round_run 任务的数据库轮次 id 解析为业务轮次编号 round_number。
+
+    返回 {(tenant_id, round_id): round_number}。每个账号组数据库只读打开一次；
+    数据库缺失/不可读/轮次已删除时不写入映射（前端显示不带编号的文案，绝不回退显示数据库 id）。
+    """
+    wanted: dict[str, set[int]] = {}
+    for task in tasks:
+        rid = _round_id_from_aggregate(task.task_type, task.aggregate_id)
+        if rid is not None:
+            wanted.setdefault(task.tenant_id, set()).add(rid)
+    resolved: dict = {}
+    if not wanted or registry is None:
+        return resolved
+    for tenant_id, round_ids in wanted.items():
+        conn = None
+        try:
+            try:
+                name = str(registry.get(tenant_id).get("name") or tenant_id)
+            except Exception:  # noqa: BLE001 — 注册表无该账号组时按 id 推导路径
+                name = tenant_id
+            db_file = registry.paths(tenant_id, name=name).db_file
+            if not db_file.exists():
+                continue
+            conn = sqlite3.connect(db_file.as_uri() + "?mode=ro", uri=True, timeout=2)
+            ids = sorted(round_ids)
+            placeholders = ",".join("?" for _ in ids)
+            for rid, number in conn.execute(
+                f"SELECT id, round_number FROM spiral_rounds WHERE id IN ({placeholders})", ids,
+            ).fetchall():
+                if number is not None:
+                    resolved[(tenant_id, int(rid))] = int(number)
+        except Exception:  # noqa: BLE001 — 单个账号组不可读不影响队列列表
+            continue
+        finally:
+            if conn is not None:
+                conn.close()
+    return resolved
+
+
 def _tenant_scoped_hot_topic_status(status: dict, tenant_id: str) -> dict:
     """热点后台服务独立运行，但状态和结果只对所属账号组可见。"""
     if status.get("tenant_id") == tenant_id or (
@@ -3636,7 +3684,7 @@ def _register_routes(app: FastAPI) -> None:
         for tenant in registry.list():
             tenant_id = tenant["id"]
             paths = registry.paths(tenant_id, name=str(tenant.get("name") or tenant_id))
-            row = {"tenant_id": tenant_id, "tenant_name": tenant["name"], "created_at": tenant.get("created_at"), "db_available": False, "db_status": "uninitialized", "contents_period": 0, "contents_all": 0, "drafts_all": 0, "drafts_pending": 0, "drafts_saved": 0, "drafts_published": 0, "drafts_failed": 0, "media_active": 0, "media_usage": 0, "registered_accounts": 0, "registered_accounts_active": 0, "platforms": {}}
+            row = {"tenant_id": tenant_id, "tenant_name": tenant["name"], "created_at": tenant.get("created_at"), "db_available": False, "db_status": "uninitialized", "contents_period": 0, "contents_all": 0, "drafts_all": 0, "drafts_pending": 0, "drafts_saved": 0, "drafts_published": 0, "drafts_failed": 0, "media_active": 0, "media_usage": 0, "registered_accounts": 0, "registered_accounts_active": 0, "platforms": {}, "recent_execution": None}
             db_file = paths.db_file
             if db_file.exists():
                 # 文件存在但读取失败才是故障；尚未创建数据库属于正常的未初始化状态。
@@ -3646,6 +3694,20 @@ def _register_routes(app: FastAPI) -> None:
                     conn = sqlite3.connect(db_file.as_uri() + "?mode=ro", uri=True, timeout=2)
                     conn.row_factory = sqlite3.Row
                     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
+                    if "task_runs" in tables:
+                        latest_run = conn.execute(
+                            "SELECT task_type, status, started_at, finished_at, created_at, error_msg "
+                            "FROM task_runs ORDER BY COALESCE(started_at, created_at) DESC, id DESC LIMIT 1"
+                        ).fetchone()
+                        if latest_run is not None:
+                            row["recent_execution"] = {
+                                "task_type": str(latest_run["task_type"]),
+                                "status": str(latest_run["status"]),
+                                "has_error_detail": bool(latest_run["error_msg"]),
+                                "started_at": latest_run["started_at"],
+                                "finished_at": latest_run["finished_at"],
+                                "created_at": latest_run["created_at"],
+                            }
                     if "contents" in tables:
                         row["contents_all"] = int(conn.execute("SELECT COUNT(*) FROM contents").fetchone()[0])
                         cols = {r["name"] for r in conn.execute("PRAGMA table_info(contents)").fetchall()}
@@ -4364,16 +4426,20 @@ def _register_routes(app: FastAPI) -> None:
                 date_from=date_from, date_to=date_to,
             )
         items = []
+        round_numbers = _resolve_task_round_numbers(registry, tasks)
         for task in tasks:
             try:
                 tenant_name = registry.get(task.tenant_id)["name"] if registry else task.tenant_id
             except TenantError:
                 tenant_name = task.tenant_id
+            round_id = _round_id_from_aggregate(task.task_type, task.aggregate_id)
             items.append({
                 "queue_order": task.queue_order,
                 "task_id": task.task_id, "task_type": task.task_type,
                 "tenant_id": task.tenant_id, "tenant_name": tenant_name,
-                "aggregate_id": task.aggregate_id, "status": task.status,
+                "aggregate_id": task.aggregate_id,
+                "round_number": round_numbers.get((task.tenant_id, round_id)) if round_id is not None else None,
+                "status": task.status,
                 "created_at": task.created_at, "available_at": task.available_at,
                 "started_at": task.started_at,
                 "finished_at": task.finished_at, "attempts": task.attempts,
@@ -4408,10 +4474,13 @@ def _register_routes(app: FastAPI) -> None:
         task = _task_queue.get(task_id)
         if task is None:
             raise HTTPException(404, "任务不存在")
+        round_id = _round_id_from_aggregate(task.task_type, task.aggregate_id)
+        round_numbers = _resolve_task_round_numbers(_g().get("tenant_registry"), [task])
         return {
             "queue_order": task.queue_order,
             "task_id": task.task_id, "task_type": task.task_type,
             "tenant_id": task.tenant_id, "aggregate_id": task.aggregate_id,
+            "round_number": round_numbers.get((task.tenant_id, round_id)) if round_id is not None else None,
             "status": task.status, "payload": task.payload, "result": task.result,
             "created_at": task.created_at, "available_at": task.available_at,
             "started_at": task.started_at,
@@ -5309,8 +5378,9 @@ def _register_routes(app: FastAPI) -> None:
             }
 
         history = [dict(r) for r in conn.execute(
-            "SELECT plan_signature, plan_snapshot, round_id, created_at, author "
-            "FROM signature_history ORDER BY id DESC LIMIT 10"
+            "SELECT h.plan_signature, h.plan_snapshot, h.round_id, r.round_number, h.created_at, h.author "
+            "FROM signature_history h LEFT JOIN spiral_rounds r ON r.id = h.round_id "
+            "ORDER BY h.id DESC LIMIT 10"
         ).fetchall()]
         for h in history:
             try:
@@ -5991,8 +6061,21 @@ def _register_routes(app: FastAPI) -> None:
                 except (TypeError, ValueError):
                     item[target] = []
             item["enabled"] = bool(item["enabled"])
+            item["installation_state"] = "registered"
+            item["enabled_state"] = "enabled" if item["enabled"] else "disabled"
+            item["runnable_state"] = "blocked_no_sandbox"
+            item["execution_mode"] = "metadata_only"
             items.append(item)
-        return {"items": items, "total": len(items), "execution_enabled": False}
+        from src.core.skills_registry import builtin_skills_catalog
+        builtin_items = builtin_skills_catalog()
+        return {
+            "items": items,
+            "total": len(items),
+            "builtin_items": builtin_items,
+            "builtin_total": len(builtin_items),
+            "execution_enabled": False,
+            "custom_execution_enabled": False,
+        }
 
     @app.post("/api/skills")
     def register_tenant_skill(req: dict):
@@ -6005,12 +6088,8 @@ def _register_routes(app: FastAPI) -> None:
         import re
         if not re.fullmatch(r"[a-z][a-z0-9_.-]{1,63}", skill_id):
             raise HTTPException(422, "skill_id 必须以小写字母开头，仅允许小写字母、数字、点、下划线和连字符")
-        builtin_skill_ids = {
-            "topic_scoring", "prompt_variants", "ultimate_goal_check", "image_card",
-            "draft_saver", "circuit_breaker", "rhythm_controller", "ops_engine",
-            "spiral_engine", "zscore_normalize", "recovery_manager", "autogrow",
-            "topic_pool", "orchestration", "scheduler", "platform_readback",
-        }
+        from src.core.skills_registry import builtin_skills_catalog
+        builtin_skill_ids = {item["skill_id"] for item in builtin_skills_catalog()}
         if skill_id in builtin_skill_ids:
             raise HTTPException(409, "该 ID 已被系统内置 Skill 占用")
         if not name or len(name) > 120 or len(description) > 2000:
@@ -6051,6 +6130,8 @@ def _register_routes(app: FastAPI) -> None:
                 "category": category, "inputs": inputs, "outputs": outputs,
                 "permissions": sorted(set(permissions)), "enabled": False,
                 "manifest_version": 1, "created_at": now, "updated_at": now,
+                "installation_state": "registered", "enabled_state": "disabled",
+                "runnable_state": "blocked_no_sandbox", "execution_mode": "metadata_only",
                 "execution_enabled": False}
 
     @app.patch("/api/skills/{skill_id}")
@@ -6127,6 +6208,9 @@ def _register_routes(app: FastAPI) -> None:
             "inputs": inputs, "outputs": outputs,
             "permissions": sorted(set(permissions)), "enabled": enabled,
             "manifest_version": expected_version + 1, "updated_at": now,
+            "installation_state": "registered",
+            "enabled_state": "enabled" if enabled else "disabled",
+            "runnable_state": "blocked_no_sandbox", "execution_mode": "metadata_only",
             "execution_enabled": False,
         }
 
@@ -6358,14 +6442,16 @@ def _register_routes(app: FastAPI) -> None:
         item = dict(row)
         item["platforms"] = json.loads(item.pop("platforms_json") or "[]")
         linked = conn.execute(
-            "SELECT d.id AS draft_id,d.platform,d.status,c.title,c.round_id,cpd.created_at "
+            "SELECT d.id AS draft_id,d.platform,d.status,c.title,c.round_id,r.round_number,cpd.created_at "
             "FROM content_plan_drafts cpd JOIN drafts d ON d.id=cpd.draft_id "
-            "JOIN contents c ON c.id=d.content_id WHERE cpd.plan_id=? ORDER BY cpd.created_at,d.id",
+            "JOIN contents c ON c.id=d.content_id LEFT JOIN spiral_rounds r ON r.id=c.round_id "
+            "WHERE cpd.plan_id=? ORDER BY cpd.created_at,d.id",
             (plan_id,),
         ).fetchall()
         rounds = conn.execute(
-            "SELECT round_id,task_id,created_at FROM content_plan_rounds "
-            "WHERE plan_id=? ORDER BY created_at DESC",
+            "SELECT cpr.round_id,r.round_number,cpr.task_id,cpr.created_at "
+            "FROM content_plan_rounds cpr LEFT JOIN spiral_rounds r ON r.id=cpr.round_id "
+            "WHERE cpr.plan_id=? ORDER BY cpr.created_at DESC",
             (plan_id,),
         ).fetchall()
         item["drafts"] = [dict(r) for r in linked]
@@ -6727,6 +6813,103 @@ def _register_routes(app: FastAPI) -> None:
             "platform_only_metrics": raw_metrics,
         }
 
+    @app.get("/api/analytics/business-summary")
+    def analytics_business_summary(days: int = Query(30, ge=1, le=365)):
+        """业务经营 KPI 汇总（生产量、确认发布量、互动、粉丝增长）；只返回有明确定义的数据，未知值保留为 null。
+
+        不提供「草稿确认发布率」「平台发布成功率」等 SaaS 漏斗类比率：前者分母口径易误读，
+        后者缺少权威平台回执，均不属于自用运营闭环的经营指标。目标完成率见 /api/goals/summary。
+        """
+        from datetime import timedelta
+
+        conn = _g()["conn"]
+        since = (_now() - timedelta(days=days - 1)).strftime("%Y-%m-%d %H:%M:%S")
+
+        contents_created = int(conn.execute(
+            "SELECT COUNT(*) FROM contents WHERE datetime(created_at) >= datetime(?)", (since,)
+        ).fetchone()[0])
+        drafts_created = int(conn.execute(
+            "SELECT COUNT(*) FROM drafts WHERE datetime(created_at) >= datetime(?)", (since,)
+        ).fetchone()[0])
+        confirmed_published = int(conn.execute(
+            "SELECT COUNT(*) FROM drafts WHERE datetime(user_confirmed_at) >= datetime(?) "
+            "AND user_confirmed_at IS NOT NULL",
+            (since,),
+        ).fetchone()[0])
+
+        # 每篇草稿仅取窗口内最新一条成功/部分成功快照，避免重复采集被重复求和。
+        metric_row = conn.execute(
+            """WITH ranked AS (
+                   SELECT draft_id, views, likes, collects, comments, shares, new_followers,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY draft_id ORDER BY fetched_at DESC, id DESC
+                          ) AS rn
+                   FROM metrics
+                   WHERE draft_id IS NOT NULL
+                     AND datetime(fetched_at) >= datetime(?)
+                     AND fetch_status IN ('success','partial')
+               )
+               SELECT COUNT(*) AS sample_count,
+                      SUM(views) AS views, SUM(likes) AS likes,
+                      SUM(collects) AS collects, SUM(comments) AS comments,
+                      SUM(shares) AS shares, SUM(new_followers) AS new_followers,
+                      SUM(CASE WHEN views IS NOT NULL THEN 1 ELSE 0 END) AS views_samples,
+                      SUM(CASE WHEN likes IS NOT NULL THEN 1 ELSE 0 END) AS likes_samples,
+                      SUM(CASE WHEN collects IS NOT NULL THEN 1 ELSE 0 END) AS collects_samples,
+                      SUM(CASE WHEN comments IS NOT NULL THEN 1 ELSE 0 END) AS comments_samples,
+                      SUM(CASE WHEN shares IS NOT NULL THEN 1 ELSE 0 END) AS shares_samples
+               FROM ranked WHERE rn = 1""",
+            (since,),
+        ).fetchone()
+
+        followers_growth: dict[str, dict | None] = {}
+        for platform in _g()["cfg"].platforms.enabled_keys():
+            baseline = conn.execute(
+                "SELECT followers, captured_at FROM account_snapshots "
+                "WHERE platform=? AND followers IS NOT NULL AND datetime(captured_at) < datetime(?) "
+                "ORDER BY captured_at DESC, id DESC LIMIT 1",
+                (platform, since),
+            ).fetchone()
+            latest = conn.execute(
+                "SELECT followers, captured_at FROM account_snapshots "
+                "WHERE platform=? AND followers IS NOT NULL AND datetime(captured_at) >= datetime(?) "
+                "ORDER BY captured_at DESC, id DESC LIMIT 1",
+                (platform, since),
+            ).fetchone()
+            followers_growth[platform] = (
+                {
+                    "growth": int(latest["followers"]) - int(baseline["followers"]),
+                    "baseline_at": baseline["captured_at"],
+                    "latest_at": latest["captured_at"],
+                }
+                if baseline is not None and latest is not None else None
+            )
+
+        return {
+            "window_days": days,
+            "since": since,
+            "contents_created": contents_created,
+            "drafts_created": drafts_created,
+            "confirmed_published": confirmed_published,
+            "interactions": {
+                "sample_count": int(metric_row["sample_count"] or 0),
+                "views": metric_row["views"],
+                "likes": metric_row["likes"],
+                "collects": metric_row["collects"],
+                "comments": metric_row["comments"],
+                "shares": metric_row["shares"],
+                "new_followers": metric_row["new_followers"],
+                "known_samples": {
+                    "views": int(metric_row["views_samples"] or 0),
+                    "likes": int(metric_row["likes_samples"] or 0),
+                    "collects": int(metric_row["collects_samples"] or 0),
+                    "comments": int(metric_row["comments_samples"] or 0),
+                    "shares": int(metric_row["shares_samples"] or 0),
+                },
+            },
+            "followers_growth_by_platform": followers_growth,
+        }
+
     # --- 选题评分 ---
     @app.get("/api/topics/score")
     def score_topics(limit: int = Query(20, ge=1, le=200)):
@@ -6805,7 +6988,7 @@ def _register_routes(app: FastAPI) -> None:
 
         cfg = _g()["cfg"]
         if cfg.hot_topics.enabled is False:
-            raise HTTPException(409, "热点采集已在配置中关闭（hot_topics.enabled=false）")
+            raise HTTPException(409, "热点采集已在系统设置中关闭，请先启用后再试")
         tenant_id = _g().get("runtime_tenant_id", "default")
         result = hot_topic_service.trigger_background(cfg, trigger="manual", tenant_id=tenant_id)
         if not result.get("started") and result.get("tenant_id") != tenant_id and result.get("running"):
@@ -6980,6 +7163,21 @@ def _register_routes(app: FastAPI) -> None:
     def set_ops_pause(req: dict):
         paused = bool((req or {}).get("paused"))
         return set_ops_paused(_g()["conn"], paused, by="web-ui")
+
+    # --- 正式运营设置向导进度（按账号组存 app_settings，不依赖浏览器存储）---
+    @app.get("/api/onboarding/progress")
+    def get_onboarding_progress_api():
+        from src.core.onboarding_progress import get_onboarding_progress
+        return get_onboarding_progress(_g()["conn"])
+
+    @app.put("/api/onboarding/progress")
+    def put_onboarding_progress_api(req: dict):
+        from src.core.onboarding_progress import set_onboarding_progress, validate_onboarding_progress
+        try:
+            step_key, step_index = validate_onboarding_progress(req)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        return set_onboarding_progress(_g()["conn"], step_key, step_index, by="web-ui")
 
     # --- 通知通道自检（不落 notifications 表）---
     @app.post("/api/notify/test")
@@ -8410,7 +8608,9 @@ def _register_routes(app: FastAPI) -> None:
     def list_user_override(limit: int = Query(200, ge=1, le=2000)):
         conn = _g()["conn"]
         rows = conn.execute(
-            "SELECT * FROM user_override ORDER BY overridden_at DESC LIMIT ?", (limit,)
+            "SELECT u.*, r.round_number FROM user_override u "
+            "LEFT JOIN spiral_rounds r ON r.id = u.round_id "
+            "ORDER BY u.overridden_at DESC LIMIT ?", (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -8565,11 +8765,11 @@ def _register_routes(app: FastAPI) -> None:
         """红线拦截历史：从 contents 表中 guard_outcome != 'pass' 的记录聚合"""
         conn = _g()["conn"]
         rows = conn.execute(
-            """SELECT id, round_id, platform, title, guard_outcome, guard_reason,
-                      created_at
-               FROM contents
-               WHERE guard_outcome IN ('warn', 'fail', 'error')
-               ORDER BY created_at DESC LIMIT ?""",
+            """SELECT c.id, c.round_id, r.round_number, c.platform, c.title,
+                      c.guard_outcome, c.guard_reason, c.created_at
+               FROM contents c LEFT JOIN spiral_rounds r ON r.id = c.round_id
+               WHERE c.guard_outcome IN ('warn', 'fail', 'error')
+               ORDER BY c.created_at DESC LIMIT ?""",
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]

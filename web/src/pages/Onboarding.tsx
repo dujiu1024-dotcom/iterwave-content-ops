@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, Platform, SystemConfigView, SystemStatus, Goal, DiagnoseResult } from "../api";
 import { navigate } from "../nav";
 import { PersonaEditor, KbEditor, LlmEditor, PlatformToggles } from "../components/ConfigEditors";
@@ -55,6 +55,8 @@ function todayStr(offsetDays = 0): string {
 export default function Onboarding() {
   const { showToast } = useApp();
   const [stepIdx, setStepIdx] = useState(0);
+  const [progressLoaded, setProgressLoaded] = useState(false);
+  const lastSavedStep = useRef<number | null>(null);
   const [cfg, setCfg] = useState<SystemConfigView | null>(null);
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [goals, setGoals] = useState<Goal[]>([]);
@@ -104,6 +106,33 @@ export default function Onboarding() {
       setErr(e.message);
     }
   };
+
+  // 向导进度按账号组存后端（app_settings.onboarding_progress），换浏览器/设备后保持一致。
+  useEffect(() => {
+    let active = true;
+    api.onboardingProgress().then((progress) => {
+      if (!active) return;
+      const byKey = progress.step_key ? STEPS.findIndex((s) => s.key === progress.step_key) : -1;
+      const idx = byKey >= 0 ? byKey
+        : (progress.step_index != null && progress.step_index < STEPS.length ? progress.step_index : 0);
+      setStepIdx(idx);
+      lastSavedStep.current = idx;
+      setProgressLoaded(true);
+    }).catch((e) => {
+      if (!active) return;
+      // 读取失败时不覆盖后端已有进度：保持从第一步开始，但不回写。
+      showToast(`向导进度读取失败：${e instanceof Error ? e.message : String(e)}`, "error");
+    });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!progressLoaded || lastSavedStep.current === stepIdx) return;
+    lastSavedStep.current = stepIdx;
+    api.saveOnboardingProgress(STEPS[stepIdx].key, stepIdx).catch((e) => {
+      showToast(`向导进度保存失败：${e instanceof Error ? e.message : String(e)}`, "error");
+    });
+  }, [progressLoaded, stepIdx]);
 
   useEffect(() => {
     (async () => {
@@ -178,6 +207,7 @@ export default function Onboarding() {
           <h1 className="page-title">正式运营设置</h1>
           <div className="page-desc">
             这里配置完整运营工作台。快速体验无需先完成这些步骤；正式生产前再按需补齐。
+            首次配置按步骤推进；当前进度保存在服务端，并按账号组分别记忆。
           </div>
         </div>
       </div>

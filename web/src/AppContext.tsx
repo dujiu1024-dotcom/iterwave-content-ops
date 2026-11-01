@@ -35,8 +35,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const refreshAuth = useCallback(async () => {
     try {
       setAuth(await api.authStatus());
-    } catch (e) {
-      console.warn("auth status fetch failed:", e);
+    } catch {
+      // Authentication state is represented in the UI; do not dump raw errors to the browser console.
       setAuth({ configured: true, authenticated: false, needs_login: true });
     }
   }, []);
@@ -45,8 +45,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     try {
       const s = await api.status();
       setStatus(s);
-    } catch (e) {
-      console.warn("status fetch failed:", e);
+    } catch {
+      // Keep the last known status without exposing raw response details in the console.
     }
   }, []);
 

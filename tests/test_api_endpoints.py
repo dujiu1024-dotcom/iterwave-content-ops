@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -2723,3 +2724,187 @@ def test_archived_industry_preset_cannot_be_applied_until_restored(client, conn)
     applied = tc.post("/api/presets/archived-apply/apply")
     assert applied.status_code == 200
     assert applied.json()["positioning"] == "为目标用户提供可执行建议"
+
+
+def test_plan_signature_history_exposes_business_round_number(client):
+    tc, conn, _ = client
+    created = tc.post("/api/rounds", json={"topic_count": 3})
+    assert created.status_code == 200
+    body = created.json()
+
+    response = tc.get("/api/plans")
+    assert response.status_code == 200
+    history = response.json()["history"]
+    entry = next(item for item in history if item["round_id"] == body["id"])
+    assert entry["round_number"] == body["round_number"]
+
+
+def test_skills_registry_distinguishes_registration_enablement_and_runnability(client):
+    tc, _, _ = client
+    catalog = tc.get("/api/skills")
+    assert catalog.status_code == 200
+    body = catalog.json()
+    assert body["execution_enabled"] is False
+    assert body["custom_execution_enabled"] is False
+    assert body["builtin_total"] == len(body["builtin_items"])
+    assert body["builtin_items"]
+    assert all(item["installation_state"] == "built_in" for item in body["builtin_items"])
+
+    created = tc.post("/api/skills", json={
+        "skill_id": "safe_manifest_check",
+        "name": "安全 Manifest 检查",
+        "version": "1.0.0",
+        "description": "仅用于验证元数据登记",
+        "category": "custom",
+        "inputs": [],
+        "outputs": [],
+        "permissions": ["read_content"],
+    })
+    assert created.status_code == 200
+    assert created.json()["installation_state"] == "registered"
+    assert created.json()["enabled_state"] == "disabled"
+    assert created.json()["runnable_state"] == "blocked_no_sandbox"
+    assert created.json()["execution_mode"] == "metadata_only"
+
+    listed = tc.get("/api/skills").json()
+    custom = next(item for item in listed["items"] if item["skill_id"] == "safe_manifest_check")
+    assert custom["runnable_state"] == "blocked_no_sandbox"
+
+
+def test_business_analytics_summary_preserves_unknown_rates_and_metrics(client):
+    tc, _, _ = client
+    response = tc.get("/api/analytics/business-summary?days=30")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["window_days"] == 30
+    assert body["contents_created"] >= 0
+    assert body["drafts_created"] >= 0
+    assert body["confirmed_published"] >= 0
+    # SaaS 漏斗类比率已从经营总览移除，接口不得再返回。
+    for removed in ("publish_eligible", "draft_publish_confirmation_rate",
+                    "platform_publish_success_rate", "platform_publish_success_note"):
+        assert removed not in body
+    assert body["interactions"]["sample_count"] >= 0
+    if body["interactions"]["sample_count"] == 0:
+        assert body["interactions"]["views"] is None
+    assert set(body["followers_growth_by_platform"]) <= {"xhs", "douyin", "kuaishou", "wechat_channels"}
+
+
+def test_business_analytics_summary_uses_latest_metric_per_draft(client):
+    tc, conn, _ = client
+    now = datetime.now()
+    created = now.strftime("%Y-%m-%d %H:%M:%S")
+    earlier = (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    old_created = (now - timedelta(days=40)).strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        "INSERT INTO contents(id, platform, title, body, created_at) VALUES(?,?,?,?,?)",
+        ("kpi-content-1", "xhs", "KPI 测试内容", "测试正文", created),
+    )
+    conn.execute(
+        "INSERT INTO drafts(id, content_id, platform, status, user_confirmed_at, created_at) "
+        "VALUES(?,?,?,?,?,?)",
+        ("kpi-draft-1", "kpi-content-1", "xhs", "user_published", created, created),
+    )
+    conn.execute(
+        "INSERT INTO contents(id, platform, title, body, created_at) VALUES(?,?,?,?,?)",
+        ("kpi-content-old", "xhs", "历史内容", "历史正文", old_created),
+    )
+    conn.execute(
+        "INSERT INTO drafts(id, content_id, platform, status, user_confirmed_at, created_at) "
+        "VALUES(?,?,?,?,?,?)",
+        ("kpi-draft-old", "kpi-content-old", "xhs", "user_published", created, old_created),
+    )
+    conn.execute(
+        "INSERT INTO metrics(draft_id, content_id, platform, fetch_status, fetched_at, views, likes, collects, comments, shares, new_followers) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        ("kpi-draft-1", "kpi-content-1", "xhs", "success", earlier, 50, 5, 2, 1, 1, 1),
+    )
+    conn.execute(
+        "INSERT INTO metrics(draft_id, content_id, platform, fetch_status, fetched_at, views, likes, collects, comments, shares, new_followers) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        ("kpi-draft-1", "kpi-content-1", "xhs", "success", created, 120, 12, 6, 3, 2, 4),
+    )
+    conn.commit()
+
+    response = tc.get("/api/analytics/business-summary?days=30")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["contents_created"] == 1
+    assert body["drafts_created"] == 1
+    assert body["confirmed_published"] == 2
+    assert body["interactions"]["sample_count"] == 1
+    assert body["interactions"]["views"] == 120
+    assert body["interactions"]["likes"] == 12
+    assert body["interactions"]["collects"] == 6
+    assert body["interactions"]["comments"] == 3
+    assert body["interactions"]["shares"] == 2
+
+
+def test_onboarding_progress_persists_in_backend(client):
+    tc, conn, _ = client
+    empty = tc.get("/api/onboarding/progress")
+    assert empty.status_code == 200
+    assert empty.json()["step_key"] is None
+    assert empty.json()["step_index"] is None
+
+    saved = tc.put("/api/onboarding/progress", json={"step_key": "kb", "step_index": 2})
+    assert saved.status_code == 200
+    assert saved.json()["step_key"] == "kb"
+    assert saved.json()["step_index"] == 2
+
+    row = conn.execute("SELECT value FROM app_settings WHERE key='onboarding_progress'").fetchone()
+    assert row is not None and '"kb"' in row[0]
+
+    again = tc.get("/api/onboarding/progress").json()
+    assert again["step_key"] == "kb"
+    assert again["step_index"] == 2
+    assert again["updated_at"]
+
+    for bad in ({"step_key": "KB!", "step_index": 1}, {"step_key": "kb", "step_index": -1},
+                {"step_key": "kb", "step_index": True}, {}):
+        resp = tc.put("/api/onboarding/progress", json=bad)
+        assert resp.status_code == 422
+
+
+def test_global_task_queue_exposes_business_round_number_not_db_id(client, cfg, tmp_path, monkeypatch):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    tc, conn, _ = client
+    db_file = Path(cfg.resolve_path(cfg.paths.db_file))
+
+    class Registry:
+        def get(self, tenant_id):
+            return {"id": tenant_id, "name": "测试账号组"}
+
+        def list(self):
+            return [{"id": "default", "name": "测试账号组"}]
+
+        def paths(self, _tenant_id, name=None):
+            return SimpleNamespace(db_file=db_file, data_dir=Path(cfg.resolve_path(cfg.paths.data_dir)))
+
+    monkeypatch.setitem(api_main._g_ctx, "tenant_registry", Registry())
+    cur = conn.execute(
+        "INSERT INTO spiral_rounds (round_number, status, topic_ids, content_variants) "
+        "VALUES (7, 'producing', '[]', '[]')"
+    )
+    round_id = cur.lastrowid
+    conn.execute("UPDATE spiral_rounds SET id = ? WHERE id = ?", (round_id + 500, round_id))
+    round_id += 500
+    conn.commit()
+
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    monkeypatch.setattr(api_main, "_task_queue", queue)
+    run, _ = queue.enqueue(task_type="round_run", tenant_id="default", aggregate_id=str(round_id), payload={})
+    save, _ = queue.enqueue(
+        task_type="round_run", tenant_id="default",
+        aggregate_id=f"{round_id}:save_pending_drafts", payload={},
+    )
+    missing, _ = queue.enqueue(task_type="round_run", tenant_id="default", aggregate_id="999999", payload={})
+
+    items = {item["task_id"]: item for item in tc.get("/api/task-queue?scope=active").json()["items"]}
+    assert items[run.task_id]["round_number"] == 7
+    assert items[save.task_id]["round_number"] == 7
+    assert items[missing.task_id]["round_number"] is None
+    assert tc.get(f"/api/task-queue/{run.task_id}").json()["round_number"] == 7
