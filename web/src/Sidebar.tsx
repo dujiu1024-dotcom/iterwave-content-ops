@@ -11,12 +11,12 @@ export interface NavItem {
 }
 
 export const NAV_ITEMS: NavItem[] = [
+  { page: "accounts",   label: "账号与登录", icon: "◉", section: "账号管理" },
   { page: "dashboard",  label: "运营总览",   icon: "▦", section: "指挥与发现" },
   { page: "activation", label: "快速体验",   icon: "✧", section: "指挥与发现", hidden: true },
   { page: "global-ops", label: "全局运营中心", icon: "▥", section: "指挥与发现", hidden: true },
   { page: "hot",        label: "热点雷达",   icon: "✳", section: "指挥与发现" },
   { page: "goals",      label: "目标与策略", icon: "◎", section: "指挥与发现" },
-  { page: "accounts",   label: "账号与登录", icon: "◉", section: "指挥与发现" },
 
   { page: "production", label: "内容生产",   icon: "▤", section: "内容作战" },
   { page: "calendar",   label: "内容日历",   icon: "▦", section: "内容作战" },
