@@ -190,3 +190,102 @@ def test_recommendation_limit_can_return_more_than_eight_items(conn, seed, test_
     finally:
         api_main._g_ctx.clear()
         api_main._g_ctx.update(saved)
+
+
+def test_successful_image_generation_ignores_legacy_monthly_quota(
+    conn, cfg, test_auth, monkeypatch, tmp_path
+):
+    """旧 monthly_quota 字段只保留兼容，不再限制个人素材库生成次数。"""
+    from src.core import media_quality
+
+    registry = TenantRegistry(tmp_path / "workspace")
+    registry.initialize()
+    conn.execute(
+        "INSERT INTO media_generation_settings (id, enabled, monthly_quota, prompt_prefix, model, size) "
+        "VALUES (1, 1, 1, '', 'test-model', '1024x1024') "
+        "ON CONFLICT(id) DO UPDATE SET enabled=1, monthly_quota=1, model='test-model', size='1024x1024'"
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        media_generation, "generate_image_bytes",
+        lambda *args, **kwargs: (b"test-image-bytes", "image/png", ".png", 1, 1),
+    )
+    monkeypatch.setattr(
+        media_quality, "score_image",
+        lambda raw, cfg=None: {"score": 90, "reasons": []},
+    )
+    saved = dict(api_main._g_ctx)
+    api_main._g_ctx.clear()
+    api_main._g_ctx.update({
+        "conn": conn, "cfg": cfg, "tenant_registry": registry,
+        "runtime_tenant_id": "default",
+    })
+    try:
+        client = _client(test_auth)
+        responses = [
+            client.post("/api/media/generate", json={"prompt": "a detailed test image prompt"}),
+            client.post("/api/media/generate", json={"prompt": "another detailed test image prompt"}),
+        ]
+        assert [response.status_code for response in responses] == [201, 201]
+        assert conn.execute(
+            "SELECT COUNT(*) FROM media_generation_jobs WHERE status='succeeded'"
+        ).fetchone()[0] == 2
+        assert conn.execute("SELECT monthly_quota FROM media_generation_settings WHERE id=1").fetchone()[0] == 1
+    finally:
+        api_main._g_ctx.clear()
+        api_main._g_ctx.update(saved)
+
+
+def test_content_template_can_be_updated_without_changing_asset_type(conn, test_auth):
+    saved = dict(api_main._g_ctx)
+    api_main._g_ctx.clear()
+    api_main._g_ctx.update({"conn": conn, "runtime_tenant_id": "default"})
+    try:
+        client = _client(test_auth)
+        created = client.post("/api/assets", json={
+            "asset_type": "template", "title": "旧模板", "body": "引入 -> 结论",
+        })
+        assert created.status_code == 200
+        asset_id = created.json()["id"]
+        updated = client.put(f"/api/assets/{asset_id}", json={
+            "asset_type": "template", "title": "新模板", "body": "问题 -> 证据 -> 局限 -> 结论",
+        })
+        assert updated.status_code == 200
+        assert updated.json()["title"] == "新模板"
+        assert updated.json()["body"] == "问题 -> 证据 -> 局限 -> 结论"
+        rejected = client.put(f"/api/assets/{asset_id}", json={
+            "asset_type": "voice", "title": "误改类型", "body": "不允许",
+        })
+        assert rejected.status_code == 409
+    finally:
+        api_main._g_ctx.clear()
+        api_main._g_ctx.update(saved)
+
+
+def test_media_library_returns_total_counts_and_offset_page(conn, test_auth):
+    for asset_id, review_status in ((101, "approved"), (102, "pending_review"), (103, "approved")):
+        conn.execute(
+            "INSERT INTO media_assets "
+            "(id, title, original_filename, stored_filename, mime_type, byte_size, sha256, alt_text, tags, source_type, width, height, status, review_status, created_at) "
+            "VALUES (?, ?, ?, ?, 'image/png', 10, ?, ?, '[]', 'upload', 100, 100, 'active', ?, '2026-11-01')",
+            (asset_id, f"分页素材 {asset_id}", f"{asset_id}.png", f"{asset_id}.png",
+             f"pagination-sha-{asset_id}", "测试素材", review_status),
+        )
+    conn.commit()
+    saved = dict(api_main._g_ctx)
+    api_main._g_ctx.clear()
+    api_main._g_ctx.update({"conn": conn, "runtime_tenant_id": "default"})
+    try:
+        response = _client(test_auth).get(
+            "/api/media?status=active&review_status=all&limit=1&offset=1"
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body["items"]) == 1
+        assert body["total"] == 3
+        assert body["counts"]["all"] == 3
+        assert body["counts"]["approved"] == 2
+        assert body["counts"]["pending"] == 1
+    finally:
+        api_main._g_ctx.clear()
+        api_main._g_ctx.update(saved)

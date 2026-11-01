@@ -16,6 +16,8 @@ export default function GlobalOperations() {
   const [activeCount, setActiveCount] = useState<number | null>(null);
   const [failedCount, setFailedCount] = useState<number | null>(null);
   const [failedTasks, setFailedTasks] = useState<GlobalTaskQueueItem[]>([]);
+  const [failedPage, setFailedPage] = useState(1);
+  const failedPageSize = 8;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
@@ -24,18 +26,24 @@ export default function GlobalOperations() {
     setLoading(true);
     setError("");
     const results = await Promise.allSettled([
-      api.globalOperationsSummary(30), api.taskQueue({ scope: "active" }), api.taskQueue({ scope: "failed" }),
+      api.globalOperationsSummary(30), api.taskQueue({ scope: "active", page: 1, pageSize: 30 }), api.taskQueue({ scope: "failed", page: failedPage, pageSize: failedPageSize }),
     ]);
     if (results[0].status === "fulfilled") setMonitor(results[0].value);
     if (results[1].status === "fulfilled") { setTasks(results[1].value.items ?? []); setActiveCount(results[1].value.total ?? results[1].value.items?.length ?? 0); }
-    if (results[2].status === "fulfilled") { setFailedCount(results[2].value.total ?? 0); setFailedTasks(results[2].value.items ?? []); }
+    if (results[2].status === "fulfilled") {
+      const total = results[2].value.total ?? 0;
+      setFailedCount(total);
+      setFailedTasks(results[2].value.items ?? []);
+      const lastPage = Math.max(1, Math.ceil(total / failedPageSize));
+      if (failedPage > lastPage) setFailedPage(lastPage);
+    }
     const failures = results.flatMap((r, i) => r.status === "rejected"
       ? [`${["账号组汇总", "活跃任务", "失败任务统计"][i]}：${r.reason instanceof Error ? r.reason.message : String(r.reason)}`]
       : []);
     setError(failures.join("；"));
     setUpdatedAt(new Date());
     setLoading(false);
-  }, []);
+  }, [failedPage]);
 
   useEffect(() => {
     void refresh();
@@ -95,7 +103,7 @@ export default function GlobalOperations() {
         {loading && !monitor ? <div className="empty-state">正在汇总账号组…</div> : !monitor ? <div className="empty-state">账号组数据暂不可用。</div> : (
           <div className="table-wrap">
             <table>
-              <thead><tr><th>账号组</th><th>数据库</th><th>平台账号</th><th>平台登录</th><th>运行中</th><th>排队中</th><th>失败 / 中断</th><th>定时调度</th><th>活跃轮次</th><th>操作</th></tr></thead>
+              <thead><tr><th>账号组</th><th>数据库</th><th>平台账号</th><th>平台登录</th><th>运行中</th><th>排队中</th><th>本页失败 / 中断</th><th>定时调度</th><th>活跃轮次</th><th>操作</th></tr></thead>
               <tbody>{(monitor.tenants ?? []).map((tenant) => {
                 const q = byTenant.get(tenant.tenant_id) ?? { queued: 0, running: 0, failed: 0 };
                 return <tr key={tenant.tenant_id}>
@@ -136,10 +144,18 @@ export default function GlobalOperations() {
           {active.length > 12 && <div className="panel-sub">另有 {active.length - 12} 个任务，请进入完整队列查看。</div>}
         </section>
         <section className="panel">
-          <div className="panel-head"><div><div className="panel-title">异常与待处理</div><div className="panel-sub">当前返回的队列记录中失败或中断的任务。</div></div><span className="tag">{failedCount ?? "—"} 项</span></div>
-          {failed.length ? <div className="list">{failed.slice(0, 12).map((task) => <div className="task-row" key={task.task_id}>
+          <div className="panel-head"><div><div className="panel-title">异常与待处理</div><div className="panel-sub">按页查看失败或中断任务，避免异常列表撑长运营总览。</div></div><span className="tag">{failedCount ?? "—"} 项</span></div>
+          {failed.length ? <div className="list">{failed.map((task) => <div className="task-row" key={task.task_id}>
             <i className="task-prio red" /><div className="task-main"><div className="task-title">{task.tenant_name} · {STATUS[task.status]}</div><div className="task-desc">{task.error_message || task.task_type}</div></div>
-          </div>)}</div> : <div className="empty-state">当前返回范围内没有失败或中断任务。</div>}
+          </div>)}</div> : <div className="empty-state">当前没有失败或中断任务。</div>}
+          {(failedCount ?? 0) > failedPageSize && <div className="pagination-bar">
+            <span className="pagination-summary">第 {failedPage} / {Math.max(1, Math.ceil((failedCount ?? 0) / failedPageSize))} 页 · 共 {failedCount} 项</span>
+            <div className="pagination-actions">
+              <button className="btn sm" disabled={failedPage <= 1 || loading} onClick={() => setFailedPage((p) => Math.max(1, p - 1))}>上一页</button>
+              <button className="btn sm" disabled={failedPage >= Math.ceil((failedCount ?? 0) / failedPageSize) || loading} onClick={() => setFailedPage((p) => p + 1)}>下一页</button>
+              <button className="btn sm" onClick={() => navigate("task-queue")}>打开完整队列</button>
+            </div>
+          </div>}
         </section>
       </div>
 

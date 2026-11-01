@@ -846,3 +846,79 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 .production-run-alert, .production-run-alert > * { min-width: 0; max-width: 100%; }
 .production-run-alert { overflow-wrap: anywhere; }
 .production-run-alert span { white-space: normal !important; overflow-wrap: anywhere; }
+
+
+/* ===== UX audit: independent fixed-height workspace scrolling ===== */
+.app { height: 100vh; min-height: 0; overflow: hidden; align-items: stretch; }
+.sidebar {
+  position: relative;
+  top: auto;
+  height: 100vh;
+  min-height: 0;
+  flex: 0 0 242px;
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+.sidebar-nav {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding-bottom: 8px;
+}
+.sidebar-nav > div { min-width: 0; }
+.side-bottom {
+  flex: 0 0 auto;
+  max-height: min(220px, 30vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-top: 1px solid #ffffff16;
+  padding-top: 10px;
+}
+.main { height: 100vh; min-height: 0; overflow: hidden; }
+.topbar { flex: 0 0 auto; position: relative; top: auto; }
+.content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.pagination-summary { color: var(--muted); font-size: 11px; }
+.pagination-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+@media (max-width: 620px) {
+  .sidebar { flex-basis: 48px; width: 48px; }
+  .side-bottom { max-height: 24vh; }
+}
+
+
+/* Account identity and editable industry preset forms */
+.account-profile-editor, .industry-preset-editor {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+.account-profile-editor .form-label,
+.industry-preset-editor label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+.industry-preset-editor textarea { resize: vertical; }

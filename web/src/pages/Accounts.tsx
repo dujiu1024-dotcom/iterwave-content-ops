@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, Platform, AccountInfo, LoginStatus } from "../api";
+import { api, Platform, AccountInfo, LoginStatus, RegisteredPlatformAccount } from "../api";
 
 const PLATFORM_EMOJI: Record<Platform, string> = {
   xhs: "小", douyin: "抖", kuaishou: "快", wechat_channels: "视",
@@ -26,17 +26,23 @@ const ACCOUNT_STATUS_LABEL: Record<string, { label: string; color: string }> = {
 
 export default function Accounts() {
   const [accounts, setAccounts] = useState<AccountInfo[] | null>(null);
+  const [registeredAccounts, setRegisteredAccounts] = useState<RegisteredPlatformAccount[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [activeLogin, setActiveLogin] = useState<Platform | null>(null);
   const [loginStatus, setLoginStatus] = useState<LoginStatus | null>(null);
   const [smsCode, setSmsCode] = useState("");
   const [smsSubmitting, setSmsSubmitting] = useState(false);
+  const [editingPlatform, setEditingPlatform] = useState<Platform | null>(null);
+  const [editHandle, setEditHandle] = useState("");
+  const [editDisplayName, setEditDisplayName] = useState("");
+  const [profileSaving, setProfileSaving] = useState(false);
 
   const load = async () => {
     setErr(null);
     try {
-      const r = await api.accounts();
+      const [r, registered] = await Promise.all([api.accounts(), api.platformAccounts()]);
       setAccounts(r.accounts);
+      setRegisteredAccounts(registered.items ?? []);
     } catch (e: any) { setErr(e.message); }
   };
 
@@ -123,6 +129,7 @@ export default function Accounts() {
         {(accounts || []).map((a) => {
           const st = ACCOUNT_STATUS_LABEL[a.status] || ACCOUNT_STATUS_LABEL.not_logged_in;
           const loginSt = a.login_proc_state ? LOGIN_STATE_LABEL[a.login_proc_state] : null;
+          const registered = registeredAccounts.find((item) => item.platform === a.platform);
           return (
             <div key={a.platform} className="panel" style={{ padding: 18 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
@@ -131,6 +138,10 @@ export default function Accounts() {
                   <div>
                     <div style={{ fontWeight: 700, fontSize: 15 }}>{a.platform_display}</div>
                     <div style={{ fontSize: 11, color: "var(--muted)" }}>本机登录</div>
+                    <div style={{ marginTop: 4 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700 }}>{registered?.display_name || registered?.account_handle || "尚未登记账号昵称"}</div>
+                      {registered?.account_handle && <div style={{ fontSize: 10, color: "var(--muted)" }}>账号标识：{registered.account_handle}</div>}
+                    </div>
                   </div>
                 </div>
                 <span className={`tag ${st.color}`}>{st.label}</span>
@@ -166,6 +177,36 @@ export default function Accounts() {
                 )}
                 {a.status === "logged_in" && (
                   <button className="btn danger" onClick={() => handleLogout(a.platform as Platform)}>✕ 退出登录</button>
+                )}
+              </div>
+              <div style={{ marginTop: 10 }}>
+                {editingPlatform === a.platform ? (
+                  <div className="account-profile-editor">
+                    <label className="form-label">账号昵称<input className="field" value={editDisplayName} onChange={(e) => setEditDisplayName(e.target.value)} placeholder="填写平台展示昵称" /></label>
+                    <label className="form-label">账号标识<input className="field" value={editHandle} onChange={(e) => setEditHandle(e.target.value)} placeholder="平台号 / 主页 ID / 账号标识" /></label>
+                    <div className="flex wrap" style={{ gap: 6 }}>
+                      <button className="btn sm primary" type="button" disabled={profileSaving || !editHandle.trim() || !editDisplayName.trim()} onClick={async () => {
+                        setProfileSaving(true);
+                        try {
+                          await api.savePlatformAccount(registered?.id ?? null, {
+                            platform: a.platform as Platform, account_handle: editHandle.trim(),
+                            display_name: editDisplayName.trim(), status: "active", notes: registered?.notes ?? "",
+                          });
+                          const refreshed = await api.platformAccounts();
+                          setRegisteredAccounts(refreshed.items ?? []);
+                          setEditingPlatform(null);
+                        } catch (e) { alert("账号资料保存失败：" + (e as Error).message); }
+                        finally { setProfileSaving(false); }
+                      }}>{profileSaving ? "保存中…" : "保存资料"}</button>
+                      <button className="btn sm" type="button" onClick={() => setEditingPlatform(null)}>取消</button>
+                    </div>
+                  </div>
+                ) : (
+                  <button className="btn xs" type="button" onClick={() => {
+                    setEditingPlatform(a.platform as Platform);
+                    setEditDisplayName(registered?.display_name ?? "");
+                    setEditHandle(registered?.account_handle ?? "");
+                  }}>{registered ? "编辑账号资料" : "登记账号昵称"}</button>
                 )}
               </div>
             </div>

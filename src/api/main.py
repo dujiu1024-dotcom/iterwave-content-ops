@@ -2794,9 +2794,7 @@ def _register_routes(app: FastAPI) -> None:
             used = int(conn.execute(
                 "SELECT COUNT(*) FROM media_generation_jobs WHERE created_at >= ? AND status = 'succeeded'", (month_start,),
             ).fetchone()[0])
-            quota = int(settings.get("monthly_quota") or 0)
-            if quota <= 0 or used >= quota:
-                raise HTTPException(429, f"本账号组本月 AI 配图额度已用完（{used}/{quota}）")
+            # 个人账号组素材库不设置人为月度次数上限；保留成功次数统计用于成本与使用分析。
             cur = conn.execute(
                 "INSERT INTO media_generation_jobs (prompt, final_prompt, model, status, created_at) "
                 "VALUES (?, ?, ?, 'running', ?)",
@@ -2995,6 +2993,31 @@ def _register_routes(app: FastAPI) -> None:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
+        count_sql = "SELECT COUNT(*) FROM media_assets" + (" WHERE " + " AND ".join(where) if where else "")
+        total = int(conn.execute(count_sql, params[:-2]).fetchone()[0])
+        summary_where: list[str] = []
+        summary_params: list = []
+        if query and query.strip():
+            needle = f"%{query.strip()}%"
+            summary_where.append("(title LIKE ? OR original_filename LIKE ? OR alt_text LIKE ? OR tags LIKE ?)")
+            summary_params.extend([needle, needle, needle, needle])
+        summary_sql = "SELECT status, review_status, COUNT(*) AS n FROM media_assets"
+        if summary_where:
+            summary_sql += " WHERE " + " AND ".join(summary_where)
+        summary_sql += " GROUP BY status, review_status"
+        counts = {"all": 0, "pending": 0, "approved": 0, "rejected": 0, "archived": 0}
+        for summary in conn.execute(summary_sql, summary_params).fetchall():
+            n = int(summary["n"])
+            if summary["status"] == "archived":
+                counts["archived"] += n
+            elif summary["status"] == "active":
+                if summary["review_status"] == "pending_review":
+                    counts["pending"] += n
+                elif summary["review_status"] == "approved":
+                    counts["approved"] += n
+                elif summary["review_status"] == "rejected":
+                    counts["rejected"] += n
+                counts["all"] += n
         rows = conn.execute(sql, params).fetchall()
         result = []
         for row in rows:
@@ -3009,7 +3032,7 @@ def _register_routes(app: FastAPI) -> None:
                 item["quality_details"] = None
             item["file_url"] = f"/api/media/{item['id']}/file"
             result.append(item)
-        return {"items": result, "limit": limit, "offset": offset}
+        return {"items": result, "limit": limit, "offset": offset, "total": total, "counts": counts}
 
     @app.post("/api/media", status_code=201)
     def upload_media_asset(req: MediaAssetUploadRequest):
@@ -6249,6 +6272,7 @@ def _register_routes(app: FastAPI) -> None:
         action_type: Optional[str] = Query(None),
         status: Optional[str] = Query(None),
         limit: int = Query(100, ge=1, le=500),
+        offset: int = Query(0, ge=0),
     ):
         conn = _g()["conn"]
         sql = "SELECT * FROM ops_logs WHERE 1=1"
@@ -6259,10 +6283,12 @@ def _register_routes(app: FastAPI) -> None:
             sql += " AND action_type = ?"; params.append(action_type)
         if status:
             sql += " AND status = ?"; params.append(status)
-        sql += " ORDER BY COALESCE(executed_at, schedule_time) DESC LIMIT ?"
-        params.append(limit)
+        count_sql = sql.replace("SELECT * FROM ops_logs", "SELECT COUNT(*) FROM ops_logs")
+        total = int(conn.execute(count_sql, params).fetchone()[0])
+        sql += " ORDER BY COALESCE(executed_at, schedule_time) DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
         rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
-        return {"items": rows, "total": len(rows)}
+        return {"items": rows, "total": total}
 
     # --- 任务追踪（task_runs）---
     @app.get("/api/task_runs")
@@ -6270,6 +6296,7 @@ def _register_routes(app: FastAPI) -> None:
         task_type: Optional[str] = Query(None),
         status: Optional[str] = Query(None),
         limit: int = Query(100, ge=1, le=500),
+        offset: int = Query(0, ge=0),
     ):
         conn = _g()["conn"]
         sql = "SELECT * FROM task_runs WHERE 1=1"
@@ -6278,8 +6305,8 @@ def _register_routes(app: FastAPI) -> None:
             sql += " AND task_type = ?"; params.append(task_type)
         if status:
             sql += " AND status = ?"; params.append(status)
-        sql += " ORDER BY id DESC LIMIT ?"
-        params.append(limit)
+        sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
     @app.post("/api/task_runs/{run_id}/resolve")
@@ -6324,14 +6351,15 @@ def _register_routes(app: FastAPI) -> None:
     def list_notifications(
         level: Optional[str] = Query(None),
         limit: int = Query(50, ge=1, le=200),
+        offset: int = Query(0, ge=0),
     ):
         conn = _g()["conn"]
         sql = "SELECT * FROM notifications WHERE 1=1"
         params: list = []
         if level:
             sql += " AND level = ?"; params.append(level)
-        sql += " ORDER BY sent_at DESC LIMIT ?"
-        params.append(limit)
+        sql += " ORDER BY sent_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
     # --- APScheduler 定时任务状态 ---
@@ -6527,6 +6555,28 @@ def _register_routes(app: FastAPI) -> None:
         conn.commit()
         row = conn.execute("SELECT * FROM content_assets WHERE id = ?",
                            (cur.lastrowid,)).fetchone()
+        return dict(row)
+
+    @app.put("/api/assets/{asset_id}")
+    def update_asset(asset_id: int, req: CreateAssetRequest):
+        """编辑已有内容资产；类型不可变，避免模板/观点被误改为其他资产类别。"""
+        conn = _g()["conn"]
+        existing = conn.execute(
+            "SELECT asset_type FROM content_assets WHERE id = ?", (asset_id,),
+        ).fetchone()
+        if existing is None:
+            raise HTTPException(404, "内容资产不存在")
+        if req.asset_type != existing["asset_type"]:
+            raise HTTPException(409, "内容资产类型不可修改")
+        if req.asset_type == "reference" and not (req.source_url or "").strip():
+            raise HTTPException(422, "外部参考必须填写原始链接 source_url（可溯源）")
+        now = _now().isoformat(timespec="seconds")
+        conn.execute(
+            "UPDATE content_assets SET title=?, body=?, source_url=?, platform=?, updated_at=? WHERE id=?",
+            (req.title, req.body, req.source_url, req.platform, now, asset_id),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM content_assets WHERE id=?", (asset_id,)).fetchone()
         return dict(row)
 
     # --- 选题库来源（上传 / 远程 / 服务器路径）---

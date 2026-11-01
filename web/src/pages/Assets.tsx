@@ -37,6 +37,7 @@ export default function Assets() {
   const [assets, setAssets] = useState<Record<AssetType, AssetItem[]>>({ reference: [], voice: [], template: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [editingTemplate, setEditingTemplate] = useState<AssetItem | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -346,6 +347,11 @@ export default function Assets() {
             pending={isPending("asset:template")}
             onSubmit={addAsset}
           />
+          <div className="note" style={{ marginBottom: 12 }}>
+            内容模板是 AI 写作的结构骨架，不是完整文案。例如：痛点引入 → 个人经历 → 方法步骤 → 证据 → 局限 → 总结。
+            保存后，在「内容生产 → 生产线 → 内容结构模板」中选择；所选结构会注入本轮生成提示词。可随时编辑，修改只影响后续生产。
+          </div>
+          {editingTemplate && <TemplateEditor item={editingTemplate} onCancel={() => setEditingTemplate(null)} onSaved={async () => { setEditingTemplate(null); await load(); }} />}
           <div className="panel">
             <div className="panel-head">
               <div>
@@ -363,6 +369,7 @@ export default function Assets() {
                     <div className="skill-desc" style={{ whiteSpace: "pre-line" }}>{t.body || "（无结构说明）"}</div>
                     <div className="skill-foot">
                       <span>{t.created_at?.slice(0, 10) ?? "—"}</span>
+                      <button className="btn xs" type="button" onClick={() => setEditingTemplate(t)}>编辑模板</button>
                     </div>
                   </div>
                 ))}
@@ -374,6 +381,43 @@ export default function Assets() {
 
       {tab === "mapping" && <KbSourcesPanel />}
     </>
+  );
+}
+
+
+function TemplateEditor({ item, onCancel, onSaved }: {
+  item: AssetItem; onCancel: () => void; onSaved: () => void | Promise<void>;
+}) {
+  const { showToast } = useApp();
+  const [title, setTitle] = useState(item.title);
+  const [body, setBody] = useState(item.body ?? "");
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    if (!title.trim() || !body.trim()) {
+      showToast("模板名称和结构说明不能为空", "error");
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.updateAsset(item.id, { asset_type: "template", title: title.trim(), body: body.trim() });
+      showToast("内容模板已更新；后续生产将使用新结构", "success");
+      await onSaved();
+    } catch (e) {
+      showToast(`更新失败：${(e as Error).message}`, "error");
+    } finally { setBusy(false); }
+  };
+  return (
+    <div className="panel template-editor" style={{ marginBottom: 14, borderColor: "var(--blue)" }}>
+      <div className="panel-head">
+        <div><div className="panel-title">编辑内容模板</div><div className="panel-sub">只修改模板结构，不会回写已生成的内容。</div></div>
+        <button className="btn sm" type="button" onClick={onCancel}>取消</button>
+      </div>
+      <label className="form-label">模板名称<input className="field" value={title} onChange={(e) => setTitle(e.target.value)} /></label>
+      <label className="form-label">内容结构（建议每行一个环节）<textarea className="field" rows={5} value={body} onChange={(e) => setBody(e.target.value)} /></label>
+      <div className="flex" style={{ justifyContent: "flex-end" }}>
+        <button className="btn sm primary" type="button" disabled={busy} onClick={() => void save()}>{busy ? "保存中…" : "保存修改"}</button>
+      </div>
+    </div>
   );
 }
 

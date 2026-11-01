@@ -38,7 +38,8 @@ export default function HotTopics() {
   const [pageTab, setPageTab] = useUrlTab<PageTab>(PAGE_TABS, "list");
   const [keyword, setKeyword] = useState("");
   const [sortBy, setSortBy] = useState<"heat" | "match">("heat");
-  const [limit, setLimit] = useState(20);
+  const [page, setPage] = useState(1);
+  const pageSize = 20;
   const [hot, setHot] = useState<HotTopicsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -225,6 +226,9 @@ export default function HotTopics() {
       ? (b.match_score ?? -1) - (a.match_score ?? -1)
       : (b.heat ?? -1) - (a.heat ?? -1));
 
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const pageItems = filtered.slice((page - 1) * pageSize, page * pageSize);
+  useEffect(() => { setPage((current) => Math.min(current, pageCount)); }, [pageCount]);
   const sources = hot?.sources || [];
   const failedSources = sources.filter((s) => s.status === "failed");
   const matched = hot?.match?.matched ?? items.filter((h) => h.dimension_match === true).length;
@@ -419,14 +423,14 @@ export default function HotTopics() {
             { k: "urgent", l: "窗口短" },
             { k: "unknown", l: "时效未知" },
           ].map((t) => (
-            <button key={t.k} type="button" className={`tab ${tab === t.k ? "active" : ""}`} onClick={() => { setTab(t.k as TabKey); setLimit(20); }}>
+            <button key={t.k} type="button" className={`tab ${tab === t.k ? "active" : ""}`} onClick={() => { setTab(t.k as TabKey); setPage(1); }}>
               {t.l}
             </button>
           ))}
         </div>
         <div className="grow" />
-        <input className="field" placeholder="搜索热点关键词" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
-        <select className="field" value={sortBy} onChange={(e) => setSortBy(e.target.value as "heat" | "match")}>
+        <input className="field" placeholder="搜索热点关键词" value={keyword} onChange={(e) => { setKeyword(e.target.value); setPage(1); }} />
+        <select className="field" value={sortBy} onChange={(e) => { setSortBy(e.target.value as "heat" | "match"); setPage(1); }}>
           <option value="heat">按热度</option>
           <option value="match">按定位关联度</option>
         </select>
@@ -451,7 +455,7 @@ export default function HotTopics() {
       ) : (
         <>
         <div className="hot-grid">
-          {filtered.slice(0, limit).map((h, idx) => {
+          {pageItems.map((h, idx) => {
             const key = `${h.source}|${h.title}`;
             return (
             <div key={`${h.id}-${idx}`} className="hot-card">
@@ -522,9 +526,13 @@ export default function HotTopics() {
             );
           })}
         </div>
-        {filtered.length > limit && (
-          <div style={{ textAlign: "center", marginTop: 14 }}>
-            <button className="btn" onClick={() => setLimit((n) => n + 20)}>再显示 20 条（剩余 {filtered.length - limit} 条）</button>
+        {filtered.length > pageSize && (
+          <div className="pagination-bar" aria-label="热点分页">
+            <span className="pagination-summary">共 {filtered.length} 条 · 第 {page}/{pageCount} 页</span>
+            <div className="pagination-actions">
+              <button className="btn sm" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>上一页</button>
+              <button className="btn sm" disabled={page >= pageCount} onClick={() => setPage((p) => Math.min(pageCount, p + 1))}>下一页</button>
+            </div>
           </div>
         )}
         </>
