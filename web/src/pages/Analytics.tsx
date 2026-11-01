@@ -49,6 +49,7 @@ export default function Analytics() {
   const [activationStatus, setActivationStatus] = useState<ActivationStatus | null>(null);
   const [goalSummary, setGoalSummary] = useState<GoalSummary | null>(null);
   const [businessSummary, setBusinessSummary] = useState<BusinessAnalyticsSummary | null>(null);
+  const [businessDays, setBusinessDays] = useState(30);
   const [reportError, setReportError] = useState<string | null>(null);
   const [snapshotHistory, setSnapshotHistory] = useState<Record<string, {
     id: string; source: string; measured_at: string; recorded_at: string;
@@ -87,8 +88,10 @@ export default function Analytics() {
   useEffect(() => { loadGaps(); }, []);
   useEffect(() => {
     api.goalsSummary().then(setGoalSummary).catch((e) => setReportError(e.message));
-    api.businessAnalyticsSummary(30).then(setBusinessSummary).catch((e) => setReportError(e.message));
   }, []);
+  useEffect(() => {
+    api.businessAnalyticsSummary(businessDays).then(setBusinessSummary).catch((e) => setReportError(e.message));
+  }, [businessDays]);
   useEffect(() => {
     loadMetrics(platformFilter, detailView === "details" ? metricsPage : undefined);
   }, [platformFilter, metricsPage, detailView]);
@@ -203,6 +206,15 @@ export default function Analytics() {
       </div>
 
       {detailView === "overview" && <>
+      <div className="flex" style={{ justifyContent: "flex-end", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <label htmlFor="business-kpi-window" className="tiny">经营统计周期</label>
+        <select id="business-kpi-window" className="field" style={{ width: 130 }} value={businessDays} onChange={(e) => setBusinessDays(Number(e.target.value))}>
+          <option value={7}>近 7 天</option>
+          <option value={30}>近 30 天</option>
+          <option value={90}>近 90 天</option>
+          <option value={365}>近 365 天</option>
+        </select>
+      </div>
       <div className="grid kpis" style={{ marginBottom: 15 }}>
         <div className="metric">
           <div className="metric-top"><span className="metric-label">指标采集记录</span><span className="metric-icon" aria-hidden="true">▤</span></div>
@@ -210,12 +222,12 @@ export default function Analytics() {
           <div className="metric-foot">近 {metrics?.z_window_days ?? 90} 天指标记录（含采集失败记录），不代表生产量</div>
         </div>
         <div className="metric">
-          <div className="metric-top"><span className="metric-label">近 30 天内容生产量</span></div>
+          <div className="metric-top"><span className="metric-label">近 {businessSummary?.window_days ?? businessDays} 天内容生产量</span></div>
           <div className="metric-val">{businessSummary?.contents_created ?? "—"} <span className="metric-unit">篇</span></div>
           <div className="metric-foot">按内容创建时间统计</div>
         </div>
         <div className="metric">
-          <div className="metric-top"><span className="metric-label">近 30 天草稿产出量</span></div>
+          <div className="metric-top"><span className="metric-label">近 {businessSummary?.window_days ?? businessDays} 天草稿产出量</span></div>
           <div className="metric-val">{businessSummary?.drafts_created ?? "—"} <span className="metric-unit">篇</span></div>
           <div className="metric-foot">按草稿创建时间统计，含平台变体</div>
         </div>
@@ -241,12 +253,12 @@ export default function Analytics() {
         <div className="metric">
           <div className="metric-label">累计确认发布量</div>
           <div className="metric-val">{businessSummary?.confirmed_published ?? "—"}</div>
-          <div className="metric-foot">近 30 天用户确认已发布的草稿</div>
+          <div className="metric-foot">近 {businessSummary?.window_days ?? businessDays} 天用户确认已发布的草稿</div>
         </div>
         <div className="metric">
           <div className="metric-label">草稿确认发布率</div>
           <div className="metric-val">{businessSummary?.draft_publish_confirmation_rate == null ? "—" : `${(businessSummary.draft_publish_confirmation_rate * 100).toFixed(1)}%`}</div>
-          <div className="metric-foot">近 30 天创建的已保存/已发布草稿中确认发布比例</div>
+          <div className="metric-foot">近 {businessSummary?.window_days ?? businessDays} 天创建的已保存/已发布草稿中确认发布比例</div>
         </div>
         <div className="metric">
           <div className="metric-label">平台发布成功率</div>
@@ -270,7 +282,7 @@ export default function Analytics() {
       </div> : null}
       <div className="grid two" style={{ marginBottom: 15 }}>
         <div className="panel">
-          <div className="panel-head"><div><div className="panel-title">近 30 天互动汇总</div><div className="panel-sub">每篇草稿仅采用窗口内最新一次成功/部分成功采集快照；未知字段不按零计算</div></div></div>
+          <div className="panel-head"><div><div className="panel-title">近 {businessSummary?.window_days ?? businessDays} 天互动汇总</div><div className="panel-sub">每篇草稿仅采用窗口内最新一次成功/部分成功采集快照；未知字段不按零计算</div></div></div>
           <div className="table-wrap">
             <table>
               <thead><tr><th>指标</th><th>合计</th><th>有效样本</th></tr></thead>
@@ -286,7 +298,7 @@ export default function Analytics() {
           <div className="panel-sub" style={{ padding: 12 }}>有效草稿样本：{businessSummary?.interactions.sample_count ?? "—"}</div>
         </div>
         <div className="panel">
-          <div className="panel-head"><div><div className="panel-title">粉丝净增长</div><div className="panel-sub">近 30 天最新快照减去窗口开始前最近基线；无基线时显示未知</div></div></div>
+          <div className="panel-head"><div><div className="panel-title">粉丝净增长</div><div className="panel-sub">近 {businessSummary?.window_days ?? businessDays} 天最新快照减去窗口开始前最近基线；无基线时显示未知</div></div></div>
           <div className="table-wrap">
             <table>
               <thead><tr><th>平台</th><th>净增长</th><th>基线时间</th><th>最新时间</th></tr></thead>
