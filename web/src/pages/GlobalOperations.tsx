@@ -14,7 +14,12 @@ export default function GlobalOperations() {
   const [monitor, setMonitor] = useState<GlobalMonitorResponse | null>(null);
   const [tasks, setTasks] = useState<GlobalTaskQueueItem[]>([]);
   const [activeCount, setActiveCount] = useState<number | null>(null);
+  const [activeCounts, setActiveCounts] = useState<Record<string, number>>({});
+  const [activePage, setActivePage] = useState(1);
+  const [activePages, setActivePages] = useState(1);
+  const activePageSize = 8;
   const [failedCount, setFailedCount] = useState<number | null>(null);
+  const [failedCounts, setFailedCounts] = useState<Record<string, number>>({});
   const [failedTasks, setFailedTasks] = useState<GlobalTaskQueueItem[]>([]);
   const [failedPage, setFailedPage] = useState(1);
   const failedPageSize = 8;
@@ -26,14 +31,21 @@ export default function GlobalOperations() {
     setLoading(true);
     setError("");
     const results = await Promise.allSettled([
-      api.globalOperationsSummary(30), api.taskQueue({ scope: "active", page: 1, pageSize: 30 }), api.taskQueue({ scope: "failed", page: failedPage, pageSize: failedPageSize }),
+      api.globalOperationsSummary(30), api.taskQueue({ scope: "active", page: activePage, pageSize: activePageSize }), api.taskQueue({ scope: "failed", page: failedPage, pageSize: failedPageSize }),
     ]);
     if (results[0].status === "fulfilled") setMonitor(results[0].value);
-    if (results[1].status === "fulfilled") { setTasks(results[1].value.items ?? []); setActiveCount(results[1].value.total ?? results[1].value.items?.length ?? 0); }
+    if (results[1].status === "fulfilled") {
+      const response = results[1].value;
+      setTasks(response.items ?? []);
+      setActiveCount(response.total ?? response.items?.length ?? 0);
+      setActivePages(response.pages ?? 1);
+      setActiveCounts(response.counts?.by_status ?? {});
+    }
     if (results[2].status === "fulfilled") {
       const total = results[2].value.total ?? 0;
       setFailedCount(total);
       setFailedTasks(results[2].value.items ?? []);
+      setFailedCounts(results[2].value.counts?.by_status ?? {});
       const lastPage = Math.max(1, Math.ceil(total / failedPageSize));
       if (failedPage > lastPage) setFailedPage(lastPage);
     }
@@ -43,7 +55,7 @@ export default function GlobalOperations() {
     setError(failures.join("；"));
     setUpdatedAt(new Date());
     setLoading(false);
-  }, [failedPage]);
+  }, [activePage, failedPage]);
 
   useEffect(() => {
     void refresh();
@@ -51,23 +63,24 @@ export default function GlobalOperations() {
     return () => window.clearInterval(timer);
   }, [refresh]);
 
-  const active = useMemo(() => tasks.filter((t) => t.status === "queued" || t.status === "running"), [tasks]);
+  const active = tasks;
   const failed = failedTasks;
   const byTenant = useMemo(() => {
     const map = new Map<string, { queued: number; running: number; failed: number }>();
-    for (const task of tasks) {
-      const value = map.get(task.tenant_id) ?? { queued: 0, running: 0, failed: 0 };
-      if (task.status === "queued") value.queued++;
-      if (task.status === "running") value.running++;
-      map.set(task.tenant_id, value);
+    for (const [tenantId, counts] of Object.entries(monitor?.queue_counts?.active_by_tenant ?? {})) {
+      map.set(tenantId, {
+        queued: counts.queued ?? 0,
+        running: counts.running ?? 0,
+        failed: 0,
+      });
     }
-    for (const task of failedTasks) {
-      const value = map.get(task.tenant_id) ?? { queued: 0, running: 0, failed: 0 };
-      value.failed++;
-      map.set(task.tenant_id, value);
+    for (const [tenantId, counts] of Object.entries(monitor?.queue_counts?.failed_by_tenant ?? {})) {
+      const value = map.get(tenantId) ?? { queued: 0, running: 0, failed: 0 };
+      value.failed = (counts.failed ?? 0) + (counts.interrupted ?? 0);
+      map.set(tenantId, value);
     }
     return map;
-  }, [tasks, failedTasks]);
+  }, [monitor]);
 
   return (
     <div className="page global-operations-page">
@@ -90,8 +103,8 @@ export default function GlobalOperations() {
 
       <div className="grid four" style={{ marginBottom: 16 }}>
         <div className="metric"><div className="metric-label">账号组</div><div className="metric-val">{monitor?.totals?.tenants ?? "—"}</div><div className="metric-foot">数据库可读取 {monitor?.totals?.available_tenants ?? "—"} 个</div></div>
-        <div className="metric"><div className="metric-label">运行中任务</div><div className="metric-val">{activeCount == null ? "—" : active.filter((t) => t.status === "running").length}</div><div className="metric-foot">来自全局队列当前返回记录</div></div>
-        <div className="metric"><div className="metric-label">等待任务</div><div className="metric-val">{activeCount == null ? "—" : active.filter((t) => t.status === "queued").length}</div><div className="metric-foot">按全局 FIFO 入队顺序</div></div>
+        <div className="metric"><div className="metric-label">运行中任务</div><div className="metric-val">{activeCount == null ? "—" : activeCounts.running ?? "—"}</div><div className="metric-foot">来自全局队列当前返回记录</div></div>
+        <div className="metric"><div className="metric-label">等待任务</div><div className="metric-val">{activeCount == null ? "—" : activeCounts.queued ?? "—"}</div><div className="metric-foot">按全局 FIFO 入队顺序</div></div>
         <div className="metric"><div className="metric-label">失败 / 中断</div><div className="metric-val">{failedCount ?? "—"}</div><div className="metric-foot">失败/中断记录（总数由数据库计数）</div></div>
       </div>
 
@@ -103,7 +116,7 @@ export default function GlobalOperations() {
         {loading && !monitor ? <div className="empty-state">正在汇总账号组…</div> : !monitor ? <div className="empty-state">账号组数据暂不可用。</div> : (
           <div className="table-wrap">
             <table>
-              <thead><tr><th>账号组</th><th>数据库</th><th>平台账号</th><th>平台登录</th><th>运行中</th><th>排队中</th><th>本页失败 / 中断</th><th>定时调度</th><th>活跃轮次</th><th>操作</th></tr></thead>
+              <thead><tr><th>账号组</th><th>数据库</th><th>平台账号</th><th>平台登录</th><th>运行中</th><th>排队中</th><th>失败 / 中断总数</th><th>定时调度</th><th>活跃轮次</th><th>操作</th></tr></thead>
               <tbody>{(monitor.tenants ?? []).map((tenant) => {
                 const q = byTenant.get(tenant.tenant_id) ?? { queued: 0, running: 0, failed: 0 };
                 return <tr key={tenant.tenant_id}>
@@ -118,7 +131,7 @@ export default function GlobalOperations() {
                       {(tenant.runtime.circuit_broken_platforms ?? []).length > 0 && <span className="tiny" style={{ color: "var(--red)" }}>熔断：{(tenant.runtime.circuit_broken_platforms ?? []).map((p) => PLATFORMS[p] ?? p).join("、")}</span>}
                     </div>
                   ) : tenant.db_status === "uninitialized" ? <span className="tag gray">未初始化</span> : tenant.db_available ? <span className="tag gray">未启动</span> : <span className="tag red">数据库不可用</span>}</td>
-                  <td>{q.running}</td><td>{q.queued}</td><td>{q.failed}</td>
+                  <td>{q.running}</td><td>{q.queued}</td><td>{q.failed || 0}</td>
                   <td>{tenant.runtime?.available ? (
                     <div className="global-scheduler-cell">
                       <span className={tenant.runtime.scheduler_running ? "tag green" : "tag red"}>{tenant.runtime.scheduler_running ? "运行中" : "已停止"}</span>
@@ -137,18 +150,25 @@ export default function GlobalOperations() {
       <div className="grid two">
         <section className="panel">
           <div className="panel-head"><div><div className="panel-title">全局 FIFO 任务</div><div className="panel-sub">运行任务不会因账号组切换而中断。</div></div><button className="btn sm" onClick={() => navigate("task-queue")}>完整队列</button></div>
-          {active.length ? <div className="list">{active.slice(0, 12).map((task) => <div className="task-row" key={task.task_id}>
+          {active.length ? <div className="list">{active.map((task) => <div className="task-row" key={task.task_id}>
             <i className={`task-prio ${task.status === "running" ? "green" : "blue"}`} />
             <div className="task-main"><div className="task-title">{task.tenant_name} · {task.task_type === "round_run" ? "内容生产" : task.task_type}</div><div className="task-desc">#{task.queue_order} · {STATUS[task.status]} · {task.aggregate_id ?? "—"}</div></div>
           </div>)}</div> : <div className="empty-state">当前没有排队或执行中的任务。</div>}
-          {active.length > 12 && <div className="panel-sub">另有 {active.length - 12} 个任务，请进入完整队列查看。</div>}
+          {(activeCount ?? 0) > activePageSize && <div className="pagination-bar">
+            <span className="pagination-summary">第 {activePage} / {activePages} 页 · 共 {activeCount} 项（当前页 {active.length} 项）</span>
+            <div className="pagination-actions">
+              <button className="btn sm" disabled={activePage <= 1 || loading} onClick={() => setActivePage((p) => Math.max(1, p - 1))}>上一页</button>
+              <button className="btn sm" disabled={activePage >= activePages || loading} onClick={() => setActivePage((p) => Math.min(activePages, p + 1))}>下一页</button>
+              <button className="btn sm" onClick={() => navigate("task-queue")}>打开完整队列</button>
+            </div>
+          </div>}
         </section>
         <section className="panel">
           <div className="panel-head"><div><div className="panel-title">异常与待处理</div><div className="panel-sub">按页查看失败或中断任务，避免异常列表撑长运营总览。</div></div><span className="tag">{failedCount ?? "—"} 项</span></div>
           {failed.length ? <div className="list">{failed.map((task) => <div className="task-row" key={task.task_id}>
             <i className="task-prio red" /><div className="task-main"><div className="task-title">{task.tenant_name} · {STATUS[task.status]}</div><div className="task-desc">{task.error_message || task.task_type}</div></div>
           </div>)}</div> : <div className="empty-state">当前没有失败或中断任务。</div>}
-          {(failedCount ?? 0) > failedPageSize && <div className="pagination-bar">
+          {(failedCount ?? 0) > 0 && <div className="pagination-bar">
             <span className="pagination-summary">第 {failedPage} / {Math.max(1, Math.ceil((failedCount ?? 0) / failedPageSize))} 页 · 共 {failedCount} 项</span>
             <div className="pagination-actions">
               <button className="btn sm" disabled={failedPage <= 1 || loading} onClick={() => setFailedPage((p) => Math.max(1, p - 1))}>上一页</button>
