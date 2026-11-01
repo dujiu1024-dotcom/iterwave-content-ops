@@ -7718,6 +7718,24 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(404, "自定义行业模板不存在")
         return {"key": key, "deleted": True}
 
+    @app.post("/api/presets/{key}/restore")
+    def restore_custom_preset(key: str):
+        from src.core.industry_presets_repository import restore_custom_preset as _restore
+        try:
+            item = _restore(_g()["conn"], key)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if item is None:
+            raise HTTPException(404, "行业模板不存在")
+        return item
+
+    @app.get("/api/presets/{key}/versions")
+    def get_preset_versions(key: str):
+        from src.core.industry_presets_repository import get_preset, list_preset_versions
+        if get_preset(_g()["conn"], key) is None:
+            raise HTTPException(404, "行业模板不存在")
+        return {"items": list_preset_versions(_g()["conn"], key)}
+
     @app.post("/api/presets/{key}/apply")
     def apply_preset(key: str):
         from src.core.industry_presets_repository import get_preset
