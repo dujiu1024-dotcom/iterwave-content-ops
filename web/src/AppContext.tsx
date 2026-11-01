@@ -35,7 +35,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const refreshAuth = useCallback(async () => {
     try {
       setAuth(await api.authStatus());
-    } catch (e) {
+    } catch {
       // Authentication state is represented in the UI; do not dump raw errors to the browser console.
       setAuth({ configured: true, authenticated: false, needs_login: true });
     }
