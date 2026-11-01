@@ -160,6 +160,7 @@ export interface MetricsResponse {
   cross_platform_comparable: string[];
   /** 只允许平台内 z 的原始计数指标 */
   platform_only_metrics: string[];
+  page?: number; page_size?: number; pages?: number;
 }
 
 export interface MetricRow {
@@ -1563,8 +1564,16 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
-  metrics: (platform?: Platform) =>
-    fetchJson<MetricsResponse>(`/api/metrics${platform ? `?platform=${platform}` : ""}`),
+  metrics: (platform?: Platform, page?: number, pageSize = 20) => {
+    const params = new URLSearchParams();
+    if (platform) params.set("platform", platform);
+    if (page != null) {
+      params.set("page", String(page));
+      params.set("page_size", String(pageSize));
+    }
+    const query = params.toString();
+    return fetchJson<MetricsResponse>(`/api/metrics${query ? `?${query}` : ""}`);
+  },
   circuitBreaker: () => fetchJson<{ events: CircuitBreakerEvent[]; broken_platforms: Platform[] }>("/api/circuit_breaker"),
   recoverCb: (platform: Platform) =>
     fetchJson<any>(`/api/circuit_breaker/recover?platform=${platform}`, { method: "POST" }),
