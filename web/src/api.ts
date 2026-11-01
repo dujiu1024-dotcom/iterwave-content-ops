@@ -567,6 +567,10 @@ export interface TenantSkillManifest {
   manifest_version: number;
   created_at: string;
   updated_at: string;
+  installation_state: "registered";
+  enabled_state: "enabled" | "disabled";
+  runnable_state: "blocked_no_sandbox";
+  execution_mode: "metadata_only";
 }
 
 export interface ContentPlan {
