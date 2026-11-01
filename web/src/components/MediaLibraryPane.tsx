@@ -320,7 +320,7 @@ export default function MediaLibraryPane() {
             <div className="ml-stats">
               <span>可用 <b>{counts.approved}</b></span>
               <span className={counts.pending ? "warn" : ""}>待审核 <b>{counts.pending}</b></span>
-              {settings && <span>本月 AI 成功生成 <b>{settings.used_this_month}</b> 次</span>}
+              {settings && <span>本月已用 <b>{settings.used_this_month}</b> 次 · 不限次数</span>}
             </div>
           </div>
           <div className="ml-actions">
@@ -441,7 +441,7 @@ export default function MediaLibraryPane() {
               </label>
               <div className="ml-field">
                 <span>使用统计</span>
-                <div className="ml-hint">本月成功生成 {settings.used_this_month} 次。个人素材库不设月度次数上限；失败请求不计入使用量。</div>
+                <div className="ml-hint">本月已成功生成 {settings.used_this_month} 次。个人素材库不设剩余额度或月度次数上限；失败请求不计入使用量。</div>
               </div>
               <label className="ml-field">
                 <span>模型</span>
