@@ -58,7 +58,7 @@ export default function Assets() {
         api.hotTopics(),
         api.assetsPage("reference", 1, 20),
         api.assetsPage("voice", 1, 20),
-        api.assetsPage("template", 1, 20),
+        api.assetsPage("template", 1, 20, true),
       ]);
       // 成功的逐个 set；失败的汇总成 error 提示
       const failures: string[] = [];
@@ -105,7 +105,7 @@ export default function Assets() {
 
   const loadAssetPage = async (type: AssetType, page: number) => {
     try {
-      const result = await api.assetsPage(type, page, 20);
+      const result = await api.assetsPage(type, page, 20, type === "template");
       setAssets((current) => ({ ...current, [type]: result.items }));
       setAssetPages((current) => ({ ...current, [type]: result.page }));
       setAssetTotals((current) => ({ ...current, [type]: result.total }));
@@ -413,12 +413,17 @@ export default function Assets() {
             ) : (
               <div className="grid three">
                 {assets.template.map((t) => (
-                  <div className="skill-card" key={t.id}>
-                    <div className="skill-name">{t.title}</div>
+                  <div className="skill-card" key={t.id} style={{ opacity: t.is_active === false ? 0.62 : 1 }}>
+                    <div className="skill-name">{t.title} {t.is_active === false && <span className="tag gray">已停用</span>}</div>
                     <div className="skill-desc" style={{ whiteSpace: "pre-line" }}>{t.body || "（无结构说明）"}</div>
                     <div className="skill-foot">
-                      <span>{t.created_at?.slice(0, 10) ?? "—"}</span>
+                      <span>v{t.version ?? 1} · {t.updated_at?.slice(0, 10) ?? t.created_at?.slice(0, 10) ?? "—"}</span>
                       <button className="btn xs" type="button" onClick={() => setEditingTemplate(t)}>编辑模板</button>
+                      {t.is_active === false ? (
+                        <button className="btn xs" type="button" onClick={async () => { await api.restoreAsset(t.id); await loadAssetPage("template", assetPages.template); }}>恢复</button>
+                      ) : (
+                        <button className="btn xs" type="button" onClick={async () => { await api.archiveAsset(t.id); await loadAssetPage("template", assetPages.template); }}>停用</button>
+                      )}
                     </div>
                   </div>
                 ))}
