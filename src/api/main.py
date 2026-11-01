@@ -7742,6 +7742,8 @@ def _register_routes(app: FastAPI) -> None:
         preset = get_preset(_g()["conn"], key)
         if preset is None:
             raise HTTPException(404, "行业模板不存在")
+        if not preset.get("is_active", True):
+            raise HTTPException(409, "该行业模板已归档，请先恢复后再应用")
         cfg = _g()["cfg"]
         updates = {
             "ultimate_goal.positioning": preset["positioning"],

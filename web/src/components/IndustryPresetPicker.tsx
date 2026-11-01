@@ -76,7 +76,7 @@ export default function IndustryPresetPicker({ onApplied }: { onApplied: () => v
       await load();
       showToast("自定义行业模板已归档，历史版本已保留", "success");
     } catch (e) {
-      showToast(`删除失败：${(e as Error).message}`, "error");
+      showToast(`归档失败：${(e as Error).message}`, "error");
     } finally { setBusy(""); }
   };
 

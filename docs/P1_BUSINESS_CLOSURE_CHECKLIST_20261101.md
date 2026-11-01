@@ -71,12 +71,11 @@ This tracker separates source implementation, automated verification, and real-p
 - [ ] Keep security ceilings in code and document why they are immutable.
 - [ ] Verify config persistence, runtime reload, tenant isolation, and backward compatibility.
 
-## P1-11 Quotas
-- [ ] Identify the authoritative quick-experience daily limit and make it tenant-configurable or explicitly product-global.
-- [ ] Define attempted/succeeded/failed charging semantics.
-- [ ] Make reservation/settlement atomic and idempotent under concurrency.
-- [ ] Use business timezone for reset boundaries.
-- [ ] Reconcile backend ledger and frontend displayed remaining quota.
+## P1-11 Usage display（自用不设额度，仅展示用量）
+产品定位为自用，不设额度，也不做额度预留/结算；本项只要求如实展示用量。
+- [ ] 不设额度：不做额度拦截，也不做预留与结算（原「强化额度预留结算」不再实施）。
+- [ ] 仅展示用量：按业务时区统计并展示调用次数（成功/失败分开计）。
+- [ ] 前端展示的用量与后端记录一致。
 
 ## P1-12 Topic and operations-goal lifecycle
 - [ ] Provide archive and restore operations with optimistic version checks.
@@ -100,7 +99,7 @@ This tracker separates source implementation, automated verification, and real-p
 | P1-08 | Partial | Partial | Real platform accounts required | Open |
 | P1-09 | Partial | Pending | Real platform comparison required | Open |
 | P1-10 | Partial | Pending | Deployment config required | Open |
-| P1-11 | Partial | Pending | Concurrent quota verification required | Open |
+| P1-11 | Partial | Pending | Not applicable（自用不设额度，仅展示用量） | Open |
 | P1-12 | Partial | Pending | Not applicable | Open |
 
 No item is considered closed until its acceptance evidence is recorded.

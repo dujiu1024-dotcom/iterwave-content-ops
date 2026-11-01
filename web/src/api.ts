@@ -1744,6 +1744,10 @@ export const api = {
     fetchJson<ContentPlan>(`/api/content-plans/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
   cancelContentPlan: (id: string, version: number) =>
     fetchJson<{ id: string; status: string }>(`/api/content-plans/${id}?version=${version}`, { method: "DELETE" }),
+  archiveContentPlan: (id: string, version: number) =>
+    fetchJson<{ id: string; status: ContentPlan["status"]; version: number }>(`/api/content-plans/${id}/archive?version=${version}`, { method: "POST" }),
+  restoreContentPlan: (id: string, version: number) =>
+    fetchJson<{ id: string; status: ContentPlan["status"]; version: number }>(`/api/content-plans/${id}/restore?version=${version}`, { method: "POST" }),
   startContentPlan: (id: string) =>
     fetchJson<{ plan_id: string; round_id: number; task_id: string; status: string; queued: boolean }>(
       `/api/content-plans/${id}/start`, { method: "POST" },
