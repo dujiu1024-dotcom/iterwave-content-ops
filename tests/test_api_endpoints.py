@@ -2590,3 +2590,54 @@ def test_kb_source_preview_failure_hides_server_paths(client, monkeypatch):
     assert "/srv/iterwave" not in detail
     assert "tenant-a" not in detail
 
+
+
+def test_content_template_versions_and_lifecycle_are_preserved(client):
+    tc, conn, _ = client
+    created = tc.post("/api/assets", json={
+        "asset_type": "template",
+        "title": "模板 v1",
+        "body": "问题 -> 证据 -> 结论",
+    })
+    assert created.status_code == 200
+    template = created.json()
+    template_id = template["id"]
+    assert template["version"] == 1
+    assert template["is_active"] is True
+
+    updated = tc.put(f"/api/assets/{template_id}", json={
+        "asset_type": "template",
+        "title": "模板 v2",
+        "body": "背景 -> 实测 -> 结论",
+    })
+    assert updated.status_code == 200
+    assert updated.json()["version"] == 2
+
+    versions = tc.get(f"/api/assets/{template_id}/versions")
+    assert versions.status_code == 200
+    assert [item["version"] for item in versions.json()["items"]] == [2, 1]
+    assert versions.json()["items"][1]["body"] == "问题 -> 证据 -> 结论"
+
+    restored_version = tc.post(f"/api/assets/{template_id}/versions/1/restore")
+    assert restored_version.status_code == 200
+    assert restored_version.json()["version"] == 3
+    assert restored_version.json()["title"] == "模板 v1"
+    history_after_restore = tc.get(f"/api/assets/{template_id}/versions").json()["items"]
+    assert [item["version"] for item in history_after_restore] == [3, 2, 1]
+
+    archived = tc.post(f"/api/assets/{template_id}/archive")
+    assert archived.status_code == 200
+    assert archived.json()["is_active"] is False
+    assert tc.get("/api/assets?asset_type=template").json()["total"] == 0
+    assert tc.get("/api/assets?asset_type=template&include_inactive=true").json()["total"] == 1
+    # 列表接口与 archive/restore 一致返回 bool，前端「已停用」标签和恢复按钮依赖此值。
+    inactive_items = tc.get("/api/assets?asset_type=template&include_inactive=true&page=1").json()["items"]
+    assert inactive_items[0]["is_active"] is False
+    legacy_items = tc.get("/api/assets?asset_type=template&include_inactive=true").json()["items"]
+    assert legacy_items[0]["is_active"] is False
+
+    restored = tc.post(f"/api/assets/{template_id}/restore")
+    assert restored.status_code == 200
+    assert restored.json()["is_active"] is True
+    assert tc.get("/api/assets?asset_type=template").json()["total"] == 1
+    assert tc.get("/api/assets?asset_type=template&page=1").json()["items"][0]["is_active"] is True

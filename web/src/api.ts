@@ -736,6 +736,9 @@ export interface AssetItem {
   platform: Platform | null;
   created_at: string | null;
   updated_at: string | null;
+  version?: number;
+  /** 后端统一序列化为 bool（数据库存 0/1） */
+  is_active?: boolean;
 }
 
 /** G-13 / G-24 运行时配置（白名单可写字段 + R22 硬锁 + 审计） */
@@ -1428,9 +1431,9 @@ export interface ActivationStatus {
   platform_metric_fields: Record<Platform, string[]>;
   activation_limits: {
     account_description_min_chars: number; account_description_max_chars: number;
-    max_runs_per_day: number; sample_max_output_tokens: number;
+    sample_max_output_tokens: number;
     max_model_calls_per_run: number; max_total_output_tokens_per_run: number;
-    daily_runs_used: number; daily_runs_remaining: number;
+    daily_runs_used: number;
   };
   cohort_started_at: string;
 }
@@ -1839,14 +1842,19 @@ export const api = {
     fetchJson<{ items: AssetItem[]; total: number }>(
       `/api/assets${asset_type ? `?asset_type=${asset_type}` : ""}`,
     ),
-  assetsPage: (asset_type: AssetType, page: number, pageSize = 20) => {
+  assetsPage: (asset_type: AssetType, page: number, pageSize = 20, includeInactive = false) => {
     const params = new URLSearchParams({ asset_type, page: String(page), page_size: String(pageSize) });
+    if (includeInactive) params.set("include_inactive", "true");
     return fetchJson<AssetPage>(`/api/assets?${params.toString()}`);
   },
   createAsset: (data: { asset_type: AssetType; title: string; body?: string; source_url?: string; platform?: Platform }) =>
     fetchJson<AssetItem>("/api/assets", { method: "POST", body: JSON.stringify(data) }),
   updateAsset: (id: number, data: { asset_type: AssetType; title: string; body?: string; source_url?: string; platform?: Platform }) =>
     fetchJson<AssetItem>(`/api/assets/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  assetVersions: (id: number) => fetchJson<{ items: Array<{ version: number; title: string; body: string | null; created_at: string | null }> }>(`/api/assets/${id}/versions`),
+  restoreAssetVersion: (id: number, version: number) => fetchJson<AssetItem>(`/api/assets/${id}/versions/${version}/restore`, { method: "POST" }),
+  archiveAsset: (id: number) => fetchJson<{ id: number; is_active: boolean }>(`/api/assets/${id}/archive`, { method: "POST" }),
+  restoreAsset: (id: number) => fetchJson<{ id: number; is_active: boolean }>(`/api/assets/${id}/restore`, { method: "POST" }),
   kbInspect: () => fetchJson<KbInspect>("/api/kb/inspect"),
   // === 访问保护 ===
   authStatus: () => fetchJson<AuthStatus>("/api/auth/status"),
