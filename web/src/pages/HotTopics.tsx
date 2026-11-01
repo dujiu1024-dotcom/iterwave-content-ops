@@ -90,7 +90,10 @@ export default function HotTopics() {
     setLoading(true);
     setError(null);
     try {
-      const data = await api.hotTopics();
+      const data = await api.hotTopics(false, {
+        page, pageSize, tab, source: sourceFilter === "all" ? undefined : sourceFilter,
+        keyword, sortBy,
+      });
       setHot(data);
       setRefreshing(!!data.refresh_job?.running);
       setResearching(!!data.research_job?.running);
@@ -135,7 +138,10 @@ export default function HotTopics() {
     if (!refreshing && !researching) return;
     const t = setInterval(async () => {
       try {
-        const data = await api.hotTopics();
+        const data = await api.hotTopics(false, {
+          page, pageSize, tab, source: sourceFilter === "all" ? undefined : sourceFilter,
+          keyword, sortBy,
+        });
         setHot(data);
         if (refreshing && !data.refresh_job?.running) {
           setRefreshing(false);
@@ -158,12 +164,13 @@ export default function HotTopics() {
       } catch { /* 下次轮询重试 */ }
     }, 2000);
     return () => clearInterval(t);
-  }, [refreshing, researching]);
+  }, [refreshing, researching, page, pageSize, tab, keyword, sortBy, sourceFilter]);
 
+  useEffect(() => { loadHot(); }, [page, pageSize, tab, keyword, sortBy, sourceFilter]);
   useEffect(() => {
-    loadHot();
-    loadConfig();
-  }, []);
+    if (hot?.pages && page > hot.pages) setPage(hot.pages);
+  }, [hot?.pages, page]);
+  useEffect(() => { loadConfig(); }, []);
 
   /** G-24：读门限配置（可编辑两项 + R22 两道硬锁只读） */
   async function loadConfig() {
@@ -216,35 +223,14 @@ export default function HotTopics() {
   }
 
   const items = hot?.items || [];
-  const kw = keyword.trim();
-  const filtered: HotTopicItem[] = items
-    .filter((h) =>
-      tab === "all" ? true
-        : tab === "matched" ? h.dimension_match === true
-          : tab === "urgent" ? h.time_sensitive === 1
-            : h.time_sensitive === null)
-    .filter((h) => sourceFilter === "all" || h.source === sourceFilter)
-    .filter((h) => !kw || h.title.includes(kw))
-    .slice()
-    .sort((a, b) => sortBy === "match"
-      ? (b.match_score ?? -1) - (a.match_score ?? -1)
-      : (b.heat ?? -1) - (a.heat ?? -1));
-
-  const sourceOptions = Array.from(new Set(items.map((item) => item.source))).sort();
-  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
-  const pageItems = filtered.slice((page - 1) * pageSize, page * pageSize);
-
-  // 切换筛选条件或每页条数后回到第一页，避免停留在不存在的页码。
-  useEffect(() => { setPage(1); }, [tab, sourceFilter, keyword, sortBy, pageSize]);
-  useEffect(() => {
-    if (page > pageCount) setPage(pageCount);
-  }, [page, pageCount]);
-
+  const pageCount = hot?.pages ?? 1;
+  const pageItems = items;
   const sources = hot?.sources || [];
+  const sourceOptions = hot?.source_options ?? [];
   const failedSources = sources.filter((s) => s.status === "failed");
   const matched = hot?.match?.matched ?? items.filter((h) => h.dimension_match === true).length;
   const pending = hot?.match?.pending ?? items.filter((h) => h.dimension_match === null).length;
-  const urgent = items.filter((h) => h.time_sensitive === 1).length;
+  const urgent = hot?.urgent_total ?? 0;
   const prog = hot?.refresh_job?.progress;
 
   return (
@@ -460,7 +446,7 @@ export default function HotTopics() {
         <div className="loading"><div className="spinner" />加载热点...</div>
       ) : error ? (
         <div className="panel"><div className="panel-sub" style={{ color: "var(--red)" }}>热点接口异常：{error}</div></div>
-      ) : filtered.length === 0 ? (
+      ) : items.length === 0 ? (
         <div className="panel">
           {hot?.enabled === false ? (
             <EmptyHint next="到「系统设置」开启热点采集，再点右上角「立即采集」">
@@ -546,12 +532,12 @@ export default function HotTopics() {
             );
           })}
         </div>
-        {filtered.length > pageSize && (
+        {pageCount > 1 && (
           <div className="pagination-bar" aria-label="热点分页">
-            <span className="pagination-summary">共 {filtered.length} 条 · 第 {page}/{pageCount} 页</span>
+            <span className="pagination-summary">共 {hot?.total ?? items.length} 条 · 第 {page}/{pageCount} 页</span>
             <div className="pagination-actions">
-              <button className="btn sm" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>上一页</button>
-              <button className="btn sm" disabled={page >= pageCount} onClick={() => setPage((p) => Math.min(pageCount, p + 1))}>下一页</button>
+              <button className="btn sm" disabled={page <= 1} onClick={() => setPage((n) => Math.max(1, n - 1))}>上一页</button>
+              <button className="btn sm" disabled={page >= pageCount} onClick={() => setPage((n) => Math.min(pageCount, n + 1))}>下一页</button>
             </div>
           </div>
         )}

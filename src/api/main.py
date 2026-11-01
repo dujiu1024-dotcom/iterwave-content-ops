@@ -92,7 +92,7 @@ from src.core.plan_version import PlanVersionManager
 from src.core.ops.pause import pause_state, set_ops_paused
 from src.core.config_store import (
     ConfigNotAllowedError, ConfigPatchError, apply_overrides, config_metadata_view, current_config_view,
-    changed_job_ids, load_overrides, patch_config, scheduler_jobs_view,
+    changed_job_ids, config_audit_page, load_overrides, patch_config, scheduler_jobs_view,
 )
 from src.adapters.base import Platform
 from src.adapters import get_adapters
@@ -2962,58 +2962,58 @@ def _register_routes(app: FastAPI) -> None:
         query: Optional[str] = Query(None, max_length=200),
         status: str = Query("active", pattern="^(active|archived|all)$"),
         review_status: str = Query("all", pattern="^(pending_review|approved|rejected|all)$"),
+        page: Optional[int] = Query(None, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
         limit: int = Query(100, ge=1, le=500),
         offset: int = Query(0, ge=0),
     ):
         conn = _g()["conn"]
-        where: list[str] = []
-        params: list = []
+        search_where: list[str] = []
+        search_params: list = []
+        if query and query.strip():
+            needle = f"%{query.strip()}%"
+            search_where.append("(title LIKE ? OR original_filename LIKE ? OR alt_text LIKE ? OR tags LIKE ?)")
+            search_params.extend([needle, needle, needle, needle])
+        search_sql = " WHERE " + " AND ".join(search_where) if search_where else ""
+        where = list(search_where)
+        params = list(search_params)
         if status != "all":
             where.append("status = ?")
             params.append(status)
         if review_status != "all":
             where.append("review_status = ?")
             params.append(review_status)
-        if query and query.strip():
-            needle = f"%{query.strip()}%"
-            where.append("(title LIKE ? OR original_filename LIKE ? OR alt_text LIKE ? OR tags LIKE ?)")
-            params.extend([needle, needle, needle, needle])
+        where_sql = " WHERE " + " AND ".join(where) if where else ""
+        total = conn.execute(
+            "SELECT COUNT(*) FROM media_assets" + where_sql, params
+        ).fetchone()[0]
+        count_row = conn.execute(
+            "SELECT "
+            "SUM(CASE WHEN status != 'archived' THEN 1 ELSE 0 END) AS active_total, "
+            "SUM(CASE WHEN status != 'archived' AND review_status = 'pending_review' THEN 1 ELSE 0 END) AS pending_total, "
+            "SUM(CASE WHEN status != 'archived' AND review_status = 'approved' THEN 1 ELSE 0 END) AS approved_total, "
+            "SUM(CASE WHEN status != 'archived' AND review_status = 'rejected' THEN 1 ELSE 0 END) AS rejected_total, "
+            "SUM(CASE WHEN status = 'archived' THEN 1 ELSE 0 END) AS archived_total "
+            "FROM media_assets" + search_sql,
+            search_params,
+        ).fetchone()
+        counts = {
+            "all": count_row["active_total"] or 0,
+            "pending": count_row["pending_total"] or 0,
+            "approved": count_row["approved_total"] or 0,
+            "rejected": count_row["rejected_total"] or 0,
+            "archived": count_row["archived_total"] or 0,
+        }
+        effective_limit = page_size if page is not None else limit
+        effective_offset = (page - 1) * page_size if page is not None else offset
         sql = (
             "SELECT id, title, original_filename, mime_type, byte_size, sha256, "
             "width, height, alt_text, tags, source_type, source_ref, status, review_status, review_note, "
             "quality_score, quality_details, created_at, updated_at "
-            "FROM media_assets"
+            "FROM media_assets" + where_sql +
+            " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
         )
-        if where:
-            sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
-        count_sql = "SELECT COUNT(*) FROM media_assets" + (" WHERE " + " AND ".join(where) if where else "")
-        total = int(conn.execute(count_sql, params[:-2]).fetchone()[0])
-        summary_where: list[str] = []
-        summary_params: list = []
-        if query and query.strip():
-            needle = f"%{query.strip()}%"
-            summary_where.append("(title LIKE ? OR original_filename LIKE ? OR alt_text LIKE ? OR tags LIKE ?)")
-            summary_params.extend([needle, needle, needle, needle])
-        summary_sql = "SELECT status, review_status, COUNT(*) AS n FROM media_assets"
-        if summary_where:
-            summary_sql += " WHERE " + " AND ".join(summary_where)
-        summary_sql += " GROUP BY status, review_status"
-        counts = {"all": 0, "pending": 0, "approved": 0, "rejected": 0, "archived": 0}
-        for summary in conn.execute(summary_sql, summary_params).fetchall():
-            n = int(summary["n"])
-            if summary["status"] == "archived":
-                counts["archived"] += n
-            elif summary["status"] == "active":
-                if summary["review_status"] == "pending_review":
-                    counts["pending"] += n
-                elif summary["review_status"] == "approved":
-                    counts["approved"] += n
-                elif summary["review_status"] == "rejected":
-                    counts["rejected"] += n
-                counts["all"] += n
-        rows = conn.execute(sql, params).fetchall()
+        rows = conn.execute(sql, [*params, effective_limit, effective_offset]).fetchall()
         result = []
         for row in rows:
             item = dict(row)
@@ -3027,7 +3027,14 @@ def _register_routes(app: FastAPI) -> None:
                 item["quality_details"] = None
             item["file_url"] = f"/api/media/{item['id']}/file"
             result.append(item)
-        return {"items": result, "limit": limit, "offset": offset, "total": total, "counts": counts}
+        if page is None:
+            return {"items": result, "limit": effective_limit, "offset": effective_offset, "total": total, "counts": counts}
+        return {
+            "items": result, "total": total, "counts": counts,
+            "page": page, "page_size": page_size,
+            "pages": max(1, (total + page_size - 1) // page_size),
+            "limit": page_size, "offset": effective_offset,
+        }
 
     @app.post("/api/media", status_code=201)
     def upload_media_asset(req: MediaAssetUploadRequest):
@@ -3938,19 +3945,40 @@ def _register_routes(app: FastAPI) -> None:
 
     # --- 轮次 ---
     @app.get("/api/rounds")
-    def list_rounds(status: Optional[str] = Query(None)):
+    def list_rounds(
+        status: Optional[str] = Query(None),
+        page: Optional[int] = Query(None, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+    ):
         conn = _g()["conn"]
-        sql = "SELECT * FROM spiral_rounds"
-        params: list = []
-        if status:
-            sql += " WHERE status = ?"
-            params.append(status)
-        sql += " ORDER BY created_at DESC LIMIT 50"
-        rows = conn.execute(sql, params).fetchall()
-        return [
-            {**dict(row), "created_at": _api_datetime(row["created_at"])}
-            for row in rows
-        ]
+        where = " WHERE status = ?" if status else ""
+        params: list = [status] if status else []
+        if page is None:
+            # 兼容旧调用方；新页面必须传 page 使用数据库分页。
+            rows = conn.execute(
+                "SELECT * FROM spiral_rounds" + where + " ORDER BY created_at DESC, id DESC LIMIT 50",
+                params,
+            ).fetchall()
+            return [
+                {**dict(row), "created_at": _api_datetime(row["created_at"])}
+                for row in rows
+            ]
+        total = conn.execute("SELECT COUNT(*) FROM spiral_rounds" + where, params).fetchone()[0]
+        rows = conn.execute(
+            "SELECT * FROM spiral_rounds" + where +
+            " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+            [*params, page_size, (page - 1) * page_size],
+        ).fetchall()
+        return {
+            "items": [
+                {**dict(row), "created_at": _api_datetime(row["created_at"])}
+                for row in rows
+            ],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "pages": max(1, (total + page_size - 1) // page_size),
+        }
 
     @app.post("/api/rounds")
     def create_round(req: CreateRoundRequest):
@@ -4315,6 +4343,8 @@ def _register_routes(app: FastAPI) -> None:
     def list_drafts(
         status: Optional[str] = Query(None),
         platform: Optional[str] = Query(None),
+        page: Optional[int] = Query(None, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
     ):
         conn = _g()["conn"]
         sql = (
@@ -4333,9 +4363,17 @@ def _register_routes(app: FastAPI) -> None:
         if platform:
             where.append("d.platform = ?")
             params.append(platform)
+        count_sql = "SELECT COUNT(*) FROM drafts d LEFT JOIN contents c ON d.content_id = c.id"
         if where:
-            sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY d.created_at DESC LIMIT 100"
+            count_sql += " WHERE " + " AND ".join(where)
+        total = int(conn.execute(count_sql, params).fetchone()[0])
+        if page is None:
+            # 兼容旧调用方；新列表必须显式传 page 以获得分页契约。
+            sql += " ORDER BY d.created_at DESC, d.id DESC LIMIT 100"
+        else:
+            offset = (page - 1) * page_size
+            sql += " ORDER BY d.created_at DESC, d.id DESC LIMIT ? OFFSET ?"
+            params.extend([page_size, offset])
         rows = conn.execute(sql, params).fetchall()
         items = []
         from src.core.content_version import content_version_hash, parse_json_list
@@ -4370,7 +4408,15 @@ def _register_routes(app: FastAPI) -> None:
             ):
                 result.pop(internal_field, None)
             items.append(result)
-        return items
+        if page is None:
+            return items
+        return {
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "pages": (total + page_size - 1) // page_size,
+        }
 
     @app.post("/api/drafts/{draft_id}/publish_confirm")
     def confirm_publish(draft_id: str, req: Optional[PublishConfirmRequest] = None):
@@ -5916,8 +5962,10 @@ def _register_routes(app: FastAPI) -> None:
         platform: Optional[str] = Query(None, pattern="^(xhs|douyin|kuaishou|wechat_channels)$"),
         fetch_status: Optional[str] = Query(None),
         limit: int = Query(100, ge=1, le=500),
+        page: Optional[int] = Query(None, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
     ):
-        """已采集数据列表（R3：NULL 原样返回，不补 0）。"""
+        """已采集数据列表；传 page 时使用数据库分页，旧 limit 调用保持兼容。"""
         conn = _g()["conn"]
         sql = (
             "SELECT m.*, c.title AS content_title, c.round_id "
@@ -5931,22 +5979,39 @@ def _register_routes(app: FastAPI) -> None:
         if fetch_status:
             sql += " AND m.fetch_status = ?"
             params.append(fetch_status)
-        sql += " ORDER BY m.fetched_at DESC NULLS LAST LIMIT ?"
-        params.append(limit)
+        count_sql = "SELECT COUNT(*) FROM metrics WHERE 1=1"
+        count_params: list = []
+        if platform:
+            count_sql += " AND platform = ?"
+            count_params.append(platform)
+        if fetch_status:
+            count_sql += " AND fetch_status = ?"
+            count_params.append(fetch_status)
+        total = conn.execute(count_sql, count_params).fetchone()[0]
+        if page is None:
+            sql += " ORDER BY m.fetched_at DESC NULLS LAST LIMIT ?"
+            params.append(limit)
+        else:
+            sql += " ORDER BY m.fetched_at DESC NULLS LAST, m.id DESC LIMIT ? OFFSET ?"
+            params.extend([page_size, (page - 1) * page_size])
         rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
-        total = conn.execute(
-            "SELECT COUNT(*) FROM metrics "
-            + (" WHERE platform = ?" if platform else "")
-            + (" AND fetch_status = ?" if fetch_status else ""),
-            [p for i, p in enumerate([platform, fetch_status]) if p is not None],
-        ).fetchone()[0]
 
         # R13：z-score 一律平台内部基准。可跨平台对比的只有比率类指标，
         # 原始曝光/点赞只给平台内 z，不允许跨平台直接比大小。
         normalizer = _g()["normalizer"]
         comparable = ["interaction_rate", "like_rate", "collect_rate"]
         raw_metrics = ["views", "likes", "collects", "comments", "shares"]
-        platforms_present = sorted({r["platform"] for r in rows if r.get("platform")})
+        platform_sql = "SELECT DISTINCT platform FROM metrics WHERE 1=1"
+        platform_params: list = []
+        if platform:
+            platform_sql += " AND platform = ?"
+            platform_params.append(platform)
+        if fetch_status:
+            platform_sql += " AND fetch_status = ?"
+            platform_params.append(fetch_status)
+        platforms_present = sorted(
+            row["platform"] for row in conn.execute(platform_sql, platform_params).fetchall()
+        )
         stats: list[dict] = []
         stat_cache: dict[tuple[str, str], Optional[float]] = {}
         for p in platforms_present:
@@ -5976,6 +6041,10 @@ def _register_routes(app: FastAPI) -> None:
             row["z"] = z
         return {
             "items": rows, "total": total,
+            **({
+                "page": page, "page_size": page_size,
+                "pages": max(1, (total + page_size - 1) // page_size),
+            } if page is not None else {}),
             "filters": {"platform": platform, "fetch_status": fetch_status},
             "z_stats": stats,
             "z_window_days": 90,
@@ -6013,11 +6082,16 @@ def _register_routes(app: FastAPI) -> None:
 
     # --- 热点雷达（R22：采集失败不显示数字）---
     @app.get("/api/hot_topics")
-    def hot_topics(refresh: bool = Query(False)):
-        """热点雷达：只读库（采集 + 标签匹配由后台定时任务完成）。
-
-        refresh=true 兼容旧前端：触发一次后台刷新后立即返回当前库内数据，不阻塞请求。
-        """
+    def hot_topics(
+        refresh: bool = Query(False),
+        page: Optional[int] = Query(None, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+        tab: str = Query("all", pattern="^(all|matched|urgent|unknown)$"),
+        source: Optional[str] = Query(None, max_length=200),
+        keyword: Optional[str] = Query(None, max_length=200),
+        sort_by: str = Query("heat", pattern="^(heat|match)$"),
+    ):
+        """热点雷达：分页请求在数据库完成筛选和稳定排序；无 page 时兼容旧响应。"""
         from ..core import hot_topic_service
 
         conn = _g()["conn"]
@@ -6027,7 +6101,10 @@ def _register_routes(app: FastAPI) -> None:
             hot_topic_service.trigger_background(
                 cfg, trigger="manual", tenant_id=tenant_id,
             )
-        data = HotTopicCollector(cfg, conn).overview()
+        data = HotTopicCollector(cfg, conn).overview(
+            page=page, page_size=page_size, tab=tab, source=source,
+            keyword=keyword, sort_by=sort_by,
+        )
         data["refresh_job"] = _tenant_scoped_hot_topic_status(
             hot_topic_service.status(), tenant_id,
         )
@@ -6272,43 +6349,74 @@ def _register_routes(app: FastAPI) -> None:
         platform: Optional[str] = Query(None),
         action_type: Optional[str] = Query(None),
         status: Optional[str] = Query(None),
+        page: Optional[int] = Query(None, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
         limit: int = Query(100, ge=1, le=500),
         offset: int = Query(0, ge=0),
     ):
         conn = _g()["conn"]
-        sql = "SELECT * FROM ops_logs WHERE 1=1"
+        where = ["1=1"]
         params: list = []
         if platform:
-            sql += " AND platform = ?"; params.append(platform)
+            where.append("platform = ?")
+            params.append(platform)
         if action_type:
-            sql += " AND action_type = ?"; params.append(action_type)
+            where.append("action_type = ?")
+            params.append(action_type)
         if status:
-            sql += " AND status = ?"; params.append(status)
-        count_sql = sql.replace("SELECT * FROM ops_logs", "SELECT COUNT(*) FROM ops_logs")
-        total = int(conn.execute(count_sql, params).fetchone()[0])
-        sql += " ORDER BY COALESCE(executed_at, schedule_time) DESC LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
-        rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
-        return {"items": rows, "total": total}
+            where.append("status = ?")
+            params.append(status)
+        where_sql = " WHERE " + " AND ".join(where)
+        total = conn.execute("SELECT COUNT(*) FROM ops_logs" + where_sql, params).fetchone()[0]
+        effective_limit = page_size if page is not None else limit
+        effective_offset = (page - 1) * page_size if page is not None else 0
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM ops_logs" + where_sql +
+            " ORDER BY COALESCE(executed_at, schedule_time) DESC, id DESC LIMIT ? OFFSET ?",
+            [*params, effective_limit, effective_offset],
+        ).fetchall()]
+        return {
+            "items": rows, "total": total, "limit": effective_limit, "offset": effective_offset,
+            **({
+                "page": page, "page_size": page_size,
+                "pages": max(1, (total + page_size - 1) // page_size),
+            } if page is not None else {}),
+        }
 
     # --- 任务追踪（task_runs）---
     @app.get("/api/task_runs")
     def list_task_runs(
         task_type: Optional[str] = Query(None),
         status: Optional[str] = Query(None),
+        page: Optional[int] = Query(None, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
         limit: int = Query(100, ge=1, le=500),
         offset: int = Query(0, ge=0),
     ):
         conn = _g()["conn"]
-        sql = "SELECT * FROM task_runs WHERE 1=1"
+        where = ["1=1"]
         params: list = []
         if task_type:
-            sql += " AND task_type = ?"; params.append(task_type)
+            where.append("task_type = ?")
+            params.append(task_type)
         if status:
-            sql += " AND status = ?"; params.append(status)
-        sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
-        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+            where.append("status = ?")
+            params.append(status)
+        where_sql = " WHERE " + " AND ".join(where)
+        total = conn.execute("SELECT COUNT(*) FROM task_runs" + where_sql, params).fetchone()[0]
+        effective_limit = page_size if page is not None else limit
+        effective_offset = (page - 1) * page_size if page is not None else 0
+        items = [dict(r) for r in conn.execute(
+            "SELECT * FROM task_runs" + where_sql +
+            " ORDER BY id DESC LIMIT ? OFFSET ?",
+            [*params, effective_limit, effective_offset],
+        ).fetchall()]
+        if page is None:
+            return items
+        return {
+            "items": items, "total": total, "page": page, "page_size": page_size,
+            "pages": max(1, (total + page_size - 1) // page_size),
+        }
 
     @app.post("/api/task_runs/{run_id}/resolve")
     def resolve_pending_verify(run_id: int, body: dict):
@@ -6351,17 +6459,28 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/api/notifications")
     def list_notifications(
         level: Optional[str] = Query(None),
+        page: Optional[int] = Query(None, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
         limit: int = Query(50, ge=1, le=200),
         offset: int = Query(0, ge=0),
     ):
         conn = _g()["conn"]
-        sql = "SELECT * FROM notifications WHERE 1=1"
-        params: list = []
-        if level:
-            sql += " AND level = ?"; params.append(level)
-        sql += " ORDER BY sent_at DESC LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
-        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+        where = " WHERE level = ?" if level else ""
+        params: list = [level] if level else []
+        total = conn.execute("SELECT COUNT(*) FROM notifications" + where, params).fetchone()[0]
+        effective_limit = page_size if page is not None else limit
+        effective_offset = (page - 1) * page_size if page is not None else 0
+        items = [dict(r) for r in conn.execute(
+            "SELECT * FROM notifications" + where +
+            " ORDER BY sent_at DESC, id DESC LIMIT ? OFFSET ?",
+            [*params, effective_limit, effective_offset],
+        ).fetchall()]
+        if page is None:
+            return items
+        return {
+            "items": items, "total": total, "page": page, "page_size": page_size,
+            "pages": max(1, (total + page_size - 1) // page_size),
+        }
 
     # --- APScheduler 定时任务状态 ---
     # --- 自动闭环（自生长）---
@@ -6486,6 +6605,13 @@ def _register_routes(app: FastAPI) -> None:
         g2 = _g()
         return current_config_view(g2["cfg"], g2["conn"])
 
+    @app.get("/api/config/audit")
+    def get_config_audit(
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+    ):
+        return config_audit_page(_g()["conn"], page=page, page_size=page_size)
+
     @app.patch("/api/config")
     def patch_runtime_config(req: ConfigPatchRequest):
         """白名单字段修改：实时生效 + 持久化覆盖 + 审计留痕。
@@ -6531,7 +6657,7 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/api/assets")
     def list_assets(
         asset_type: Optional[str] = Query(None),
-        page: int = Query(1, ge=1),
+        page: Optional[int] = Query(None, ge=1),
         page_size: int = Query(20, ge=1, le=100),
     ):
         conn = _g()["conn"]
@@ -6539,17 +6665,26 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(400, "asset_type 只能是 reference / voice / template")
         where = " WHERE asset_type = ?" if asset_type else ""
         params: list = [asset_type] if asset_type else []
-        total = int(conn.execute(
-            "SELECT COUNT(*) FROM content_assets" + where, params,
-        ).fetchone()[0])
+        if page is None:
+            # 兼容旧调用方；新页面通过 page 参数读取完整分页。
+            rows = conn.execute(
+                "SELECT * FROM content_assets" + where +
+                " ORDER BY created_at DESC, id DESC LIMIT 100",
+                params,
+            ).fetchall()
+            total = conn.execute("SELECT COUNT(*) FROM content_assets" + where, params).fetchone()[0]
+            return {"items": [dict(r) for r in rows], "total": total}
+        total = conn.execute("SELECT COUNT(*) FROM content_assets" + where, params).fetchone()[0]
         rows = conn.execute(
-            "SELECT * FROM content_assets" + where
-            + " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
-            (*params, page_size, (page - 1) * page_size),
+            "SELECT * FROM content_assets" + where +
+            " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+            [*params, page_size, (page - 1) * page_size],
         ).fetchall()
         return {
-            "items": [dict(r) for r in rows], "total": total,
-            "page": page, "page_size": page_size,
+            "items": [dict(r) for r in rows],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
             "pages": max(1, (total + page_size - 1) // page_size),
         }
 

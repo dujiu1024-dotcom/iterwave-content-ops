@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api import main as api_main
+from src.core.metrics import Normalizer
 from src.core.notify import Notifier
 from src.core.ops.pause import is_ops_paused
 from src.core.plan_version import PlanVersionManager
@@ -31,6 +32,7 @@ def client(cfg, conn, seed, test_auth):
         "sm_draft": DraftStateMachine(conn),
         "sm_round": RoundStateMachine(conn),
         "plan_version_manager": PlanVersionManager(cfg, conn),
+        "normalizer": Normalizer(conn),
         "notifier": Notifier(cfg, conn),
     })
     app = api_main._build_app()
@@ -303,87 +305,6 @@ def test_round_business_states_cannot_be_set_manually(client):
     assert conn.execute(
         "SELECT status FROM spiral_rounds WHERE id = ?", (producing_round,)
     ).fetchone()[0] == "producing"
-
-
-def test_round_cancel_rejected_while_run_is_active(client, tmp_path, monkeypatch):
-    tc, conn, seed = client
-    round_id = seed.round(status="producing")
-    _seed_active_queue_round(tmp_path, monkeypatch, round_id)
-    response = tc.post(
-        f"/api/rounds/{round_id}/transition",
-        json={"target_status": "cancelled", "reason": "回归测试"},
-    )
-
-    assert response.status_code == 409
-    assert conn.execute(
-        "SELECT status FROM spiral_rounds WHERE id = ?", (round_id,)
-    ).fetchone()[0] == "producing"
-
-
-def test_round_cancel_rejected_while_platform_draft_is_saved(client):
-    tc, conn, seed = client
-    round_id = seed.round(status="awaiting_publish")
-    draft_id = seed.draft(
-        round_id, platform="xhs", draft_status="draft_saved", fetch_status=None,
-    )
-    response = tc.post(
-        f"/api/rounds/{round_id}/transition",
-        json={"target_status": "cancelled", "reason": "回归测试"},
-    )
-
-    assert response.status_code == 409
-    assert "已存入平台" in response.json()["detail"]
-    assert conn.execute(
-        "SELECT status FROM spiral_rounds WHERE id = ?", (round_id,)
-    ).fetchone()[0] == "awaiting_publish"
-    assert conn.execute(
-        "SELECT status FROM drafts WHERE id = ?", (draft_id,)
-    ).fetchone()[0] == "draft_saved"
-
-
-def test_round_cancel_rejected_if_published_history_exists_even_when_failed(client):
-    tc, conn, seed = client
-    round_id = seed.round(status="collecting_metrics")
-    draft_id = seed.draft(
-        round_id, platform="xhs", draft_status="failed", fetch_status=None,
-    )
-    conn.execute(
-        "UPDATE drafts SET user_confirmed_at = ?, error_msg = ? WHERE id = ?",
-        ("2026-01-01T00:00:00", "采集重试耗尽", draft_id),
-    )
-    conn.commit()
-
-    response = tc.post(
-        f"/api/rounds/{round_id}/transition",
-        json={"target_status": "cancelled", "reason": "回归测试"},
-    )
-
-    assert response.status_code == 409
-    assert "存在发布历史" in response.json()["detail"]
-    assert conn.execute(
-        "SELECT status FROM spiral_rounds WHERE id = ?", (round_id,)
-    ).fetchone()[0] == "collecting_metrics"
-
-
-def test_cancel_round_cancels_local_pending_drafts_together(client):
-    tc, conn, seed = client
-    round_id = seed.round(status="producing")
-    draft_id = seed.draft(
-        round_id, platform="xhs", draft_status="draft_pending", fetch_status=None,
-    )
-    response = tc.post(
-        f"/api/rounds/{round_id}/transition",
-        json={"target_status": "cancelled", "reason": "用户取消本轮"},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["new_status"] == "cancelled"
-    assert conn.execute(
-        "SELECT status FROM spiral_rounds WHERE id = ?", (round_id,)
-    ).fetchone()[0] == "cancelled"
-    assert conn.execute(
-        "SELECT status FROM drafts WHERE id = ?", (draft_id,)
-    ).fetchone()[0] == "cancelled"
 
 
 def test_round_cancel_rejected_while_run_is_active(client, tmp_path, monkeypatch):
@@ -1277,3 +1198,240 @@ def test_assets_endpoint_returns_database_pagination_and_exact_total(client):
     assert len(third.json()["items"]) == 3
     ids = [item["id"] for response in (first, second, third) for item in response.json()["items"]]
     assert len(ids) == len(set(ids)) == 23
+# ---------------------------------------------------------------- 图片素材库分页与统计
+def test_media_assets_pagination_and_counts_are_database_backed(client):
+    tc, conn, _ = client
+    rows = []
+    review_states = ("pending_review", "approved", "rejected")
+    for index in range(45):
+        rows.append((
+            f"分页素材 {index:02d}",
+            f"asset-{index:02d}.png",
+            f"stored-{index:02d}.png",
+            "image/png",
+            1024,
+            f"sha-{index:02d}",
+            100,
+            100,
+            "archived" if index >= 40 else "active",
+            review_states[index % 3],
+        ))
+    conn.executemany(
+        "INSERT INTO media_assets "
+        "(title, original_filename, stored_filename, mime_type, byte_size, sha256, width, height, status, review_status) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+
+    first = tc.get("/api/media?status=active&review_status=all&page=1&page_size=20")
+    second = tc.get("/api/media?status=active&review_status=all&page=2&page_size=20")
+    assert first.status_code == second.status_code == 200
+    first_body, second_body = first.json(), second.json()
+    assert first_body["total"] == 40
+    assert first_body["page"] == 1 and first_body["pages"] == 2
+    assert len(first_body["items"]) == 20
+    assert len(second_body["items"]) == 20
+    assert {item["id"] for item in first_body["items"]}.isdisjoint(
+        {item["id"] for item in second_body["items"]}
+    )
+    assert first_body["counts"] == {
+        "all": 40, "pending": 14, "approved": 13, "rejected": 13, "archived": 5,
+    }
+
+    pending = tc.get("/api/media?status=active&review_status=pending_review&page=1&page_size=20")
+    assert pending.status_code == 200
+    assert pending.json()["total"] == 14
+    assert all(item["review_status"] == "pending_review" for item in pending.json()["items"])
+
+
+def test_media_assets_search_counts_are_not_limited_to_current_page(client):
+    tc, conn, _ = client
+    for index in range(25):
+        conn.execute(
+            "INSERT INTO media_assets "
+            "(title, original_filename, stored_filename, mime_type, byte_size, sha256, width, height, status, review_status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 'approved')",
+            (f"目标关键词 {index}", f"target-{index}.png", f"target-{index}.png",
+             "image/png", 512, f"target-sha-{index}", 80, 80),
+        )
+    conn.commit()
+
+    response = tc.get("/api/media?query=目标关键词&status=active&page=1&page_size=10")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 25
+    assert body["pages"] == 3
+    assert body["counts"]["all"] == 25
+    assert body["counts"]["approved"] == 25
+
+
+# ---------------------------------------------------------------- 运营日志 / 任务追踪 / 通知历史分页
+def test_operations_history_endpoints_return_database_totals_and_pages(client):
+    tc, conn, _ = client
+    for index in range(45):
+        stamp = f"2026-11-01 10:{index // 60:02d}:{index % 60:02d}"
+        conn.execute(
+            "INSERT INTO ops_logs (platform, action_type, content, executed_at, status) "
+            "VALUES ('xhs', 'passive_reply', ?, ?, 'success')",
+            (f"日志 {index}", stamp),
+        )
+        conn.execute(
+            "INSERT INTO task_runs (task_type, status, attempt, max_attempts, created_at) "
+            "VALUES ('data_fetch', 'success', 1, 3, ?)",
+            (stamp,),
+        )
+        conn.execute(
+            "INSERT INTO notifications (level, type, title, channel, sent_at) "
+            "VALUES ('info', 'round_completed', ?, 'macos', ?)",
+            (f"通知 {index}", stamp),
+        )
+    conn.commit()
+
+    endpoints = ("/api/ops_logs", "/api/task_runs", "/api/notifications")
+    for endpoint in endpoints:
+        first = tc.get(f"{endpoint}?page=1&page_size=20")
+        second = tc.get(f"{endpoint}?page=2&page_size=20")
+        assert first.status_code == second.status_code == 200
+        first_body, second_body = first.json(), second.json()
+        assert first_body["total"] == 45
+        assert first_body["page"] == 1 and first_body["pages"] == 3
+        assert len(first_body["items"]) == 20
+        assert len(second_body["items"]) == 20
+        assert {row["id"] for row in first_body["items"]}.isdisjoint(
+            {row["id"] for row in second_body["items"]}
+        )
+
+
+# ---------------------------------------------------------------- 配置审计历史分页
+def test_config_audit_endpoint_paginates_all_redacted_changes(client):
+    tc, conn, _ = client
+    for index in range(47):
+        conn.execute(
+            "INSERT INTO config_changes (key, old_value, new_value, changed_at) "
+            "VALUES (?, ?, ?, ?)",
+            (f"rhythm.daily_quotas.xhs.passive_replies.{index}",
+             f"old-{index}", f"new-{index}", f"2026-11-01 11:{index // 60:02d}:{index % 60:02d}"),
+        )
+    conn.commit()
+
+    first = tc.get("/api/config/audit?page=1&page_size=20")
+    second = tc.get("/api/config/audit?page=2&page_size=20")
+    third = tc.get("/api/config/audit?page=3&page_size=20")
+    assert first.status_code == second.status_code == third.status_code == 200
+    a, b, c = first.json(), second.json(), third.json()
+    assert a["total"] == b["total"] == c["total"] == 47
+    assert a["pages"] == 3 and c["page"] == 3
+    assert [len(a["items"]), len(b["items"]), len(c["items"])] == [20, 20, 7]
+    ids = [row["id"] for body in (a, b, c) for row in body["items"]]
+    assert len(ids) == len(set(ids)) == 47
+    assert a["items"][0]["new_value"] == "new-46"
+
+
+def test_config_audit_endpoint_rejects_invalid_pagination(client):
+    tc, _, _ = client
+    assert tc.get("/api/config/audit?page=0").status_code == 422
+    assert tc.get("/api/config/audit?page=1&page_size=101").status_code == 422
+
+
+# ---------------------------------------------------------------- 热点雷达数据库分页
+def test_hot_topics_database_pagination_and_server_filters(client, cfg):
+    tc, conn, _ = client
+    # 本用例只验证分页与筛选契约：关闭可调的热度门，避免默认阈值（5000）过滤掉造数
+    cfg.hot_topics.filters["heat_filter_enabled"] = False
+    for index in range(45):
+        conn.execute(
+            "INSERT INTO hot_topics "
+            "(id, source, evidence_status, title, heat_score, time_sensitive, last_seen_at) "
+            "VALUES (?, ?, 'collected', ?, ?, 1, ?)",
+            (f"paging-hot-{index:03d}", "test/xhs", f"分页热点-{index}",
+             float(index + 1), "2026-11-01 10:00:00"),
+        )
+    conn.commit()
+
+    first = tc.get("/api/hot_topics?page=1&page_size=20")
+    second = tc.get("/api/hot_topics?page=2&page_size=20")
+    third = tc.get("/api/hot_topics?page=3&page_size=20")
+    assert first.status_code == second.status_code == third.status_code == 200
+    a, b, c = first.json(), second.json(), third.json()
+    assert [a["total"], b["total"], c["total"]] == [45, 45, 45]
+    assert [len(a["items"]), len(b["items"]), len(c["items"])] == [20, 20, 5]
+    ids = [item["id"] for body in (a, b, c) for item in body["items"]]
+    assert len(ids) == len(set(ids)) == 45
+    assert a["items"][0]["heat"] == 45
+    assert a["urgent_total"] == b["urgent_total"] == c["urgent_total"] == 45
+    assert a["match"] == b["match"] == c["match"]
+    assert "test/xhs" in a["source_options"]
+
+    filtered = tc.get("/api/hot_topics?page=1&page_size=20&source=test%2Fxhs&keyword=热点-1")
+    assert filtered.status_code == 200
+    result = filtered.json()
+    # 分页热点-0..44 中标题含「热点-1」的是 1、10..19 共 11 条
+    assert result["total"] == 11
+    assert all("热点-1" in item["title"] for item in result["items"])
+
+
+def test_hot_topics_database_pagination_preserves_latest_batch_and_failure_suppression(client, cfg):
+    tc, conn, _ = client
+    cfg.hot_topics.filters["heat_filter_enabled"] = False
+    conn.execute(
+        "INSERT INTO hot_topics (id, source, evidence_status, title, heat_score, time_sensitive, last_seen_at) "
+        "VALUES ('old-batch', 'batch/xhs', 'collected', '旧批次', 999, 1, '2026-10-30 10:00:00')"
+    )
+    conn.execute(
+        "INSERT INTO hot_topics (id, source, evidence_status, title, heat_score, time_sensitive, last_seen_at) "
+        "VALUES ('new-batch', 'batch/xhs', 'collected', '最新批次', 20, 1, '2026-11-01 10:00:00')"
+    )
+    conn.execute(
+        "INSERT INTO hot_topics (id, source, evidence_status, title, discovered_at) "
+        "VALUES ('failed-source', 'broken/douyin', 'failed', '采集失败', '2026-11-01 10:01:00')"
+    )
+    conn.execute(
+        "INSERT INTO hot_topics (id, source, evidence_status, title, heat_score, last_seen_at) "
+        "VALUES ('old-failed-platform', 'broken/douyin', 'collected', '失败平台旧数据', 88, '2026-11-01 09:00:00')"
+    )
+    conn.commit()
+
+    response = tc.get("/api/hot_topics?page=1&page_size=20")
+    assert response.status_code == 200
+    ids = {item["id"] for item in response.json()["items"]}
+    assert "old-batch" not in ids
+    assert "new-batch" in ids
+    assert "old-failed-platform" not in ids
+    assert any(source["status"] == "failed" for source in response.json()["sources"])
+
+
+# ---------------------------------------------------------------- 逐篇指标数据库分页
+def test_metrics_endpoint_database_pagination_and_filtered_total(client):
+    tc, conn, _ = client
+    for index in range(45):
+        conn.execute(
+            "INSERT INTO metrics (platform, fetch_status, fetched_at, views, likes, interaction_rate) "
+            "VALUES ('xhs', 'success', ?, ?, ?, ?)",
+            (f"2026-11-01 10:{index // 60:02d}:{index % 60:02d}",
+             100 + index, 10 + index, (index + 1) / 1000),
+        )
+    conn.commit()
+
+    first = tc.get("/api/metrics?page=1&page_size=20&fetch_status=success")
+    second = tc.get("/api/metrics?page=2&page_size=20&fetch_status=success")
+    third = tc.get("/api/metrics?page=3&page_size=20&fetch_status=success")
+    assert first.status_code == second.status_code == third.status_code == 200
+    a, b, c = first.json(), second.json(), third.json()
+    assert [a["total"], b["total"], c["total"]] == [45, 45, 45]
+    assert [len(a["items"]), len(b["items"]), len(c["items"])] == [20, 20, 5]
+    ids = [item["id"] for body in (a, b, c) for item in body["items"]]
+    assert len(ids) == len(set(ids)) == 45
+    assert a["pages"] == 3 and c["page"] == 3
+    assert a["z_stats"] == b["z_stats"] == c["z_stats"]
+
+    filtered = tc.get("/api/metrics?page=1&page_size=20&platform=xhs&fetch_status=failed")
+    assert filtered.status_code == 200
+    assert filtered.json()["total"] == 0
+    assert filtered.json()["items"] == []
+    status_only = tc.get("/api/metrics?page=1&page_size=20&fetch_status=failed")
+    assert status_only.status_code == 200
+    assert status_only.json()["total"] == 0
+    legacy = tc.get("/api/metrics?limit=1")
+    assert legacy.status_code == 200
+    assert len(legacy.json()["items"]) == 1

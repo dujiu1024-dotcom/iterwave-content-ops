@@ -1,10 +1,10 @@
 # IterWave 全量功能与业务闭环整改清单
 
-> 版本：1.0  
+> 版本：1.1  
 > 建立日期：2026-11-01  
 > 状态：执行中  
 > 执行分支：`chore/full-remediation-plan-20261101`  
-> 基线：`main` @ `a06f768f3f365939d6a337311b4b54404b896973`
+> 基线：`main` @ `6b538b2d22797ca9ac64327b3ffc5b742b7fa71b`（审查时）；执行分支仍从 `a06f768` 旧基线分出，尚未同步 PR #64。
 
 ## 0. 文档用途与审查边界
 
@@ -18,6 +18,68 @@
 - **待验证风险**：存在风险但尚未证实，不得描述为已发生。
 
 历史审查未完成所有真实平台端到端测试。没有真实账号、平台结果和日志证据的项目不得标记“真机验证通过”。
+
+
+## 0.1 第一阶段：Git 整理与整改基线审计（2026-11-01）
+
+本节是 Git 整理阶段的审计记录。所有判断均以 GitHub 当前分支、PR 元数据和 commit compare 为依据；“已合并”不等于已部署，“分支存在”不等于仍需保留。
+
+### 当前基线
+
+- 默认分支：`main`，HEAD：`6b538b2d22797ca9ac64327b3ffc5b742b7fa71b`。
+- PR #63 已合并，merge commit：`a06f768f3f365939d6a337311b4b54404b896973`。
+- PR #64 已合并，merge commit：`6b538b2d22797ca9ac64327b3ffc5b742b7fa71b`。
+- PR #65 的整改分支从 PR #64 合并前的旧基线分出；与当前 main 比较为 113 commits ahead / 1 commit behind，GitHub 标记 `mergeable_state=dirty`。因此不能直接合并，必须先把 PR #64 的 main 变更整合进整改分支并解决冲突。
+- PR #65 当前 HEAD：`f449693e4abc970bdef8a677c128c76612dafa39`；25 个文件变更；Draft。
+- 本轮没有修改 main，也没有合并任何功能 PR。
+
+### PR 与分支盘点
+
+| 对象 | 当前状态 | 审计结论 / 处理决定 |
+|---|---|---|
+| PR #63 | 已合并 | 保留历史记录；代码进入 main。 |
+| PR #64 | 已合并 | 保留历史记录；当前 main HEAD 即其 merge commit。 |
+| PR #65 / `chore/full-remediation-plan-20261101` | Open / Draft；113 commits；25 files；HEAD `f449693` | 唯一总整改主线候选；当前与 main 冲突，先同步 main，再继续作为整改主线。 |
+| PR #70 / `ci/ux-detail-pages-validation-v3-20261101` | Open / Draft；27 commits；17 files；HEAD `a580551` | 含页面、资产、模板、Skills、配额和分页修复；基于 PR #65 的旧提交 `504d124`，相对当前 PR #65 为 27 commits ahead / 72 behind，且 GitHub 标记 dirty。不能直接合并或删除，必须逐文件/逐提交移植并验证。 |
+| PR #66 / `feat/ux-detail-pages-20261101` | Closed，未合并 | PR #70 的历史祖先；PR #70 比其记录的 HEAD 多 8 commits。当前同名分支已继续前进到 `9b4d587`，包含 PR #66 关闭后新增提交；不得误删。 |
+| PR #67、#68 | Closed，未合并 | 两个验证 PR 指向相同 HEAD `cdd0a28`，属于重复 CI 验证记录；功能代码不应以它们为合并目标。 |
+| PR #69 | Closed，未合并 | v2 验证分支；其 HEAD `dc2eea3` 是 PR #70 v3 HEAD 的祖先，验证用途已被 v3 后续提交覆盖。 |
+| PR #58、#62 | 已合并 | 保留历史记录。 |
+| PR #59、#60、#61 | Closed，未合并 | 对应提交已包含在当前 main 的历史中（与 main 比较无独立 ahead commits）；不再作为待合并目标。 |
+| `feat/ux-operations-accounts-templates-20261101` | 分支存在，无 Open PR | 相对 main 有 26 commits ahead、16 个文件变更；与 PR #65/#70 均有分叉，包含尚未核对的独立改动。列为待移植来源，禁止删除。 |
+| `feat/ux-productivity-audit-20261101` | PR #64 的 head 分支 | PR #64 已合并；分支内容已通过 PR #64 进入 main，可列为清理候选，但本轮未删除。 |
+
+### 分支清理决定
+
+当前远端共有 8 个分支：`main`、`chore/full-remediation-plan-20261101`、三个 `ci/ux-detail-pages-validation*` 分支、`feat/ux-detail-pages-20261101`、`feat/ux-operations-accounts-templates-20261101`、`feat/ux-productivity-audit-20261101`。
+
+- **保留**：main、PR #65 总整改分支、PR #70 功能整改来源分支、`feat/ux-detail-pages`、`feat/ux-operations-accounts-templates`。它们之间存在分叉或尚未核对的独立提交。
+- **可清理候选**：`feat/ux-productivity-audit`（PR #64 已合并）；`ci/ux-detail-pages-validation` 与 `ci/ux-detail-pages-validation-v2`（旧验证分支，PR #67/#68/#69 已关闭，且 v3 已继续推进）。
+- **本轮未删除任何分支**：当前可用 GitHub 操作接口没有分支删除能力；同时，未合并功能分支尚有独立提交，不能仅凭 PR 关闭状态删除。
+- PR #67/#68/#69 已关闭；PR #66 已关闭。PR #65/#70 继续保持 Draft，不在没有冲突解决和 CI 证据时转 Ready 或合并。
+
+### 下一步 Git 操作顺序
+
+1. 以当前 main `6b538b2` 为基线，将 PR #64 已合并内容同步进 PR #65 整改分支；处理冲突时以 main 的已合并功能为准，保留 PR #65 的后续整改。
+2. 将 `feat/ux-operations-accounts-templates`、`feat/ux-detail-pages`、PR #70 的独立改动逐项比较，建立 commit/file 级移植表；相同改动只保留一份，独有改动必须移植。
+3. 在新的统一整改分支上执行后端 pytest、Ruff、前端构建和 CI；未通过前不合并 main。
+4. 完成移植并确认提交已进入统一分支后，再清理已合并的旧功能分支和重复 CI 分支。
+5. PR #65 与 PR #70 最终合并为一个统一整改 PR，后续所有整改只从统一分支推进；本文件继续作为唯一状态源。
+
+### 本阶段完成判定
+
+- [x] 核实 main 当前 HEAD 与 PR #63/#64 合并关系。
+- [x] 核实 PR #65、#70 的 head/base、提交数、变更文件数和分叉情况。
+- [x] 核实 PR #66–69 的重复/继承关系。
+- [x] 盘点全部远端分支并标记保留、移植、清理候选。
+- [ ] 将 PR #64 合并基线同步到 PR #65。
+- [ ] 完成 PR #70 与两个未合并功能分支的独立提交移植。
+- [ ] 在统一分支上跑通 CI。
+- [ ] 删除已确认安全的旧分支并关闭重复 PR。
+- [ ] 建立唯一后续整改 PR。
+
+**阶段结论：Git 资产审计完成；代码分支整合与清理尚未完成。不得将第一阶段整体标记为已关闭。**
+
 
 ## 1. 优先级定义
 
@@ -53,7 +115,8 @@
 - 现状：多个列表采用固定截断或前端追加，无法访问完整历史数据。
 - 要求：统一 page/page_size 或 cursor/limit；后端返回 items、total、分页信息；支持服务端筛选、搜索、排序；大表优先游标分页；筛选变化重置页码；区分空数据、加载失败和请求超时。
 - 验收：总数准确；首末页可访问；筛选、排序与分页组合正确；无静默截断。
-- 状态：未开始
+- 进展：全局运营中心、任务队列、已生产内容、轮次、内容资产、图片素材、运营历史、配置审计、热点雷达和逐篇数据等模块已分批加入服务端分页；仍需迁移旧数组兼容调用方，并统一响应契约与异常状态。
+- 状态：部分完成
 
 #### A-02 逐项消除固定条数截断
 - 优先级：P1；性质：用户实测 + 历史审查
@@ -68,14 +131,16 @@
 - 现状：若 KPI 从截断后的前端列表计算，结果会随分页变化而失真。
 - 要求：后端独立聚合；定义时间窗口、状态范围、单位、时区和计算口径；列表筛选与 KPI 使用一致过滤条件；空数据不得错误显示 100% 成功率。
 - 验收：改变页码/页大小不改变 KPI；同条件列表与统计可核对。
-- 状态：未开始
+- 进展：全局运营中心账号组矩阵已改为后端按账号组独立聚合；热点雷达分页路径已独立计算 KPI；仍需逐页核查其他列表与总览 KPI，统一统计口径。
+- 状态：部分完成
 
 #### A-04 历史数据回填完整性
 - 优先级：P1；性质：用户反馈 + 历史审查
 - 现状：部分回填只读取最近 100 条。
 - 要求：支持分页/游标分批处理、进度记录、中断恢复、失败重试、去重和数量核对；不得默认限制最近 100 条。
 - 验收：超过 100 条可完整回填；重复运行不重复导入；中断后可续跑；输出成功/失败/跳过统计。
-- 状态：未开始
+- 进展：发布后 Analytics 回填已改为 draftsAll 分页读取全部草稿；Assets、Operations、GlobalSearch 等消费者已迁移；仍需检查其他回填链路、断点续传、失败重试、去重和数量核对。
+- 状态：部分完成
 
 #### A-05 时间与时区统一
 - 优先级：P1；性质：用户反馈 + 历史审查
@@ -543,3 +608,189 @@ A-02、A-04、B-05、D-07、D-08、F-01 至 F-08、G-01 至 G-06。
 - 热点雷达当前是前端分页，接口仍整体返回当前热点榜单；若数据量超过配置上限，应继续实施服务端过滤/分页。
 
 本轮代码自动化测试尚未全部完成；不得将“开发完成”理解为 CI、部署或真机验收通过。
+## 10. 2026-11-01 后续执行记录（第二批）
+
+### A-02 / E-05 热点雷达分页根因复核
+- 已回读当前分支实现：`GET /api/hot_topics` 不接收分页、来源、关键词或排序参数；`HotTopicCollector.overview()` 调用 `_load()` 后返回完整 `items`；`_load()` 直接执行 `SELECT * FROM hot_topics ORDER BY heat_score DESC` 并在 Python 中完成最近批次识别、采集失败屏蔽、跨平台去重、热度/时效门限、画像匹配、可发布性判断和趋势计算。
+- 前端 `HotTopics.tsx` 再对完整响应执行来源/关键词过滤、排序和 `slice` 分页。因此目前的“页码分页”仅是前端分页，接口仍全量返回；后端 SQL 也没有 LIMIT/OFFSET，不能将其描述为服务端分页或数据库分页。
+- 不可直接在原始 SQL 上加 LIMIT/OFFSET：最近采集批次、同平台最新失败屏蔽、跨平台 duplicate_of 合并以及按本轮数据计算的平台热度中位数/趋势都依赖跨行数据。简单截断会改变筛选结果、来源状态、趋势和 KPI，造成漏项与统计漂移。
+- 本轮结论：热点分页根因分析完成，尚未改动分页实现。下一步需先将“全局批次/失败/去重/门限”处理拆成可复用的 SQL 过滤与聚合阶段，再对最终候选集执行稳定排序和 LIMIT/OFFSET；match/趋势计算需定义哪些可延迟到当前页、哪些 KPI 必须独立聚合。排序必须增加稳定次级键（如 id），避免翻页重复/漏项。
+- E-05 单来源试抓取仍未实现；当前刷新接口是全局后台采集，不应伪装成单来源诊断。
+- 验证要求：构造超过 5000 条热点、同源多批次、来源失败、跨平台重复、热度门限和未知匹配状态的夹具；逐页合并结果应与全量基准结果一致，total 与 KPI 不随页码变化。
+- 状态：分析完成（开发未开始；不将前端切片误报为后端分页）。
+
+### 本轮执行边界
+- 本轮通过 GitHub API 回读分支源码与整改文档；当前执行环境没有仓库本地工作树，未运行 pytest、Ruff、npm build 或浏览器测试。
+- 未对热点查询做有损的 SQL LIMIT/OFFSET 改动；避免在不理解全局批次和趋势语义时引入漏数。
+
+## 11. 2026-11-01 后续执行记录（第三批：已生产内容分页）
+
+### A-01 / A-02：已生产内容列表从固定 100 条改为数据库分页
+- 后端 `GET /api/drafts` 新增可选 `page`、`page_size` 参数（page >= 1，page_size 1–100）；传分页参数时执行数据库 `LIMIT/OFFSET`，并独立执行 `COUNT(*)`，返回 `items/total/page/page_size/pages`。
+- 保留不传 page 的旧数组响应，避免破坏其他现有调用方；旧调用仍有历史 100 条兼容上限，后续需逐个迁移，不能视为全系统截断已消除。
+- 过滤仍由后端完成，支持 status + platform 组合；排序使用 `created_at DESC, id DESC` 稳定次序。
+- 前端“内容资产 → 已生产内容”改为每页 20 条，状态/平台变化重置到第一页，显示真实总数与页码；删除当前页末尾记录后会校正页码。
+- 提交：
+  - 后端 API：`60349a0315bc6882edc0fedf652650bc673bbe35`
+  - 前端 API 类型/方法：`c7db49631cc6dae303a4c25d6e2887d462a8e549`
+  - 已生产内容页面：`d4d1e983d96313b80ce3a535dbae377035af46e2`
+- 状态：开发完成（代码已提交并通过 GitHub API 回读核对）；自动化测试、构建和浏览器验证未执行，不能标记测试通过。
+- 后续：迁移仍调用旧数组模式的其他草稿列表消费者；为分页新增 API 参数组合、总数准确性、跨页无重复/遗漏、空页与删除后页码回退测试。
+
+### 本轮验证边界
+- 已从 GitHub 分支回读后端路由、API 类型和页面实现，确认分页响应契约与前端调用一致。
+- 当前环境无本地仓库工作树，未运行 pytest、Ruff、npm build 或浏览器测试。
+
+
+
+### 2026-11-01 — 第四批：轮次与内容资产数据库分页
+
+#### A-01：生产轮次列表
+- `GET /api/rounds`新增 `page` / `page_size` 参数；分页请求执行独立 `COUNT(*)` 与 SQL `LIMIT/OFFSET`，排序为 `created_at DESC, id DESC`，每页默认 20 条。
+- 未传 `page` 时保留旧数组响应与 50 条兼容上限，避免破坏旧调用方；生产页面已切换 `roundsPage`，显示真实总数与页码。
+- 提交：后端 `d33425766cd0dec76748917997cd89fa71c141af`；API 类型/方法 `7dddff56df68ebd95a9845b1ab2364f9834979e8`；页面 `465339ea8ba2ebb2b0c98ca081a0dd993a0f9808`；分页 effect 修正 `667f7495b3168de24bd11dc82041d3653bf8b0ea`；避免初次加载重复请求 `f497aaf5aeeec57d426863940c429907e05ae446`。
+
+#### A-01：内容资产列表
+- `GET /api/assets`新增分页参数；按 `asset_type` 过滤后独立统计 total，再执行稳定排序和数据库分页。兼容旧响应结构，旧调用仍有 100 条兼容上限。
+- 外部参考、个人观点、内容模板三个页面均改为每页 20 条；显示数据库真实总数和页码，不再只读取前 100 条。
+- 提交：后端 `dc9f62f8a6c23a28815bfe14b7fa01553c0997fb`；API 类型/方法 `a19e326b5948af4ec20d7329f751d772752d6762`；资产页面 `af6c424a6a49098d2df0cf080d1094fd084f4532`。
+
+#### 验证边界与后续
+- 已通过 GitHub API 回读核对后端分页 SQL、API 响应类型、页面分页请求和页码控件；没有本地仓库工作树，尚未运行 pytest、Ruff、`npm run build` 或浏览器验证。
+- 兼容旧调用方的无分页模式仍保留 50/100 条上限；下一步逐项迁移生产页面模板读取、其他草稿消费者及其它列表，不能将兼容模式误认为全系统无截断。
+- 需要补充轮次/资产分页 API 测试：空数据、筛选 total、超过 50/100 条、稳定排序、页码越界和跨页无重复/遗漏。
+
+### 2026-11-01 — 第五批：图片素材库服务端分页与真实统计
+
+#### M-01：图片素材库超过 200 张后无法完整浏览
+- `GET /api/media` 新增 `page/page_size` 分页参数；数据库执行筛选后的 `COUNT(*)` 与稳定排序 `created_at DESC, id DESC` 的 `LIMIT/OFFSET`。
+- 搜索条件在数据库层应用；审核状态、归档状态在数据库层筛选。兼容旧 `limit/offset` 调用，避免接口破坏。
+- 新增独立统计：全部有效、待审核、可用、已驳回、已归档；统计按当前搜索词聚合，但不受当前 tab、页码和每页数量影响。
+- 图片素材库前端每页 20 张，状态筛选和关键词搜索走后端，页码变化重新请求；不再对前 200 条本地过滤。
+- 提交：后端分页 `31050eb6b35b92519e9ee69f65f1f3a25a406e41`；SQL 结构整理 `19cf79792cec808fbaa830d54ffde3856aad0e91`；前端响应类型/API `264e9714e93a532cd5d91c8dc386b5c28b2f142d`；页面分页/筛选 `cfb504433cc73673c180bc40aa749400963b98ab`；生成后筛选刷新修正 `e973ed6c0bf16430e53d5cd4ab25134c997f18d5`。
+- 新增 HTTP API 测试代码：覆盖 45 条素材跨页无重复、筛选 total、真实分类统计和搜索后的跨页总数。测试提交 `3ec2abe5ed06939e96a8ed73866d118cea3ed966`。
+
+#### 验证边界
+- 已通过 GitHub API 回读确认 API SQL、筛选参数、响应字段、前端页码控件和新增测试代码。
+- 尚未运行 pytest、Ruff、TypeScript 构建或浏览器测试；测试用例已编写，不代表测试执行通过。
+- 旧 `limit/offset` 兼容模式仍保留，后续应盘点所有调用方并逐步统一分页契约。
+### 2026-11-01 — 第六批：运营日志、任务追踪、通知历史分页
+
+#### O-01：三类运营历史列表固定截断
+- `GET /api/ops_logs`、`GET /api/task_runs`、`GET /api/notifications` 新增 `page/page_size`；数据库先执行筛选后的 `COUNT(*)`，再稳定排序并执行 `LIMIT/OFFSET`。
+- 旧调用保持兼容：运营日志仍返回 `{items,total}`（total 已改为真实总数），任务追踪和通知历史不传 page 时仍返回数组。
+- 运营控制台三个列表改为每页 20 条；页码切换重新请求后端，显示真实总数；任务核实操作后保留当前页并刷新。
+- 提交：后端 `b1d8110157fc88bed1647cb52044f28a7c66762d`；前端分页 API `3a56de4e5e541a4d96afe5218620c311e6ab1aa9`；运营控制台分页 `fcdfaa37d06857f4b4d20ec9ec5e9a8848768cbe`；通知分页挂载位置修正 `2a020f115310450d50522adc96abd84b118b3439`；真实总数显示 `7b9ed497db2775d61d4d04c150e34c28d0eb7378`。
+- 新增 API 测试代码：每类列表插入 45 条，验证 total、页数、每页 20 条及相邻页无重复。测试提交 `af546ee9c08017f3039b12f4ff554444f04d0323`。
+
+#### 验证边界
+- 已通过 GitHub API 回读核对三个接口分页 SQL、兼容响应、前端分页请求及列表控件。
+- 尚未运行 pytest、Ruff、TypeScript 构建或浏览器测试；新增测试代码未执行。
+- 当前批次未改造审计链列表；审计链分页需要进一步定位审计 API 和消费页面，列为下一批。
+### 2026-11-01 — 第七批：配置审计记录数据库分页
+
+#### A-01：设置页配置变更审计固定只显示最近 20 条
+- 新增 `GET /api/config/audit?page=&page_size=`，后端对 `config_changes` 执行独立 `COUNT(*)` 与 `ORDER BY id DESC LIMIT/OFFSET`，每页默认 20、最大 100。
+- 将旧配置值/新配置值的脱敏逻辑集中在 `config_audit_page`，继续屏蔽内部端点配置，避免分页接口绕过原有敏感值保护。
+- 设置页审计表接入真实总数、页码和上一页/下一页；旧 `/api/config` 中的最近 20 条 audit 字段保留兼容。
+- 新增 API 测试代码：47 条审计记录跨三页、无重复、总数一致、最新记录排序和非法分页参数校验。
+- 提交：核心分页 `365ce13205f0799a98e4c478f543b28bd1ae3905`；API 路由 `d7e0fa5b0bf974aa32f013181cde94f10081caf3`；前端 API `aa8ef0020c7d5dc3142426604ab5354bf8401bd0`；设置页 `d77301da2ab26918d9aa7259ca35f1a5973550e3`；测试 `ec65462525739769f2ea853535a2dffa103f9aa2`。
+
+#### 验证边界
+- 已通过 GitHub API 回读确认分页函数、API 路由、前端分页状态与控件、测试用例均存在。
+- 尚未运行 pytest、Ruff、TypeScript 构建或浏览器测试；新增测试代码未执行。
+- `/api/config` 旧响应仍包含最近 20 条审计记录用于兼容；设置页已切换新分页端点。
+### 2026-11-01 — 第八批：热点雷达数据库分页与服务端筛选
+
+#### A-02：热点雷达从前端内存切页改为数据库分页
+- 新增分页查询路径：`GET /api/hot_topics?page=&page_size=&tab=&source=&keyword=&sort_by=`；旧请求不传 page 时保留原数组兼容响应。
+- 数据库 CTE 先执行每来源最新采集批次筛选、失败平台屏蔽、跨平台重复主条目筛选、热度/时效门限，再执行筛选、稳定排序、COUNT 和 LIMIT/OFFSET。
+- 页内条目通过当前页 SQL 查询返回；来源下拉选项独立查询，不随页码变化。
+- 趋势中位数从完整可见集合计算，不使用当前页数据；匹配 KPI、紧急热点数独立聚合，不随页码变化。
+- 服务端支持全部/已匹配/紧急/时效未知、来源、关键词筛选，以及热度/定位关联度排序；前端已切换为服务端分页请求。
+- 保留跨平台重复条目在主条目 also_on 中展示；仅对当前页主条目查询其重复来源，避免整表重复条目回传。
+- 新增测试代码：45 条热点跨页无重复、total/KPI 不随页变化、来源和关键词筛选、最新批次保留、失败平台旧数据屏蔽。
+- SQL CTE 在独立 SQLite 内存库做了语法与参数绑定 smoke test；这不是项目 pytest，也不替代完整应用测试。
+- 主要提交：分页核心 `8a23433`；服务端筛选排序 `9a8e1d1`；overview 元数据 `68b1ab3`；API `372089f`；前端 API `1f2ad84`；页面 `191b50b`；测试 `32612a7`；最终核心修正 `f189c33`。
+
+#### 验证边界
+- 已回读核心 SQL、API 参数、前端分页请求和测试代码；SQL CTE 参数绑定 smoke test 通过。
+- 尚未运行项目 pytest、Ruff、TypeScript 构建、CI 或浏览器真机测试；不得视为完整验收。
+- 热点雷达数据库分页本轮完成代码改造，仍需完整自动化测试和真机验证后才能关闭 A-02。
+- 后续修正：关键词匹配保持原有大小写敏感语义；来源状态选取增加窗口函数稳定排序；前端来源选项改为独立完整集合，并在总页数缩小时自动校正页码。
+- 追加提交：测试批次时间夹具 `92c9edf`；核心查询修正 `da7b05a`、`4486cef`、`f189c33`、`2c5a4e2`；前端分页边界 `63df0a6`、`64c1b24`、`77becc7`；API 类型 `d74e462`；测试夹具 `7b1e84d`。
+### 2026-11-01 — 第九批：逐篇数据分页与历史发布回填完整读取
+
+#### A-02 / A-04：逐篇数据不再固定只取 100 条
+- `/api/metrics` 新增可选 page/page_size，筛选后独立 COUNT，按 fetched_at DESC、id DESC 稳定排序并数据库 LIMIT/OFFSET；不传 page 时保留旧 limit 响应。
+- 平台基准统计所需的平台集合改为从完整筛选数据独立读取，不再只根据当前页推断平台，分页不会改变 z_stats。
+- Analytics 详细数据接入每页 20 条和页码；总览继续走旧兼容响应，避免把逐篇分页误用为总览统计口径。
+- 发布后数据回填原先调用旧 drafts 接口，最多读取 100 条；新增 draftsAll 分页聚合方法，Analytics 回填列表逐页读取全部草稿后再筛选已确认发布内容。
+- 新增 API 测试代码：45 条逐篇指标跨三页、无重复、total 和平台基准统计一致；验证平台+状态过滤的空结果。
+- 主要提交：metrics API `6ce4cc6`；前端 API `c1778f2`；完整草稿读取 `a0ac492`；Analytics 页面 `b3b5a12`；测试 `28d2109`。
+
+#### 验证边界
+- 已回读 API SQL、分页类型、Analytics 页码控件、draftsAll 调用及测试代码。
+- 尚未运行项目 pytest、Ruff、TypeScript 构建、CI 或浏览器测试；逐篇数据分页与完整回填仍需自动化和真机验收。
+- 旧草稿列表调用方继续盘点：Analytics 发布回填、Assets、Operations 发布确认列表、GlobalSearch 均从 api.drafts() 迁移为 draftsAll()，避免各页面静默漏掉第 101 条以后的记录；draftsAll 以每批最多 5 个并发分页请求读取，避免一次性发起大量请求。
+- 追加提交：Operations `2c88047`；Assets `352c698`；GlobalSearch `06546ef`；draftsAll 并发限流 `4a40293`。
+- 轮次旧调用方盘点：Dashboard 原来使用兼容接口，只读取最近 50 条；已迁移到 `roundsPage(1, 20)`，明确首页只展示最近 20 条摘要，不再请求固定 50 条数组。
+- 追加提交：Dashboard 轮次分页调用 `9e9c016`。
+- 指标分页测试补充覆盖仅按 fetch_status 筛选（不传 platform）的查询，修复并防止该组合的 COUNT SQL 产生无效 AND 子句；同时验证旧 limit 参数仍兼容。追加测试提交 `c398fc2`。
+
+
+
+## 12. 2026-11-01 — 第一阶段续审：分支提交与文件级迁移盘点
+
+本节基于本轮重新执行的 GitHub compare、分支 commit 列表和 PR patch 回读。它修订并细化 0.1 节的初步判断；以下数量均为本轮查询时的快照。
+
+### 12.1 最新分支关系
+
+| 分支 / PR | 相对基线 | 本轮结论 | 处理 |
+|---|---:|---|---|
+| `main` | HEAD `6b538b2d` | 当前正式基线；包含 PR #63、#64 | 保留 |
+| `chore/full-remediation-plan-20261101`（PR #65） | 相对 main：115 ahead / 1 behind；25 个变更文件 | 主整改线，含服务端分页、热点筛选、草稿/轮次/指标迁移及审计文档；尚未同步 main 最新的 PR #64 merge commit | 保留为主线候选，不直接合并 |
+| `ci/ux-detail-pages-validation-v3-20261101`（PR #70） | 相对 PR #65：27 ahead / 74 behind；17 个变更文件 | 是详情页改造线的后续验证分支，包含多个补丁、测试和 UX 修正 | 保留；按文件/提交迁移，不整支覆盖 |
+| `feat/ux-detail-pages-20261101` | 相对 PR #65：24 ahead / 74 behind | 与 PR #70 共享大部分详情页提交；PR #70 比它恰好多 3 个提交，改动文件为 Assets、GlobalOperations、HotTopics | 保留到 PR #70 三个后续提交完成核对 |
+| `feat/ux-operations-accounts-templates-20261101` | 相对 main：26 ahead / 0 behind；16 个变更文件 | 从 main 直接分出的独立改造线，含账号、行业模板、素材、队列、全局运营中心、配额/节奏等改动；不可当作废弃分支 | 必须保留并迁移 |
+| `ci/ux-detail-pages-validation-20261101`、`ci/ux-detail-pages-validation-v2-20261101` | 历史验证分支 | 对应已关闭的旧验证 PR #67/#68/#69，v3 已继承并继续推进验证 | 仅列为清理候选；删除前再次核对分支 HEAD 与保护规则 |
+| `feat/ux-productivity-audit-20261101` | PR #64 已合并 | 已合并功能线 | 列为清理候选；本轮未删除 |
+
+### 12.2 关键提交关系
+
+- PR #70 的 v3 分支相对 `feat/ux-detail-pages-20261101` **仅多 3 个提交**：`fix(assets): display total records instead of current page size`、`fix(hot-topics): reset pagination when filters change`、`ux(global-ops): clarify failed task totals are global`。这 3 个提交必须随 v3 一并纳入迁移核对。
+- PR #70 相对 PR #65 的 27 个独有提交集中在：队列失败筛选/分页及统计、热点来源编辑、账号身份提示、侧栏滚动、行业模板入口/编辑、Skill 合约检查、素材分页和图片生成配额策略等；PR #65 自身的 115 个 ahead 提交则包含其独立的全量分页整改主线。两者不能通过简单“以一边覆盖另一边”合并。
+- `feat/ux-operations-accounts-templates-20261101` 相对 main 的 26 个提交是另一条独立提交链；其与 PR #65、PR #70 都有文件重叠。重叠重点包括 `src/api/main.py`、`tests/test_api_endpoints.py`、`tests/test_task_queue.py`、`web/src/Sidebar.tsx`、`web/src/api.ts`、`web/src/components/IndustryPresetPicker.tsx`、`web/src/components/MediaLibraryPane.tsx`、`web/src/pages/Accounts.tsx`、`web/src/pages/Assets.tsx`、`web/src/pages/GlobalOperations.tsx`、`web/src/pages/HotTopics.tsx`、`web/src/pages/Operations.tsx`、`web/src/pages/Production.tsx`、`web/src/pages/TaskQueue.tsx`、`web/src/styles.css`。这些文件必须按功能语义合并，不能整文件从某分支复制。
+- PR #65 相对 main 仍 behind 1，缺少 PR #64 的最新合并节点；必须先把 main 的 PR #64 内容纳入整改主线，再进行其他移植和回归。
+
+### 12.3 迁移顺序（避免回退）
+
+1. **同步主线基线**：以 main 当前 HEAD（含 PR #64）作为最终目标基线；先解决 PR #65 的唯一 behind 提交差异，并核对冲突文件。
+2. **移植 PR #65 独有整改**：保留服务端分页、统计聚合、完整草稿读取、轮次/指标/配置审计迁移等后续提交；对照 main 和 PR #64，确认没有重复或回退。
+3. **移植 operations 分支 26 个提交**：逐提交/逐文件对照，优先迁移账号身份、行业模板、Skills、队列/全局运营中心、素材与配额策略；保留 PR #65 中更新、更完整的后端分页实现。
+4. **移植 PR #70 v3 的 27 个独有提交**：对照 operations 分支已迁移内容，处理重复修复；特别保留 v3 相对 detail 分支多出的 3 个边界修正。
+5. **构建唯一整改分支和 PR**：在所有变更进入同一分支后，运行后端 pytest/Ruff、前端构建和 CI；PR 维持 Draft，直到自动化验证通过并完成代码审查。
+6. **清理分支**：只有在迁移提交可在唯一整改分支追溯、PR/CI 证据齐全后，才删除旧验证分支和已合并功能分支。未合并的 operations/detail 分支不得提前删除。
+
+### 12.4 第一阶段状态与执行边界
+
+- [x] 盘点 main、PR #65、PR #70、detail、operations 和历史 CI 分支。
+- [x] 对 PR #65、PR #70、detail、operations 执行 compare，记录 ahead/behind 和文件重叠。
+- [x] 回读 PR #65、PR #70 的文件 patch，识别主要迁移主题。
+- [x] 确认 operations 分支包含 26 个相对 main 的独有提交，撤销其“可清理”候选判断。
+- [ ] 将 PR #64 最新 main 基线同步进统一整改分支。
+- [ ] 完成 operations 26 个提交与 PR #70 27 个独有提交的逐项迁移。
+- [ ] 运行后端/前端 CI 并取得成功记录。
+- [ ] 建立唯一最终整改 PR，确认迁移后再清理旧分支。
+
+**执行限制说明：** 本轮连接器可读取 GitHub commit/patch、比较 refs、更新文件和创建 Git 对象，但没有本地仓库工作树及可运行 shell 的 Git 环境，无法可靠执行交互式 rebase/cherry-pick、冲突解决、pytest、Ruff 或 npm build。GitHub API 也没有提供本轮可用的 branch 删除操作。为避免把未测试的整文件覆盖伪装成合并，本轮没有强制移动分支、合并 PR 或删除分支。第一阶段的审计与迁移清单已细化，但 Git 历史整合和 CI 验证仍未完成；不得标记第一阶段完成。
+
+
+### 12.5 数量与基线校正（以本轮最新 compare 结果为准）
+
+上一小节 12.1 的 PR #65 / PR #70 ahead/behind 数字是中间快照，现以 2026-11-01 本次重新查询结果校正：
+- PR #65 整改分支相对 main：**116 ahead / 1 behind**；merge base 为 `a06f768f3f365939d6a337311b4b54404b896973`，即 PR #64 合并前的主线节点。当前 main HEAD 为 `6b538b2d22797ca9ac64327b3ffc5b742b7fa71b`，唯一 behind 是 PR #64 合并提交。
+- PR #70 v3 相对 PR #65：**27 ahead / 75 behind**，merge base 为 `6746f731acc54c7508dc056c5e37a2ff9c635ed0`；17 个文件有差异。
+- v3 相对 `feat/ux-detail-pages-20261101`：**3 ahead / 0 behind**，merge base 为 `9b4d587f7ffa51b700b48ecdf4918bac912842f7`，变更仅涉及 Assets、GlobalOperations、HotTopics。
+- operations 分支相对 main：**26 ahead / 0 behind**，merge base 正是 main HEAD `6b538b2d22797ca9ac64327b3ffc5b742b7fa71b`，涉及 16 个文件。
+- 由此确认：PR #65 并不是“仅落后 1 个普通提交”这么简单；它从 PR #64 merge 前的主线分叉，且 116 个独有提交必须完整保留。同步 main 时应纳入 PR #64 merge 节点，不得 reset 到 main 或覆盖整改提交。
