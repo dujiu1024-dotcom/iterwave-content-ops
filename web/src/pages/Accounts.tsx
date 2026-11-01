@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, Platform, AccountInfo, LoginStatus, RegisteredPlatformAccount } from "../api";
+import { api, Platform, AccountInfo, LoginStatus, RegisteredPlatformAccount, AccountIdentity } from "../api";
 
 const PLATFORM_EMOJI: Record<Platform, string> = {
   xhs: "小", douyin: "抖", kuaishou: "快", wechat_channels: "视",
@@ -34,6 +34,8 @@ export default function Accounts() {
   const [loginStatus, setLoginStatus] = useState<LoginStatus | null>(null);
   const [smsCode, setSmsCode] = useState("");
   const [smsSubmitting, setSmsSubmitting] = useState(false);
+  const [platformIdentities, setPlatformIdentities] = useState<Record<string, AccountIdentity>>({});
+  const [identityLoading, setIdentityLoading] = useState<Platform | null>(null);
 
   const load = async () => {
     setErr(null);
@@ -68,6 +70,7 @@ export default function Accounts() {
           // 结束状态：再等 1s 后关弹窗
           setTimeout(() => {
             if (st.state === "success") {
+              void readIdentity(activeLogin);
               setActiveLogin(null);
               load();
             } else {
@@ -113,6 +116,36 @@ export default function Accounts() {
       await api.logout(p);
       load();
     } catch (e: any) { alert("退出失败：" + e.message); }
+  };
+
+  const readIdentity = async (platform: Platform) => {
+    setIdentityLoading(platform);
+    try {
+      const identity = await api.accountIdentity(platform);
+      setPlatformIdentities((prev) => ({ ...prev, [platform]: identity }));
+      // 已有账号登记时，同步平台真实昵称；没有登记时只展示探测结果，不擅自创建账号身份记录。
+      const existing = registeredAccounts.find((item) => item.platform === platform);
+      if (identity.logged_in && identity.name && existing && existing.display_name !== identity.name) {
+        const saved = await api.savePlatformAccount(existing.id, {
+          platform,
+          account_handle: existing.account_handle,
+          display_name: identity.name,
+          notes: existing.notes,
+          status: existing.status,
+        });
+        setRegisteredAccounts((prev) => prev.map((item) => item.platform === platform ? saved : item));
+        setIdentityDrafts((prev) => ({ ...prev, [platform]: {
+          account_handle: saved.account_handle, display_name: saved.display_name, notes: saved.notes,
+        } }));
+      }
+    } catch (e: any) {
+      setPlatformIdentities((prev) => ({ ...prev, [platform]: {
+        platform, logged_in: false, name: "", avatar_url: null,
+        error: e?.message || "读取平台身份失败",
+      } }));
+    } finally {
+      setIdentityLoading(null);
+    }
   };
 
   const saveIdentity = async (platform: Platform) => {
@@ -233,7 +266,29 @@ export default function Accounts() {
                         <div style={{ fontSize: 11, color: "var(--muted)" }}>登记状态：{existing.status === "active" ? "已启用" : "已停用"}</div>
                       </div>
                     )}
-                    <div style={{ fontSize: 11, color: "var(--muted)" }}>账号身份备注（手动登记，用于避免选错账号）</div>
+                    {platformIdentities[a.platform] && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "7px 0" }}>
+                        {platformIdentities[a.platform].avatar_url ? (
+                          <img src={platformIdentities[a.platform].avatar_url!} alt="" width={34} height={34}
+                            referrerPolicy="no-referrer" style={{ borderRadius: "50%", objectFit: "cover" }} />
+                        ) : <span aria-hidden="true" style={{ width: 34, height: 34, borderRadius: "50%", background: "var(--surface-2)" }} />}
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <div style={{ fontSize: 12, fontWeight: 650 }}>
+                            {platformIdentities[a.platform].logged_in
+                              ? (platformIdentities[a.platform].name || "已验证登录，平台未返回昵称")
+                              : (platformIdentities[a.platform].error || "平台登录态未验证")}
+                          </div>
+                          <div className="tiny">平台实时身份校验</div>
+                        </div>
+                      </div>
+                    )}
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                      <div style={{ fontSize: 11, color: "var(--muted)", flex: 1 }}>账号身份备注（手动登记，用于避免选错账号）</div>
+                      <button className="btn sm" type="button" disabled={identityLoading === a.platform}
+                        onClick={() => void readIdentity(a.platform as Platform)}>
+                        {identityLoading === a.platform ? "读取中…" : "读取平台昵称"}
+                      </button>
+                    </div>
                     <input className="field" value={draft.display_name} placeholder="账号昵称 / 备注名"
                       onChange={(e) => setIdentityDrafts((prev) => ({ ...prev, [a.platform]: { ...draft, display_name: e.target.value } }))} />
                     <input className="field" value={draft.account_handle} placeholder="平台账号标识（ID / 主页号）"
