@@ -2975,18 +2975,21 @@ def _register_routes(app: FastAPI) -> None:
         offset: int = Query(0, ge=0),
     ):
         conn = _g()["conn"]
-        where: list[str] = []
-        params: list = []
+        search_where: list[str] = []
+        search_params: list = []
+        if query and query.strip():
+            needle = f"%{query.strip()}%"
+            search_where.append("(title LIKE ? OR original_filename LIKE ? OR alt_text LIKE ? OR tags LIKE ?)")
+            search_params.extend([needle, needle, needle, needle])
+        search_sql = " WHERE " + " AND ".join(search_where) if search_where else ""
+        where = list(search_where)
+        params = list(search_params)
         if status != "all":
             where.append("status = ?")
             params.append(status)
         if review_status != "all":
             where.append("review_status = ?")
             params.append(review_status)
-        if query and query.strip():
-            needle = f"%{query.strip()}%"
-            where.append("(title LIKE ? OR original_filename LIKE ? OR alt_text LIKE ? OR tags LIKE ?)")
-            params.extend([needle, needle, needle, needle])
         where_sql = " WHERE " + " AND ".join(where) if where else ""
         total = conn.execute(
             "SELECT COUNT(*) FROM media_assets" + where_sql, params
@@ -2998,12 +3001,8 @@ def _register_routes(app: FastAPI) -> None:
             "SUM(CASE WHEN status != 'archived' AND review_status = 'approved' THEN 1 ELSE 0 END) AS approved_total, "
             "SUM(CASE WHEN status != 'archived' AND review_status = 'rejected' THEN 1 ELSE 0 END) AS rejected_total, "
             "SUM(CASE WHEN status = 'archived' THEN 1 ELSE 0 END) AS archived_total "
-            "FROM media_assets" + (
-                " WHERE " + " AND ".join(
-                    clause for clause in where if clause not in ("status = ?", "review_status = ?")
-                ) if any(clause not in ("status = ?", "review_status = ?") for clause in where) else ""
-            ),
-            [value for clause, value in zip(where, params) if clause not in ("status = ?", "review_status = ?")],
+            "FROM media_assets" + search_sql,
+            search_params,
         ).fetchone()
         counts = {
             "all": count_row["active_total"] or 0,
