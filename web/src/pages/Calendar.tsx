@@ -40,7 +40,35 @@ export default function Calendar() {
   const [error, setError] = useState<string | null>(null);
   // 行内排期编辑：selected 为草稿 id，draftTime 为 datetime-local 值
   const [selected, setSelected] = useState<{ id: string; title: string } | null>(null);
+  const [targetDraftId, setTargetDraftId] = useState<string | null>(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("target_type") === "draft" ? params.get("target_id") : null;
+  });
   const [draftTime, setDraftTime] = useState("");
+  useEffect(() => {
+    const syncTarget = () => {
+      const params = new URLSearchParams(window.location.search);
+      setTargetDraftId(params.get("target_type") === "draft" ? params.get("target_id") : null);
+    };
+    window.addEventListener("popstate", syncTarget);
+    return () => window.removeEventListener("popstate", syncTarget);
+  }, []);
+  useEffect(() => {
+    if (!targetDraftId) return;
+    let active = true;
+    void api.draftById(targetDraftId).then((draft) => {
+      if (!active || !draft) return;
+      const targetDate = draft.scheduled_publish_at || draft.saved_at || draft.created_at;
+      const parsed = targetDate ? new Date(targetDate) : null;
+      if (parsed && !Number.isNaN(parsed.getTime())) {
+        setCursorDate(new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate()));
+        setViewMode("day");
+      }
+    }).catch((error) => {
+      if (active) showToast("加载通知关联草稿失败，请刷新页面重试", "error");
+    });
+    return () => { active = false; };
+  }, [targetDraftId]);
   const [pendingDraft, setPendingDraft] = useState<Record<string, string>>({});
   const scheduleDrawerRef = useRef<HTMLElement | null>(null);
   const planDrawerRef = useRef<HTMLElement | null>(null);
@@ -288,7 +316,7 @@ export default function Calendar() {
                           title={editable ? `${e.title} · 点击改排期` : `${e.title} · ${statusLabel[e.status] ?? e.status}（不可改排期）`}
                           disabled={!editable}
                           onClick={() => { setSelected({ id: e.id, title: e.title }); setDraftTime(_toLocalInput(e.scheduled || e.saved_at)); }}
-                          style={{ borderLeft: `3px solid ${platformColors[e.platform] || "#666"}`, outline: selected?.id === e.id ? "2px solid var(--blue)" : "none" }}>
+                          style={{ borderLeft: `3px solid ${platformColors[e.platform] || "#666"}`, outline: selected?.id === e.id || targetDraftId === e.id ? "2px solid var(--blue)" : "none" }}>
                           <span className="calendar-event-title">{e.title}</span>
                           <span className="calendar-event-meta">{e.scheduled ? e.scheduled.slice(11, 16) : "未排期"}{statusLabel[e.status] ? ` · ${statusLabel[e.status]}` : ""}</span>
                         </button>
@@ -468,7 +496,7 @@ export default function Calendar() {
               </thead>
               <tbody>
                 {unscheduled.map((d) => (
-                  <tr key={d.id}>
+                  <tr key={d.id} style={targetDraftId === d.id ? { background: "var(--surface-2)", outline: "2px solid var(--blue)" } : undefined}>
                     <td style={{ fontSize: 11, color: "var(--subtle)" }}>草稿</td>
                     <td>{d.title ?? <span style={{ color: "var(--subtle)" }}>—</span>}</td>
                     <td>

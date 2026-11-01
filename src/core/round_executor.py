@@ -32,6 +32,7 @@ from typing import Optional
 from .config import PROJECT_ROOT
 
 from .timezone import business_now
+from .task_context import bind_task_context
 from .kb_reader import KbReader  # noqa: F401 — 兼容旧引用
 from .topic_pool import load_pool
 from .persona import effective_persona
@@ -195,6 +196,8 @@ class RoundExecutor:
             raise ValueError(f"轮次 {round_id} 无法进入 producing")
 
         task_run_id = self._start_task_run(round_id)
+        task_context = bind_task_context(task_run_id, round_id)
+        task_context.__enter__()
 
         try:
             # 复盘反馈也属于执行流程；若读取/解析异常，必须进入统一失败收尾，
@@ -218,6 +221,8 @@ class RoundExecutor:
                     self.conn.commit()
                 except Exception:  # noqa: BLE001 — 失败报告尽量持久化，但不遮盖主错误
                     logger.exception("空选题失败报告写入失败 round=%s", round_id)
+                finally:
+                    task_context.__exit__(None, None, None)
                 return report
 
             # P0：只有确认本轮确实有内容需要生成后，才检查模型配置。
@@ -285,6 +290,7 @@ class RoundExecutor:
             self._finish_task_run(task_run_id, "failed", "；".join(report["errors"]) or None)
         else:
             self._finish_task_run(task_run_id, "success")
+        task_context.__exit__(None, None, None)
 
         report["finished_at"] = business_now(self.cfg).isoformat()
         report["step_status"] = step_status_from_report(report, self._orch)
@@ -997,7 +1003,10 @@ class RoundExecutor:
                 logger.exception("存草稿异常 platform=%s", platform.value)
                 report["drafts_failed"] += 1
                 self._mark_draft_failed(row["draft_id"], f"存草稿异常: {exc}")
-                self._notify_failed(platform, row["title"], f"存草稿异常: {exc}")
+                self._notify_failed(
+                    platform, row["title"], f"存草稿异常: {exc}",
+                    draft_id=row["draft_id"], round_id=round_id,
+                )
                 continue
 
             if result.success:
@@ -1020,6 +1029,7 @@ class RoundExecutor:
                     self.notifier.emit(
                         "draft_saved",
                         f"{platform.display_name} 草稿已保存：{row['title'][:30]}",
+                        draft_id=row["draft_id"], round_id=round_id,
                     )
             elif result.needs_human_verify:
                 # —— R17 / P0-3 新增：按钮点了但无成功证据，需人工核实 ——
@@ -1049,6 +1059,7 @@ class RoundExecutor:
                 )
                 self._notify_failed(
                     platform, row["title"], result.error_msg or "存草稿失败",
+                    draft_id=row["draft_id"], round_id=round_id,
                 )
 
         if skipped_login_platforms:
@@ -1138,7 +1149,10 @@ class RoundExecutor:
             draft_id, "failed", reason=reason, extra_updates={"error_msg": reason},
         )
 
-    def _notify_failed(self, platform: Platform, title: str, reason: str) -> None:
+    def _notify_failed(
+        self, platform: Platform, title: str, reason: str,
+        *, draft_id: Optional[str] = None, round_id: Optional[int] = None,
+    ) -> None:
         """存草稿失败通知（error 级，落 notifications 表）。"""
         if not self.notifier:
             return
@@ -1146,6 +1160,8 @@ class RoundExecutor:
             "draft_failed",
             f"{platform.display_name} 存草稿失败：{(title or '')[:30]} — {reason}",
             platform=platform.value,
+            draft_id=draft_id,
+            round_id=round_id,
         )
 
     def _notify_guard_give_up(self, platform: Platform, title: str, msg: str) -> None:

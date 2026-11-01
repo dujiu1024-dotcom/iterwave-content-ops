@@ -63,6 +63,28 @@ function groupOf(t: OpsTab): OpsGroup {
 export default function Operations() {
   const { showToast, withPending } = useApp();
   const [rawTab, setTab] = useUrlTab<OpsTab>(ALL_OPS_TABS, "kpi");
+  const [recordTarget, setRecordTarget] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    const type = params.get("target_type");
+    const rawId = params.get("target_id");
+    const id = rawId && /^\d+$/.test(rawId) ? Number(rawId) : null;
+    return { type, id };
+  });
+  useEffect(() => {
+    const syncTarget = () => {
+      const params = new URLSearchParams(window.location.search);
+      const type = params.get("target_type");
+      const rawId = params.get("target_id");
+      const id = rawId && /^\d+$/.test(rawId) ? Number(rawId) : null;
+      setRecordTarget({ type, id });
+      if (id) {
+        if (type === "task_run") setTab("tasks");
+        if (type === "ops_log") setTab("logs");
+      }
+    };
+    window.addEventListener("popstate", syncTarget);
+    return () => window.removeEventListener("popstate", syncTarget);
+  }, [setTab]);
   const tab = groupOf(rawTab);
   const show = (p: OpsPane) => (TABS.find((g) => g.key === tab)?.panes ?? []).includes(p);
 
@@ -106,8 +128,8 @@ export default function Operations() {
     try {
       const results = await Promise.allSettled([
         show("kpi") || show("logs") ? api.opsKpi(kpiDays) : Promise.resolve(null),
-        show("logs") ? api.opsLogsPage(logsPage, historyPageSize, { platform: logsPlatform || undefined, status: logsStatus || undefined, dateFrom: logsDateFrom || undefined, dateTo: logsDateTo || undefined }) : Promise.resolve(null),
-        show("tasks") ? api.taskRunsPage(tasksPage, historyPageSize, { platform: tasksPlatform || undefined, status: tasksStatus || undefined, taskType: tasksType || undefined, dateFrom: tasksDateFrom || undefined, dateTo: tasksDateTo || undefined }) : Promise.resolve(null),
+        show("logs") ? api.opsLogsPage(logsPage, historyPageSize, { platform: logsPlatform || undefined, status: logsStatus || undefined, dateFrom: logsDateFrom || undefined, dateTo: logsDateTo || undefined, recordId: recordTarget.type === "ops_log" ? recordTarget.id ?? undefined : undefined }) : Promise.resolve(null),
+        show("tasks") ? api.taskRunsPage(tasksPage, historyPageSize, { platform: tasksPlatform || undefined, status: tasksStatus || undefined, taskType: tasksType || undefined, dateFrom: tasksDateFrom || undefined, dateTo: tasksDateTo || undefined, recordId: recordTarget.type === "task_run" ? recordTarget.id ?? undefined : undefined, roundId: recordTarget.type === "round" ? recordTarget.id ?? undefined : undefined }) : Promise.resolve(null),
         show("notifications") ? api.notificationsPage(notifsPage, historyPageSize) : Promise.resolve(null),
         show("notifications") ? api.notifyRules() : Promise.resolve(null),
         show("scheduler") ? api.schedulerJobs() : Promise.resolve(null),
@@ -146,7 +168,7 @@ export default function Operations() {
     }
   };
 
-  useEffect(() => { refresh(); }, [tab, kpiDays, logsPage, tasksPage, notifsPage, logsPlatform, logsStatus, logsDateFrom, logsDateTo, tasksPlatform, tasksStatus, tasksType, tasksDateFrom, tasksDateTo]);
+  useEffect(() => { refresh(); }, [tab, kpiDays, logsPage, tasksPage, notifsPage, logsPlatform, logsStatus, logsDateFrom, logsDateTo, tasksPlatform, tasksStatus, tasksType, tasksDateFrom, tasksDateTo, recordTarget.type, recordTarget.id]);
 
   const testNotify = async () => {
     setNotifBusy(true);
@@ -216,7 +238,7 @@ export default function Operations() {
       {show("kpi") && <KpiPane kpi={kpi} days={kpiDays} onDaysChange={setKpiDays} />}
 
       {/* === 2. 评论日志 === */}
-      {show("logs") && <LogsPane logs={logs} total={logsTotal} page={logsPage} pages={logsPages} onPageChange={setLogsPage} onResolved={refresh} platform={logsPlatform} status={logsStatus} dateFrom={logsDateFrom} dateTo={logsDateTo} onFiltersChange={(v) => { setLogsPage(1); setLogsPlatform(v.platform); setLogsStatus(v.status); setLogsDateFrom(v.dateFrom); setLogsDateTo(v.dateTo); }} />}
+      {show("logs") && <LogsPane logs={logs} total={logsTotal} page={logsPage} pages={logsPages} onPageChange={setLogsPage} onResolved={refresh} targetId={recordTarget.type === "ops_log" ? recordTarget.id : null} platform={logsPlatform} status={logsStatus} dateFrom={logsDateFrom} dateTo={logsDateTo} onFiltersChange={(v) => { setLogsPage(1); setLogsPlatform(v.platform); setLogsStatus(v.status); setLogsDateFrom(v.dateFrom); setLogsDateTo(v.dateTo); }} />}
 
       {/* === 3. 发布确认 === */}
       {show("publish") && <PublishPane />}
@@ -240,7 +262,7 @@ export default function Operations() {
       )}
 
       {/* === 5. 任务追踪 === */}
-      {show("tasks") && <TasksPane tasks={tasks} total={tasksTotal} page={tasksPage} pages={tasksPages} onPageChange={setTasksPage} onResolved={refresh} platform={tasksPlatform} status={tasksStatus} taskType={tasksType} dateFrom={tasksDateFrom} dateTo={tasksDateTo} onFiltersChange={(v) => { setTasksPage(1); setTasksPlatform(v.platform); setTasksStatus(v.status); setTasksType(v.taskType); setTasksDateFrom(v.dateFrom); setTasksDateTo(v.dateTo); }} />}
+      {show("tasks") && <TasksPane tasks={tasks} total={tasksTotal} page={tasksPage} pages={tasksPages} onPageChange={setTasksPage} onResolved={refresh} targetId={recordTarget.type === "task_run" || recordTarget.type === "round" ? recordTarget.id : null} targetType={recordTarget.type} platform={tasksPlatform} status={tasksStatus} taskType={tasksType} dateFrom={tasksDateFrom} dateTo={tasksDateTo} onFiltersChange={(v) => { setTasksPage(1); setTasksPlatform(v.platform); setTasksStatus(v.status); setTasksType(v.taskType); setTasksDateFrom(v.dateFrom); setTasksDateTo(v.dateTo); }} />}
 
       {/* === 6. 定时任务 === */}
       {show("scheduler") && <SchedulerPane jobs={jobs} onTriggered={refresh} />}
@@ -394,8 +416,9 @@ function KpiCard({ label, value, hint, color }: { label: string; value: number; 
   );
 }
 
-function LogsPane({ logs, total, page, pages, onPageChange, onResolved, platform, status, dateFrom, dateTo, onFiltersChange }: {
+function LogsPane({ logs, total, page, pages, onPageChange, onResolved, targetId, platform, status, dateFrom, dateTo, onFiltersChange }: {
   logs: OpsLogItem[]; total: number; page: number; pages: number; onPageChange: (page: number) => void;
+  targetId?: number | null;
   onResolved?: () => void;
   platform: Platform | ""; status: string; dateFrom: string; dateTo: string;
   onFiltersChange: (value: { platform: Platform | ""; status: string; dateFrom: string; dateTo: string }) => void;
@@ -448,7 +471,7 @@ function LogsPane({ logs, total, page, pages, onPageChange, onResolved, platform
               </td></tr>
             )}
             {logs.map((l) => (
-              <tr key={l.id}>
+              <tr key={l.id} style={targetId === l.id ? { background: "var(--surface-2)", outline: "2px solid var(--primary)" } : undefined}>
                 <td style={{ fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>
                   {l.executed_at ? new Date(l.executed_at).toLocaleString("zh-CN") : l.schedule_time ? "待执行" : "-"}
                 </td>
@@ -774,9 +797,10 @@ function BreakerPane({
   );
 }
 
-function TasksPane({ tasks, total, page, pages, onPageChange, onResolved, platform, status, taskType, dateFrom, dateTo, onFiltersChange }: {
+function TasksPane({ tasks, total, page, pages, onPageChange, onResolved, targetId, targetType, platform, status, taskType, dateFrom, dateTo, onFiltersChange }: {
   tasks: TaskRunItem[];
   total: number; page: number; pages: number; onPageChange: (page: number) => void;
+  targetId?: number | null; targetType?: string | null;
   onResolved?: () => void;
   platform: Platform | ""; status: string; taskType: string; dateFrom: string; dateTo: string;
   onFiltersChange: (value: { platform: Platform | ""; status: string; taskType: string; dateFrom: string; dateTo: string }) => void;
@@ -834,7 +858,7 @@ function TasksPane({ tasks, total, page, pages, onPageChange, onResolved, platfo
               </td></tr>
             )}
             {tasks.map((t) => (
-              <tr key={t.id}>
+              <tr key={t.id} style={(targetType === "round" ? t.task_type === "round_pipeline" && t.biz_id === String(targetId) : targetId === t.id) ? { background: "var(--surface-2)", outline: "2px solid var(--primary)" } : undefined}>
                 <td style={{ fontSize: 12, fontFamily: "monospace" }}>#{t.id}</td>
                 <td>{TYPE_LABEL[t.task_type] ?? t.task_type}</td>
                 <td>{t.platform ? PLATFORM_NAME[t.platform] : "-"}</td>

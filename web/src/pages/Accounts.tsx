@@ -19,9 +19,9 @@ const LOGIN_STATE_LABEL: Record<string, { label: string; color: string }> = {
 };
 
 const ACCOUNT_STATUS_LABEL: Record<string, { label: string; color: string }> = {
-  logged_in:     { label: "✓ 已登录",      color: "green" },
+  logged_in:     { label: "✓ 登录流程成功", color: "green" },
   logging_in:    { label: "▣ 登录中...",  color: "blue" },
-  not_logged_in: { label: "✕ 未登录",      color: "gray" },
+  not_logged_in: { label: "✕ 未配置登录态", color: "gray" },
 };
 
 export default function Accounts() {
@@ -173,7 +173,13 @@ export default function Accounts() {
       {/* 四平台账号状态卡 */}
       <div className="grid two" style={{ marginBottom: 20 }}>
         {(accounts || []).map((a) => {
-          const st = ACCOUNT_STATUS_LABEL[a.status] || ACCOUNT_STATUS_LABEL.not_logged_in;
+          const st = a.credential_present
+            ? { label: "本机登录态文件存在", color: "green" }
+            : a.status === "logging_in"
+              ? ACCOUNT_STATUS_LABEL.logging_in
+              : a.status === "logged_in"
+                ? { label: "登录流程成功，凭证待导出", color: "blue" }
+                : ACCOUNT_STATUS_LABEL.not_logged_in;
           const loginSt = a.login_proc_state ? LOGIN_STATE_LABEL[a.login_proc_state] : null;
           return (
             <div key={a.platform} className="panel" style={{ padding: 18 }}>
@@ -197,11 +203,22 @@ export default function Accounts() {
               )}
 
               {/* 本机凭证状态不等于平台会话实时有效；实际可用性仍需业务请求验证 */}
-              {a.status === "logged_in" && (
+              {a.credential_present && (
                 <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 10 }}>
-                  ✓ 本机存在登录凭证 · 平台会话有效性将在实际请求时确认
+                  ✓ 本机登录态文件存在 · 平台会话有效性仍需实际请求确认
                 </div>
               )}
+
+              <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 10 }}>
+                <span className={`tag ${a.preflight_ready ? "green" : "orange"}`}>
+                  {a.preflight_ready ? "运行前条件齐备" : "运行前条件未齐"}
+                </span>
+                <div style={{ marginTop: 5 }}>
+                  平台：{a.enabled ? "已启用" : "未启用"} · 账号登记：{a.account_active ? "已启用" : a.account_registered ? "已停用" : "未登记"} ·
+                  登录态文件：{a.credential_present ? "存在" : "缺失"} · 熔断：{a.circuit_broken ? "冷却中" : "正常"}
+                </div>
+                <div>运行前检查不代表平台会话已验证；实际可用性以平台请求结果为准。</div>
+              </div>
 
               {/* 账号身份备注：由运营者登记，用于区分同平台账号；不冒充平台自动采集昵称 */}
               {(() => {

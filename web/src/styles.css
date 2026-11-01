@@ -855,3 +855,44 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 .side-bottom { flex: 0 0 auto; max-height: min(220px, 30vh); overflow-y: auto; }
 .main { height: 100vh; min-height: 0; overflow: hidden; }
 .content { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+
+
+/* Guided content-template onboarding and read-only Skill contract tests */
+.template-howto { margin-bottom: 14px; }
+.template-howto-steps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+.template-howto-steps > span {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.template-howto-steps b {
+  display: grid;
+  place-items: center;
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--blue-weak);
+  color: var(--blue);
+}
+.skill-contract-tester { margin-top: 14px; border-color: var(--blue); }
+.skill-contract-results { display: grid; gap: 5px; margin-top: 10px; font-size: 11px; }
+.skill-contract-results .pass { color: var(--green); }
+.skill-contract-results .fail { color: var(--red); }
+@media (max-width: 900px) {
+  .template-howto-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 620px) {
+  .template-howto-steps { grid-template-columns: 1fr; }
+}

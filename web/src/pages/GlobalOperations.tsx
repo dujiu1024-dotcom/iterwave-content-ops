@@ -234,7 +234,7 @@ export default function GlobalOperations() {
             </div>
             {todo.source === "notification" ? <button className="btn sm" disabled={loading} onClick={() => {
               void api.markNotificationRead(Number(todo.record_id)).then(() => refresh()).catch((e) => setError(e instanceof Error ? e.message : String(e)));
-            }}>标记已读</button> : <button className="btn sm" onClick={() => navigate(todo.target_page, todo.target_page === "operations" ? todo.target_tab : undefined)}>处理</button>}
+            }}>标记已读</button> : <button className="btn sm" onClick={() => navigate(todo.target_page, todo.target_page === "operations" ? (todo.target_tab ?? undefined) : undefined)}>处理</button>}
           </div>)}
         </div> : <div className="empty-state">当前筛选条件下没有待处理事项。</div>}
         {todoCapped && <div className="tiny" style={{ marginTop: 8 }}>部分来源记录较多，当前统计已提示截取范围；请缩小账号组或来源筛选。</div>}
@@ -262,9 +262,23 @@ export default function GlobalOperations() {
               <div className="task-title">{notification.title}</div>
               <div className="task-desc">{notification.body || notification.type} · {notification.platform ? (PLATFORMS[notification.platform] ?? notification.platform) : "系统"} · {new Date(notification.sent_at).toLocaleString("zh-CN")}</div>
             </div>
+            <button className="btn sm primary" disabled={loading} onClick={() => {
+              void api.markNotificationRead(notification.id)
+                .then(() => {
+                  void refresh();
+                  navigate(
+                    notification.target_page || "operations",
+                    notification.target_tab || undefined,
+                    notification.target_type && notification.target_id !== undefined && notification.target_id !== null
+                      ? { type: notification.target_type, id: notification.target_id }
+                      : null,
+                  );
+                })
+                .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+            }}>查看并标记已读</button>
             <button className="btn sm" disabled={loading} onClick={() => {
               void api.markNotificationRead(notification.id).then(() => refresh()).catch((e) => setError(e instanceof Error ? e.message : String(e)));
-            }}>标记已读</button>
+            }}>仅标记已读</button>
           </div>)}
         </div> : <div className="empty-state">当前没有未读通知。</div>}
       </section>

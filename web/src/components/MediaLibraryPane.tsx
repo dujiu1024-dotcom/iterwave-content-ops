@@ -181,9 +181,8 @@ export default function MediaLibraryPane() {
             data_base64: await fileAsBase64(item),
           });
           if (result.duplicate) duplicates += 1; else succeeded += 1;
-        } catch (e) {
+        } catch {
           failedFiles.push(item);
-          console.error("media upload failed:", item.name, e);
         }
       }
       const parts = [`新增 ${succeeded} 张`];

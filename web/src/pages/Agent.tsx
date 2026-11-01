@@ -439,6 +439,8 @@ function SkillsPane() {
   const [draftTest, setDraftTest] = useState<ReturnType<typeof inspectSkillManifest> | null>(null);
   const [savedTests, setSavedTests] = useState<Record<string, ReturnType<typeof inspectSkillManifest>>>({});
 
+  const [testingSkill, setTestingSkill] = useState<TenantSkillManifest | null>(null);
+
   const load = async () => {
     setLoading(true);
     try {
@@ -611,6 +613,7 @@ function SkillsPane() {
                   <td><div className="skill-row-actions">
                     <button className="btn sm" type="button" onClick={() => editSkill(skill)}>编辑</button>
                     <button className="btn sm" type="button" onClick={() => setSavedTests((old) => ({ ...old, [skill.skill_id]: inspectSkillManifest(skill) }))}>配置自检</button>
+                    <button className="btn sm primary" type="button" onClick={() => setTestingSkill(skill)}>独立测试</button>
                     <button className="btn sm" disabled={isPending(`skill:toggle:${skill.skill_id}`)} onClick={() => void toggle(skill)}>{skill.enabled ? "停用" : "启用"}</button>
                     <button className="btn sm" disabled={skill.enabled || isPending(`skill:delete:${skill.skill_id}`)} onClick={() => void remove(skill)}>删除</button>
                   </div>
@@ -621,12 +624,111 @@ function SkillsPane() {
             </table>
           </div>
         )}
+        {testingSkill && <SkillContractTester key={testingSkill.skill_id + ":" + testingSkill.manifest_version} skill={testingSkill} onClose={() => setTestingSkill(null)} />}
         <div className="note" style={{ marginTop: 10 }}>安全限制：登记记录按账号组隔离；新建默认停用；权限仅允许读取类声明；启用不代表具备执行能力，Agent 当前不会加载或运行用户代码。</div>
       </div>
     </>
   );
 }
 
+
+type SkillContractCheck = { label: string; pass: boolean; detail?: string };
+
+function validateSkillSample(sample: unknown, schemas: Array<Record<string, unknown>>, direction: string): SkillContractCheck[] {
+  if (!schemas.length) return [{ label: `${direction} Schema`, pass: true, detail: "未声明字段，当前无约束" }];
+  const checks: SkillContractCheck[] = [];
+  for (const schema of schemas) {
+    const name = typeof schema.name === "string" ? schema.name : "";
+    if (name) {
+      const required = schema.required === true;
+      const present = Boolean(sample && typeof sample === "object" && !Array.isArray(sample)
+        && Object.prototype.hasOwnProperty.call(sample, name));
+      if (!present) {
+        checks.push({ label: name, pass: !required, detail: required ? "缺少必填字段" : "可选字段未提供" });
+        continue;
+      }
+      const value = (sample as Record<string, unknown>)[name];
+      const expected = typeof schema.type === "string" ? schema.type : "any";
+      const actual = value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+      const typePass = expected === "any" || expected === actual
+        || (expected === "integer" && typeof value === "number" && Number.isInteger(value))
+        || (expected === "number" && typeof value === "number");
+      const enumValues = Array.isArray(schema.enum) ? schema.enum : null;
+      const enumPass = !enumValues || enumValues.some((entry) => JSON.stringify(entry) === JSON.stringify(value));
+      checks.push({
+        label: name, pass: typePass && enumPass,
+        detail: !typePass ? `类型应为 ${expected}，实际为 ${actual}` : !enumPass ? "不在允许值范围内" : "类型与约束通过",
+      });
+      continue;
+    }
+    const required = Array.isArray(schema.required) ? schema.required.filter((v): v is string => typeof v === "string") : [];
+    const properties = schema.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties)
+      ? schema.properties as Record<string, unknown> : {};
+    const objectPass = sample !== null && typeof sample === "object" && !Array.isArray(sample);
+    const missing = objectPass ? required.filter((key) => !Object.prototype.hasOwnProperty.call(sample, key)) : required;
+    const typePass = schema.type !== "object" || objectPass;
+    checks.push({
+      label: typeof schema.title === "string" ? schema.title : `${direction} 对象结构`,
+      pass: typePass && missing.length === 0,
+      detail: !typePass ? "样例应为 JSON 对象" : missing.length ? `缺少必填字段：${missing.join("、")}` : `检查 ${Object.keys(properties).length} 个属性定义`,
+    });
+  }
+  return checks;
+}
+
+function SkillContractTester({ skill, onClose }: { skill: TenantSkillManifest; onClose: () => void }) {
+  const [inputSample, setInputSample] = useState("{}");
+  const [outputSample, setOutputSample] = useState("{}");
+  const [checks, setChecks] = useState<SkillContractCheck[] | null>(null);
+  const [error, setError] = useState("");
+  const run = () => {
+    setError("");
+    try {
+      const input = JSON.parse(inputSample);
+      const output = JSON.parse(outputSample);
+      setChecks([
+        ...validateSkillSample(input, skill.inputs, "输入"),
+        ...validateSkillSample(output, skill.outputs, "输出"),
+      ]);
+    } catch (e) {
+      setChecks(null);
+      setError(e instanceof Error ? `JSON 格式错误：${e.message}` : "JSON 格式错误");
+    }
+  };
+  return (
+    <div className="panel skill-contract-tester">
+      <div className="panel-head">
+        <div>
+          <div className="panel-title">独立测试：{skill.name}</div>
+          <div className="panel-sub">填写输入和预期输出样例，验证是否符合已登记的 Schema</div>
+        </div>
+        <button className="btn sm" type="button" onClick={onClose}>关闭测试</button>
+      </div>
+      <div className="grid two">
+        <label className="form-label">输入样例（JSON）
+          <textarea className="field" rows={7} value={inputSample} onChange={(e) => setInputSample(e.target.value)} spellCheck={false} />
+        </label>
+        <label className="form-label">输出样例（JSON）
+          <textarea className="field" rows={7} value={outputSample} onChange={(e) => setOutputSample(e.target.value)} spellCheck={false} />
+        </label>
+      </div>
+      <div className="flex wrap" style={{ alignItems: "center", gap: 10 }}>
+        <button className="btn sm primary" type="button" onClick={run}>运行契约测试</button>
+        <span className="tiny">测试对象：{skill.skill_id} · v{skill.version} · Manifest #{skill.manifest_version}</span>
+      </div>
+      {error && <div className="note" role="alert" style={{ color: "var(--red)" }}>{error}</div>}
+      {checks && <div className="skill-contract-results" role="status">
+        <strong>{checks.filter((item) => item.pass).length}/{checks.length} 项通过</strong>
+        {checks.map((item, index) => <div key={`${item.label}-${index}`} className={item.pass ? "pass" : "fail"}>
+          {item.pass ? "✓" : "✕"} {item.label} · {item.detail}
+        </div>)}
+      </div>}
+      <div className="note" style={{ marginTop: 10 }}>
+        安全边界：这是输入/输出契约测试，不会执行 Skill 代码、调用 Agent 工具或访问外网。当前自定义 Skill 仍是元数据登记，尚无可执行运行时。
+      </div>
+    </div>
+  );
+}
 
 function AuditPagination({ total, page, pageSize, onPageChange }: {
   total: number; page: number; pageSize: number; onPageChange: (page: number) => void;

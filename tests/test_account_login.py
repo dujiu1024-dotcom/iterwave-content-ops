@@ -285,3 +285,17 @@ def test_success_login_status_exports_to_same_tenant_directory(tmp_login, tmp_pa
 
     assert status["state"] == "success"
     assert captured == {"platform": "xhs", "data_dir": tenant_data}
+
+
+def test_start_login_hides_process_launch_path_errors(tmp_login, monkeypatch):
+    monkeypatch.setattr(al, "build_cmd", lambda *_args, **_kwargs: ["fake-login-command"])
+
+    def fail_popen(*_args, **_kwargs):
+        raise OSError("/srv/iterwave/private/browser/chromium: permission denied")
+
+    monkeypatch.setattr(al.subprocess, "Popen", fail_popen)
+    result = al.start_login("xhs")
+    assert result["state"] == "error"
+    assert result["message"] == "登录进程启动失败，请检查浏览器运行环境或联系管理员"
+    assert "/srv/iterwave" not in result["message"]
+

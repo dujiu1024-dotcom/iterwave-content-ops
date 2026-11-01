@@ -439,6 +439,16 @@ def test_server_source_and_path_redaction(cfg, tmp_path):
     with pytest.raises(FileNotFoundError):
         kb_sources.add_server(cfg, path=str(tmp_path / "missing.csv"))
 
+    # 后台读取失败的可见诊断不能回传服务端绝对路径。
+    missing = kb_sources.read_source(cfg, {
+        "id": "missing-server-source", "kind": "server", "name": "私有服务器源",
+        "path": str(tmp_path / "private" / "missing.csv"), "format": "csv", "enabled": True,
+    })
+    rendered = json.dumps(missing, ensure_ascii=False)
+    assert missing["status"] == "error"
+    assert missing["error"] == "来源文件不存在或不可访问"
+    assert str(tmp_path) not in rendered
+
 
 def test_remote_source_inspection_redacts_url_and_name(cfg):
     result = kb_sources.read_source(cfg, {
@@ -617,7 +627,9 @@ def test_remote_csv_json_rss(cfg, monkeypatch):
     out = kb_sources.sync_all_remote(cfg)
     assert out[json_src["id"]] == "failed"
     sources = {s["id"]: s for s in kb_sources.load_registry(cfg)}
-    assert "boom" in (sources[json_src["id"]]["last_error"] or "")
+    safe_error = sources[json_src["id"]]["last_error"] or ""
+    assert "OSError" in safe_error
+    assert "boom" not in safe_error
 
 
 def test_preview_and_delete(cfg):

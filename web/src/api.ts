@@ -27,6 +27,13 @@ export interface GlobalTaskQueueItem {
   attempts: number;
   error_code: string | null;
   error_message: string | null;
+  retry_of_task_id?: string | null;
+  retry_confirmed_by?: string | null;
+  retry_confirmation_note?: string | null;
+  resolution_action?: "handled" | "ignored" | null;
+  resolution_actor?: string | null;
+  resolution_note?: string | null;
+  resolution_at?: string | null;
 }
 
 export interface GlobalTaskQueueResponse {
@@ -51,8 +58,8 @@ export interface GlobalTodoItem {
   status: string;
   created_at: string | null;
   severity: "high" | "medium";
-  target_page: "task-queue" | "operations" | "assets";
-  target_tab: string;
+  target_page: string;
+  target_tab: string | null;
 }
 
 export interface GlobalTodoResponse {
@@ -77,8 +84,10 @@ export interface QueueTaskSubmission {
 
 export interface SystemStatus {
   enabled_platforms: Platform[];
-  /** 有登录态的平台（R20 ● 判定依据） */
+  /** 兼容旧字段：实际表示本机登录态文件存在，不代表会话有效 */
   logged_in_platforms: Platform[];
+  credential_present_platforms?: Platform[];
+  platform_status?: Partial<Record<Platform, PlatformProgress>>;
   /** 无登录态的平台：真实操作为阻塞状态 */
   platforms_without_login: Platform[];
   circuit_broken_platforms: Platform[];
@@ -420,8 +429,17 @@ export interface GoalSummary {
 
 /** 四平台进度（/api/platform_progress，固定返回 4 个平台） */
 export interface PlatformProgress {
-  /** 与 /api/status.enabled_platforms 同一口径 */
+  /** 与系统配置相同的四平台支持集合 */
+  supported?: boolean;
+  configured?: boolean;
   enabled: boolean;
+  account_registered?: boolean;
+  account_active?: boolean;
+  /** 本机 storage_state 文件存在；不代表平台会话仍有效 */
+  credential_present?: boolean;
+  session_validity?: "not_checked" | string;
+  preflight_ready?: boolean;
+  blockers?: string[];
   total_drafts: number;
   /** { draft_saved: 3, user_published: 1, data_fetching: 2, ... } */
   status_breakdown: Record<string, number>;
@@ -439,6 +457,8 @@ export interface ActionItem {
   source?: string;
   created_at?: string | null;
   actions?: string[];
+  target_page?: string;
+  target_tab?: string | null;
 }
 
 export interface HotSourceStatus {
@@ -864,6 +884,13 @@ export interface HotSource {
   platforms?: string[];
   platform?: string;
   enabled?: boolean;
+  last_test?: {
+    status: "success" | "failed" | "empty";
+    item_count: number;
+    sample_titles: string[];
+    message: string;
+    tested_at: string;
+  } | null;
 }
 
 export interface KbInspect {
@@ -1105,6 +1132,14 @@ export interface AccountInfo {
   login_proc_state?: string;
   login_proc_message?: string;
   has_storage_state: boolean;
+  enabled?: boolean;
+  configured?: boolean;
+  account_registered?: boolean;
+  account_active?: boolean;
+  credential_present?: boolean;
+  circuit_broken?: boolean;
+  preflight_ready?: boolean;
+  blockers?: string[];
   /** 扫码中的 QR（data:image/png;base64,xxx） */
   qr_base64?: string | null;
 }
@@ -1240,6 +1275,10 @@ export interface NotificationItem {
   channel: string | null;
   sent_at: string;
   read_at: string | null;
+  target_page?: string;
+  target_tab?: string | null;
+  target_type?: "task_run" | "ops_log" | "round" | "draft" | null;
+  target_id?: number | string | null;
 }
 
 export interface SchedulerJob {
@@ -1489,6 +1528,25 @@ export const api = {
     fetchJson<{ task_id: string; status: string }>(`/api/task-queue/${encodeURIComponent(taskId)}/cancel`, {
       method: "POST",
     }),
+  resolveTask: (taskId: string, input: { action: "handled" | "ignored"; note: string }) =>
+    fetchJson<{
+      task_id: string; action: "handled" | "ignored"; actor: string;
+      note: string; acted_at: string; created: boolean;
+    }>(`/api/task-queue/${encodeURIComponent(taskId)}/resolve`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  retryTask: (taskId: string, input: { confirmedNotExecuted: boolean; confirmationNote: string }) =>
+    fetchJson<{
+      task_id: string; retry_of_task_id: string; tenant_id: string; task_type: string;
+      status: string; created: boolean; confirmed_by: string; confirmation_note: string;
+    }>(`/api/task-queue/${encodeURIComponent(taskId)}/retry`, {
+      method: "POST",
+      body: JSON.stringify({
+        confirmed_not_executed: input.confirmedNotExecuted,
+        confirmation_note: input.confirmationNote,
+      }),
+    }),
   rounds: (status?: string) =>
     fetchJson<SpiralRound[]>(status ? `/api/rounds?status=${status}` : "/api/rounds"),
   roundsPage: (page: number, pageSize = 20, status?: string) => {
@@ -1523,6 +1581,11 @@ export const api = {
     if (status) p.set("status", status);
     if (platform) p.set("platform", platform);
     return fetchJson<Draft[]>(`/api/drafts?${p}`);
+  },
+  draftById: async (id: string) => {
+    const p = new URLSearchParams({ draft_id: id });
+    const rows = await fetchJson<Draft[]>(`/api/drafts?${p}`);
+    return rows[0] ?? null;
   },
   draftsPage: (status: string | undefined, platform: Platform | undefined, page: number, pageSize = 20) => {
     const p = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
@@ -1901,8 +1964,9 @@ export const api = {
     fetchJson<{ id: number; status: string; resolved_at?: string; already_resolved: boolean }>(
       `/api/ops_logs/${id}/resolve`, { method: "POST", body: JSON.stringify({ action }) },
     ),
-  opsLogsPage: (page: number, pageSize = 20, filters: { platform?: Platform; actionType?: string; status?: string; dateFrom?: string; dateTo?: string } = {}) => {
+  opsLogsPage: (page: number, pageSize = 20, filters: { platform?: Platform; actionType?: string; status?: string; dateFrom?: string; dateTo?: string; recordId?: number } = {}) => {
     const p = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    if (filters.recordId) p.set("record_id", String(filters.recordId));
     if (filters.platform) p.set("platform", filters.platform);
     if (filters.actionType) p.set("action_type", filters.actionType);
     if (filters.status) p.set("status", filters.status);
@@ -1916,8 +1980,10 @@ export const api = {
     if (status) p.set("status", status);
     return fetchJson<TaskRunItem[]>(`/api/task_runs?${p}`);
   },
-  taskRunsPage: (page: number, pageSize = 20, filters: { taskType?: string; status?: string; platform?: Platform; dateFrom?: string; dateTo?: string } = {}) => {
+  taskRunsPage: (page: number, pageSize = 20, filters: { taskType?: string; status?: string; platform?: Platform; dateFrom?: string; dateTo?: string; recordId?: number; roundId?: number } = {}) => {
     const p = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    if (filters.recordId) p.set("record_id", String(filters.recordId));
+    if (filters.roundId) p.set("round_id", String(filters.roundId));
     if (filters.taskType) p.set("task_type", filters.taskType);
     if (filters.status) p.set("status", filters.status);
     if (filters.platform) p.set("platform", filters.platform);

@@ -553,7 +553,6 @@ function HotSourceManager({ onSaved }: { onSaved: () => void }) {
   const [platform, setPlatform] = useState("");
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [testingIndex, setTestingIndex] = useState<number | null>(null);
-  const [testResults, setTestResults] = useState<Record<number, string>>({});
 
   useEffect(() => {
     api.hotSources()
@@ -610,14 +609,12 @@ function HotSourceManager({ onSaved }: { onSaved: () => void }) {
     setTestingIndex(index);
     try {
       const result = await api.testHotSource(index);
-      const detail = result.ok
-        ? `成功：解析 ${result.item_count} 条；示例：${result.sample_titles.join(" / ") || "无"}`
-        : `失败：${result.message}`;
-      setTestResults((prev) => ({ ...prev, [index]: detail }));
+      // 从服务端重新读取持久化的最近结果；刷新页面或重新进入后仍可见。
+      const latest = await api.hotSources();
+      setItems(latest.items);
       showToast(result.message, result.ok ? "success" : "error");
     } catch (e) {
       const message = (e as Error).message || "来源试抓取失败";
-      setTestResults((prev) => ({ ...prev, [index]: `失败：${message}` }));
       showToast(message, "error");
     } finally {
       setTestingIndex(null);
@@ -668,7 +665,18 @@ function HotSourceManager({ onSaved }: { onSaved: () => void }) {
                       </button>
                     </div>
                   </td>
-                  <td className="metric-foot">{testResults[i] || "—"}</td>
+                  <td className="metric-foot">
+                    {s.last_test ? (
+                      <>
+                        <span className={`tag ${s.last_test.status === "success" ? "green" : s.last_test.status === "failed" ? "red" : "gray"}`}>
+                          {s.last_test.status === "success" ? "成功" : s.last_test.status === "failed" ? "失败" : "无有效内容"}
+                        </span>
+                        <div>{s.last_test.tested_at} · {s.last_test.item_count} 条</div>
+                        <div>{s.last_test.message}</div>
+                        {s.last_test.sample_titles.length > 0 && <div>示例：{s.last_test.sample_titles.join(" / ")}</div>}
+                      </>
+                    ) : "尚未试抓取"}
+                  </td>
                 </tr>
               ))}
               {items.length === 0 && (

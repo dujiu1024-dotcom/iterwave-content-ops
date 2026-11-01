@@ -23,6 +23,7 @@ from .circuit_breaker import CircuitBreakerEngine
 from .pause import is_ops_paused
 
 from ..timezone import business_now
+from ..task_context import current_round_id, current_task_run_id
 
 logger = logging.getLogger(__name__)
 
@@ -295,10 +296,10 @@ class OperationsEngine:
         rhythm_wait_seconds: int = 0,
     ) -> None:
         self.db.execute(
-            "INSERT INTO ops_logs (platform, action_type, target_url, target_author, "
+            "INSERT INTO ops_logs (round_id, task_run_id, platform, action_type, target_url, target_author, "
             "content, schedule_time, executed_at, status, error_msg, rhythm_wait_seconds) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (platform.value, action_type, target_url, target_author,
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (current_round_id(), current_task_run_id(), platform.value, action_type, target_url, target_author,
              content, business_now(self.cfg).isoformat(), business_now(self.cfg).isoformat(),
              status, error_msg, rhythm_wait_seconds),
         )

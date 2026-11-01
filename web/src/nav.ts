@@ -3,11 +3,21 @@
 import { useEffect, useState } from "react";
 import { NAV_ITEMS } from "./Sidebar";
 
-export function navigate(page: string, tab?: string) {
+export function navigate(
+  page: string, tab?: string,
+  target?: { type: string; id: number | string } | null,
+) {
   const url = new URL(window.location.href);
   url.searchParams.set("page", page);
   if (tab) url.searchParams.set("tab", tab);
   else url.searchParams.delete("tab");
+  if (target?.type && target.id !== undefined && target.id !== null) {
+    url.searchParams.set("target_type", target.type);
+    url.searchParams.set("target_id", String(target.id));
+  } else {
+    url.searchParams.delete("target_type");
+    url.searchParams.delete("target_id");
+  }
   window.history.pushState({}, "", url.toString());
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
