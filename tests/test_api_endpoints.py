@@ -2590,3 +2590,41 @@ def test_kb_source_preview_failure_hides_server_paths(client, monkeypatch):
     assert "/srv/iterwave" not in detail
     assert "tenant-a" not in detail
 
+
+
+def test_content_template_versions_and_lifecycle_are_preserved(client):
+    tc, conn, _ = client
+    created = tc.post("/api/assets", json={
+        "asset_type": "template",
+        "title": "模板 v1",
+        "body": "问题 -> 证据 -> 结论",
+    })
+    assert created.status_code == 200
+    template = created.json()
+    template_id = template["id"]
+    assert template["version"] == 1
+    assert template["is_active"] == 1
+
+    updated = tc.put(f"/api/assets/{template_id}", json={
+        "asset_type": "template",
+        "title": "模板 v2",
+        "body": "背景 -> 实测 -> 结论",
+    })
+    assert updated.status_code == 200
+    assert updated.json()["version"] == 2
+
+    versions = tc.get(f"/api/assets/{template_id}/versions")
+    assert versions.status_code == 200
+    assert [item["version"] for item in versions.json()["items"]] == [2, 1]
+    assert versions.json()["items"][1]["body"] == "问题 -> 证据 -> 结论"
+
+    archived = tc.post(f"/api/assets/{template_id}/archive")
+    assert archived.status_code == 200
+    assert archived.json()["is_active"] is False
+    assert tc.get("/api/assets?asset_type=template").json()["total"] == 0
+    assert tc.get("/api/assets?asset_type=template&include_inactive=true").json()["total"] == 1
+
+    restored = tc.post(f"/api/assets/{template_id}/restore")
+    assert restored.status_code == 200
+    assert restored.json()["is_active"] is True
+    assert tc.get("/api/assets?asset_type=template").json()["total"] == 1
