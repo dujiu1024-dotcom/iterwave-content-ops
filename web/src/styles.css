@@ -824,7 +824,14 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 .calendar-agenda-event[draggable="true"], .calendar-event[draggable="true"] { cursor: grab; }
 .calendar-agenda-event[draggable="true"]:active, .calendar-event[draggable="true"]:active { cursor: grabbing; }
 .skill-desc { white-space: pre-line; }
-.sidebar { min-height: 100vh; height: auto; align-self: stretch; position: relative; overflow: visible; }
+.sidebar {
+  display: flex; flex-direction: column;
+  position: sticky; top: 0; height: 100vh; height: 100dvh; max-height: 100dvh;
+  min-height: 0; align-self: flex-start; overflow: hidden; overscroll-behavior: contain;
+}
+.sidebar-nav { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-gutter: stable; padding-bottom: 8px; }
+.side-bottom { flex: 0 0 auto; max-height: min(220px, 30vh); overflow-y: auto; overscroll-behavior: contain; border-top: 1px solid #ffffff16; padding-top: 10px; }
+.sidebar-nav, .side-bottom { scrollbar-width: thin; }
 @media (max-width: 1100px) {
   .calendar-week-grid { grid-template-columns: repeat(7, minmax(0, 1fr)); }
   .calendar-toolbar { flex-wrap: wrap; justify-content: flex-start; }
@@ -983,3 +990,4 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
   .template-howto-steps { grid-template-columns: 1fr; }
   .industry-preset-item { align-items: flex-start; flex-direction: column; }
 }
+

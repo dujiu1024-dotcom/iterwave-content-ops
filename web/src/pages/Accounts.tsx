@@ -27,6 +27,8 @@ const ACCOUNT_STATUS_LABEL: Record<string, { label: string; color: string }> = {
 export default function Accounts() {
   const [accounts, setAccounts] = useState<AccountInfo[] | null>(null);
   const [registeredAccounts, setRegisteredAccounts] = useState<RegisteredPlatformAccount[]>([]);
+  const [identityDrafts, setIdentityDrafts] = useState<Record<string, { account_handle: string; display_name: string; notes: string }>>({});
+  const [savingIdentity, setSavingIdentity] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [activeLogin, setActiveLogin] = useState<Platform | null>(null);
   const [loginStatus, setLoginStatus] = useState<LoginStatus | null>(null);
@@ -43,6 +45,13 @@ export default function Accounts() {
       const [r, registered] = await Promise.all([api.accounts(), api.platformAccounts()]);
       setAccounts(r.accounts);
       setRegisteredAccounts(registered.items ?? []);
+      setIdentityDrafts(Object.fromEntries(
+        (registered.items ?? []).map((item) => [item.platform, {
+          account_handle: item.account_handle ?? "",
+          display_name: item.display_name ?? "",
+          notes: item.notes ?? "",
+        }]),
+      ));
     } catch (e: any) { setErr(e.message); }
   };
 
@@ -110,6 +119,47 @@ export default function Accounts() {
     } catch (e: any) { alert("退出失败：" + e.message); }
   };
 
+  const saveIdentity = async (platform: Platform) => {
+    const draft = identityDrafts[platform] ?? { account_handle: "", display_name: "", notes: "" };
+    if (!draft.account_handle.trim()) {
+      alert("请填写平台账号标识，避免无法区分账号");
+      return;
+    }
+    const existing = registeredAccounts.find((item) => item.platform === platform);
+    setSavingIdentity(platform);
+    try {
+      const saved = await api.savePlatformAccount(existing?.id ?? null, {
+        platform,
+        account_handle: draft.account_handle.trim(),
+        display_name: draft.display_name.trim(),
+        notes: draft.notes.trim(),
+        status: existing?.status ?? "active",
+      });
+      setRegisteredAccounts((prev) => [...prev.filter((item) => item.platform !== platform), saved]);
+      setIdentityDrafts((prev) => ({ ...prev, [platform]: {
+        account_handle: saved.account_handle,
+        display_name: saved.display_name,
+        notes: saved.notes,
+      } }));
+    } catch (e: any) {
+      alert("保存账号身份失败：" + e.message);
+    } finally {
+      setSavingIdentity(null);
+    }
+  };
+
+  const deleteIdentity = async (platform: Platform) => {
+    const existing = registeredAccounts.find((item) => item.platform === platform);
+    if (!existing || !confirm("确定清除这条账号身份登记吗？不会退出平台登录态。")) return;
+    try {
+      await api.deletePlatformAccount(existing.id);
+      setRegisteredAccounts((prev) => prev.filter((item) => item.id !== existing.id));
+      setIdentityDrafts((prev) => ({ ...prev, [platform]: { account_handle: "", display_name: "", notes: "" } }));
+    } catch (e: any) {
+      alert("清除账号身份失败：" + e.message);
+    }
+  };
+
   const activeLoginProfile = activeLogin
     ? registeredAccounts.find((item) => item.platform === activeLogin)
     : undefined;
@@ -165,6 +215,29 @@ export default function Accounts() {
                   ✓ 登录有效 · 可用于存草稿、运营与数据采集
                 </div>
               )}
+
+              {/* 账号身份备注：由运营者登记，用于区分同平台账号；不冒充平台自动采集昵称 */}
+              {(() => {
+                const draft = identityDrafts[a.platform] ?? { account_handle: "", display_name: "", notes: "" };
+                const existing = registeredAccounts.find((item) => item.platform === a.platform);
+                return (
+                  <div style={{ display: "grid", gap: 7, marginBottom: 12, padding: 10, border: "1px solid var(--line)", borderRadius: 8 }}>
+                    <div style={{ fontSize: 11, color: "var(--muted)" }}>账号身份备注（手动登记，用于避免选错账号）</div>
+                    <input className="field" value={draft.display_name} placeholder="账号昵称 / 备注名"
+                      onChange={(e) => setIdentityDrafts((prev) => ({ ...prev, [a.platform]: { ...draft, display_name: e.target.value } }))} />
+                    <input className="field" value={draft.account_handle} placeholder="平台账号标识（ID / 主页号）"
+                      onChange={(e) => setIdentityDrafts((prev) => ({ ...prev, [a.platform]: { ...draft, account_handle: e.target.value } }))} />
+                    <input className="field" value={draft.notes} placeholder="备注（可选）"
+                      onChange={(e) => setIdentityDrafts((prev) => ({ ...prev, [a.platform]: { ...draft, notes: e.target.value } }))} />
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      <button className="btn sm" disabled={savingIdentity === a.platform} onClick={() => void saveIdentity(a.platform as Platform)}>
+                        {savingIdentity === a.platform ? "保存中…" : existing ? "更新身份备注" : "登记账号身份"}
+                      </button>
+                      {existing && <button className="btn sm danger" onClick={() => void deleteIdentity(a.platform as Platform)}>清除登记</button>}
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* 操作按钮 */}
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>

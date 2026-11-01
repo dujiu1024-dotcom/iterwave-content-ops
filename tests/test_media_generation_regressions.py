@@ -236,6 +236,50 @@ def test_successful_image_generation_ignores_legacy_monthly_quota(
         api_main._g_ctx.update(saved)
 
 
+def test_legacy_monthly_quota_does_not_block_additional_generation(
+    conn, cfg, test_auth, monkeypatch, tmp_path
+):
+    registry = TenantRegistry(tmp_path / "workspace")
+    registry.initialize()
+    conn.execute(
+        "INSERT INTO media_generation_settings (id, enabled, monthly_quota, prompt_prefix, model, size) "
+        "VALUES (1, 1, 1, '', 'test-model', '1024x1024') "
+        "ON CONFLICT(id) DO UPDATE SET enabled=1, monthly_quota=1, model='test-model', size='1024x1024'"
+    )
+    conn.execute(
+        "INSERT INTO media_generation_jobs (prompt, final_prompt, model, status, created_at) "
+        "VALUES ('previous', 'previous', 'test-model', 'succeeded', ?)",
+        (api_main._now().strftime("%Y-%m-%d %H:%M:%S"),),
+    )
+    conn.commit()
+
+    def fail_provider(*args, **kwargs):
+        raise media_generation.ImageGenerationError("provider unavailable")
+
+    monkeypatch.setattr(media_generation, "generate_image_bytes", fail_provider)
+    saved = dict(api_main._g_ctx)
+    api_main._g_ctx.clear()
+    api_main._g_ctx.update({
+        "conn": conn,
+        "cfg": cfg,
+        "tenant_registry": registry,
+        "runtime_tenant_id": "default",
+    })
+    try:
+        client = _client(test_auth)
+        response = client.post("/api/media/generate", json={"prompt": "another test image"})
+        assert response.status_code == 502
+        assert conn.execute(
+            "SELECT COUNT(*) FROM media_generation_jobs WHERE status = 'succeeded'"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM media_generation_jobs WHERE status = 'failed'"
+        ).fetchone()[0] == 1
+    finally:
+        api_main._g_ctx.clear()
+        api_main._g_ctx.update(saved)
+
+
 def test_content_template_can_be_updated_without_changing_asset_type(conn, test_auth):
     saved = dict(api_main._g_ctx)
     api_main._g_ctx.clear()
@@ -289,3 +333,4 @@ def test_media_library_returns_total_counts_and_offset_page(conn, test_auth):
     finally:
         api_main._g_ctx.clear()
         api_main._g_ctx.update(saved)
+

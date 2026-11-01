@@ -370,6 +370,63 @@ def test_queue_history_can_filter_by_task_type(tmp_path):
     assert all_total == 2 and {item.task_id for item in all_items} == {round_task.task_id, scheduler_task.task_id}
 
 
+def test_queue_status_counts_are_aggregated_by_tenant(tmp_path):
+    queue = make_queue(tmp_path)
+    queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={"n": 1})
+    running_a, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={"n": 2})
+    failed_b, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-b", payload={"n": 3})
+    interrupted_b, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-b", payload={"n": 4})
+
+    conn = queue._connect()
+    try:
+        conn.executemany(
+            "UPDATE global_task_queue SET status=? WHERE task_id=?",
+            [
+                ("running", running_a.task_id),
+                ("failed", failed_b.task_id),
+                ("interrupted", interrupted_b.task_id),
+            ],
+        )
+    finally:
+        conn.close()
+
+    active = queue.status_counts(scope="active")
+    failed = queue.status_counts(scope="failed")
+
+    assert active["total"] == 2
+    assert active["by_status"] == {"queued": 1, "running": 1}
+    assert active["by_tenant"] == {
+        "tenant-a": {"queued": 1, "running": 1},
+    }
+    assert failed["total"] == 2
+    assert failed["by_tenant"] == {
+        "tenant-b": {"failed": 1, "interrupted": 1},
+    }
+
+
+def test_failed_queue_page_can_filter_task_type(tmp_path):
+    queue = make_queue(tmp_path)
+    round_task, _ = queue.enqueue(
+        task_type="round_run", tenant_id="tenant-a", payload={"kind": "round"},
+    )
+    scheduler_task, _ = queue.enqueue(
+        task_type="scheduler_job", tenant_id="tenant-a", payload={"kind": "scheduler"},
+    )
+
+    conn = queue._connect()
+    try:
+        conn.executemany(
+            "UPDATE global_task_queue SET status='failed' WHERE task_id=?",
+            [(round_task.task_id,), (scheduler_task.task_id,)],
+        )
+    finally:
+        conn.close()
+
+    items, total = queue.list_page(scope="failed", task_type="round_run")
+    assert total == 1
+    assert [item.task_id for item in items] == [round_task.task_id]
+
+
 def test_active_and_failed_scopes_are_paginated_with_full_status_counts(tmp_path):
     queue = make_queue(tmp_path)
     for index in range(23):
@@ -380,13 +437,13 @@ def test_active_and_failed_scopes_are_paginated_with_full_status_counts(tmp_path
             payload={"round_id": index},
         )
         if index < 3:
-            claimed = queue.claim_next(f"worker-{index}")
+            claimed = queue.claim_next("worker-test")
             assert claimed is not None and claimed.task_id == task.task_id
-            assert queue.finish(task.task_id, f"worker-{index}", result={"ok": True})
+            assert queue.finish(task.task_id, "worker-test", result={"ok": True})
         elif index == 3:
-            claimed = queue.claim_next("worker-failed")
+            claimed = queue.claim_next("worker-test")
             assert claimed is not None and claimed.task_id == task.task_id
-            assert queue.fail(task.task_id, "worker-failed", error_code="test", error_message="failed")
+            assert queue.fail(task.task_id, "worker-test", error_code="test", error_message="failed")
 
     first, total = queue.list_page(scope="active", page=1, page_size=8)
     second, total_again = queue.list_page(scope="active", page=2, page_size=8)

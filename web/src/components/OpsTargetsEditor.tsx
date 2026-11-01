@@ -20,6 +20,7 @@ function commentsText(items: { url: string; content: string }[]): string {
 export default function OpsTargetsEditor() {
   const { showToast } = useApp();
   const [targets, setTargets] = useState<OpsTargetsView>(EMPTY);
+  const [commentsDrafts, setCommentsDrafts] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -28,7 +29,11 @@ export default function OpsTargetsEditor() {
     setLoading(true);
     try {
       const result = await api.opsTargets();
-      setTargets({ ...EMPTY, ...result.items });
+      const nextTargets = { ...EMPTY, ...result.items };
+      setTargets(nextTargets);
+      setCommentsDrafts(Object.fromEntries(
+        PLATFORMS.map(({ key }) => [key, commentsText(nextTargets[key]?.active_comments ?? [])]),
+      ));
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -59,6 +64,9 @@ export default function OpsTargetsEditor() {
     try {
       const result = await api.saveOpsTargets(normalized);
       setTargets(result.items);
+      setCommentsDrafts(Object.fromEntries(
+        PLATFORMS.map(({ key }) => [key, commentsText(result.items[key]?.active_comments ?? [])]),
+      ));
       showToast(result.message, "success");
     } catch (e) {
       showToast(`保存主动运营目标失败：${e instanceof Error ? e.message : String(e)}`, "error");
@@ -98,10 +106,12 @@ export default function OpsTargetsEditor() {
               <textarea
                 className="field"
                 rows={5}
-                value={commentsText(current.active_comments)}
+                value={commentsDrafts[key] ?? commentsText(current.active_comments)}
                 placeholder={"https://平台主页链接 | 写一条有具体观点的评论"}
                 onChange={(event) => {
-                  const active_comments = event.target.value.split("\n").filter((line) => line.trim()).map((line) => {
+                  const raw = event.target.value;
+                  setCommentsDrafts((prev) => ({ ...prev, [key]: raw }));
+                  const active_comments = raw.split("\n").filter((line) => line.trim()).map((line) => {
                     const index = line.indexOf("|");
                     return index < 0
                       ? { url: line.trim(), content: "" }

@@ -2785,16 +2785,11 @@ def _register_routes(app: FastAPI) -> None:
             source_mime = source["mime_type"]
             source_filename = source["original_filename"]
 
-        # 整个配额检查与调用串行化，避免并发请求同时越过月度上限。
+        # 只保留并发互斥，避免同一账号组同时生成造成资源竞争；monthly_quota 为历史兼容字段，不再限制使用次数。
         if not _media_generation_lock.acquire(blocking=False):
             raise HTTPException(409, "已有图片生成任务正在执行，请稍后重试")
         try:
             now = _now().strftime("%Y-%m-%d %H:%M:%S")
-            month_start = _now().replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
-            used = int(conn.execute(
-                "SELECT COUNT(*) FROM media_generation_jobs WHERE created_at >= ? AND status = 'succeeded'", (month_start,),
-            ).fetchone()[0])
-            # 个人账号组素材库不设置人为月度次数上限；保留成功次数统计用于成本与使用分析。
             cur = conn.execute(
                 "INSERT INTO media_generation_jobs (prompt, final_prompt, model, status, created_at) "
                 "VALUES (?, ?, ?, 'running', ?)",
@@ -3880,7 +3875,7 @@ def _register_routes(app: FastAPI) -> None:
             tasks, total = _task_queue.list_page(
                 page=page,
                 page_size=page_size,
-                scope=scope, task_type=task_type if scope == "history" else None,
+                scope=scope, task_type=task_type,
             )
         items = []
         for task in tasks:
@@ -3905,6 +3900,12 @@ def _register_routes(app: FastAPI) -> None:
                 "pages": max(1, (total + page_size - 1) // page_size),
                 "counts": _task_queue.status_counts(scope=scope),
             })
+            if scope == "active":
+                active_stats = _task_queue.status_counts(scope="active")
+                response["status_counts"] = active_stats["by_status"]
+                response["tenant_status_counts"] = active_stats["by_tenant"]
+            elif scope == "failed":
+                response["tenant_status_counts"] = _task_queue.status_counts(scope="failed")["by_tenant"]
         return response
 
     @app.get("/api/task-queue/{task_id}")

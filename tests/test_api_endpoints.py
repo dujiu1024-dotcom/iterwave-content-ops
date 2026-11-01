@@ -1257,16 +1257,17 @@ def test_orchestration_rejects_unregistered_disabled_and_unsupported_custom_skil
 
 
 def test_assets_endpoint_returns_database_pagination_and_exact_total(client):
+    tc, _, _ = client
     for index in range(23):
-        response = client.post(
+        response = tc.post(
             "/api/assets",
             json={"asset_type": "voice", "title": f"voice-{index}", "body": "sample"},
         )
         assert response.status_code == 200
 
-    first = client.get("/api/assets?asset_type=voice&page=1&page_size=10")
-    second = client.get("/api/assets?asset_type=voice&page=2&page_size=10")
-    third = client.get("/api/assets?asset_type=voice&page=3&page_size=10")
+    first = tc.get("/api/assets?asset_type=voice&page=1&page_size=10")
+    second = tc.get("/api/assets?asset_type=voice&page=2&page_size=10")
+    third = tc.get("/api/assets?asset_type=voice&page=3&page_size=10")
 
     assert first.status_code == second.status_code == third.status_code == 200
     assert first.json()["total"] == 23
