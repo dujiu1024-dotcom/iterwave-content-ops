@@ -737,7 +737,7 @@ export interface AssetItem {
   created_at: string | null;
   updated_at: string | null;
   version?: number;
-  is_active?: boolean;
+  is_active?: boolean | number;
 }
 
 /** G-13 / G-24 运行时配置（白名单可写字段 + R22 硬锁 + 审计） */
