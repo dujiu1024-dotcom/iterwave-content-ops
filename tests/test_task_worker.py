@@ -539,7 +539,11 @@ def test_worker_reconciles_interrupted_round_tasks_on_startup(tmp_path, monkeypa
 
     observed = []
     worker = GlobalTaskWorker(queue, lambda tenant_id: {})
-    monkeypatch.setattr(worker, "_reconcile_round_failure", lambda item, reason: observed.append((item.task_id, item.tenant_id, reason)))
+    def reconcile(item, reason):
+        observed.append((item.task_id, item.tenant_id, reason))
+        return True
+
+    monkeypatch.setattr(worker, "_reconcile_round_failure", reconcile)
     worker._sync_terminal_rounds()
 
     assert observed == [(task.task_id, "tenant-kill", "模拟进程意外退出")]
