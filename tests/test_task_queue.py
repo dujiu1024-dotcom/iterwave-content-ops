@@ -437,13 +437,13 @@ def test_active_and_failed_scopes_are_paginated_with_full_status_counts(tmp_path
             payload={"round_id": index},
         )
         if index < 3:
-            claimed = queue.claim_next(f"worker-{index}")
+            claimed = queue.claim_next("worker-test")
             assert claimed is not None and claimed.task_id == task.task_id
-            assert queue.finish(task.task_id, f"worker-{index}", result={"ok": True})
+            assert queue.finish(task.task_id, "worker-test", result={"ok": True})
         elif index == 3:
-            claimed = queue.claim_next("worker-failed")
+            claimed = queue.claim_next("worker-test")
             assert claimed is not None and claimed.task_id == task.task_id
-            assert queue.fail(task.task_id, "worker-failed", error_code="test", error_message="failed")
+            assert queue.fail(task.task_id, "worker-test", error_code="test", error_message="failed")
 
     first, total = queue.list_page(scope="active", page=1, page_size=8)
     second, total_again = queue.list_page(scope="active", page=2, page_size=8)
