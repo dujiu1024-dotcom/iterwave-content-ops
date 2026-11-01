@@ -2603,3 +2603,35 @@ def test_plan_signature_history_exposes_business_round_number(client):
     history = response.json()["history"]
     entry = next(item for item in history if item["round_id"] == body["id"])
     assert entry["round_number"] == body["round_number"]
+
+
+def test_skills_registry_distinguishes_registration_enablement_and_runnability(client):
+    tc, _, _ = client
+    catalog = tc.get("/api/skills")
+    assert catalog.status_code == 200
+    body = catalog.json()
+    assert body["execution_enabled"] is False
+    assert body["custom_execution_enabled"] is False
+    assert body["builtin_total"] == len(body["builtin_items"])
+    assert body["builtin_items"]
+    assert all(item["installation_state"] == "built_in" for item in body["builtin_items"])
+
+    created = tc.post("/api/skills", json={
+        "skill_id": "safe_manifest_check",
+        "name": "安全 Manifest 检查",
+        "version": "1.0.0",
+        "description": "仅用于验证元数据登记",
+        "category": "custom",
+        "inputs": [],
+        "outputs": [],
+        "permissions": ["read_content"],
+    })
+    assert created.status_code == 200
+    assert created.json()["installation_state"] == "registered"
+    assert created.json()["enabled_state"] == "disabled"
+    assert created.json()["runnable_state"] == "blocked_no_sandbox"
+    assert created.json()["execution_mode"] == "metadata_only"
+
+    listed = tc.get("/api/skills").json()
+    custom = next(item for item in listed["items"] if item["skill_id"] == "safe_manifest_check")
+    assert custom["runnable_state"] == "blocked_no_sandbox"
