@@ -30,3 +30,19 @@ def test_invalid_business_timezone_is_rejected(cfg):
     payload["business_timezone"] = "Mars/Olympus"
     with pytest.raises(ValidationError):
         Config.model_validate(payload)
+
+
+def test_business_now_is_stable_across_day_boundary_for_configured_zone(cfg, monkeypatch):
+    from datetime import timezone
+    from src.core import timezone as timezone_module
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            instant = datetime(2026, 10, 31, 16, 30, tzinfo=timezone.utc)
+            return instant.astimezone(tz) if tz else instant.replace(tzinfo=None)
+
+    cfg.business_timezone = "Asia/Shanghai"
+    monkeypatch.setattr(timezone_module, "datetime", FrozenDateTime)
+    assert business_now(cfg).date().isoformat() == "2026-11-01"
+    assert business_now(cfg).hour == 0
