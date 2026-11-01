@@ -425,3 +425,39 @@ def test_failed_queue_page_can_filter_task_type(tmp_path):
     items, total = queue.list_page(scope="failed", task_type="round_run")
     assert total == 1
     assert [item.task_id for item in items] == [round_task.task_id]
+
+
+def test_active_and_failed_scopes_are_paginated_with_full_status_counts(tmp_path):
+    queue = make_queue(tmp_path)
+    for index in range(23):
+        task, _ = queue.enqueue(
+            task_type="round_run",
+            tenant_id="tenant-a" if index % 2 == 0 else "tenant-b",
+            aggregate_id=str(index),
+            payload={"round_id": index},
+        )
+        if index < 3:
+            claimed = queue.claim_next(f"worker-{index}")
+            assert claimed is not None and claimed.task_id == task.task_id
+            assert queue.finish(task.task_id, f"worker-{index}", result={"ok": True})
+        elif index == 3:
+            claimed = queue.claim_next("worker-failed")
+            assert claimed is not None and claimed.task_id == task.task_id
+            assert queue.fail(task.task_id, "worker-failed", error_code="test", error_message="failed")
+
+    first, total = queue.list_page(scope="active", page=1, page_size=8)
+    second, total_again = queue.list_page(scope="active", page=2, page_size=8)
+    counts = queue.status_counts(scope="active")
+
+    assert total == total_again == 19
+    assert len(first) == 8 and len(second) == 8
+    assert len({item.task_id for item in first + second}) == 16
+    assert counts["total"] == 19
+    assert counts["by_status"] == {"queued": 19, "running": 0}
+    assert counts["by_tenant"]["tenant-a"]["queued"] + counts["by_tenant"]["tenant-b"]["queued"] == 19
+
+    failed, failed_total = queue.list_page(scope="failed", page=1, page_size=8)
+    failed_counts = queue.status_counts(scope="failed")
+    assert failed_total == 1
+    assert len(failed) == 1 and failed[0].status == "failed"
+    assert failed_counts["by_status"]["failed"] == 1
