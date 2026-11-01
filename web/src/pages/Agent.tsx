@@ -584,14 +584,16 @@ function SkillsPane() {
         ) : (
           <div className="table-wrap">
             <table>
-              <thead><tr><th>Skill</th><th>版本</th><th>分类</th><th>权限</th><th>状态</th><th>操作</th></tr></thead>
+              <thead><tr><th>Skill</th><th>版本</th><th>分类</th><th>权限</th><th>安装</th><th>启用</th><th>可运行</th><th>操作</th></tr></thead>
               <tbody>{customSkills.map((skill) => (
                 <tr key={skill.skill_id}>
                   <td><strong>{skill.name}</strong><div className="tiny">{skill.skill_id}</div><div className="tiny">{skill.description}</div><details className="skill-manifest-preview"><summary>预览 Manifest</summary><pre>{JSON.stringify(skill, null, 2)}</pre></details></td>
                   <td>{skill.version}</td>
                   <td>{skill.category}</td>
                   <td>{skill.permissions.length ? skill.permissions.join("、") : "无"}</td>
-                  <td><span className={skill.enabled ? "tag green" : "tag gray"}>{skill.enabled ? "已启用（仅登记）" : "已停用"}</span></td>
+                  <td><span className="tag">已登记</span></td>
+                  <td><span className={skill.enabled ? "tag green" : "tag gray"}>{skill.enabled ? "已启用" : "已停用"}</span></td>
+                  <td><span className="tag orange">不可运行（未配置沙箱）</span></td>
                   <td><div className="skill-row-actions">
                     <button className="btn sm" type="button" onClick={() => editSkill(skill)}>编辑</button>
                     <button className="btn sm" type="button" onClick={() => setSavedTests((old) => ({ ...old, [skill.skill_id]: inspectSkillManifest(skill) }))}>配置自检</button>
