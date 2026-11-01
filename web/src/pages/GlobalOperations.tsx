@@ -177,6 +177,7 @@ export default function GlobalOperations() {
                       <span className={`tag ${tenant.recent_execution.status === "success" || tenant.recent_execution.status === "succeeded" ? "green" : tenant.recent_execution.status === "failed" || tenant.recent_execution.status === "interrupted" ? "red" : "gray"}`}>
                         {RUN_STATUS[tenant.recent_execution.status] ?? tenant.recent_execution.status}
                       </span>
+                      {tenant.recent_execution.has_error_detail && <span className="tiny">诊断详情已记录</span>}
                       <span className="tiny">{tenant.recent_execution.finished_at || tenant.recent_execution.started_at || tenant.recent_execution.created_at
                         ? new Date(tenant.recent_execution.finished_at || tenant.recent_execution.started_at || tenant.recent_execution.created_at!).toLocaleString("zh-CN")
                         : "时间未知"}</span>
