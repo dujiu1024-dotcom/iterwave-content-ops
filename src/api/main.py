@@ -2969,6 +2969,8 @@ def _register_routes(app: FastAPI) -> None:
         query: Optional[str] = Query(None, max_length=200),
         status: str = Query("active", pattern="^(active|archived|all)$"),
         review_status: str = Query("all", pattern="^(pending_review|approved|rejected|all)$"),
+        page: Optional[int] = Query(None, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
         limit: int = Query(100, ge=1, le=500),
         offset: int = Query(0, ge=0),
     ):
@@ -2985,17 +2987,41 @@ def _register_routes(app: FastAPI) -> None:
             needle = f"%{query.strip()}%"
             where.append("(title LIKE ? OR original_filename LIKE ? OR alt_text LIKE ? OR tags LIKE ?)")
             params.extend([needle, needle, needle, needle])
+        where_sql = " WHERE " + " AND ".join(where) if where else ""
+        total = conn.execute(
+            "SELECT COUNT(*) FROM media_assets" + where_sql, params
+        ).fetchone()[0]
+        count_row = conn.execute(
+            "SELECT "
+            "SUM(CASE WHEN status != 'archived' THEN 1 ELSE 0 END) AS active_total, "
+            "SUM(CASE WHEN status != 'archived' AND review_status = 'pending_review' THEN 1 ELSE 0 END) AS pending_total, "
+            "SUM(CASE WHEN status != 'archived' AND review_status = 'approved' THEN 1 ELSE 0 END) AS approved_total, "
+            "SUM(CASE WHEN status != 'archived' AND review_status = 'rejected' THEN 1 ELSE 0 END) AS rejected_total, "
+            "SUM(CASE WHEN status = 'archived' THEN 1 ELSE 0 END) AS archived_total "
+            "FROM media_assets" + (
+                " WHERE " + " AND ".join(
+                    clause for clause in where if clause not in ("status = ?", "review_status = ?")
+                ) if any(clause not in ("status = ?", "review_status = ?") for clause in where) else ""
+            ),
+            [value for clause, value in zip(where, params) if clause not in ("status = ?", "review_status = ?")],
+        ).fetchone()
+        counts = {
+            "all": count_row["active_total"] or 0,
+            "pending": count_row["pending_total"] or 0,
+            "approved": count_row["approved_total"] or 0,
+            "rejected": count_row["rejected_total"] or 0,
+            "archived": count_row["archived_total"] or 0,
+        }
+        effective_limit = page_size if page is not None else limit
+        effective_offset = (page - 1) * page_size if page is not None else offset
         sql = (
             "SELECT id, title, original_filename, mime_type, byte_size, sha256, "
             "width, height, alt_text, tags, source_type, source_ref, status, review_status, review_note, "
             "quality_score, quality_details, created_at, updated_at "
-            "FROM media_assets"
+            "FROM media_assets" + where_sql +
+            " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
         )
-        if where:
-            sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
-        rows = conn.execute(sql, params).fetchall()
+        rows = conn.execute(sql, [*params, effective_limit, effective_offset]).fetchall()
         result = []
         for row in rows:
             item = dict(row)
@@ -3009,7 +3035,14 @@ def _register_routes(app: FastAPI) -> None:
                 item["quality_details"] = None
             item["file_url"] = f"/api/media/{item['id']}/file"
             result.append(item)
-        return {"items": result, "limit": limit, "offset": offset}
+        if page is None:
+            return {"items": result, "limit": effective_limit, "offset": effective_offset, "total": total, "counts": counts}
+        return {
+            "items": result, "total": total, "counts": counts,
+            "page": page, "page_size": page_size,
+            "pages": max(1, (total + page_size - 1) // page_size),
+            "limit": page_size, "offset": effective_offset,
+        }
 
     @app.post("/api/media", status_code=201)
     def upload_media_asset(req: MediaAssetUploadRequest):
