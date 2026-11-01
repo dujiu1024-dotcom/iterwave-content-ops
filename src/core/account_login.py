@@ -242,6 +242,7 @@ def read_account_identity(
         logged_in = payload.get("loggedIn") is True
         name = payload.get("name") if isinstance(payload.get("name"), str) else ""
         avatar = payload.get("avatar") if isinstance(payload.get("avatar"), str) else ""
+        avatar = avatar[:2048]
         parsed = urlparse(avatar) if avatar else None
         if parsed and (parsed.scheme not in ("http", "https") or not parsed.hostname
                        or parsed.username or parsed.password):
