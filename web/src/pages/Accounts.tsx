@@ -114,6 +114,9 @@ export default function Accounts() {
     if (!confirm(`确定要退出 ${PLATFORM_EMOJI[p]} 的登录态吗？本地登录信息将被删除，下次存草稿需要重新扫码。`)) return;
     try {
       await api.logout(p);
+      setPlatformIdentities((prev) => ({ ...prev, [p]: {
+        platform: p, logged_in: false, name: "", avatar_url: null, error: "已退出登录",
+      } }));
       load();
     } catch (e: any) { alert("退出失败：" + e.message); }
   };
