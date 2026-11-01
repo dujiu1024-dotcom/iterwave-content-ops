@@ -26,6 +26,8 @@ from typing import Optional
 
 from playwright.async_api import Page, BrowserContext, async_playwright
 
+from src.core.redact import safe_error_summary
+
 from .base import (
     Platform, DraftResult, ContentToPublish,
     CircuitBreakerReason, FetchStatus, MetricsSnapshot,
@@ -464,7 +466,7 @@ class DraftSaver:
 
         except Exception as exc:
             logger.exception("❌ 平台 %s 存草稿失败: %s", self.platform, exc)
-            return DraftResult(success=False, error_msg=str(exc))
+            return DraftResult(success=False, error_msg=safe_error_summary(exc, "平台存草稿失败，请检查登录状态后重试"))
 
     # ------------------------------------------------------------------
     # 内部辅助
