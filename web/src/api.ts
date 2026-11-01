@@ -35,6 +35,7 @@ export interface GlobalTaskQueueResponse {
   page?: number;
   page_size?: number;
   pages?: number;
+  status_counts?: { queued?: number; running?: number; failed?: number; interrupted?: number };
 }
 
 export interface QueueTaskSubmission {
