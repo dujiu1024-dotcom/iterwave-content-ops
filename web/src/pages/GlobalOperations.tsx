@@ -21,6 +21,7 @@ export default function GlobalOperations() {
   const [activePages, setActivePages] = useState(1);
   const [failedPages, setFailedPages] = useState(1);
   const [activeCounts, setActiveCounts] = useState<{ queued: number; running: number }>({ queued: 0, running: 0 });
+  const [tenantCounts, setTenantCounts] = useState<Record<string, { queued: number; running: number; failed: number }>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
@@ -52,6 +53,17 @@ export default function GlobalOperations() {
       setFailedPages(data.pages ?? 1);
       if (failedPage > (data.pages ?? 1)) setFailedPage(data.pages ?? 1);
     }
+    const activeByTenant = results[1].status === "fulfilled" ? results[1].value.tenant_status_counts ?? {} : {};
+    const failedByTenant = results[2].status === "fulfilled" ? results[2].value.tenant_status_counts ?? {} : {};
+    const tenantIds = new Set([...Object.keys(activeByTenant), ...Object.keys(failedByTenant)]);
+    setTenantCounts(Object.fromEntries(Array.from(tenantIds, (tenantId) => [
+      tenantId,
+      {
+        queued: activeByTenant[tenantId]?.queued ?? 0,
+        running: activeByTenant[tenantId]?.running ?? 0,
+        failed: (failedByTenant[tenantId]?.failed ?? 0) + (failedByTenant[tenantId]?.interrupted ?? 0),
+      },
+    ])));
     const failures = results.flatMap((r, i) => r.status === "rejected"
       ? [`${["账号组汇总", "活跃任务", "失败任务统计"][i]}：${r.reason instanceof Error ? r.reason.message : String(r.reason)}`]
       : []);
@@ -68,22 +80,6 @@ export default function GlobalOperations() {
 
   const active = tasks;
   const failed = failedTasks;
-  const byTenant = useMemo(() => {
-    const map = new Map<string, { queued: number; running: number; failed: number }>();
-    for (const task of tasks) {
-      const value = map.get(task.tenant_id) ?? { queued: 0, running: 0, failed: 0 };
-      if (task.status === "queued") value.queued++;
-      if (task.status === "running") value.running++;
-      map.set(task.tenant_id, value);
-    }
-    for (const task of failedTasks) {
-      const value = map.get(task.tenant_id) ?? { queued: 0, running: 0, failed: 0 };
-      value.failed++;
-      map.set(task.tenant_id, value);
-    }
-    return map;
-  }, [tasks, failedTasks]);
-
   return (
     <div className="page global-operations-page">
       <div className="page-head">
@@ -120,7 +116,7 @@ export default function GlobalOperations() {
             <table>
               <thead><tr><th>账号组</th><th>数据库</th><th>平台账号</th><th>平台登录</th><th>运行中</th><th>排队中</th><th>失败 / 中断</th><th>定时调度</th><th>活跃轮次</th><th>操作</th></tr></thead>
               <tbody>{(monitor.tenants ?? []).map((tenant) => {
-                const q = byTenant.get(tenant.tenant_id) ?? { queued: 0, running: 0, failed: 0 };
+                const q = tenantCounts[tenant.tenant_id] ?? { queued: 0, running: 0, failed: 0 };
                 return <tr key={tenant.tenant_id}>
                   <td><strong>{tenant.tenant_name}</strong><div className="tiny">{tenant.tenant_id}</div></td>
                   <td><span className={tenant.db_status === "uninitialized" ? "tag gray" : tenant.db_available ? "tag green" : "tag red"}>{tenant.db_status === "uninitialized" ? "未初始化" : tenant.db_available ? "可读取" : "不可用"}</span></td>
