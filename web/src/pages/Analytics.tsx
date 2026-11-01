@@ -36,9 +36,6 @@ export default function Analytics() {
   const [metricsError, setMetricsError] = useState<string | null>(null);
   const [platformFilter, setPlatformFilter] = useState<Platform | "">("");
   const [metricsPage, setMetricsPage] = useState(1);
-  const [gapsError, setGapsError] = useState<string | null>(null);
-  const [adopting, setAdopting] = useState<string | null>(null);
-  const [adoptMsg, setAdoptMsg] = useState<string | null>(null);
   const [publishedDrafts, setPublishedDrafts] = useState<Draft[]>([]);
   const [backfillBusy, setBackfillBusy] = useState<string | null>(null);
   const [backfillValues, setBackfillValues] = useState<Record<string, {
@@ -61,22 +58,7 @@ export default function Analytics() {
   const [detailView, setDetailView] = useState<"overview" | "details">("overview");
 
   const loadGaps = () => {
-    setGapsError(null);
-    api.gaps().then(setAnalysis).catch((e) => setGapsError(e.message));
-  };
-  /** R19：只有 coverage_gap（audience=user）可采纳；validation_gap 是 Agent 内部建议 */
-  const adoptGap = async (dimension: string) => {
-    setAdopting(dimension);
-    setAdoptMsg(null);
-    try {
-      const r = await api.adoptGaps([dimension]);
-      setAdoptMsg(`已把「${dimension}」写回母计划（影响 ${(r.stale_rounds ?? []).length} 个活跃轮次）`);
-      loadGaps();
-    } catch (e: any) {
-      setAdoptMsg(`采纳失败: ${e.message}`);
-    } finally {
-      setAdopting(null);
-    }
+    api.gaps().then(setAnalysis).catch((e) => setReportError(e.message));
   };
   const updateWeeklyAction = async (
     suggestionKey: string,
@@ -540,12 +522,12 @@ export default function Analytics() {
             <div className="panel-sub">根据最近的发布数据自动生成</div>
           </div>
         </div>
-        {gapsError && (
+        {reportError && (
           <div className="note" style={{ color: "var(--red)", marginBottom: 10, display: "flex", gap: 8, alignItems: "center" }}>
-            <span>! {gapsError}</span><button className="btn sm" onClick={loadGaps}>重试</button>
+            <span>! {reportError}</span><button className="btn sm" onClick={loadGaps}>重试</button>
           </div>
         )}
-        {!analysis && !gapsError ? <div className="loading"><div className="spinner" />加载中...</div> : analysis && (
+        {!analysis && !reportError ? <div className="loading"><div className="spinner" />加载中...</div> : analysis && (
           <>
             {adjustments.length === 0 ? (
               <EmptyHint next="跑满一轮并完成数据采集后，再回到这里查看调整建议">暂无策略调整建议</EmptyHint>
@@ -574,65 +556,6 @@ export default function Analytics() {
         )}
       </div>
 
-      <div className="panel">
-        <div className="panel-head">
-          <div>
-            <div className="panel-title"><span className="icon">◫</span>缺口分析</div>
-            <div className="panel-sub">覆盖缺口可直接采纳进母计划；验证缺口仅 Agent 内部参考</div>
-          </div>
-        </div>
-        {adoptMsg && (
-          <div className="panel-sub" style={{ padding: "0 16px 8px", color: "var(--muted)" }}>{adoptMsg}</div>
-        )}
-        {!analysis ? (
-          <EmptyHint next="完成一轮复盘后这里会列出覆盖缺口与验证缺口">暂无缺口数据</EmptyHint>
-        ) : (() => {
-          const coverage = analysis.gaps.filter((g) => g.audience === "user");
-          const validation = analysis.gaps.filter((g) => g.audience !== "user");
-          return (
-            <>
-              {coverage.length === 0 ? (
-                <EmptyHint next="当前各维度覆盖均衡，跑满一轮后重新评估">暂无覆盖缺口</EmptyHint>
-              ) : (
-                <div className="list">
-                  {coverage.map((g, i) => (
-                    <div key={`c-${i}`} className="task-row">
-                      <i className="task-prio blue" />
-                      <div className="task-main">
-                        <div className="task-title">{g.dimension}</div>
-                        <div className="task-desc">{g.suggestion_text}</div>
-                        <div className="task-desc" style={{ color: "var(--subtle)", fontSize: 11 }}>
-                          现有 <Num value={g.current_count} /> 条 · 建议补至 <Num value={g.target_count} /> 条 ·
-                          样本 <Num value={g.sample_count} /> · 平均互动率 <Num value={g.avg_interaction_rate} />
-                        </div>
-                      </div>
-                      <button
-                        className="btn sm primary"
-                        disabled={adopting === g.dimension}
-                        onClick={() => adoptGap(g.dimension)}
-                      >
-                        {adopting === g.dimension ? "采纳中…" : "✓ 采纳到母计划"}
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {validation.length > 0 && (
-                <div style={{ marginTop: 14 }}>
-                  <div className="form-label" style={{ color: "var(--subtle)" }}>
-                    Agent 内部建议（无需用户确认）
-                  </div>
-                  {validation.map((g, i) => (
-                    <div key={`v-${i}`} style={{ color: "var(--subtle)", fontSize: 12, marginTop: 6 }}>
-                      · {g.dimension}：{g.suggestion_text}（有效样本 {g.sample_count} 条，待下一轮受控试验）
-                    </div>
-                  ))}
-                </div>
-              )}
-            </>
-          );
-        })()}
-      </div>
       </>}
     </>
   );
