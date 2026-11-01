@@ -641,3 +641,26 @@ def test_publish_confirmation_atomic_transition_schedules_fetch_once(cfg, conn, 
     ).fetchone()
     assert row["status"] == "user_published"
     assert row["user_confirmed_at"]
+
+
+def test_tracked_scheduler_task_stores_safe_exception_message(cfg, conn, monkeypatch):
+    eng = _engine(cfg, conn)
+
+    async def fail_with_private_detail():
+        raise RuntimeError("https://internal.example/private?token=secret")
+
+    monkeypatch.setattr(eng, "_job_kb_scan", fail_with_private_detail)
+    try:
+        asyncio.run(eng._run_tracked("_job_kb_scan"))
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("expected scheduler job failure")
+
+    row = conn.execute(
+        "SELECT status, error_msg FROM task_runs ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["status"] == "failed"
+    assert row["error_msg"] == "定时任务执行失败，请检查服务端运行日志"
+    assert "internal.example" not in row["error_msg"]
+    assert "secret" not in row["error_msg"]
