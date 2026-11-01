@@ -173,7 +173,7 @@ export default function GlobalOperations() {
                   <td>{tenant.runtime?.active_rounds ?? "—"}</td>
                   <td>{tenant.recent_execution ? (
                     <div className="global-scheduler-cell">
-                      <strong>{RUN_TYPE[tenant.recent_execution.task_type] ?? tenant.recent_execution.task_type}</strong>
+                      <strong>{RUN_TYPE[tenant.recent_execution.task_type] ?? "其他后台任务"}</strong>
                       <span className={`tag ${tenant.recent_execution.status === "success" || tenant.recent_execution.status === "succeeded" ? "green" : tenant.recent_execution.status === "failed" || tenant.recent_execution.status === "interrupted" ? "red" : "gray"}`}>
                         {RUN_STATUS[tenant.recent_execution.status] ?? tenant.recent_execution.status}
                       </span>
