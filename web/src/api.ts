@@ -1851,6 +1851,7 @@ export const api = {
   updateAsset: (id: number, data: { asset_type: AssetType; title: string; body?: string; source_url?: string; platform?: Platform }) =>
     fetchJson<AssetItem>(`/api/assets/${id}`, { method: "PUT", body: JSON.stringify(data) }),
   assetVersions: (id: number) => fetchJson<{ items: Array<{ version: number; title: string; body: string | null; created_at: string | null }> }>(`/api/assets/${id}/versions`),
+  restoreAssetVersion: (id: number, version: number) => fetchJson<AssetItem>(`/api/assets/${id}/versions/${version}/restore`, { method: "POST" }),
   archiveAsset: (id: number) => fetchJson<{ id: number; is_active: boolean }>(`/api/assets/${id}/archive`, { method: "POST" }),
   restoreAsset: (id: number) => fetchJson<{ id: number; is_active: boolean }>(`/api/assets/${id}/restore`, { method: "POST" }),
   kbInspect: () => fetchJson<KbInspect>("/api/kb/inspect"),
