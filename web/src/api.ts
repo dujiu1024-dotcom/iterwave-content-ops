@@ -1059,6 +1059,7 @@ export interface PlanSignatureHistory {
   plan_signature: string;
   plan_snapshot: MasterPlan | string;
   round_id: number | null;
+  round_number: number | null;
   created_at: string;
   author: string | null;
 }
@@ -1759,7 +1760,7 @@ export const api = {
     ),
   deleteTenantSkill: (skill_id: string) =>
     fetchJson<{ skill_id: string; deleted: boolean }>(`/api/skills/${skill_id}`, { method: "DELETE" }),
-  contentPlan: (id: string) => fetchJson<ContentPlan & { drafts: Array<{ draft_id: string; platform: Platform; status: string; title: string; round_id: number | null }>; rounds: Array<{ round_id: number; task_id: string | null; created_at: string }> }>(`/api/content-plans/${id}`),
+  contentPlan: (id: string) => fetchJson<ContentPlan & { drafts: Array<{ draft_id: string; platform: Platform; status: string; title: string; round_id: number | null; round_number: number | null }>; rounds: Array<{ round_id: number; round_number: number | null; task_id: string | null; created_at: string }> }>(`/api/content-plans/${id}`),
   linkContentPlanDrafts: (id: string, draft_ids: string[]) =>
     fetchJson<{ plan_id: string; linked_now: string[]; linked_count: number; status: string }>(
       `/api/content-plans/${id}/drafts`, { method: "POST", body: JSON.stringify({ draft_ids }) },
