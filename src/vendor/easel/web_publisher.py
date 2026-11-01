@@ -492,6 +492,14 @@ def _secure_login_artifact(path: Path) -> None:
     except OSError:
         pass
 
+def _secure_profile_dir(path: Path) -> None:
+    """浏览器 Profile 含 Cookie 与本地存储，目录仅允许当前用户访问。"""
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
+
 
 def cmd_platforms(_a) -> int:
     print(f"支持 {len(PLATFORMS)} 个网页发布平台：\n")
@@ -1392,7 +1400,7 @@ def _run_browser(a, headed: bool, do_publish: bool) -> int:
     except Exception as e:
         _die(f"需要 playwright：{e}（pip install playwright && playwright install chromium）", 3)
     profile = _profile_dir(a.platform, a.profile_base)
-    profile.mkdir(parents=True, exist_ok=True)
+    _secure_profile_dir(profile)
     cfg = PLATFORMS[a.platform]
     ctx = {"media": a.media or "", "title": a.title or "", "desc": a.desc or "",
            "tags": a.tags or "", "cover": a.cover or ""}
@@ -2247,7 +2255,7 @@ def cmd_login_qr(a) -> int:
     if not cfg:
         _die(f"未知平台：{a.platform}（支持：{', '.join(PLATFORMS)}）")
     profile = _profile_dir(a.platform, a.profile_base)
-    profile.mkdir(parents=True, exist_ok=True)
+    _secure_profile_dir(profile)
     root = Path(__file__).resolve().parents[3] / "outputs" / "_login"
     qr_out = Path(a.qr_out).expanduser() if a.qr_out else root / f"{a.platform}.png"
     sf = a.status_file or str(root / f"{a.platform}.json")
@@ -2483,7 +2491,7 @@ def cmd_whoami(a) -> int:
     try:
         with sync_playwright() as p:
             profile = _profile_dir(a.platform, a.profile_base)
-            profile.mkdir(parents=True, exist_ok=True)
+            _secure_profile_dir(profile)
             browser = p.chromium.launch_persistent_context(
                 str(profile), headless=True, locale="zh-CN",
                 args=LAUNCH_ARGS + ["--no-proxy-server"])
