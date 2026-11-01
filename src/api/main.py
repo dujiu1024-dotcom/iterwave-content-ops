@@ -4297,6 +4297,8 @@ def _register_routes(app: FastAPI) -> None:
     def list_drafts(
         status: Optional[str] = Query(None),
         platform: Optional[str] = Query(None),
+        page: Optional[int] = Query(None, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
     ):
         conn = _g()["conn"]
         sql = (
@@ -4315,9 +4317,17 @@ def _register_routes(app: FastAPI) -> None:
         if platform:
             where.append("d.platform = ?")
             params.append(platform)
+        count_sql = "SELECT COUNT(*) FROM drafts d LEFT JOIN contents c ON d.content_id = c.id"
         if where:
-            sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY d.created_at DESC LIMIT 100"
+            count_sql += " WHERE " + " AND ".join(where)
+        total = int(conn.execute(count_sql, params).fetchone()[0])
+        if page is None:
+            # 兼容旧调用方；新列表必须显式传 page 以获得分页契约。
+            sql += " ORDER BY d.created_at DESC, d.id DESC LIMIT 100"
+        else:
+            offset = (page - 1) * page_size
+            sql += " ORDER BY d.created_at DESC, d.id DESC LIMIT ? OFFSET ?"
+            params.extend([page_size, offset])
         rows = conn.execute(sql, params).fetchall()
         items = []
         from src.core.content_version import content_version_hash, parse_json_list
@@ -4352,7 +4362,15 @@ def _register_routes(app: FastAPI) -> None:
             ):
                 result.pop(internal_field, None)
             items.append(result)
-        return items
+        if page is None:
+            return items
+        return {
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "pages": (total + page_size - 1) // page_size,
+        }
 
     @app.post("/api/drafts/{draft_id}/publish_confirm")
     def confirm_publish(draft_id: str, req: Optional[PublishConfirmRequest] = None):
