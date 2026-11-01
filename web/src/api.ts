@@ -1430,6 +1430,8 @@ async function fetchJson<T>(path: string, options?: RequestInit): Promise<T> {
     } catch {
       // 非 JSON 错误体，保留原文
     }
+    // 5xx 可能包含服务端内部异常细节；只向浏览器暴露稳定的用户提示。
+    if (res.status >= 500) detail = "服务暂时不可用，请稍后重试";
     const error = new Error(detail) as Error & { status?: number; code?: string };
     error.status = res.status;
     error.code = errorCode;
