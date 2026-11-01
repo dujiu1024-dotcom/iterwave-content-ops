@@ -202,7 +202,8 @@ def start_login(platform: str, restart: bool = False, data_dir: Path | str | Non
             proc = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT), env=_login_env(),
                                     stdout=log_fh, stderr=subprocess.STDOUT, close_fds=True)
         except Exception as e:  # noqa: BLE001
-            return {**_empty_status(platform), "state": "error", "message": f"登录进程启动失败: {e}"}
+            logger.warning("登录进程启动失败 platform=%s error=%s", platform, type(e).__name__)
+            return {**_empty_status(platform), "state": "error", "message": "登录进程启动失败，请检查浏览器运行环境或联系管理员"}
         finally:
             log_fh.close()
         _LOGIN_PROCESSES[process_key] = proc

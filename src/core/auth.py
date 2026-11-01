@@ -266,6 +266,21 @@ def logout_session(token: Optional[str]) -> None:
     _save_revocations()
 
 
+def audit_actor(request) -> str:
+    """Return a non-secret, per-session audit principal; never persist a credential."""
+    cookie_token = request.cookies.get(COOKIE_NAME)
+    parsed = _parse_session(cookie_token)
+    if parsed is not None and parsed[0] not in _load_revocations():
+        fingerprint = hashlib.sha256(parsed[0].encode("utf-8")).hexdigest()[:20]
+        return f"session:{fingerprint}"
+    headers = request.headers
+    candidate = request_token(None, headers)
+    if candidate and verify_password(candidate):
+        # Script callers currently share one access token; this is not a human identity.
+        return "shared-api-token"
+    return "authenticated-unknown"
+
+
 # ----------------------------------------------------------------------
 # 登录限速
 # ----------------------------------------------------------------------

@@ -24,6 +24,12 @@ class WorkerLeaseLost(RuntimeError):
     """消费者无法确认自己仍持有全局任务租约。"""
 
 
+class TaskExecutionFailed(RuntimeError):
+    """业务执行器返回结构化失败报告，队列任务必须进入 failed。"""
+
+    code = "task_execution_failed"
+
+
 class GlobalTaskWorker:
     def __init__(
         self,
@@ -122,7 +128,7 @@ class GlobalTaskWorker:
     async def _run_task(self, task: QueuedTask) -> dict[str, Any]:
         allowed_scheduler_methods = {
             "_job_publish_polling", "_job_data_fetch", "_job_daily_ops",
-            "_job_comment_polling", "_job_cb_recovery", "_job_kb_scan",
+            "_job_comment_polling", "_job_cb_recovery", "_job_hot_topics_refresh", "_job_kb_scan",
             "_job_kb_sync", "_job_data_retention_cleanup",
             "_job_round_timeout_sweeper", "_job_round_review", "_job_autogrow_next_round",
         }
@@ -178,7 +184,41 @@ class GlobalTaskWorker:
                 args = task.payload.get("args", [])
                 if method not in allowed_scheduler_methods or not isinstance(args, list):
                     raise ValueError("定时任务类型或参数无效")
-                result = await getattr(context["scheduler"], method)(*args)
+                task_type = {
+                    "_job_publish_polling": "publish_polling",
+                    "_job_data_fetch": "data_fetch",
+                    "_job_daily_ops": "daily_ops",
+                    "_job_comment_polling": "comment_polling",
+                    "_job_cb_recovery": "cb_recovery",
+                    "_job_kb_scan": "kb_scan",
+                    "_job_kb_sync": "kb_scan",
+                    "_job_hot_topics_refresh": "hot_topics_refresh",
+                    "_job_data_retention_cleanup": "data_retention_cleanup",
+                    "_job_round_timeout_sweeper": "round_pipeline",
+                    "_job_round_review": "round_pipeline",
+                    "_job_autogrow_next_round": "round_pipeline",
+                }[method]
+                task_run_id = self._start_scheduler_task_run(
+                    context["conn"], context["cfg"], task_type, method, args,
+                )
+                from src.core.task_context import bind_task_context
+                try:
+                    with bind_task_context(task_run_id):
+                        result = await getattr(context["scheduler"], method)(*args)
+                except Exception as exc:
+                    self._finish_scheduler_task_run(
+                        context["conn"], context["cfg"], task_run_id, "failed", str(exc)[:500],
+                    )
+                    raise
+                else:
+                    failed_report = isinstance(result, dict) and result.get("final_status") == "failed"
+                    errors = result.get("errors") if isinstance(result, dict) else None
+                    error_msg = "；".join(str(item) for item in errors if item) if isinstance(errors, list) else None
+                    self._finish_scheduler_task_run(
+                        context["conn"], context["cfg"], task_run_id,
+                        "failed" if failed_report else "success",
+                        (error_msg or "调度任务返回 failed") if failed_report else None,
+                    )
                 return result if isinstance(result, dict) else {"completed": True}
         finally:
             scheduler = context.get("scheduler")
@@ -193,6 +233,42 @@ class GlobalTaskWorker:
                     conn.close()
                 except Exception:
                     logger.exception("关闭任务账号组数据库连接失败")
+
+
+    @staticmethod
+    def _start_scheduler_task_run(conn, cfg, task_type: str, method: str, args: list) -> int | None:
+        """为全局队列中的定时任务建立本账号组 task_run，供日志和通知精确关联。"""
+        if conn is None or not callable(getattr(conn, "execute", None)):
+            return None
+        import json
+        from src.core.timezone import business_now
+        try:
+            now = business_now(cfg).isoformat(timespec="seconds")
+            identity = json.dumps(args, ensure_ascii=False, default=str)[:300]
+            cur = conn.execute(
+                "INSERT INTO task_runs (task_type, biz_id, status, attempt, started_at, created_at) "
+                "VALUES (?, ?, 'running', 1, ?, ?)",
+                (task_type, f"scheduler:{method}:{identity}", now, now),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+        except Exception:
+            logger.exception("创建定时任务审计记录失败 method=%s", method)
+            return None
+
+    @staticmethod
+    def _finish_scheduler_task_run(conn, cfg, task_run_id: int | None, status: str, error_msg: str | None) -> None:
+        if conn is None or task_run_id is None:
+            return
+        from src.core.timezone import business_now
+        try:
+            conn.execute(
+                "UPDATE task_runs SET status=?, finished_at=?, error_msg=? WHERE id=? AND status='running'",
+                (status, business_now(cfg).isoformat(timespec="seconds"), error_msg, task_run_id),
+            )
+            conn.commit()
+        except Exception:
+            logger.exception("结束定时任务审计记录失败 task_run_id=%s", task_run_id)
 
     @staticmethod
     def _mark_round_failed(conn, round_id: int, reason: str) -> bool:
@@ -340,6 +416,10 @@ class GlobalTaskWorker:
             report = await execution
             if lease_lost.is_set():
                 raise WorkerLeaseLost("任务租约丢失，拒绝提交完成状态")
+            if isinstance(report, dict) and report.get("final_status") == "failed":
+                errors = report.get("errors")
+                detail = "；".join(str(item) for item in errors if item) if isinstance(errors, list) else ""
+                raise TaskExecutionFailed(detail or "业务执行器返回 failed")
             if not self.queue.finish(task.task_id, self.owner, result=report):
                 raise WorkerLeaseLost("任务完成状态写入失败，租约可能已失效")
         except WorkerLeaseLost:

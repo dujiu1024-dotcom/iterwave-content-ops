@@ -492,3 +492,163 @@ def test_history_page_filters_created_date_range(tmp_path):
         assert "date_from" in str(exc)
     else:
         raise AssertionError("reversed date range must be rejected")
+
+
+def test_manual_retry_preserves_tenant_payload_and_audits_confirmation(tmp_path):
+    queue = make_queue(tmp_path)
+    original, _ = queue.enqueue(
+        task_type="round_run",
+        tenant_id="tenant-a",
+        aggregate_id="round-17",
+        payload={"round_id": 17, "execution_snapshot": {"platform": "xhs", "account_id": "a-1"}},
+    )
+    claimed = queue.claim_next("worker-1")
+    assert claimed is not None and claimed.task_id == original.task_id
+    assert queue.fail(
+        original.task_id, "worker-1",
+        error_code="network_timeout", error_message="请求超时，平台状态待核实",
+    )
+
+    retry, created = queue.retry_after_manual_verification(
+        original.task_id,
+        confirmed_by="operator",
+        confirmation_note="已在平台后台核实，该内容没有创建或发布记录",
+        confirmed_not_executed=True,
+    )
+
+    assert created is True
+    assert retry.task_id != original.task_id
+    assert retry.retry_of_task_id == original.task_id
+    assert retry.tenant_id == original.tenant_id
+    assert retry.task_type == original.task_type
+    assert retry.aggregate_id == original.aggregate_id
+    assert retry.payload == original.payload
+    assert retry.status == "queued"
+    assert retry.retry_confirmed_by == "operator"
+    assert retry.retry_confirmation_note == "已在平台后台核实，该内容没有创建或发布记录"
+    assert queue.get(original.task_id).status == "failed"
+
+
+def test_manual_retry_is_idempotent_for_same_parent(tmp_path):
+    queue = make_queue(tmp_path)
+    original, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={"n": 1})
+    claimed = queue.claim_next("worker-1")
+    assert claimed is not None
+    assert queue.fail(original.task_id, "worker-1", error_code="failed", error_message="test")
+
+    first, created = queue.retry_after_manual_verification(
+        original.task_id, confirmed_by="operator",
+        confirmation_note="平台后台确认没有执行记录",
+        confirmed_not_executed=True,
+    )
+    second, created_again = queue.retry_after_manual_verification(
+        original.task_id, confirmed_by="operator",
+        confirmation_note="重复请求应返回同一恢复任务",
+        confirmed_not_executed=True,
+    )
+    assert created is True
+    assert created_again is False
+    assert second.task_id == first.task_id
+    assert queue.list_page(scope="active")[1] == 1
+
+
+def test_manual_retry_requires_confirmation_and_rejects_non_terminal_state(tmp_path):
+    queue = make_queue(tmp_path)
+    queued, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={})
+    try:
+        queue.retry_after_manual_verification(
+            queued.task_id, confirmed_by="operator",
+            confirmation_note="平台后台确认没有执行记录",
+            confirmed_not_executed=True,
+        )
+    except Exception as exc:
+        assert "failed/interrupted" in str(exc)
+    else:
+        raise AssertionError("queued task must not be manually retried")
+
+    assert queue.cancel(queued.task_id)
+    failed, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-b", payload={})
+    claimed = queue.claim_next("worker-1")
+    assert claimed is not None
+    assert queue.fail(failed.task_id, "worker-1", error_code="failed", error_message="test")
+    try:
+        queue.retry_after_manual_verification(
+            failed.task_id, confirmed_by="operator",
+            confirmation_note="平台后台确认没有执行记录",
+            confirmed_not_executed=False,
+        )
+    except ValueError as exc:
+        assert "必须明确确认平台侧未执行" in str(exc)
+    else:
+        raise AssertionError("retry without explicit confirmation must be rejected")
+
+
+def test_failed_task_resolution_is_audited_idempotent_and_removed_from_todos(tmp_path):
+    queue = make_queue(tmp_path)
+    task, _ = queue.enqueue(task_type="scheduler_job", tenant_id="tenant-a", payload={"job": "daily"})
+    claimed = queue.claim_next("worker-1")
+    assert claimed is not None and claimed.task_id == task.task_id
+    assert queue.fail(task.task_id, "worker-1", error_code="job_failed", error_message="采集失败")
+
+    unresolved, unresolved_total = queue.list_page(scope="failed", unresolved_only=True)
+    assert unresolved_total == 1
+    assert [row.task_id for row in unresolved] == [task.task_id]
+
+    resolution, created = queue.resolve_failed_task(
+        task.task_id, action="handled", actor="session:test-user",
+        note="已检查失败原因并完成线下补录",
+    )
+    assert created is True
+    assert resolution["action"] == "handled"
+    assert resolution["actor"] == "session:test-user"
+    assert resolution["note"] == "已检查失败原因并完成线下补录"
+
+    repeated, created_again = queue.resolve_failed_task(
+        task.task_id, action="handled", actor="session:test-user",
+        note="重复提交不应覆盖首次审计记录",
+    )
+    assert created_again is False
+    assert repeated == resolution
+
+    unresolved_after, unresolved_total_after = queue.list_page(scope="failed", unresolved_only=True)
+    assert unresolved_total_after == 0
+    assert unresolved_after == []
+
+    history, history_total = queue.list_page(scope="failed")
+    assert history_total == 1
+    assert history[0].status == "failed"
+    assert history[0].resolution_action == "handled"
+    assert history[0].resolution_actor == "session:test-user"
+    assert history[0].resolution_note == "已检查失败原因并完成线下补录"
+    assert history[0].resolution_at
+
+
+def test_failed_task_resolution_rejects_active_tasks_and_conflicting_actions(tmp_path):
+    queue = make_queue(tmp_path)
+    task, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={})
+    try:
+        queue.resolve_failed_task(
+            task.task_id, action="ignored", actor="operator",
+            note="该任务当前仍在排队不能忽略",
+        )
+    except Exception as exc:
+        assert "failed/interrupted" in str(exc)
+    else:
+        raise AssertionError("active tasks must not be resolved")
+
+    claimed = queue.claim_next("worker-1")
+    assert claimed is not None
+    assert queue.fail(task.task_id, "worker-1", error_code="failed", error_message="test")
+    queue.resolve_failed_task(
+        task.task_id, action="ignored", actor="operator",
+        note="该任务属于重复告警无需再次跟进",
+    )
+    try:
+        queue.resolve_failed_task(
+            task.task_id, action="handled", actor="operator",
+            note="不允许覆盖首次处理决定",
+        )
+    except Exception as exc:
+        assert "不允许反向修改" in str(exc)
+    else:
+        raise AssertionError("conflicting resolution must be rejected")

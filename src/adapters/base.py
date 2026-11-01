@@ -57,6 +57,7 @@ class DraftStatus(str, Enum):
 
 class FetchStatus(str, Enum):
     """数据采集五态（R3/R14）。"""
+    # 读回成功但尚未找到对应已发布作品；发布确认轮询继续等待，不作为失败告警。
     PENDING = "pending"
     SUCCESS = "success"
     PARTIAL = "partial"
@@ -313,7 +314,7 @@ class PlatformAdapter(ABC):
         import json
 
         from .readback import (
-            ReadbackUnavailable, failed_snapshot, match_work,
+            ReadbackUnavailable, failed_snapshot, match_work, pending_snapshot,
             read_works_sync, snapshot_from_work,
         )
 
@@ -335,8 +336,8 @@ class PlatformAdapter(ABC):
 
         work = match_work(works, title, platform_draft_id)
         if work is None:
-            return failed_snapshot(
-                self.platform, f"作品列表中未匹配到标题「{(title or '')[:20]}」",
+            return pending_snapshot(
+                self.platform, f"作品列表暂未匹配到标题「{(title or '')[:20]}」",
             )
 
         return snapshot_from_work(

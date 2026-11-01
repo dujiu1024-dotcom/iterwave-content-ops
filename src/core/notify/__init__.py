@@ -28,6 +28,7 @@ import subprocess
 from datetime import timedelta
 
 from ..timezone import business_now
+from ..task_context import current_round_id, current_task_run_id
 from typing import Optional, cast
 
 
@@ -111,6 +112,10 @@ class Notifier:
         level: Optional[str] = None,
         platform: Optional[str] = None,
         title: Optional[str] = None,
+        task_run_id: Optional[int] = None,
+        ops_log_id: Optional[int] = None,
+        round_id: Optional[int] = None,
+        draft_id: Optional[str] = None,
     ) -> bool:
         """发送一条通知。返回是否至少投递成功一个通道。
 
@@ -179,8 +184,14 @@ class Notifier:
             if ok:
                 sent_channels.append(channel)
 
-        self._save(db_type, final_level, platform, head, body,
-                   sent_channels[0] if sent_channels else None)
+        self._save(
+            db_type, final_level, platform, head, body,
+            sent_channels[0] if sent_channels else None,
+            task_run_id=task_run_id if task_run_id is not None else current_task_run_id(),
+            ops_log_id=ops_log_id,
+            round_id=round_id if round_id is not None else current_round_id(),
+            draft_id=draft_id,
+        )
 
         if not sent_channels:
             logger.warning(
@@ -330,18 +341,27 @@ class Notifier:
     def _save(
         self, db_type: str, level: str, platform: Optional[str],
         title: str, body: str, channel: Optional[str],
+        task_run_id: Optional[int] = None,
+        ops_log_id: Optional[int] = None,
+        round_id: Optional[int] = None,
+        draft_id: Optional[str] = None,
     ) -> None:
         if self.conn is None:
             return
         try:
             self.conn.execute(
-                "INSERT INTO notifications (level, type, platform, title, body, channel, sent_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO notifications (level, type, platform, title, body, channel, sent_at, "
+                "task_run_id, ops_log_id, round_id, draft_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     level, db_type, platform, title, body, channel,
                     # 带微秒：表上 UNIQUE(type, platform, sent_at) 只到秒，
                     # 同一秒内多条同类型通知（如连存多篇草稿）会撞约束丢记录
                     business_now(self.cfg).isoformat(sep=" "),
+                    task_run_id if task_run_id is not None else current_task_run_id(),
+                    ops_log_id,
+                    round_id if round_id is not None else current_round_id(),
+                    draft_id,
                 ),
             )
             self.conn.commit()
