@@ -758,7 +758,7 @@ function TasksPane({ tasks, total, page, pages, onPageChange, onResolved }: {
       <div className="panel-head">
         <div>
           <div className="panel-title"><span className="icon">⌁</span>任务追踪</div>
-          <div className="panel-sub">运行 / 中断 / 待核实 — 崩溃恢复的关键表</div>
+          <div className="panel-sub">共 {total} 条 · 运行 / 中断 / 待核实 — 崩溃恢复的关键表</div>
         </div>
       </div>
       {err && <div className="panel-sub" style={{ padding: "0 16px 8px", color: "var(--red)" }}>{err}</div>}
@@ -1242,7 +1242,7 @@ function NotificationsPane({ items, rules, total, page, pages, onPageChange, onC
       <div className="panel">
         <div className="panel-head">
           <div className="panel-title"><span className="icon">♧</span>消息通知历史</div>
-          <div className="panel-sub">7 场景 × 4 级 × macOS/企微/飞书</div>
+          <div className="panel-sub">共 {total} 条历史通知 · 7 场景 × 4 级 × macOS/企微/飞书</div>
         </div>
         <div className="table-wrap">
           <table>
