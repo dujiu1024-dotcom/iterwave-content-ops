@@ -380,8 +380,15 @@ class HotTopicCollector:
         source_rows = self.conn.execute(
             base + """
                 SELECT platform_key, source, evidence_status, discovered_at
-                FROM eligible_base
-                GROUP BY platform_key
+                FROM (
+                    SELECT platform_key, source, evidence_status, discovered_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY platform_key
+                               ORDER BY heat_score DESC NULLS LAST, id DESC
+                           ) AS source_rank
+                    FROM eligible_base
+                )
+                WHERE source_rank = 1
                 ORDER BY platform_key
             """,
             gate_params,
