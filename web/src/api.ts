@@ -541,6 +541,14 @@ export interface UnscheduledDraft {
 /** G-13 内容资产（外部参考 / 个人观点 / 内容模板） */
 export type AssetType = "reference" | "voice" | "template";
 
+export interface AssetPage {
+  items: AssetItem[];
+  total: number;
+  page: number;
+  page_size: number;
+  pages: number;
+}
+
 export interface TenantItem {
   id: string;
   name: string;
@@ -1640,6 +1648,10 @@ export const api = {
     fetchJson<{ items: AssetItem[]; total: number }>(
       `/api/assets${asset_type ? `?asset_type=${asset_type}` : ""}`,
     ),
+  assetsPage: (asset_type: AssetType, page: number, pageSize = 20) => {
+    const params = new URLSearchParams({ asset_type, page: String(page), page_size: String(pageSize) });
+    return fetchJson<AssetPage>(`/api/assets?${params.toString()}`);
+  },
   createAsset: (data: { asset_type: AssetType; title: string; body?: string; source_url?: string; platform?: Platform }) =>
     fetchJson<AssetItem>("/api/assets", { method: "POST", body: JSON.stringify(data) }),
   kbInspect: () => fetchJson<KbInspect>("/api/kb/inspect"),
