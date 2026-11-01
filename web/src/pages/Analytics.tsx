@@ -229,7 +229,7 @@ export default function Analytics() {
         </div>
       </div>
 
-            <div className="flex" style={{ justifyContent: "flex-end", alignItems: "center", gap: 8, marginBottom: 10 }}>
+            <div className="flex" style={{ justifyContent: "flex-end", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
         <label htmlFor="business-kpi-window" className="tiny">经营统计周期</label>
         <select id="business-kpi-window" className="field" style={{ width: 130 }} value={businessDays} onChange={(e) => setBusinessDays(Number(e.target.value))}>
           <option value={7}>近 7 天</option>
@@ -238,7 +238,7 @@ export default function Analytics() {
           <option value={365}>近 365 天</option>
         </select>
       </div>
-      <div className="grid kpis business-kpis" style={{ marginBottom: 15, gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
+      <div className="grid kpis analytics-business-kpis" style={{ marginBottom: 15 }}>
         <div className="metric">
           <div className="metric-top"><span className="metric-label">近 {businessSummary?.window_days ?? businessDays} 天内容生产量</span></div>
           <div className="metric-val">{businessSummary?.contents_created ?? "—"} <span className="metric-unit">篇</span></div>
