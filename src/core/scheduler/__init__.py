@@ -300,12 +300,16 @@ class SchedulerEngine:
         if self.conn is None or self.sm_draft is None:
             return False
         now = confirmed_at or business_now(self.cfg)
-        ok = self.sm_draft.transition(
-            draft_id, "user_published", reason=via,
-            extra_updates={"user_confirmed_at": now.isoformat()},
+        # 原子条件更新：并发的手动确认与平台轮询只能有一个调用赢得状态迁移，
+        # 只有赢家才注册一次性采集任务，避免两个请求都读到 draft_saved 后重复排程。
+        cur = self.conn.execute(
+            "UPDATE drafts SET status='user_published', user_confirmed_at=? "
+            "WHERE id=? AND status IN ('draft_saved', 'draft_pending')",
+            (now.isoformat(), draft_id),
         )
-        if not ok:
+        if cur.rowcount != 1:
             return False
+        self.conn.commit()
         if note_url:
             self.conn.execute(
                 "UPDATE drafts SET platform_note_url = COALESCE(platform_note_url, ?) WHERE id = ?",
