@@ -166,6 +166,9 @@ export default function HotTopics() {
   }, [refreshing, researching, page, tab, keyword, sortBy, sourceFilter]);
 
   useEffect(() => { loadHot(); }, [page, tab, keyword, sortBy, sourceFilter]);
+  useEffect(() => {
+    if (hot?.pages && page > hot.pages) setPage(hot.pages);
+  }, [hot?.pages, page]);
   useEffect(() => { loadConfig(); }, []);
 
   /** G-24：读门限配置（可编辑两项 + R22 两道硬锁只读） */
@@ -219,7 +222,6 @@ export default function HotTopics() {
   }
 
   const items = hot?.items || [];
-  const pageSize = 20;
   const pageCount = hot?.pages ?? 1;
   const pageItems = items;
   const sources = hot?.sources || [];
