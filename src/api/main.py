@@ -142,6 +142,54 @@ def _enqueue_round_task(*, tenant_id: str, round_id: int, topic_count=None,
     )
 
 
+def _round_id_from_aggregate(task_type: str, aggregate_id) -> Optional[int]:
+    """round_run 任务的 aggregate_id 形如 "<round_id>" 或 "<round_id>:<operation>"（round_id 为数据库主键）。"""
+    if task_type != "round_run" or not aggregate_id:
+        return None
+    head = str(aggregate_id).split(":", 1)[0]
+    return int(head) if head.isdigit() else None
+
+
+def _resolve_task_round_numbers(registry, tasks) -> dict:
+    """把 round_run 任务的数据库轮次 id 解析为业务轮次编号 round_number。
+
+    返回 {(tenant_id, round_id): round_number}。每个账号组数据库只读打开一次；
+    数据库缺失/不可读/轮次已删除时不写入映射（前端显示不带编号的文案，绝不回退显示数据库 id）。
+    """
+    wanted: dict[str, set[int]] = {}
+    for task in tasks:
+        rid = _round_id_from_aggregate(task.task_type, task.aggregate_id)
+        if rid is not None:
+            wanted.setdefault(task.tenant_id, set()).add(rid)
+    resolved: dict = {}
+    if not wanted or registry is None:
+        return resolved
+    for tenant_id, round_ids in wanted.items():
+        conn = None
+        try:
+            try:
+                name = str(registry.get(tenant_id).get("name") or tenant_id)
+            except Exception:  # noqa: BLE001 — 注册表无该账号组时按 id 推导路径
+                name = tenant_id
+            db_file = registry.paths(tenant_id, name=name).db_file
+            if not db_file.exists():
+                continue
+            conn = sqlite3.connect(db_file.as_uri() + "?mode=ro", uri=True, timeout=2)
+            ids = sorted(round_ids)
+            placeholders = ",".join("?" for _ in ids)
+            for rid, number in conn.execute(
+                f"SELECT id, round_number FROM spiral_rounds WHERE id IN ({placeholders})", ids,
+            ).fetchall():
+                if number is not None:
+                    resolved[(tenant_id, int(rid))] = int(number)
+        except Exception:  # noqa: BLE001 — 单个账号组不可读不影响队列列表
+            continue
+        finally:
+            if conn is not None:
+                conn.close()
+    return resolved
+
+
 def _tenant_scoped_hot_topic_status(status: dict, tenant_id: str) -> dict:
     """热点后台服务独立运行，但状态和结果只对所属账号组可见。"""
     if status.get("tenant_id") == tenant_id or (
@@ -4379,16 +4427,20 @@ def _register_routes(app: FastAPI) -> None:
                 date_from=date_from, date_to=date_to,
             )
         items = []
+        round_numbers = _resolve_task_round_numbers(registry, tasks)
         for task in tasks:
             try:
                 tenant_name = registry.get(task.tenant_id)["name"] if registry else task.tenant_id
             except TenantError:
                 tenant_name = task.tenant_id
+            round_id = _round_id_from_aggregate(task.task_type, task.aggregate_id)
             items.append({
                 "queue_order": task.queue_order,
                 "task_id": task.task_id, "task_type": task.task_type,
                 "tenant_id": task.tenant_id, "tenant_name": tenant_name,
-                "aggregate_id": task.aggregate_id, "status": task.status,
+                "aggregate_id": task.aggregate_id,
+                "round_number": round_numbers.get((task.tenant_id, round_id)) if round_id is not None else None,
+                "status": task.status,
                 "created_at": task.created_at, "available_at": task.available_at,
                 "started_at": task.started_at,
                 "finished_at": task.finished_at, "attempts": task.attempts,
@@ -4423,10 +4475,13 @@ def _register_routes(app: FastAPI) -> None:
         task = _task_queue.get(task_id)
         if task is None:
             raise HTTPException(404, "任务不存在")
+        round_id = _round_id_from_aggregate(task.task_type, task.aggregate_id)
+        round_numbers = _resolve_task_round_numbers(_g().get("tenant_registry"), [task])
         return {
             "queue_order": task.queue_order,
             "task_id": task.task_id, "task_type": task.task_type,
             "tenant_id": task.tenant_id, "aggregate_id": task.aggregate_id,
+            "round_number": round_numbers.get((task.tenant_id, round_id)) if round_id is not None else None,
             "status": task.status, "payload": task.payload, "result": task.result,
             "created_at": task.created_at, "available_at": task.available_at,
             "started_at": task.started_at,
@@ -6688,7 +6743,11 @@ def _register_routes(app: FastAPI) -> None:
 
     @app.get("/api/analytics/business-summary")
     def analytics_business_summary(days: int = Query(30, ge=1, le=365)):
-        """业务经营 KPI 汇总；只返回有明确定义的数据，未知值保留为 null。"""
+        """业务经营 KPI 汇总（生产量、确认发布量、互动、粉丝增长）；只返回有明确定义的数据，未知值保留为 null。
+
+        不提供「草稿确认发布率」「平台发布成功率」等 SaaS 漏斗类比率：前者分母口径易误读，
+        后者缺少权威平台回执，均不属于自用运营闭环的经营指标。目标完成率见 /api/goals/summary。
+        """
         from datetime import timedelta
 
         conn = _g()["conn"]
@@ -6699,11 +6758,6 @@ def _register_routes(app: FastAPI) -> None:
         ).fetchone()[0])
         drafts_created = int(conn.execute(
             "SELECT COUNT(*) FROM drafts WHERE datetime(created_at) >= datetime(?)", (since,)
-        ).fetchone()[0])
-        publish_eligible = int(conn.execute(
-            "SELECT COUNT(*) FROM drafts WHERE datetime(created_at) >= datetime(?) "
-            "AND status IN ('draft_saved','user_published','data_fetching','published')",
-            (since,),
         ).fetchone()[0])
         confirmed_published = int(conn.execute(
             "SELECT COUNT(*) FROM drafts WHERE datetime(created_at) >= datetime(?) "
@@ -6766,12 +6820,6 @@ def _register_routes(app: FastAPI) -> None:
             "contents_created": contents_created,
             "drafts_created": drafts_created,
             "confirmed_published": confirmed_published,
-            "publish_eligible": publish_eligible,
-            "draft_publish_confirmation_rate": (
-                confirmed_published / publish_eligible if publish_eligible else None
-            ),
-            "platform_publish_success_rate": None,
-            "platform_publish_success_note": "当前没有覆盖所有平台的权威发布尝试/成功回执分母，暂不可计算",
             "interactions": {
                 "sample_count": int(metric_row["sample_count"] or 0),
                 "views": metric_row["views"],
@@ -7044,6 +7092,21 @@ def _register_routes(app: FastAPI) -> None:
     def set_ops_pause(req: dict):
         paused = bool((req or {}).get("paused"))
         return set_ops_paused(_g()["conn"], paused, by="web-ui")
+
+    # --- 正式运营设置向导进度（按账号组存 app_settings，不依赖浏览器存储）---
+    @app.get("/api/onboarding/progress")
+    def get_onboarding_progress_api():
+        from src.core.onboarding_progress import get_onboarding_progress
+        return get_onboarding_progress(_g()["conn"])
+
+    @app.put("/api/onboarding/progress")
+    def put_onboarding_progress_api(req: dict):
+        from src.core.onboarding_progress import set_onboarding_progress, validate_onboarding_progress
+        try:
+            step_key, step_index = validate_onboarding_progress(req)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        return set_onboarding_progress(_g()["conn"], step_key, step_index, by="web-ui")
 
     # --- 通知通道自检（不落 notifications 表）---
     @app.post("/api/notify/test")

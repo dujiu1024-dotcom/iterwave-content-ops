@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, GlobalMonitorResponse, GlobalTaskQueueItem, GlobalTodoItem, NotificationItem } from "../api";
 import { navigate } from "../nav";
+import { roundTaskLabel } from "../roundLabel";
 
 const STATUS: Record<string, string> = {
   queued: "排队中", running: "运行中", succeeded: "已完成",
   failed: "失败", cancelled: "已取消", interrupted: "中断",
+};
+const TASK_TYPE_LABEL: Record<string, string> = {
+  round_run: "内容生产", scheduler_job: "账号组后台任务",
 };
 const PLATFORMS: Record<string, string> = {
   xhs: "小红书", douyin: "抖音", kuaishou: "快手", wechat_channels: "视频号",
@@ -195,7 +199,7 @@ export default function GlobalOperations() {
           <div className="panel-head"><div><div className="panel-title">全局 FIFO 任务</div><div className="panel-sub">运行任务不会因账号组切换而中断。</div></div><button className="btn sm" onClick={() => navigate("task-queue")}>完整队列</button></div>
           {active.length ? <div className="list">{active.map((task) => <div className="task-row" key={task.task_id}>
             <i className={`task-prio ${task.status === "running" ? "green" : "blue"}`} />
-            <div className="task-main"><div className="task-title">{task.tenant_name} · {task.task_type === "round_run" ? "内容生产" : task.task_type}</div><div className="task-desc">队列 #{task.queue_order} · {STATUS[task.status]}</div></div>
+            <div className="task-main"><div className="task-title">{task.tenant_name} · {task.task_type === "round_run" ? roundTaskLabel(task) : (TASK_TYPE_LABEL[task.task_type] ?? "账号组后台任务")}</div><div className="task-desc">队列 #{task.queue_order} · {STATUS[task.status]}</div></div>
           </div>)}</div> : <div className="empty-state">当前没有排队或执行中的任务。</div>}
           {activePages > 1 && <div className="pagination-row" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, paddingTop: 12 }}>
             <button className="btn sm" disabled={activePage <= 1 || loading} onClick={() => setActivePage((p) => Math.max(1, p - 1))}>上一页</button>
@@ -206,7 +210,7 @@ export default function GlobalOperations() {
         <section className="panel">
           <div className="panel-head"><div><div className="panel-title">异常与待处理</div><div className="panel-sub">当前返回的队列记录中失败或中断的任务。</div></div><span className="tag">{failedCount ?? "—"} 项</span></div>
           {failed.length ? <div className="list">{failed.map((task) => <div className="task-row" key={task.task_id}>
-            <i className="task-prio red" /><div className="task-main"><div className="task-title">{task.tenant_name} · {STATUS[task.status]}</div><div className="task-desc">{task.error_message || task.task_type}</div></div>
+            <i className="task-prio red" /><div className="task-main"><div className="task-title">{task.tenant_name} · {task.task_type === "round_run" ? roundTaskLabel(task) : (TASK_TYPE_LABEL[task.task_type] ?? "账号组后台任务")} · {STATUS[task.status]}</div><div className="task-desc">{task.error_message || "未记录错误说明"}</div></div>
           </div>)}</div> : <div className="empty-state">当前没有失败或中断任务。</div>}
           {failedPages > 1 && <div className="pagination-row" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, paddingTop: 12 }}>
             <button className="btn sm" disabled={failedPage <= 1 || loading} onClick={() => setFailedPage((p) => Math.max(1, p - 1))}>上一页</button>

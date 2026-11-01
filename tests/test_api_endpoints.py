@@ -2647,10 +2647,10 @@ def test_business_analytics_summary_preserves_unknown_rates_and_metrics(client):
     assert body["contents_created"] >= 0
     assert body["drafts_created"] >= 0
     assert body["confirmed_published"] >= 0
-    assert body["publish_eligible"] >= body["confirmed_published"]
-    if body["publish_eligible"] == 0:
-        assert body["draft_publish_confirmation_rate"] is None
-    assert body["platform_publish_success_rate"] is None
+    # SaaS 漏斗类比率已从经营总览移除，接口不得再返回。
+    for removed in ("publish_eligible", "draft_publish_confirmation_rate",
+                    "platform_publish_success_rate", "platform_publish_success_note"):
+        assert removed not in body
     assert body["interactions"]["sample_count"] >= 0
     if body["interactions"]["sample_count"] == 0:
         assert body["interactions"]["views"] is None
@@ -2689,11 +2689,79 @@ def test_business_analytics_summary_uses_latest_metric_per_draft(client):
     assert body["contents_created"] == 1
     assert body["drafts_created"] == 1
     assert body["confirmed_published"] == 1
-    assert body["publish_eligible"] == 1
-    assert body["draft_publish_confirmation_rate"] == 1.0
     assert body["interactions"]["sample_count"] == 1
     assert body["interactions"]["views"] == 120
     assert body["interactions"]["likes"] == 12
     assert body["interactions"]["collects"] == 6
     assert body["interactions"]["comments"] == 3
     assert body["interactions"]["shares"] == 2
+
+
+def test_onboarding_progress_persists_in_backend(client):
+    tc, conn, _ = client
+    empty = tc.get("/api/onboarding/progress")
+    assert empty.status_code == 200
+    assert empty.json()["step_key"] is None
+    assert empty.json()["step_index"] is None
+
+    saved = tc.put("/api/onboarding/progress", json={"step_key": "kb", "step_index": 2})
+    assert saved.status_code == 200
+    assert saved.json()["step_key"] == "kb"
+    assert saved.json()["step_index"] == 2
+
+    row = conn.execute("SELECT value FROM app_settings WHERE key='onboarding_progress'").fetchone()
+    assert row is not None and '"kb"' in row[0]
+
+    again = tc.get("/api/onboarding/progress").json()
+    assert again["step_key"] == "kb"
+    assert again["step_index"] == 2
+    assert again["updated_at"]
+
+    for bad in ({"step_key": "KB!", "step_index": 1}, {"step_key": "kb", "step_index": -1},
+                {"step_key": "kb", "step_index": True}, {}):
+        resp = tc.put("/api/onboarding/progress", json=bad)
+        assert resp.status_code == 422
+
+
+def test_global_task_queue_exposes_business_round_number_not_db_id(client, cfg, tmp_path, monkeypatch):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    tc, conn, _ = client
+    db_file = Path(cfg.resolve_path(cfg.paths.db_file))
+
+    class Registry:
+        def get(self, tenant_id):
+            return {"id": tenant_id, "name": "测试账号组"}
+
+        def list(self):
+            return [{"id": "default", "name": "测试账号组"}]
+
+        def paths(self, _tenant_id, name=None):
+            return SimpleNamespace(db_file=db_file, data_dir=Path(cfg.resolve_path(cfg.paths.data_dir)))
+
+    monkeypatch.setitem(api_main._g_ctx, "tenant_registry", Registry())
+    cur = conn.execute(
+        "INSERT INTO spiral_rounds (round_number, status, topic_ids, content_variants) "
+        "VALUES (7, 'producing', '[]', '[]')"
+    )
+    round_id = cur.lastrowid
+    conn.execute("UPDATE spiral_rounds SET id = ? WHERE id = ?", (round_id + 500, round_id))
+    round_id += 500
+    conn.commit()
+
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    monkeypatch.setattr(api_main, "_task_queue", queue)
+    run, _ = queue.enqueue(task_type="round_run", tenant_id="default", aggregate_id=str(round_id), payload={})
+    save, _ = queue.enqueue(
+        task_type="round_run", tenant_id="default",
+        aggregate_id=f"{round_id}:save_pending_drafts", payload={},
+    )
+    missing, _ = queue.enqueue(task_type="round_run", tenant_id="default", aggregate_id="999999", payload={})
+
+    items = {item["task_id"]: item for item in tc.get("/api/task-queue?scope=active").json()["items"]}
+    assert items[run.task_id]["round_number"] == 7
+    assert items[save.task_id]["round_number"] == 7
+    assert items[missing.task_id]["round_number"] is None
+    assert tc.get(f"/api/task-queue/{run.task_id}").json()["round_number"] == 7
