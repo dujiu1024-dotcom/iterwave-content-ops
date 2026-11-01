@@ -427,5 +427,5 @@ def failed_snapshot(platform: Platform, reason: str) -> MetricsSnapshot:
     return MetricsSnapshot(
         platform=platform,
         fetch_status=FetchStatus.FAILED,
-        error_msg=reason,
+        error_msg=safe_error_summary(reason, "平台数据读取失败，请检查登录状态后重试"),
     )
