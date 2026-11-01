@@ -127,14 +127,18 @@ export default function TaskQueue() {
       ]);
       setActiveItems(activeResponse.items || []);
       setActiveTotal(activeResponse.total ?? 0);
-      setActivePages(activeResponse.pages ?? 1);
+      const nextActivePages = activeResponse.pages ?? 1;
+      setActivePages(nextActivePages);
+      if (activePage > nextActivePages) setActivePage(nextActivePages);
       setActiveCounts({
         queued: activeResponse.status_counts?.queued ?? 0,
         running: activeResponse.status_counts?.running ?? 0,
       });
       setHistoryItems(historyResponse.items || []);
       setHistoryTotal(historyResponse.total ?? 0);
-      setHistoryPages(historyResponse.pages ?? 1);
+      const nextHistoryPages = historyResponse.pages ?? 1;
+      setHistoryPages(nextHistoryPages);
+      if (historyPage > nextHistoryPages) setHistoryPage(nextHistoryPages);
       setError("");
     } catch (err) {
       setError((err as Error).message || "任务队列读取失败");
