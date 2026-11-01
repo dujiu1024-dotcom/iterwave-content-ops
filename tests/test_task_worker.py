@@ -539,7 +539,11 @@ def test_worker_reconciles_interrupted_round_tasks_on_startup(tmp_path, monkeypa
 
     observed = []
     worker = GlobalTaskWorker(queue, lambda tenant_id: {})
-    monkeypatch.setattr(worker, "_reconcile_round_failure", lambda item, reason: observed.append((item.task_id, item.tenant_id, reason)))
+    def reconcile(item, reason):
+        observed.append((item.task_id, item.tenant_id, reason))
+        return True
+
+    monkeypatch.setattr(worker, "_reconcile_round_failure", reconcile)
     worker._sync_terminal_rounds()
 
     assert observed == [(task.task_id, "tenant-kill", "模拟进程意外退出")]
@@ -893,3 +897,53 @@ def test_scheduler_exception_audit_uses_safe_message(tmp_path):
     assert "internal.example" not in row["error_msg"]
     assert "secret" not in row["error_msg"]
     audit_conn.close()
+
+
+def test_interrupted_round_reconciliation_retries_after_transient_context_failure(tmp_path, monkeypatch):
+    """一次性上下文/数据库故障不能让进程内缓存永久跳过 interrupted 对账。"""
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    task, _ = queue.enqueue(
+        task_type="round_run", tenant_id="tenant-a", aggregate_id="25",
+        payload={"round_id": 25, "operation": "run"},
+    )
+    claimed = queue.claim_next("worker-reconcile")
+    assert claimed is not None
+    assert queue.interrupt(task.task_id, "worker-reconcile")
+
+    calls = {"build": 0, "round": 0, "plan": 0}
+
+    class FakeConnection:
+        def close(self):
+            pass
+
+    def build_context(_tenant_id):
+        calls["build"] += 1
+        if calls["build"] == 1:
+            raise OSError("temporary tenant database unavailable")
+        return {
+            "conn": FakeConnection(),
+            "scheduler": SimpleNamespace(shutdown=lambda: None),
+        }
+
+    monkeypatch.setattr(
+        GlobalTaskWorker, "_mark_round_failed",
+        staticmethod(lambda *_args: calls.__setitem__("round", calls["round"] + 1) or True),
+    )
+    monkeypatch.setattr(
+        GlobalTaskWorker, "_mark_content_plan_failed",
+        staticmethod(lambda *_args: calls.__setitem__("plan", calls["plan"] + 1)),
+    )
+    worker = GlobalTaskWorker(queue, build_context)
+
+    worker._sync_terminal_rounds()
+    assert task.task_id not in worker._reconciled_interrupted_task_ids
+    assert calls == {"build": 1, "round": 0, "plan": 0}
+
+    worker._sync_terminal_rounds()
+    assert task.task_id in worker._reconciled_interrupted_task_ids
+    assert calls == {"build": 2, "round": 1, "plan": 1}
+
+    # 对账成功后不重复执行数据库修复。
+    worker._sync_terminal_rounds()
+    assert calls == {"build": 2, "round": 1, "plan": 1}
