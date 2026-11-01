@@ -21,11 +21,18 @@ import Settings from "./pages/Settings";
 import TaskQueue from "./pages/TaskQueue";
 import GlobalSearch from "./components/GlobalSearch";
 
+// 顶栏账户菜单包含不显示在侧栏的页面；它们仍必须支持刷新、深链和浏览器前进/后退。
+const ROUTABLE_PAGES = new Set<string>([
+  ...NAV_ITEMS.map((item) => item.page),
+  "accounts",
+  "settings",
+]);
+
 function Router() {
   // 初始读 URL param，之后 onChange 同步写 URL（demo 风格）
   const getInitial = () => {
     const m = new URLSearchParams(window.location.search).get("page");
-    if (m && NAV_ITEMS.some((n) => n.page === m)) return m;
+    if (m && ROUTABLE_PAGES.has(m)) return m;
     return "dashboard";
   };
   const [page, setPageState] = useState<string>(getInitial);
@@ -49,7 +56,7 @@ function Router() {
   useEffect(() => {
     const onPop = () => {
       const m = new URLSearchParams(window.location.search).get("page");
-      if (m && NAV_ITEMS.some((n) => n.page === m)) setPageState(m);
+      if (m && ROUTABLE_PAGES.has(m)) setPageState(m);
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
