@@ -5969,8 +5969,10 @@ def _register_routes(app: FastAPI) -> None:
         platform: Optional[str] = Query(None, pattern="^(xhs|douyin|kuaishou|wechat_channels)$"),
         fetch_status: Optional[str] = Query(None),
         limit: int = Query(100, ge=1, le=500),
+        page: Optional[int] = Query(None, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
     ):
-        """已采集数据列表（R3：NULL 原样返回，不补 0）。"""
+        """已采集数据列表；传 page 时使用数据库分页，旧 limit 调用保持兼容。"""
         conn = _g()["conn"]
         sql = (
             "SELECT m.*, c.title AS content_title, c.round_id "
@@ -5984,22 +5986,39 @@ def _register_routes(app: FastAPI) -> None:
         if fetch_status:
             sql += " AND m.fetch_status = ?"
             params.append(fetch_status)
-        sql += " ORDER BY m.fetched_at DESC NULLS LAST LIMIT ?"
-        params.append(limit)
+        count_sql = "SELECT COUNT(*) FROM metrics WHERE 1=1"
+        count_params: list = []
+        if platform:
+            count_sql += " AND platform = ?"
+            count_params.append(platform)
+        if fetch_status:
+            count_sql += " AND fetch_status = ?"
+            count_params.append(fetch_status)
+        total = conn.execute(count_sql, count_params).fetchone()[0]
+        if page is None:
+            sql += " ORDER BY m.fetched_at DESC NULLS LAST LIMIT ?"
+            params.append(limit)
+        else:
+            sql += " ORDER BY m.fetched_at DESC NULLS LAST, m.id DESC LIMIT ? OFFSET ?"
+            params.extend([page_size, (page - 1) * page_size])
         rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
-        total = conn.execute(
-            "SELECT COUNT(*) FROM metrics "
-            + (" WHERE platform = ?" if platform else "")
-            + (" AND fetch_status = ?" if fetch_status else ""),
-            [p for i, p in enumerate([platform, fetch_status]) if p is not None],
-        ).fetchone()[0]
 
         # R13：z-score 一律平台内部基准。可跨平台对比的只有比率类指标，
         # 原始曝光/点赞只给平台内 z，不允许跨平台直接比大小。
         normalizer = _g()["normalizer"]
         comparable = ["interaction_rate", "like_rate", "collect_rate"]
         raw_metrics = ["views", "likes", "collects", "comments", "shares"]
-        platforms_present = sorted({r["platform"] for r in rows if r.get("platform")})
+        platform_sql = "SELECT DISTINCT platform FROM metrics WHERE 1=1"
+        platform_params: list = []
+        if platform:
+            platform_sql += " AND platform = ?"
+            platform_params.append(platform)
+        if fetch_status:
+            platform_sql += " AND fetch_status = ?"
+            platform_params.append(fetch_status)
+        platforms_present = sorted(
+            row["platform"] for row in conn.execute(platform_sql, platform_params).fetchall()
+        )
         stats: list[dict] = []
         stat_cache: dict[tuple[str, str], Optional[float]] = {}
         for p in platforms_present:
@@ -6029,6 +6048,10 @@ def _register_routes(app: FastAPI) -> None:
             row["z"] = z
         return {
             "items": rows, "total": total,
+            **({
+                "page": page, "page_size": page_size,
+                "pages": max(1, (total + page_size - 1) // page_size),
+            } if page is not None else {}),
             "filters": {"platform": platform, "fetch_status": fetch_status},
             "z_stats": stats,
             "z_window_days": 90,
