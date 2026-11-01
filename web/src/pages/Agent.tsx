@@ -515,7 +515,7 @@ function SkillsPane() {
                 <tbody>
                   {skills.map((skill) => (
                     <tr key={skill.skill_id}>
-                      <td title={skill.source}>
+                      <td>
                         <strong>{skill.name.replace(/（R\d+）/g, "").replace("Playwright ", "")}</strong>
                         <div className="tiny">{skill.skill_id}</div>
                         <details className="skill-manifest-preview">
