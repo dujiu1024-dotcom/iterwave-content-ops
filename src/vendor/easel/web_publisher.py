@@ -472,10 +472,25 @@ def _profile_dir(platform: str, base: str | None) -> Path:
 
 
 def _login_artifact_dir(profile_base: str | None) -> Path:
-    """敏感登录/发布截图跟随租户 data_dir，不落入共享 outputs。"""
+    """敏感登录/发布截图跟随租户 data_dir，并限制目录权限。"""
     if profile_base:
-        return Path(profile_base).expanduser().resolve().parent / "_login"
-    return Path(__file__).resolve().parents[3] / "outputs" / "_login"
+        path = Path(profile_base).expanduser().resolve().parent / "_login"
+    else:
+        path = Path(__file__).resolve().parents[3] / "outputs" / "_login"
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
+    return path
+
+
+def _secure_login_artifact(path: Path) -> None:
+    """截图/二维码可能包含登录态或个人信息，限制为当前用户可读写。"""
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
 
 
 def cmd_platforms(_a) -> int:
@@ -1568,6 +1583,7 @@ def _run_browser(a, headed: bool, do_publish: bool) -> int:
                             _sp = _login_artifact_dir(a.profile_base) / "debug-screenshot.png"
                         _sp.parent.mkdir(parents=True, exist_ok=True)
                         page.screenshot(path=str(_sp))
+                        _secure_login_artifact(_sp)
                     elif act == "js_eval":
                         # 直接执行 JS 代码（用于快手等框架按钮，CSS选择器/has-text 匹配不稳定）
                         page.evaluate(val)
@@ -1619,6 +1635,7 @@ def _run_browser(a, headed: bool, do_publish: bool) -> int:
                         fp = _login_artifact_dir(a.profile_base) / f"{a.platform}-publish-fail.png"
                         fp.parent.mkdir(parents=True, exist_ok=True)
                         page.screenshot(path=str(fp))
+                        _secure_login_artifact(fp)
                     except Exception:
                         pass
                     _ui = "界面判定通过" if ui_ok else "界面判定未通过"
@@ -1636,6 +1653,7 @@ def _run_browser(a, headed: bool, do_publish: bool) -> int:
                         fp = _login_artifact_dir(a.profile_base) / f"{a.platform}-publish-fail.png"
                         fp.parent.mkdir(parents=True, exist_ok=True)
                         page.screenshot(path=str(fp))
+                        _secure_login_artifact(fp)
                     except Exception:
                         pass
                     # 识别常见"账号级验证墙"（需短信/绑手机），给精准提示
@@ -1679,6 +1697,7 @@ def _run_browser(a, headed: bool, do_publish: bool) -> int:
                 fp = _login_artifact_dir(a.profile_base) / f"{a.platform}-publish-fail.png"
                 fp.parent.mkdir(parents=True, exist_ok=True)
                 page.screenshot(path=str(fp))
+                        _secure_login_artifact(fp)
                 print(f"    失败截图：{fp}", file=sys.stderr)
             except Exception:
                 pass
@@ -2052,10 +2071,12 @@ def _crop_qr(page, qr_out, cfg) -> None:
     if best is not None:
         try:
             best[1].screenshot(path=str(qr_out))
+            _secure_login_artifact(qr_out)
             return
         except Exception:
             pass
     page.screenshot(path=str(qr_out))   # 兜底：整页
+    _secure_login_artifact(qr_out)
 
 
 def _capture_qr(page, qr_out, cfg) -> None:
