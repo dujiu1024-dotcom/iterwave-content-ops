@@ -230,7 +230,7 @@ export default function HotTopics() {
       : (b.heat ?? -1) - (a.heat ?? -1));
 
   const sourceOptions = Array.from(new Set(items.map((item) => item.source))).sort();
-  const pageSize = 20;
+  const [pageSize, setPageSize] = useState(20);
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
   const pageItems = filtered.slice((page - 1) * pageSize, page * pageSize);
 
@@ -442,6 +442,11 @@ export default function HotTopics() {
         <select className="field" value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
           <option value="all">全部来源</option>
           {sourceOptions.map((source) => <option key={source} value={source}>{platformLabel(source.split("/").pop() || source)} · {source}</option>)}
+        </select>
+        <select className="field" aria-label="每页热点数量" value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}>
+          <option value={20}>每页 20 条</option>
+          <option value={50}>每页 50 条</option>
+          <option value={100}>每页 100 条</option>
         </select>
       </div>
 
