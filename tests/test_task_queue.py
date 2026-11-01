@@ -402,3 +402,26 @@ def test_queue_status_counts_are_aggregated_by_tenant(tmp_path):
     assert failed["by_tenant"] == {
         "tenant-b": {"failed": 1, "interrupted": 1},
     }
+
+
+def test_failed_queue_page_can_filter_task_type(tmp_path):
+    queue = make_queue(tmp_path)
+    round_task, _ = queue.enqueue(
+        task_type="round_run", tenant_id="tenant-a", payload={"kind": "round"},
+    )
+    scheduler_task, _ = queue.enqueue(
+        task_type="scheduler_job", tenant_id="tenant-a", payload={"kind": "scheduler"},
+    )
+
+    conn = queue._connect()
+    try:
+        conn.executemany(
+            "UPDATE global_task_queue SET status='failed' WHERE task_id=?",
+            [(round_task.task_id,), (scheduler_task.task_id,)],
+        )
+    finally:
+        conn.close()
+
+    items, total = queue.list_page(scope="failed", task_type="round_run")
+    assert total == 1
+    assert [item.task_id for item in items] == [round_task.task_id]
