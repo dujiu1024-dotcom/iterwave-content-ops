@@ -43,7 +43,7 @@ function aggregateLabel(task: GlobalTaskQueueItem) {
   const [method, objectId, attempt] = task.aggregate_id.split(":");
   const label = SCHEDULER_JOB_LABEL[method] || "账号组后台任务";
   if (method === "_job_data_fetch" && objectId) {
-    return `${label} · ${objectId}${attempt ? ` · 第 ${attempt} 次` : ""}`;
+    return `${label}${attempt ? ` · 第 ${attempt} 次` : ""}`;
   }
   return label;
 }
