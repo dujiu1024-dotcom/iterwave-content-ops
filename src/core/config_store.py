@@ -1187,7 +1187,8 @@ def patch_config(
                 audit_rows=system_audit_rows,
             )
         except (ValueError, sqlite3.Error) as exc:
-            raise ConfigPatchError(str(exc)) from exc
+            logger.exception("系统模型配置持久化失败")
+            raise ConfigPatchError("系统模型配置保存失败，请检查数据库状态后重试") from exc
     if persisted_tenant:
         # Tenant settings, version snapshot and audit rows share one SQLite transaction.
         from src.core.config_repository import save_settings
@@ -1197,7 +1198,8 @@ def patch_config(
                 remove_keys=remove_keys,
             )
         except (ValueError, sqlite3.Error) as exc:
-            raise ConfigPatchError(str(exc)) from exc
+            logger.exception("账号组运行时配置持久化失败")
+            raise ConfigPatchError("账号组配置保存失败，请检查数据库状态后重试") from exc
 
     for key, value in {**persisted_tenant, **persisted_system}.items():
         _set_value(cfg, key, value)
