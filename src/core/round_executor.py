@@ -268,7 +268,7 @@ class RoundExecutor:
                     report["errors"].append("失败收尾：轮次状态未能迁移到 failed")
             except Exception as cleanup_exc:  # noqa: BLE001
                 logger.exception("轮次失败状态收尾异常 round=%s", round_id)
-                report["errors"].append(f"失败状态收尾异常: {cleanup_exc}")
+                report["errors"].append("失败状态收尾异常，详细原因已记录到服务端日志")
         except Exception as exc:  # noqa: BLE001 — 执行器兜底，必须留痕
             logger.exception("轮次 %s 执行异常", round_id)
             report["errors"].append("执行异常，请检查运行日志")
