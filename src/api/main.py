@@ -3883,7 +3883,11 @@ def _register_routes(app: FastAPI) -> None:
                 "pages": max(1, (total + page_size - 1) // page_size),
             })
             if scope == "active":
-                response["status_counts"] = _task_queue.status_counts(scope="active")["by_status"]
+                active_stats = _task_queue.status_counts(scope="active")
+                response["status_counts"] = active_stats["by_status"]
+                response["tenant_status_counts"] = active_stats["by_tenant"]
+            elif scope == "failed":
+                response["tenant_status_counts"] = _task_queue.status_counts(scope="failed")["by_tenant"]
         return response
 
     @app.get("/api/task-queue/{task_id}")
