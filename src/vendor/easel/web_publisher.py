@@ -1635,7 +1635,7 @@ def _run_browser(a, headed: bool, do_publish: bool) -> int:
                         fp = _login_artifact_dir(a.profile_base) / f"{a.platform}-publish-fail.png"
                         fp.parent.mkdir(parents=True, exist_ok=True)
                         page.screenshot(path=str(fp))
-                        _secure_login_artifact(fp)
+                _secure_login_artifact(fp)
                     except Exception:
                         pass
                     _ui = "界面判定通过" if ui_ok else "界面判定未通过"
