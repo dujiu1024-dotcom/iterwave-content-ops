@@ -206,30 +206,11 @@ export default function Analytics() {
       </div>
 
       {detailView === "overview" && <>
-      <div className="flex" style={{ justifyContent: "flex-end", alignItems: "center", gap: 8, marginBottom: 10 }}>
-        <label htmlFor="business-kpi-window" className="tiny">经营统计周期</label>
-        <select id="business-kpi-window" className="field" style={{ width: 130 }} value={businessDays} onChange={(e) => setBusinessDays(Number(e.target.value))}>
-          <option value={7}>近 7 天</option>
-          <option value={30}>近 30 天</option>
-          <option value={90}>近 90 天</option>
-          <option value={365}>近 365 天</option>
-        </select>
-      </div>
       <div className="grid kpis" style={{ marginBottom: 15 }}>
         <div className="metric">
           <div className="metric-top"><span className="metric-label">指标采集记录</span><span className="metric-icon" aria-hidden="true">▤</span></div>
           <div className="metric-val">{metrics ? metrics.total : "—"} <span className="metric-unit">条</span></div>
           <div className="metric-foot">近 {metrics?.z_window_days ?? 90} 天指标记录（含采集失败记录），不代表生产量</div>
-        </div>
-        <div className="metric">
-          <div className="metric-top"><span className="metric-label">近 {businessSummary?.window_days ?? businessDays} 天内容生产量</span></div>
-          <div className="metric-val">{businessSummary?.contents_created ?? "—"} <span className="metric-unit">篇</span></div>
-          <div className="metric-foot">按内容创建时间统计</div>
-        </div>
-        <div className="metric">
-          <div className="metric-top"><span className="metric-label">近 {businessSummary?.window_days ?? businessDays} 天草稿产出量</span></div>
-          <div className="metric-val">{businessSummary?.drafts_created ?? "—"} <span className="metric-unit">篇</span></div>
-          <div className="metric-foot">按草稿创建时间统计，含平台变体</div>
         </div>
         <div className="metric">
           <div className="metric-top"><span className="metric-label">平均互动率</span><span className="metric-icon" aria-hidden="true">↗</span></div>
@@ -248,7 +229,26 @@ export default function Analytics() {
         </div>
       </div>
 
+            <div className="flex" style={{ justifyContent: "flex-end", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <label htmlFor="business-kpi-window" className="tiny">经营统计周期</label>
+        <select id="business-kpi-window" className="field" style={{ width: 130 }} value={businessDays} onChange={(e) => setBusinessDays(Number(e.target.value))}>
+          <option value={7}>近 7 天</option>
+          <option value={30}>近 30 天</option>
+          <option value={90}>近 90 天</option>
+          <option value={365}>近 365 天</option>
+        </select>
+      </div>
       <div className="grid kpis analytics-activation-kpis" style={{ marginBottom: 15, gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
+                <div className="metric">
+          <div className="metric-top"><span className="metric-label">近 {businessSummary?.window_days ?? businessDays} 天内容生产量</span></div>
+          <div className="metric-val">{businessSummary?.contents_created ?? "—"} <span className="metric-unit">篇</span></div>
+          <div className="metric-foot">按内容创建时间统计</div>
+        </div>
+        <div className="metric">
+          <div className="metric-top"><span className="metric-label">近 {businessSummary?.window_days ?? businessDays} 天草稿产出量</span></div>
+          <div className="metric-val">{businessSummary?.drafts_created ?? "—"} <span className="metric-unit">篇</span></div>
+          <div className="metric-foot">按草稿创建时间统计，含平台变体</div>
+        </div>
         <div className="metric"><div className="metric-label">首次价值时间 TTV</div><div className="metric-val">{activationMetrics?.ttv_seconds == null ? "—" : `${Math.round(activationMetrics.ttv_seconds)} 秒`}</div><div className="metric-foot">输入 {activationMetrics?.activation_input_wait_seconds == null ? "—" : Math.round(activationMetrics.activation_input_wait_seconds)} 秒 · 排队 {activationMetrics?.model_queue_wait_seconds == null ? "—" : Math.round(activationMetrics.model_queue_wait_seconds)} 秒 · 生成 {activationMetrics?.generation_processing_seconds == null ? "—" : Math.round(activationMetrics.generation_processing_seconds)} 秒</div><div className="metric-foot">P50 {activationMetrics?.ttv_p50_seconds == null ? "—" : Math.round(activationMetrics.ttv_p50_seconds)} 秒 · P90 {activationMetrics?.ttv_p90_seconds == null ? "—" : Math.round(activationMetrics.ttv_p90_seconds)} 秒 · 样本 {activationMetrics?.ttv_sample_count ?? 0}</div><div className="metric-foot">{activationMetrics?.ttv_percentile_scope || "分位数范围待定"}</div></div>
         <div className="metric">
           <div className="metric-label">累计确认发布量</div>
