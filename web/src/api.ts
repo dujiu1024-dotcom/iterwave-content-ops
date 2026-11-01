@@ -478,7 +478,7 @@ export interface HotTopicsResponse {
   storage?: { rows: number; retention_days: number; max_rows: number };
   sources: HotSourceStatus[];
   items: HotTopicItem[];
-  total?: number; page?: number; page_size?: number; pages?: number; urgent_total?: number;
+  total?: number; page?: number; page_size?: number; pages?: number; urgent_total?: number; source_options?: string[];
   filters?: Record<string, unknown>;
   message?: string;
 }
