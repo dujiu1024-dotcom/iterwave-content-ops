@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import AsyncPanel from "../components/AsyncPanel";
 import EmptyHint from "../components/EmptyHint";
 import TopicPoolPane from "../components/TopicPoolPane";
@@ -36,11 +36,17 @@ export default function Assets() {
   const [config, setConfig] = useState<SystemConfigView | null>(null);
   const [hot, setHot] = useState<HotTopicItem[]>([]);
   const [assets, setAssets] = useState<Record<AssetType, AssetItem[]>>({ reference: [], voice: [], template: [] });
+  const [assetTotals, setAssetTotals] = useState<Record<AssetType, number>>({ reference: 0, voice: 0, template: 0 });
+  const [assetPages, setAssetPages] = useState<Record<AssetType, number>>({ reference: 1, voice: 1, template: 1 });
+  const [referencePage, setReferencePage] = useState(1);
+  const [voicePage, setVoicePage] = useState(1);
+  const [templatePage, setTemplatePage] = useState(1);
+  const assetPageSize = 12;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [editingTemplate, setEditingTemplate] = useState<AssetItem | null>(null);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
@@ -52,9 +58,9 @@ export default function Assets() {
         api.kbInspect(),
         api.config(),
         api.hotTopics(),
-        api.assets("reference"),
-        api.assets("voice"),
-        api.assets("template"),
+        api.assets("reference", referencePage, assetPageSize),
+        api.assets("voice", voicePage, assetPageSize),
+        api.assets("template", templatePage, assetPageSize),
       ]);
       // 成功的逐个 set；失败的汇总成 error 提示
       const failures: string[] = [];
@@ -75,6 +81,16 @@ export default function Assets() {
         voice: voices?.items ?? [],
         template: templates?.items ?? [],
       });
+      setAssetTotals({
+        reference: refs?.total ?? 0,
+        voice: voices?.total ?? 0,
+        template: templates?.total ?? 0,
+      });
+      setAssetPages({
+        reference: refs?.pages ?? 1,
+        voice: voices?.pages ?? 1,
+        template: templates?.pages ?? 1,
+      });
 
       if (failures.length > 0) {
         setError(`部分数据加载失败：${failures.join("、")} — 已展示成功部分`);
@@ -84,9 +100,9 @@ export default function Assets() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [referencePage, voicePage, templatePage]);
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { void load(); }, [load]);
 
   const addAsset = async (type: AssetType, data: { title: string; body?: string; source_url?: string }) => {
     try {
@@ -239,6 +255,8 @@ export default function Assets() {
                   </tbody>
                 </table>
               </div>
+              <AssetPagination page={referencePage} pages={assetPages.reference} total={assetTotals.reference}
+                onPageChange={setReferencePage} pageSize={assetPageSize} />
             </AsyncPanel>
           </div>
 
@@ -333,6 +351,8 @@ export default function Assets() {
                 ))}
               </div>
             )}
+            <AssetPagination page={voicePage} pages={assetPages.voice} total={assetTotals.voice}
+              onPageChange={setVoicePage} pageSize={assetPageSize} />
           </div>
         </>
       )}
@@ -395,6 +415,8 @@ export default function Assets() {
                 ))}
               </div>
             )}
+            <AssetPagination page={templatePage} pages={assetPages.template} total={assetTotals.template}
+              onPageChange={setTemplatePage} pageSize={assetPageSize} />
           </div>
         </>
       )}
@@ -404,6 +426,19 @@ export default function Assets() {
   );
 }
 
+
+function AssetPagination({ page, pages, total, pageSize, onPageChange }: {
+  page: number; pages: number; total: number; pageSize: number; onPageChange: (page: number) => void;
+}) {
+  if (total <= pageSize) return null;
+  return <div className="pagination-bar">
+    <span className="pagination-summary">共 {total} 条 · 第 {page}/{pages} 页 · 每页 {pageSize} 条</span>
+    <div className="pagination-actions">
+      <button className="btn sm" disabled={page <= 1} onClick={() => onPageChange(page - 1)}>上一页</button>
+      <button className="btn sm" disabled={page >= pages} onClick={() => onPageChange(page + 1)}>下一页</button>
+    </div>
+  </div>;
+}
 
 function TemplateEditor({ item, onCancel, onSaved }: {
   item: AssetItem; onCancel: () => void; onSaved: () => void | Promise<void>;
