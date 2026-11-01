@@ -6006,12 +6006,8 @@ def _register_routes(app: FastAPI) -> None:
         import re
         if not re.fullmatch(r"[a-z][a-z0-9_.-]{1,63}", skill_id):
             raise HTTPException(422, "skill_id 必须以小写字母开头，仅允许小写字母、数字、点、下划线和连字符")
-        builtin_skill_ids = {
-            "topic_scoring", "prompt_variants", "ultimate_goal_check", "image_card",
-            "draft_saver", "circuit_breaker", "rhythm_controller", "ops_engine",
-            "spiral_engine", "zscore_normalize", "recovery_manager", "autogrow",
-            "topic_pool", "orchestration", "scheduler", "platform_readback",
-        }
+        from src.core.skills_registry import builtin_skills_catalog
+        builtin_skill_ids = {item["skill_id"] for item in builtin_skills_catalog()}
         if skill_id in builtin_skill_ids:
             raise HTTPException(409, "该 ID 已被系统内置 Skill 占用")
         if not name or len(name) > 120 or len(description) > 2000:
