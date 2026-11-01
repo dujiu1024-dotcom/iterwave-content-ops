@@ -1038,6 +1038,17 @@ export interface AccountInfo {
   qr_base64?: string | null;
 }
 
+export interface RegisteredPlatformAccount {
+  id: number;
+  platform: Platform;
+  account_handle: string;
+  display_name: string;
+  status: "active" | "inactive";
+  notes: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
 export interface LoginStatus {
   platform: Platform;
   platform_display: string;
@@ -1813,6 +1824,13 @@ export const api = {
     fetchJson<RedlineRecord[]>(`/api/redline_history?limit=${limit}`),
   // === 账号管理 ===
   accounts: () => fetchJson<{ accounts: AccountInfo[] }>("/api/accounts"),
+  platformAccounts: () => fetchJson<{ items: RegisteredPlatformAccount[]; total: number; active_total: number }>("/api/platform-accounts"),
+  savePlatformAccount: (id: number | null, data: { platform: Platform; account_handle: string; display_name: string; status: "active" | "inactive"; notes: string }) =>
+    fetchJson<RegisteredPlatformAccount>(id == null ? "/api/platform-accounts" : `/api/platform-accounts/${id}`, {
+      method: id == null ? "POST" : "PUT", body: JSON.stringify(data),
+    }),
+  deletePlatformAccount: (id: number) =>
+    fetchJson<void>(`/api/platform-accounts/${id}`, { method: "DELETE" }),
   /** 启动扫码登录；restart=true 会先结束仍在运行的旧登录进程 */
   startLogin: (platform: Platform, restart = false) =>
     fetchJson<LoginStatus>(`/api/accounts/${platform}/login${restart ? "?restart=true" : ""}`, { method: "POST" }),
