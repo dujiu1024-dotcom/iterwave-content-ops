@@ -6451,18 +6451,20 @@ def _register_routes(app: FastAPI) -> None:
         ops_win = windows.get("ops")
         ops_range = f"{ops_win.start_hour:02d}:00-{ops_win.end_hour:02d}:00" if ops_win else "08:00-23:00"
 
-        # 每平台 posting_windows：目前四平台共用 ops 窗口（后续可分平台配）
-        posting_windows = {p: [ops_range] for p in enabled}
+        # 节奏配置对所有受支持平台都可见和可编辑；平台启停状态单独返回，
+        # 避免未启用平台（尤其快手）被误认为没有节奏控制能力。
+        supported_platforms = ("xhs", "douyin", "kuaishou", "wechat_channels")
+        posting_windows = {p: [ops_range] for p in supported_platforms}
 
         return {
             "enabled_platforms": enabled,
             "quotas": {
                 p: {
-                    "passive_replies": getattr(quotas_map.get(p), "passive_replies", None),
-                    "active_comments": getattr(quotas_map.get(p), "active_comments", None),
-                    "follows": getattr(quotas_map.get(p), "follows", None),
+                    "passive_replies": getattr(quotas_map.get(p), "passive_replies", 0),
+                    "active_comments": getattr(quotas_map.get(p), "active_comments", 0),
+                    "follows": getattr(quotas_map.get(p), "follows", 0),
                 }
-                for p in enabled
+                for p in supported_platforms
             },
             "posting_windows": posting_windows,
             "ops_window": (
