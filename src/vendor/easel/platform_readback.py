@@ -345,6 +345,7 @@ def verify_douyin_publish(page, *, title: str, since_ms: int | None = None,
     """
     last_error: Exception | None = None
     last_candidates: list[WorkItem] = []
+    successful_readback = False
     evidence: dict[str, Any] = {"attempts": 0}
     for i in range(max(1, attempts)):
         evidence = {"attempts": i + 1, "checked_at": int(time.time())}
@@ -358,6 +359,7 @@ def verify_douyin_publish(page, *, title: str, since_ms: int | None = None,
             if i + 1 < attempts:
                 time.sleep(delay_s)
             continue
+        successful_readback = True
         last_candidates = works
         evidence["count"] = len(works)
         matched = find_published_work(works, title, since_ms=since_ms, exclude_ids=snapshot_ids)
@@ -373,8 +375,10 @@ def verify_douyin_publish(page, *, title: str, since_ms: int | None = None,
         print(f"… 读回第 {i + 1}/{attempts} 轮：列表 {len(works)} 条未见本次作品", file=sys.stderr)
         if i + 1 < attempts:
             time.sleep(delay_s)
-    if last_error is not None and not last_candidates:
+    if not successful_readback and last_error is not None:
         return ReadbackResult(outcome="readback_error", evidence=evidence, error=str(last_error))
+    if last_error is not None:
+        evidence["recovered_after_readback_error"] = True
     return ReadbackResult(outcome="unverified", candidates=last_candidates[:5], evidence=evidence)
 
 
@@ -681,6 +685,7 @@ def verify_kuaishou_publish(page, *, title: str, since_ms: int | None = None,
     """快手发布后对账入口：多轮读回（列表异步更新/审核队列，给平台索引时间）。四档同抖音。"""
     last_error: Exception | None = None
     last_candidates: list[WorkItem] = []
+    successful_readback = False
     evidence: dict[str, Any] = {"attempts": 0}
     for i in range(max(1, attempts)):
         evidence = {"attempts": i + 1, "checked_at": int(time.time())}
@@ -694,6 +699,7 @@ def verify_kuaishou_publish(page, *, title: str, since_ms: int | None = None,
             if i + 1 < attempts:
                 time.sleep(delay_s)
             continue
+        successful_readback = True
         last_candidates = works
         evidence["count"] = len(works)
         matched = find_published_work(works, title, since_ms=since_ms, exclude_ids=snapshot_ids)
@@ -708,8 +714,10 @@ def verify_kuaishou_publish(page, *, title: str, since_ms: int | None = None,
         print(f"… 快手读回第 {i + 1}/{attempts} 轮：列表 {len(works)} 条未见本次作品", file=sys.stderr)
         if i + 1 < attempts:
             time.sleep(delay_s)
-    if last_error is not None and not last_candidates:
+    if not successful_readback and last_error is not None:
         return ReadbackResult(outcome="readback_error", evidence=evidence, error=str(last_error))
+    if last_error is not None:
+        evidence["recovered_after_readback_error"] = True
     return ReadbackResult(outcome="unverified", candidates=last_candidates[:5], evidence=evidence)
 
 
@@ -845,6 +853,7 @@ def verify_bilibili_publish(cookie_file, *, title: str, since_ms: int | None = N
     """B站发布后对账入口：多轮读回（审核队列/索引延迟）。四档同抖音。"""
     last_error: Exception | None = None
     last_candidates: list[WorkItem] = []
+    successful_readback = False
     evidence: dict[str, Any] = {"attempts": 0}
     for i in range(max(1, attempts)):
         evidence = {"attempts": i + 1, "checked_at": int(time.time())}
@@ -858,6 +867,7 @@ def verify_bilibili_publish(cookie_file, *, title: str, since_ms: int | None = N
             if i + 1 < attempts:
                 time.sleep(delay_s)
             continue
+        successful_readback = True
         last_candidates = works
         evidence["count"] = len(works)
         matched = find_published_work(works, title, since_ms=since_ms, exclude_ids=snapshot_ids)
@@ -872,6 +882,8 @@ def verify_bilibili_publish(cookie_file, *, title: str, since_ms: int | None = N
         print(f"… B站读回第 {i + 1}/{attempts} 轮：列表 {len(works)} 条未见本次稿件", file=sys.stderr)
         if i + 1 < attempts:
             time.sleep(delay_s)
-    if last_error is not None and not last_candidates:
+    if not successful_readback and last_error is not None:
         return ReadbackResult(outcome="readback_error", evidence=evidence, error=str(last_error))
+    if last_error is not None:
+        evidence["recovered_after_readback_error"] = True
     return ReadbackResult(outcome="unverified", candidates=last_candidates[:5], evidence=evidence)
