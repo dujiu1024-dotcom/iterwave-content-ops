@@ -138,7 +138,7 @@ export default function GlobalOperations() {
         {loading && !monitor ? <div className="empty-state">正在汇总账号组…</div> : !monitor ? <div className="empty-state">账号组数据暂不可用。</div> : (
           <div className="table-wrap">
             <table>
-              <thead><tr><th>账号组</th><th>数据库</th><th>平台账号</th><th>平台登录</th><th>运行中</th><th>排队中</th><th>失败 / 中断</th><th>定时调度</th><th>活跃轮次</th><th>操作</th></tr></thead>
+              <thead><tr><th>账号组</th><th>数据库</th><th>平台账号</th><th>平台登录</th><th>运行中</th><th>排队中</th><th>失败 / 中断</th><th>定时调度</th><th>活跃轮次</th></tr></thead>
               <tbody>{(monitor.tenants ?? []).map((tenant) => {
                 const q = tenantCounts[tenant.tenant_id] ?? { queued: 0, running: 0, failed: 0 };
                 return <tr key={tenant.tenant_id}>
@@ -161,7 +161,6 @@ export default function GlobalOperations() {
                     </div>
                   ) : tenant.db_status === "uninitialized" ? <span className="tag gray">未初始化</span> : tenant.db_available ? <span className="tag gray">未启动</span> : <span className="tag gray">—</span>}</td>
                   <td>{tenant.runtime?.active_rounds ?? "—"}</td>
-                  <td><span className="muted">—</span></td>
                 </tr>;
               })}</tbody>
             </table>
