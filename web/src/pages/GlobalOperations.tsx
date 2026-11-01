@@ -39,6 +39,7 @@ export default function GlobalOperations() {
       setTasks(data.items ?? []);
       setActiveCount(data.total ?? data.items?.length ?? 0);
       setActivePages(data.pages ?? 1);
+      if (activePage > (data.pages ?? 1)) setActivePage(data.pages ?? 1);
       setActiveCounts({
         queued: data.status_counts?.queued ?? 0,
         running: data.status_counts?.running ?? 0,
@@ -49,6 +50,7 @@ export default function GlobalOperations() {
       setFailedCount(data.total ?? 0);
       setFailedTasks(data.items ?? []);
       setFailedPages(data.pages ?? 1);
+      if (failedPage > (data.pages ?? 1)) setFailedPage(data.pages ?? 1);
     }
     const failures = results.flatMap((r, i) => r.status === "rejected"
       ? [`${["账号组汇总", "活跃任务", "失败任务统计"][i]}：${r.reason instanceof Error ? r.reason.message : String(r.reason)}`]
@@ -103,7 +105,7 @@ export default function GlobalOperations() {
 
       <div className="grid four" style={{ marginBottom: 16 }}>
         <div className="metric"><div className="metric-label">账号组</div><div className="metric-val">{monitor?.totals?.tenants ?? "—"}</div><div className="metric-foot">数据库可读取 {monitor?.totals?.available_tenants ?? "—"} 个</div></div>
-        <div className="metric"><div className="metric-label">运行中任务</div><div className="metric-val">{activeCount == null ? "—" : activeCounts.running}</div><div className="metric-foot">来自全局队列当前返回记录</div></div>
+        <div className="metric"><div className="metric-label">运行中任务</div><div className="metric-val">{activeCount == null ? "—" : activeCounts.running}</div><div className="metric-foot">来自全局队列数据库聚合</div></div>
         <div className="metric"><div className="metric-label">等待任务</div><div className="metric-val">{activeCount == null ? "—" : activeCounts.queued}</div><div className="metric-foot">按全局 FIFO 入队顺序</div></div>
         <div className="metric"><div className="metric-label">失败 / 中断</div><div className="metric-val">{failedCount ?? "—"}</div><div className="metric-foot">失败/中断记录（总数由数据库计数）</div></div>
       </div>
