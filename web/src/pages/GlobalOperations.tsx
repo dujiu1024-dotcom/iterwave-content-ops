@@ -1,13 +1,27 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, GlobalMonitorResponse, GlobalTaskQueueItem, GlobalTodoItem, NotificationItem } from "../api";
 import { navigate } from "../nav";
+import { roundTaskLabel } from "../roundLabel";
 
 const STATUS: Record<string, string> = {
   queued: "排队中", running: "运行中", succeeded: "已完成",
   failed: "失败", cancelled: "已取消", interrupted: "中断",
 };
+const TASK_TYPE_LABEL: Record<string, string> = {
+  round_run: "内容生产", scheduler_job: "账号组后台任务",
+};
 const PLATFORMS: Record<string, string> = {
   xhs: "小红书", douyin: "抖音", kuaishou: "快手", wechat_channels: "视频号",
+};
+
+const RUN_STATUS: Record<string, string> = {
+  pending: "待执行", running: "执行中", success: "成功", succeeded: "成功",
+  failed: "失败", interrupted: "中断", skipped: "跳过", pending_verify: "待核实",
+};
+const RUN_TYPE: Record<string, string> = {
+  publish_polling: "发布确认轮询", data_fetch: "数据采集", daily_ops: "每日运营",
+  comment_polling: "评论轮询", cb_recovery: "熔断恢复", kb_scan: "选题库扫描",
+  draft_save: "草稿保存", round_pipeline: "轮次流程", data_retention_cleanup: "数据清理",
 };
 
 export default function GlobalOperations() {
@@ -138,7 +152,7 @@ export default function GlobalOperations() {
         {loading && !monitor ? <div className="empty-state">正在汇总账号组…</div> : !monitor ? <div className="empty-state">账号组数据暂不可用。</div> : (
           <div className="table-wrap">
             <table>
-              <thead><tr><th>账号组</th><th>数据库</th><th>平台账号</th><th>平台登录</th><th>运行中</th><th>排队中</th><th>失败 / 中断</th><th>定时调度</th><th>活跃轮次</th><th>操作</th></tr></thead>
+              <thead><tr><th>账号组</th><th>数据库</th><th>平台账号</th><th>平台登录</th><th>运行中</th><th>排队中</th><th>失败 / 中断</th><th>定时调度</th><th>活跃轮次</th><th>最近执行</th></tr></thead>
               <tbody>{(monitor.tenants ?? []).map((tenant) => {
                 const q = tenantCounts[tenant.tenant_id] ?? { queued: 0, running: 0, failed: 0 };
                 return <tr key={tenant.tenant_id}>
@@ -161,7 +175,18 @@ export default function GlobalOperations() {
                     </div>
                   ) : tenant.db_status === "uninitialized" ? <span className="tag gray">未初始化</span> : tenant.db_available ? <span className="tag gray">未启动</span> : <span className="tag gray">—</span>}</td>
                   <td>{tenant.runtime?.active_rounds ?? "—"}</td>
-                  <td><span className="muted">—</span></td>
+                  <td>{tenant.recent_execution ? (
+                    <div className="global-scheduler-cell">
+                      <strong>{RUN_TYPE[tenant.recent_execution.task_type] ?? "其他后台任务"}</strong>
+                      <span className={`tag ${tenant.recent_execution.status === "success" || tenant.recent_execution.status === "succeeded" ? "green" : tenant.recent_execution.status === "failed" || tenant.recent_execution.status === "interrupted" ? "red" : "gray"}`}>
+                        {RUN_STATUS[tenant.recent_execution.status] ?? tenant.recent_execution.status}
+                      </span>
+                      {tenant.recent_execution.has_error_detail && <span className="tiny">诊断详情已记录</span>}
+                      <span className="tiny">{tenant.recent_execution.finished_at || tenant.recent_execution.started_at || tenant.recent_execution.created_at
+                        ? new Date(tenant.recent_execution.finished_at || tenant.recent_execution.started_at || tenant.recent_execution.created_at!).toLocaleString("zh-CN")
+                        : "时间未知"}</span>
+                    </div>
+                  ) : <span className="muted">暂无执行记录</span>}</td>
                 </tr>;
               })}</tbody>
             </table>
@@ -174,7 +199,7 @@ export default function GlobalOperations() {
           <div className="panel-head"><div><div className="panel-title">全局 FIFO 任务</div><div className="panel-sub">运行任务不会因账号组切换而中断。</div></div><button className="btn sm" onClick={() => navigate("task-queue")}>完整队列</button></div>
           {active.length ? <div className="list">{active.map((task) => <div className="task-row" key={task.task_id}>
             <i className={`task-prio ${task.status === "running" ? "green" : "blue"}`} />
-            <div className="task-main"><div className="task-title">{task.tenant_name} · {task.task_type === "round_run" ? "内容生产" : task.task_type}</div><div className="task-desc">#{task.queue_order} · {STATUS[task.status]} · {task.aggregate_id ?? "—"}</div></div>
+            <div className="task-main"><div className="task-title">{task.tenant_name} · {task.task_type === "round_run" ? roundTaskLabel(task) : (TASK_TYPE_LABEL[task.task_type] ?? "账号组后台任务")}</div><div className="task-desc">队列 #{task.queue_order} · {STATUS[task.status]}</div></div>
           </div>)}</div> : <div className="empty-state">当前没有排队或执行中的任务。</div>}
           {activePages > 1 && <div className="pagination-row" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, paddingTop: 12 }}>
             <button className="btn sm" disabled={activePage <= 1 || loading} onClick={() => setActivePage((p) => Math.max(1, p - 1))}>上一页</button>
@@ -185,7 +210,7 @@ export default function GlobalOperations() {
         <section className="panel">
           <div className="panel-head"><div><div className="panel-title">异常与待处理</div><div className="panel-sub">当前返回的队列记录中失败或中断的任务。</div></div><span className="tag">{failedCount ?? "—"} 项</span></div>
           {failed.length ? <div className="list">{failed.map((task) => <div className="task-row" key={task.task_id}>
-            <i className="task-prio red" /><div className="task-main"><div className="task-title">{task.tenant_name} · {STATUS[task.status]}</div><div className="task-desc">{task.error_message || task.task_type}</div></div>
+            <i className="task-prio red" /><div className="task-main"><div className="task-title">{task.tenant_name} · {task.task_type === "round_run" ? roundTaskLabel(task) : (TASK_TYPE_LABEL[task.task_type] ?? "账号组后台任务")} · {STATUS[task.status]}</div><div className="task-desc">{task.error_message || "未记录错误说明"}</div></div>
           </div>)}</div> : <div className="empty-state">当前没有失败或中断任务。</div>}
           {failedPages > 1 && <div className="pagination-row" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, paddingTop: 12 }}>
             <button className="btn sm" disabled={failedPage <= 1 || loading} onClick={() => setFailedPage((p) => Math.max(1, p - 1))}>上一页</button>

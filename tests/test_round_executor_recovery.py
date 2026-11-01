@@ -483,3 +483,32 @@ def test_finalize_saved_draft_with_cancelled_sibling_still_awaits_publish(cfg, c
     ).fetchone()[0] == "awaiting_publish"
 
 
+
+
+def test_unexpected_draft_adapter_exception_is_not_persisted_verbatim(cfg, conn, seed, monkeypatch):
+    from src.core import login_manager
+
+    monkeypatch.setattr(login_manager, "has_login_state", lambda _platform: True)
+    round_id = seed.round(status="producing")
+    draft_id = seed.draft(
+        round_id, platform="xhs", draft_status="draft_pending", fetch_status=None,
+    )
+    class BrokenAdapter:
+        async def save_draft(self, payload):
+            raise RuntimeError("https://internal.example/private?token=secret")
+
+    executor = _executor(cfg, conn, {Platform.XHS: BrokenAdapter()})
+    report = {
+        "drafts_failed": 0, "drafts_saved": 0, "steps": [],
+    }
+    rows = [{
+        "content_id": conn.execute("SELECT content_id FROM drafts WHERE id=?", (draft_id,)).fetchone()[0],
+        "draft_id": draft_id, "platform": Platform.XHS, "title": "测试标题",
+        "body": "测试正文", "tags": [], "image_paths": [],
+    }]
+    asyncio.run(executor._save_all_drafts(rows, round_id, report))
+
+    stored = conn.execute("SELECT error_msg FROM drafts WHERE id=?", (draft_id,)).fetchone()[0]
+    assert "internal.example" not in stored
+    assert "secret" not in stored
+    assert "平台存草稿操作异常" in stored
