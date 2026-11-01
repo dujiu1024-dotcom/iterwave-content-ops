@@ -1322,3 +1322,40 @@ def test_media_assets_search_counts_are_not_limited_to_current_page(client):
     assert body["pages"] == 3
     assert body["counts"]["all"] == 25
     assert body["counts"]["approved"] == 25
+
+
+# ---------------------------------------------------------------- 运营日志 / 任务追踪 / 通知历史分页
+def test_operations_history_endpoints_return_database_totals_and_pages(client):
+    tc, conn, _ = client
+    for index in range(45):
+        stamp = f"2026-11-01 10:{index // 60:02d}:{index % 60:02d}"
+        conn.execute(
+            "INSERT INTO ops_logs (platform, action_type, content, executed_at, status) "
+            "VALUES ('xhs', 'passive_reply', ?, ?, 'success')",
+            (f"日志 {index}", stamp),
+        )
+        conn.execute(
+            "INSERT INTO task_runs (task_type, status, attempt, max_attempts, created_at) "
+            "VALUES ('data_fetch', 'success', 1, 3, ?)",
+            (stamp,),
+        )
+        conn.execute(
+            "INSERT INTO notifications (level, type, title, channel, sent_at) "
+            "VALUES ('info', 'round_completed', ?, 'macos', ?)",
+            (f"通知 {index}", stamp),
+        )
+    conn.commit()
+
+    endpoints = ("/api/ops_logs", "/api/task_runs", "/api/notifications")
+    for endpoint in endpoints:
+        first = tc.get(f"{endpoint}?page=1&page_size=20")
+        second = tc.get(f"{endpoint}?page=2&page_size=20")
+        assert first.status_code == second.status_code == 200
+        first_body, second_body = first.json(), second.json()
+        assert first_body["total"] == 45
+        assert first_body["page"] == 1 and first_body["pages"] == 3
+        assert len(first_body["items"]) == 20
+        assert len(second_body["items"]) == 20
+        assert {row["id"] for row in first_body["items"]}.isdisjoint(
+            {row["id"] for row in second_body["items"]}
+        )
