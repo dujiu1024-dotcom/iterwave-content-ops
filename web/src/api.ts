@@ -545,7 +545,6 @@ export interface BuiltinSkillManifest {
   group: string;
   skill_id: string;
   name: string;
-  source: string;
   capability_status: "normal" | "limited";
   description: string;
   installation_state: "built_in";
