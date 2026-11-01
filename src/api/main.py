@@ -5088,6 +5088,16 @@ def _register_routes(app: FastAPI) -> None:
             # 统一入口：改状态 + 回写链接 + 注册发布后数据采集 + 推进轮次（与轮询识别完全一致）
             ok = sched.on_user_published(draft_id, via="用户确认发布", note_url=note_url or None)
             if not ok:
+                # 并发请求可能在最初读取状态后被另一请求先完成；将其视为幂等重复确认，
+                # 不能重复写例外审计、通知或推进数据采集。
+                latest = conn.execute(
+                    "SELECT status, platform_note_url FROM drafts WHERE id=?", (draft_id,),
+                ).fetchone()
+                if latest and latest["status"] in ("user_published", "data_fetching", "published"):
+                    return {
+                        "draft_id": draft_id, "status": latest["status"],
+                        "note_url": latest["platform_note_url"], "already_confirmed": True,
+                    }
                 raise HTTPException(400, "状态迁移失败")
             if note_url:
                 conn.execute("UPDATE drafts SET platform_note_url = ? WHERE id = ?", (note_url, draft_id))
