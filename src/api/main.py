@@ -3637,7 +3637,7 @@ def _register_routes(app: FastAPI) -> None:
         for tenant in registry.list():
             tenant_id = tenant["id"]
             paths = registry.paths(tenant_id, name=str(tenant.get("name") or tenant_id))
-            row = {"tenant_id": tenant_id, "tenant_name": tenant["name"], "created_at": tenant.get("created_at"), "db_available": False, "db_status": "uninitialized", "contents_period": 0, "contents_all": 0, "drafts_all": 0, "drafts_pending": 0, "drafts_saved": 0, "drafts_published": 0, "drafts_failed": 0, "media_active": 0, "media_usage": 0, "registered_accounts": 0, "registered_accounts_active": 0, "platforms": {}}
+            row = {"tenant_id": tenant_id, "tenant_name": tenant["name"], "created_at": tenant.get("created_at"), "db_available": False, "db_status": "uninitialized", "contents_period": 0, "contents_all": 0, "drafts_all": 0, "drafts_pending": 0, "drafts_saved": 0, "drafts_published": 0, "drafts_failed": 0, "media_active": 0, "media_usage": 0, "registered_accounts": 0, "registered_accounts_active": 0, "platforms": {}, "recent_execution": None}
             db_file = paths.db_file
             if db_file.exists():
                 # 文件存在但读取失败才是故障；尚未创建数据库属于正常的未初始化状态。
@@ -3647,6 +3647,21 @@ def _register_routes(app: FastAPI) -> None:
                     conn = sqlite3.connect(db_file.as_uri() + "?mode=ro", uri=True, timeout=2)
                     conn.row_factory = sqlite3.Row
                     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
+                    if "task_runs" in tables:
+                        latest_run = conn.execute(
+                            "SELECT id, task_type, biz_id, status, started_at, finished_at, created_at "
+                            "FROM task_runs ORDER BY COALESCE(started_at, created_at) DESC, id DESC LIMIT 1"
+                        ).fetchone()
+                        if latest_run is not None:
+                            row["recent_execution"] = {
+                                "run_id": int(latest_run["id"]),
+                                "task_type": str(latest_run["task_type"]),
+                                "biz_id": latest_run["biz_id"],
+                                "status": str(latest_run["status"]),
+                                "started_at": latest_run["started_at"],
+                                "finished_at": latest_run["finished_at"],
+                                "created_at": latest_run["created_at"],
+                            }
                     if "contents" in tables:
                         row["contents_all"] = int(conn.execute("SELECT COUNT(*) FROM contents").fetchone()[0])
                         cols = {r["name"] for r in conn.execute("PRAGMA table_info(contents)").fetchall()}
