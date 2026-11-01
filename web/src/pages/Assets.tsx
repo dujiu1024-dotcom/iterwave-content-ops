@@ -50,7 +50,7 @@ export default function Assets() {
       // 尤其 hotTopics 是外部公益 API（易挂），不能让它拖垮整个页面
       const results = await Promise.allSettled([
         api.scoreTopics(30),
-        api.drafts(),
+        api.draftsAll(),
         api.kbInspect(),
         api.config(),
         api.hotTopics(),
