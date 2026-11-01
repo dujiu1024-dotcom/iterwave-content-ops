@@ -8624,6 +8624,7 @@ def _register_routes(app: FastAPI) -> None:
         cancel_login as _cancel_login,
         clear_login as _clear_login,
         submit_sms_code as _submit_sms_code,
+        read_account_identity as _read_account_identity,
     )
 
     def _valid_platform(platform: str) -> str:
@@ -8738,6 +8739,12 @@ def _register_routes(app: FastAPI) -> None:
         """前端轮询：返回登录进度 + QR base64（data:image/png;base64,... 直嵌 <img>）。"""
         p = _valid_platform(platform)
         return _get_login_status(p, data_dir=_interactive_login_data_dir())
+
+    @app.get("/api/accounts/{platform}/identity")
+    def platform_account_identity(platform: str):
+        """通过平台只读 whoami 校验登录态并读取昵称/头像；严格绑定当前账号组目录。"""
+        p = _valid_platform(platform)
+        return _read_account_identity(p, data_dir=_interactive_login_data_dir())
 
     @app.post("/api/accounts/{platform}/logout")
     def logout_platform(platform: str):
