@@ -211,9 +211,13 @@ class GlobalTaskWorker:
                 try:
                     with bind_task_context(task_run_id):
                         result = await getattr(context["scheduler"], method)(*args)
-                except Exception as exc:
+                except Exception:
+                    logger.exception(
+                        "定时任务执行异常 tenant=%s method=%s", task.tenant_id, method,
+                    )
                     self._finish_scheduler_task_run(
-                        context["conn"], context["cfg"], task_run_id, "failed", str(exc)[:500],
+                        context["conn"], context["cfg"], task_run_id, "failed",
+                        "定时任务执行异常，请检查服务端运行日志",
                     )
                     raise
                 else:
@@ -445,8 +449,7 @@ class GlobalTaskWorker:
         except Exception as exc:  # noqa: BLE001 — 单任务失败不得终止消费者
             from src.core.redact import redact
             error_code = redact(str(getattr(exc, "code", "round_execution_failed")))[:80]
-            # 历史列表需要可诊断的失败原因；先统一脱敏，再隐藏本机绝对路径。
-            # 不把原始 traceback、请求头或平台响应对象写入用户可见字段。
+            # 任务历史保留可诊断的业务错误；先脱敏并隐藏本机路径，不写 traceback / 请求头。
             import re
             detail = redact(str(exc)).strip()
             detail = re.sub(r"(?<!:)/(?:[^\s:'\"<>]+/)*[^\s:'\"<>]+", "[路径已隐藏]", detail)

@@ -158,23 +158,29 @@ def test_activation_sample_success_stays_outside_formal_production(activation_cl
     assert conn.execute("SELECT COUNT(*) FROM drafts").fetchone()[0] == 0
 
 
-def test_daily_quota_is_configured_and_idempotency_precedes_quota(activation_client, conn):
-    main._g_ctx["cfg"].activation.max_runs_per_day = 1
+def test_quick_experience_has_no_daily_run_limit_and_reports_usage(activation_client, conn):
+    """自用不设快速体验每日次数上限：多次体验不返回 429，状态接口只展示今日已体验次数。"""
+    assert not hasattr(main._g_ctx["cfg"].activation, "max_runs_per_day")
     payload = {
         "account_description": "分享产品经理的 AI 工具实践和效率方法",
         "platform": "xhs",
-        "idempotency_key": "daily-quota-1",
+        "idempotency_key": "daily-usage-0",
     }
     first = activation_client.post("/api/activation/samples", json=payload)
     assert first.status_code == 202
     repeated = activation_client.post("/api/activation/samples", json=payload)
     assert repeated.status_code == 202
     assert repeated.json()["deduplicated"] is True
-    second = activation_client.post("/api/activation/samples", json={
-        **payload, "idempotency_key": "daily-quota-2",
-    })
-    assert second.status_code == 429
-    assert conn.execute("SELECT COUNT(*) FROM sample_runs").fetchone()[0] == 1
+    for index in range(1, 8):
+        response = activation_client.post("/api/activation/samples", json={
+            **payload, "idempotency_key": f"daily-usage-{index}",
+        })
+        assert response.status_code == 202, response.text
+    assert conn.execute("SELECT COUNT(*) FROM sample_runs").fetchone()[0] == 8
+    limits = activation_client.get("/api/activation/status").json()["activation_limits"]
+    assert limits["daily_runs_used"] == 8
+    assert "max_runs_per_day" not in limits
+    assert "daily_runs_remaining" not in limits
 
 
 def test_platform_metric_fields_are_enforced(activation_client, seed):
@@ -760,3 +766,37 @@ def test_activation_sample_background_does_not_block_tenant_switch(
     assert conn.execute(
         "SELECT COUNT(*) FROM sample_contents WHERE sample_run_id=?", (run_id,)
     ).fetchone()[0] == 3
+
+
+def test_activation_untrusted_exception_code_does_not_leak_message(activation_client, conn, monkeypatch):
+    cfg = main._g_ctx["cfg"]
+    cfg.llm.enabled = True
+    monkeypatch.setenv(cfg.llm.api_key_env, "test-only-key")
+    from src.core import content_pipeline
+
+    class ProviderFailure(RuntimeError):
+        code = "provider_internal_failure"
+
+    def fail_with_untrusted_code(*args, **kwargs):
+        raise ProviderFailure("https://internal.example/private?token=secret")
+
+    monkeypatch.setattr(content_pipeline, "generate_copy_content", fail_with_untrusted_code)
+    response = activation_client.post("/api/activation/samples", json={
+        "account_description": "分享产品经理的 AI 工具实践和效率方法",
+        "platform": "xhs",
+        "idempotency_key": "untrusted-exception-code",
+    })
+    assert response.status_code == 202
+    run_id = response.json()["sample_run_id"]
+    result = None
+    for _ in range(100):
+        result = activation_client.get(f"/api/activation/samples/{run_id}").json()
+        if result["run"]["status"] in ("ready", "failed"):
+            break
+        time.sleep(0.02)
+
+    assert result["run"]["status"] == "failed"
+    assert result["run"]["error_code"] == "sample_generation_failed"
+    assert result["run"]["error_message_safe"] == "样稿生成失败，请检查模型配置后重试"
+    assert "internal.example" not in result["run"]["error_message_safe"]
+    assert "secret" not in result["run"]["error_message_safe"]

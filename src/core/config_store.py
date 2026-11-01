@@ -222,6 +222,14 @@ SCALAR_RULES: dict[str, tuple[type, float | None, float | None]] = {
     "spiral.min_metrics_for_ops_adjustment": (int, 1, 100),
     "spiral.min_rounds_for_systematic_adjustment": (int, 1, 100),
     "llm.enabled": (bool, None, None),
+    "llm.retry_attempts": (int, 0, 5),
+    "llm.retry_backoff_seconds": (float, 0.1, 30.0),
+    "copy_generation.max_output_tokens": (int, 128, 8192),
+    "activation.account_description_min_chars": (int, 1, 100),
+    "activation.account_description_max_chars": (int, 20, 1000),
+    "activation.stale_task_timeout_minutes": (int, 5, 240),
+    "activation.sample_max_output_tokens": (int, 128, 8192),
+    "activation.max_model_calls_per_run": (int, 3, 30),
     # 通知通道开关（页面只在运营中心提供开关；也可从这里改）
     "notifications.channels.macos.enabled": (bool, None, None),
     "notifications.channels.wecom.enabled": (bool, None, None),
@@ -1187,7 +1195,8 @@ def patch_config(
                 audit_rows=system_audit_rows,
             )
         except (ValueError, sqlite3.Error) as exc:
-            raise ConfigPatchError(str(exc)) from exc
+            logger.exception("系统模型配置持久化失败")
+            raise ConfigPatchError("系统模型配置保存失败，请检查数据库状态后重试") from exc
     if persisted_tenant:
         # Tenant settings, version snapshot and audit rows share one SQLite transaction.
         from src.core.config_repository import save_settings
@@ -1197,7 +1206,8 @@ def patch_config(
                 remove_keys=remove_keys,
             )
         except (ValueError, sqlite3.Error) as exc:
-            raise ConfigPatchError(str(exc)) from exc
+            logger.exception("账号组运行时配置持久化失败")
+            raise ConfigPatchError("账号组配置保存失败，请检查数据库状态后重试") from exc
 
     for key, value in {**persisted_tenant, **persisted_system}.items():
         _set_value(cfg, key, value)

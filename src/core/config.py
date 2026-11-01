@@ -198,19 +198,19 @@ class UltimateGoalConfig(BaseModel):
 
 
 class TimeoutsConfig(BaseModel):
-    round_timeout_hours: int = 48
-    awaiting_publish_timeout_hours: int = 120
-    publish_confirm_timeout_hours: int = 72
-    publish_confirm_grace_hours: int = 48
-    collecting_metrics_timeout_hours: int = 72
-    metrics_initial_delay_hours: int = 24
+    round_timeout_hours: int = Field(48, ge=1, le=720)
+    awaiting_publish_timeout_hours: int = Field(120, ge=2, le=1440)
+    publish_confirm_timeout_hours: int = Field(72, ge=1, le=1440)
+    publish_confirm_grace_hours: int = Field(48, ge=0, le=720)
+    collecting_metrics_timeout_hours: int = Field(72, ge=1, le=1440)
+    metrics_initial_delay_hours: int = Field(24, ge=0, le=720)
     metrics_retry_attempts: int = Field(3, ge=1, le=20)
     metrics_retry_interval_minutes: int = Field(30, ge=1, le=1440)
     login_timeout_seconds: int = Field(240, ge=60, le=1800)
     login_export_timeout_seconds: int = Field(90, ge=10, le=600)
     recovery_retry_delay_minutes: int = Field(1, ge=1, le=60)
-    goal_max_rounds: int = 30
-    round_min_interval_hours: int = 4
+    goal_max_rounds: int = Field(30, ge=1, le=500)
+    round_min_interval_hours: int = Field(4, ge=0, le=720)
 
     @model_validator(mode="after")
     def _check_independent_timeouts(self) -> "TimeoutsConfig":
@@ -630,10 +630,9 @@ class LlmConfig(BaseModel):
 
 
 class ActivationConfig(BaseModel):
-    """快速体验资源与输入边界；BYOK 仍按供应商实际计费。"""
+    """快速体验输入与单次资源边界；自用不设每日次数上限，BYOK 仍按供应商实际计费。"""
     account_description_min_chars: int = Field(10, ge=1, le=100)
     account_description_max_chars: int = Field(300, ge=20, le=1000)
-    max_runs_per_day: int = Field(5, ge=1, le=100)
     stale_task_timeout_minutes: int = Field(30, ge=5, le=240)
     sample_max_output_tokens: int = Field(1200, ge=128, le=8192)
     max_model_calls_per_run: int = Field(9, ge=3, le=30)

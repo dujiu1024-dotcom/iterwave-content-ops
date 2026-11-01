@@ -179,8 +179,11 @@ class SchedulerEngine:
             with bind_task_context(task_run_id):
                 try:
                     await getattr(self, method_name)(*args)
-                except Exception as exc:
-                    self._finish_tracked_task_run(task_run_id, "failed", str(exc)[:500])
+                except Exception:
+                    logger.exception("定时任务执行失败 method=%s", method_name)
+                    self._finish_tracked_task_run(
+                        task_run_id, "failed", "定时任务执行失败，请检查服务端运行日志",
+                    )
                     raise
                 else:
                     self._finish_tracked_task_run(task_run_id, "success", None)
@@ -300,12 +303,16 @@ class SchedulerEngine:
         if self.conn is None or self.sm_draft is None:
             return False
         now = confirmed_at or business_now(self.cfg)
-        ok = self.sm_draft.transition(
-            draft_id, "user_published", reason=via,
-            extra_updates={"user_confirmed_at": now.isoformat()},
+        # 原子条件更新：并发的手动确认与平台轮询只能有一个调用赢得状态迁移，
+        # 只有赢家才注册一次性采集任务，避免两个请求都读到 draft_saved 后重复排程。
+        cur = self.conn.execute(
+            "UPDATE drafts SET status='user_published', user_confirmed_at=? "
+            "WHERE id=? AND status IN ('draft_saved', 'draft_pending')",
+            (now.isoformat(), draft_id),
         )
-        if not ok:
+        if cur.rowcount != 1:
             return False
+        self.conn.commit()
         if note_url:
             self.conn.execute(
                 "UPDATE drafts SET platform_note_url = COALESCE(platform_note_url, ?) WHERE id = ?",
@@ -918,10 +925,14 @@ class SchedulerEngine:
                     await self.ops.active_comment(platform, target, content or "")
                 else:
                     await self.ops.follow(platform, target)
-            except Exception as exc:  # noqa: BLE001 — 单条失败不能中断整轮 daily_ops
-                logger.warning("❌ [APS] daily_ops %s %s 异常: %s",
-                               platform.value, action_type, exc)
-                self._finish_task_run(task_run_id, "failed", str(exc)[:500])
+            except Exception:  # noqa: BLE001 — 单条失败不能中断整轮 daily_ops
+                logger.exception(
+                    "daily_ops 单条动作异常 platform=%s action=%s",
+                    platform.value, action_type,
+                )
+                self._finish_task_run(
+                    task_run_id, "failed", "运营动作执行失败，请检查服务端运行日志",
+                )
                 return task_run_id
 
             status, error_msg = self._last_op_outcome(
