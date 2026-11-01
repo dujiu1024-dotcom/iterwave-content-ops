@@ -200,11 +200,6 @@ export default function Production() {
     api.assets("template").then((r) => setTemplates(r.items)).catch(() => setTemplates([]));
     api.goals().then((g) => setGoals(g.filter((x) => x.status === "active"))).catch(() => {});
     refresh().catch((e) => showToast(`加载轮次失败: ${e.message}`, "error"));
-  }, []);
-  useEffect(() => {
-    if (roundsPage > 1) refresh();
-  }, [roundsPage]);
-  //
     api.status()
       .then((s) => {
         if (s.enabled_platforms?.length) setSelPlatforms(s.enabled_platforms);
@@ -212,6 +207,9 @@ export default function Production() {
       })
       .catch(() => { /* 用默认四平台 */ });
   }, []);
+  useEffect(() => {
+    refresh().catch((e) => showToast(`加载轮次失败: ${e.message}`, "error"));
+  }, [roundsPage]);
 
   useEffect(() => {
     if (currentRoundId) loadRoundData(currentRoundId);
