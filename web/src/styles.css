@@ -825,6 +825,7 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 .calendar-agenda-event[draggable="true"]:active, .calendar-event[draggable="true"]:active { cursor: grabbing; }
 .skill-desc { white-space: pre-line; }
 .sidebar {
+  display: flex; flex-direction: column;
   position: sticky; top: 0; height: 100vh; height: 100dvh; max-height: 100dvh;
   min-height: 0; align-self: flex-start; overflow: hidden; overscroll-behavior: contain;
 }
