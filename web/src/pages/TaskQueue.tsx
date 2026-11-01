@@ -108,6 +108,7 @@ export default function TaskQueue() {
   const [historyPages, setHistoryPages] = useState(1);
   const [historyPage, setHistoryPage] = useState(1);
   const [historyType, setHistoryType] = useState<"all" | "round_run" | "scheduler_job">("round_run");
+  const [historyStatus, setHistoryStatus] = useState<"all" | "failed">("all");
   const historyPageSize = 20;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -117,7 +118,7 @@ export default function TaskQueue() {
     try {
       const [activeResponse, historyResponse] = await Promise.all([
         api.taskQueue({ scope: "active" }),
-        api.taskQueue({ scope: "history", page: historyPage, pageSize: historyPageSize, taskType: historyType === "all" ? undefined : historyType }),
+        api.taskQueue({ scope: historyStatus === "failed" ? "failed" : "history", page: historyPage, pageSize: historyPageSize, taskType: historyType === "all" ? undefined : historyType }),
       ]);
       setActiveItems(activeResponse.items || []);
       setHistoryItems(historyResponse.items || []);
@@ -129,7 +130,7 @@ export default function TaskQueue() {
     } finally {
       setLoading(false);
     }
-  }, [historyPage, historyType]);
+  }, [historyPage, historyType, historyStatus]);
 
   useEffect(() => {
     void refresh();
@@ -191,17 +192,20 @@ export default function TaskQueue() {
 
       <section className="panel">
         <div className="panel-head">
-          <div><h2>最近任务</h2><div className="muted">仅展示用户发起的内容生产任务；系统后台调度任务不混入历史列表。</div></div>
+          <div><h2>最近任务</h2><div className="muted">支持按任务类型和失败状态筛选；系统后台调度任务可单独查看。</div></div>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <select aria-label="历史任务类型" value={historyType} onChange={(event) => { setHistoryType(event.target.value as "all" | "round_run" | "scheduler_job"); setHistoryPage(1); }}>
               <option value="round_run">内容生产</option><option value="scheduler_job">系统后台任务</option><option value="all">全部任务类型</option>
+            </select>
+            <select aria-label="历史任务状态" value={historyStatus} onChange={(event) => { setHistoryStatus(event.target.value as "all" | "failed"); setHistoryPage(1); }}>
+              <option value="all">全部状态</option><option value="failed">失败 / 中断待处理</option>
             </select>
             <span className="muted">共 {historyTotal} 项 · 第 {historyPage}/{historyPages} 页</span>
           </div>
         </div>
         {history.length ? <div>{history.map((task) => <TaskRow key={task.task_id} task={task} onCancel={cancel} cancelling={false} />)}</div> : <div className="empty-state">暂无历史任务。</div>}
         <div className="panel-foot" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "12px 16px" }}>
-          <span className="muted">每页 {historyPageSize} 条，历史记录由服务端分页读取。</span>
+          <span className="muted">每页 {historyPageSize} 条，历史记录与失败任务均由服务端分页读取。</span>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <button className="btn sm" disabled={historyPage <= 1 || loading} onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}>上一页</button>
             <span className="muted">{historyPage} / {historyPages}</span>
