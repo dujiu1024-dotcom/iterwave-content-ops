@@ -6706,6 +6706,11 @@ def _register_routes(app: FastAPI) -> None:
             (since,),
         ).fetchone()[0])
         confirmed_published = int(conn.execute(
+            "SELECT COUNT(*) FROM drafts WHERE datetime(user_confirmed_at) >= datetime(?) "
+            "AND user_confirmed_at IS NOT NULL",
+            (since,),
+        ).fetchone()[0])
+        cohort_confirmed = int(conn.execute(
             "SELECT COUNT(*) FROM drafts WHERE datetime(created_at) >= datetime(?) "
             "AND status IN ('draft_saved','user_published','data_fetching','published') "
             "AND user_confirmed_at IS NOT NULL",
@@ -6768,7 +6773,7 @@ def _register_routes(app: FastAPI) -> None:
             "confirmed_published": confirmed_published,
             "publish_eligible": publish_eligible,
             "draft_publish_confirmation_rate": (
-                confirmed_published / publish_eligible if publish_eligible else None
+                cohort_confirmed / publish_eligible if publish_eligible else None
             ),
             "platform_publish_success_rate": None,
             "platform_publish_success_note": "当前没有覆盖所有平台的权威发布尝试/成功回执分母，暂不可计算",
