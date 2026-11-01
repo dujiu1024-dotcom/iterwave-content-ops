@@ -234,7 +234,17 @@ class HotTopicCollector:
     # 对外入口
     # ------------------------------------------------------------------
 
-    def overview(self, force: bool = False, *, page: int | None = None, page_size: int = 20, tab: str = 'all', source: str | None = None, keyword: str | None = None, sort_by: str = 'heat') -> dict:
+    def overview(
+        self,
+        force: bool = False,
+        *,
+        page: int | None = None,
+        page_size: int = 20,
+        tab: str = "all",
+        source: str | None = None,
+        keyword: str | None = None,
+        sort_by: str = "heat",
+    ) -> dict:
         """返回热点雷达数据（只读库）。force 参数保留兼容，后台刷新由调用方触发。"""
         if self.hcfg.enabled is False:
             return {
@@ -301,7 +311,16 @@ class HotTopicCollector:
         }
 
 
-    def _load_page(self, page: int, page_size: int, *, tab: str = 'all', source: str | None = None, keyword: str | None = None, sort_by: str = 'heat') -> tuple[list[dict], list[dict], int, dict, int, list[str]]:
+    def _load_page(
+        self,
+        page: int,
+        page_size: int,
+        *,
+        tab: str = "all",
+        source: str | None = None,
+        keyword: str | None = None,
+        sort_by: str = "heat",
+    ) -> tuple[list[dict], list[dict], int, dict, int, list[str]]:
         """数据库分页读取热点；批次、失败屏蔽、去重、门限和趋势基准均先于分页。"""
         from .hot_topic_matcher import HotTopicMatcher, keyword_judgement
 
