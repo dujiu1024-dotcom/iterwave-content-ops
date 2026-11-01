@@ -621,3 +621,46 @@ def test_scheduler_jobs_distinguish_missing_dependencies_from_intentional_skips(
     assert comment_polling["final_status"] == "failed"
     assert cb_recovery["final_status"] == "failed"
     assert autogrow["final_status"] == "skipped"
+
+
+def test_publish_confirmation_atomic_transition_schedules_fetch_once(cfg, conn, seed, monkeypatch):
+    from src.core.state_machine import DraftStateMachine
+
+    round_id = seed.round(status="awaiting_publish")
+    draft_id = seed.draft(round_id, draft_status="draft_saved", fetch_status=None)
+    engine = _engine(cfg, conn)
+    engine.wire(conn=conn, adapters={}, sm_draft=DraftStateMachine(conn))
+    scheduled = []
+    monkeypatch.setattr(engine, "schedule_data_fetch", lambda draft_id, run_at, attempt=1: scheduled.append((draft_id, attempt)))
+
+    assert engine.on_user_published(draft_id, via="first-confirm") is True
+    assert engine.on_user_published(draft_id, via="duplicate-confirm") is False
+    assert scheduled == [(draft_id, 1)]
+    row = conn.execute(
+        "SELECT status, user_confirmed_at FROM drafts WHERE id=?", (draft_id,),
+    ).fetchone()
+    assert row["status"] == "user_published"
+    assert row["user_confirmed_at"]
+
+
+def test_tracked_scheduler_task_stores_safe_exception_message(cfg, conn, monkeypatch):
+    eng = _engine(cfg, conn)
+
+    async def fail_with_private_detail():
+        raise RuntimeError("https://internal.example/private?token=secret")
+
+    monkeypatch.setattr(eng, "_job_kb_scan", fail_with_private_detail)
+    try:
+        asyncio.run(eng._run_tracked("_job_kb_scan"))
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("expected scheduler job failure")
+
+    row = conn.execute(
+        "SELECT status, error_msg FROM task_runs ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["status"] == "failed"
+    assert row["error_msg"] == "定时任务执行失败，请检查服务端运行日志"
+    assert "internal.example" not in row["error_msg"]
+    assert "secret" not in row["error_msg"]

@@ -158,23 +158,29 @@ def test_activation_sample_success_stays_outside_formal_production(activation_cl
     assert conn.execute("SELECT COUNT(*) FROM drafts").fetchone()[0] == 0
 
 
-def test_daily_quota_is_configured_and_idempotency_precedes_quota(activation_client, conn):
-    main._g_ctx["cfg"].activation.max_runs_per_day = 1
+def test_quick_experience_has_no_daily_run_limit_and_reports_usage(activation_client, conn):
+    """自用不设快速体验每日次数上限：多次体验不返回 429，状态接口只展示今日已体验次数。"""
+    assert not hasattr(main._g_ctx["cfg"].activation, "max_runs_per_day")
     payload = {
         "account_description": "分享产品经理的 AI 工具实践和效率方法",
         "platform": "xhs",
-        "idempotency_key": "daily-quota-1",
+        "idempotency_key": "daily-usage-0",
     }
     first = activation_client.post("/api/activation/samples", json=payload)
     assert first.status_code == 202
     repeated = activation_client.post("/api/activation/samples", json=payload)
     assert repeated.status_code == 202
     assert repeated.json()["deduplicated"] is True
-    second = activation_client.post("/api/activation/samples", json={
-        **payload, "idempotency_key": "daily-quota-2",
-    })
-    assert second.status_code == 429
-    assert conn.execute("SELECT COUNT(*) FROM sample_runs").fetchone()[0] == 1
+    for index in range(1, 8):
+        response = activation_client.post("/api/activation/samples", json={
+            **payload, "idempotency_key": f"daily-usage-{index}",
+        })
+        assert response.status_code == 202, response.text
+    assert conn.execute("SELECT COUNT(*) FROM sample_runs").fetchone()[0] == 8
+    limits = activation_client.get("/api/activation/status").json()["activation_limits"]
+    assert limits["daily_runs_used"] == 8
+    assert "max_runs_per_day" not in limits
+    assert "daily_runs_remaining" not in limits
 
 
 def test_platform_metric_fields_are_enforced(activation_client, seed):
@@ -760,3 +766,168 @@ def test_activation_sample_background_does_not_block_tenant_switch(
     assert conn.execute(
         "SELECT COUNT(*) FROM sample_contents WHERE sample_run_id=?", (run_id,)
     ).fetchone()[0] == 3
+
+
+def test_activation_untrusted_exception_code_does_not_leak_message(activation_client, conn, monkeypatch):
+    cfg = main._g_ctx["cfg"]
+    cfg.llm.enabled = True
+    monkeypatch.setenv(cfg.llm.api_key_env, "test-only-key")
+    from src.core import content_pipeline
+
+    class ProviderFailure(RuntimeError):
+        code = "provider_internal_failure"
+
+    def fail_with_untrusted_code(*args, **kwargs):
+        raise ProviderFailure("https://internal.example/private?token=secret")
+
+    monkeypatch.setattr(content_pipeline, "generate_copy_content", fail_with_untrusted_code)
+    response = activation_client.post("/api/activation/samples", json={
+        "account_description": "分享产品经理的 AI 工具实践和效率方法",
+        "platform": "xhs",
+        "idempotency_key": "untrusted-exception-code",
+    })
+    assert response.status_code == 202
+    run_id = response.json()["sample_run_id"]
+    result = None
+    for _ in range(100):
+        result = activation_client.get(f"/api/activation/samples/{run_id}").json()
+        if result["run"]["status"] in ("ready", "failed"):
+            break
+        time.sleep(0.02)
+
+    assert result["run"]["status"] == "failed"
+    assert result["run"]["error_code"] == "sample_generation_failed"
+    assert result["run"]["error_message_safe"] == "样稿生成失败，请检查模型配置后重试"
+    assert "internal.example" not in result["run"]["error_message_safe"]
+    assert "secret" not in result["run"]["error_message_safe"]
+
+
+def test_first_value_activation_to_saved_edited_and_reviewed_formal_content(
+    activation_client, conn, seed, monkeypatch,
+):
+    """从首次激活、样稿生成、采用、导入正式轮次到编辑和重新质检的 API 闭环。"""
+    from datetime import datetime
+    from types import SimpleNamespace
+    from src.core import content_pipeline
+
+    cfg = main._g_ctx["cfg"]
+    cfg.llm.enabled = True
+    monkeypatch.setenv(cfg.llm.api_key_env, "test-only-key")
+    main._g_ctx["guard"] = SimpleNamespace(
+        check_content=lambda *args, **kwargs: SimpleNamespace(
+            result=SimpleNamespace(value="pass"),
+            passes=True,
+            reason="通过正式质量门",
+            redline_hits=[],
+        )
+    )
+
+    base_body = (
+        "产品经理 AI工具 需求分析 用户研究 项目管理 工作效率 数据分析 业务流程 产品设计 "
+        "用户反馈 方案验证 目标拆解 方法总结 实践案例 场景分析 效率提升 团队协作 持续迭代 经验复盘"
+    )
+    variants = [
+        "第一篇介绍如何通过用户访谈拆解真实需求，建立优先级并验证方案。",
+        "第二篇介绍如何建立团队协作节奏，明确责任边界并减少返工。",
+        "第三篇介绍如何复盘项目结果，把有效经验沉淀为可执行模板。",
+    ]
+    calls = {"count": 0}
+
+    def generate_distinct(*args, **kwargs):
+        index = calls["count"] % len(variants)
+        calls["count"] += 1
+        return (
+            f"产品经理实用方法 {index + 1}",
+            base_body + " " + variants[index],
+            ["产品经理", "实用经验"],
+        )
+
+    monkeypatch.setattr(content_pipeline, "generate_copy_content", generate_distinct)
+
+    # 新用户首次进入与激活记录。
+    status = activation_client.get("/api/activation/status")
+    assert status.status_code == 200
+    started = activation_client.post("/api/activation/start")
+    assert started.status_code == 200
+
+    # 快速体验：异步生成样稿并等待完成。
+    generated = activation_client.post("/api/activation/samples", json={
+        "account_description": "分享产品经理的 AI 工具实践和效率方法",
+        "platform": "xhs",
+        "idempotency_key": "first-value-formal-e2e",
+    })
+    assert generated.status_code == 202
+    run_id = generated.json()["sample_run_id"]
+    result = None
+    for _ in range(200):
+        result = activation_client.get(f"/api/activation/samples/{run_id}").json()
+        if result["run"]["status"] in ("ready", "failed"):
+            break
+        time.sleep(0.02)
+    assert result["run"]["status"] == "ready", result["run"]
+    assert len(result["contents"]) == 3
+    sample = result["contents"][0]
+
+    # 用户采用样稿，保存到个人样稿库。
+    saved = activation_client.post(
+        f"/api/activation/samples/{run_id}/contents/{sample['id']}/events",
+        json={"event_type": "saved"},
+    )
+    assert saved.status_code == 200
+    library = activation_client.get("/api/activation/saved")
+    assert any(item["id"] == sample["id"] for item in library.json()["items"])
+
+    # 将样稿导入正式生产轮次，保持幂等。
+    round_id = seed.round(status="created")
+    promoted = activation_client.post(
+        f"/api/activation/saved/{sample['id']}/promote",
+        json={"round_id": round_id},
+    )
+    assert promoted.status_code == 201, promoted.text
+    formal = promoted.json()
+    assert formal["already_promoted"] is False
+    assert conn.execute(
+        "SELECT status FROM drafts WHERE id=?", (formal["draft_id"],)
+    ).fetchone()["status"] == "draft_pending"
+
+    repeated = activation_client.post(
+        f"/api/activation/saved/{sample['id']}/promote",
+        json={"round_id": round_id},
+    )
+    assert repeated.status_code == 201
+    assert repeated.json()["already_promoted"] is True
+    assert repeated.json()["content_id"] == formal["content_id"]
+
+    # 正式内容允许编辑；编辑后必须重新执行质量检查。
+    edited = activation_client.patch(
+        f"/api/contents/{formal['content_id']}",
+        json={
+            "title": "经过人工编辑的产品经理实践方法",
+            "body": sample["body"] + " 人工补充了真实项目中的执行细节和复盘依据。",
+            "tags": ["产品经理", "项目复盘"],
+            "reason": "首次体验内容人工完善",
+        },
+    )
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["changed"] is True
+    stale_guard = conn.execute(
+        "SELECT guard_outcome FROM contents WHERE id=?", (formal["content_id"],)
+    ).fetchone()["guard_outcome"]
+    assert stale_guard is None
+
+    reviewed = activation_client.post(f"/api/contents/{formal['content_id']}/recheck")
+    assert reviewed.status_code == 200, reviewed.text
+    assert reviewed.json()["passes"] is True
+    assert conn.execute(
+        "SELECT guard_outcome FROM contents WHERE id=?", (formal["content_id"],)
+    ).fetchone()["guard_outcome"] == "pass"
+
+    # 关键数据必须落在正式内容库，而不是继续停留在体验样稿状态。
+    assert conn.execute(
+        "SELECT COUNT(*) FROM contents WHERE id=? AND round_id=?",
+        (formal["content_id"], round_id),
+    ).fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM content_events WHERE sample_content_id=? AND event_type='content_saved'",
+        (sample["id"],),
+    ).fetchone()[0] == 1

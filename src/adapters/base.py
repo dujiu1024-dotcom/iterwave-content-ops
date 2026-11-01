@@ -21,6 +21,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
+from src.core.redact import safe_error_summary
+
 logger = logging.getLogger(__name__)
 
 # =====================================================================
@@ -323,11 +325,18 @@ class PlatformAdapter(ABC):
             # 不能把 async Page 传进去（只会得到未 await 的 coroutine）。
             works = await asyncio.to_thread(read_works_sync, self.platform)
         except ReadbackUnavailable as exc:
-            logger.warning("读回不可用 platform=%s: %s", self.platform.value, exc)
-            return failed_snapshot(self.platform, str(exc))
-        except Exception as exc:  # noqa: BLE001 — 登录失效 / 网络故障统一落 failed
+            logger.warning(
+                "读回不可用 platform=%s error_type=%s",
+                self.platform.value, type(exc).__name__,
+            )
+            return failed_snapshot(
+                self.platform, "平台作品列表读取不可用，请检查登录状态或服务状态后重试",
+            )
+        except Exception:  # noqa: BLE001 — 登录失效 / 网络故障统一落 failed
             logger.exception("读回失败 platform=%s", self.platform.value)
-            return failed_snapshot(self.platform, f"读回失败: {exc}")
+            return failed_snapshot(
+                self.platform, "平台作品列表读取失败，请检查服务端运行日志后重试",
+            )
 
         if not works:
             return failed_snapshot(

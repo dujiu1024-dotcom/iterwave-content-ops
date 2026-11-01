@@ -35,7 +35,7 @@ import threading
 import time
 from pathlib import Path
 
-from .redact import redact
+from .redact import redact, safe_error_summary
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,26 @@ TERMINAL_STATES = ("success", "expired", "error")
 QR_STATES = ("qr_ready", "window_login")
 
 _LOGIN_PROCESSES: dict[object, subprocess.Popen] = {}
+
+
+# 产品边界：系统只负责生成草稿，发布由用户在平台上手动完成。
+# vendor 脚本保留上游原样（含 publish 子命令），这里在唯一的调用出口做白名单，
+# 任何非登录/只读子命令都会被拒绝，避免误触发自动发布。
+ALLOWED_VENDOR_SUBCOMMANDS = frozenset({"login", "login-qr", "whoami", "check"})
+
+
+class VendorCommandBlocked(RuntimeError):
+    """尝试通过 vendor 脚本执行登录以外的子命令（例如 publish）。"""
+
+
+def guard_vendor_cmd(cmd: list[str]) -> list[str]:
+    """校验 vendor 命令只包含允许的子命令；返回原命令便于链式调用。"""
+    sub = cmd[2] if len(cmd) > 2 else ""
+    if sub not in ALLOWED_VENDOR_SUBCOMMANDS:
+        raise VendorCommandBlocked(
+            f"禁止通过系统执行 vendor 子命令「{sub}」：发布需由用户在平台手动完成"
+        )
+    return cmd
 _PROCESS_LOCK = threading.Lock()
 _EXPORT_LOCK = threading.Lock()
 _EXPORTING: set[object] = set()
@@ -96,15 +116,45 @@ def _process_key(platform: str, data_dir: Path | str | None = None):
     return (str(Path(data_dir).resolve()), platform)
 
 
+# 登录子进程的 umask：vendor/easel 保持上游原样，不在 vendor 里逐个 chmod；
+# 由外层给子进程设置 077，使其写出的二维码、状态文件、短信校验 DOM/截图、
+# 浏览器 Profile（Cookie/本地存储）默认仅当前用户可读写。
+_PRIVATE_UMASK = 0o077
+
+
+def _private_dir(path: Path) -> None:
+    """创建目录并收紧为 0700；已存在的目录也会被收紧。"""
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        path.chmod(0o700)
+    except OSError:
+        logger.warning("无法收紧登录数据目录权限：%s", path.name)
+
+
+def _private_file(path: Path) -> None:
+    try:
+        path.chmod(0o600)
+    except OSError:
+        logger.warning("无法收紧登录数据文件权限：%s", path.name)
+
+
+def _private_subprocess_kwargs() -> dict:
+    """POSIX 下让登录/导出子进程以 umask 077 运行；Windows 无 umask 语义，不传。"""
+    return {"umask": _PRIVATE_UMASK} if os.name != "nt" else {}
+
+
 def _ensure_dirs(data_dir: Path | str | None = None) -> None:
     # 浏览器 profile 包含可复用的社交平台 Cookie；目录权限必须阻止同机其他用户遍历。
     login_dir, profile_base, storage_state_dir = _data_paths(data_dir)
     for d in (login_dir, profile_base, storage_state_dir):
-        d.mkdir(parents=True, exist_ok=True)
-        try:
-            d.chmod(0o700)
-        except OSError:
-            logger.warning("无法收紧登录数据目录权限：%s", d.name)
+        _private_dir(d)
+
+
+def _ensure_profile_dir(platform: str, data_dir: Path | str | None = None) -> None:
+    """vendor 脚本对已存在的 profile 只做 mkdir(exist_ok)，不改权限；
+    因此在外层预先按账号组创建并收紧为 0700，避免改动 vendor 代码。"""
+    if platform in PROFILE_NAMES:
+        _private_dir(profile_dir(platform, data_dir))
 
 
 def _headed() -> bool:
@@ -197,10 +247,13 @@ def start_login(platform: str, restart: bool = False, data_dir: Path | str | Non
         except ValueError as e:
             return {**_empty_status(platform), "state": "error", "message": str(e)}
 
+        _ensure_profile_dir(platform, data_dir)
         log_fh = f["log"].open("a", encoding="utf-8")
+        _private_file(f["log"])
         try:
-            proc = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT), env=_login_env(),
-                                    stdout=log_fh, stderr=subprocess.STDOUT, close_fds=True)
+            proc = subprocess.Popen(guard_vendor_cmd(cmd), cwd=str(PROJECT_ROOT), env=_login_env(),
+                                    stdout=log_fh, stderr=subprocess.STDOUT, close_fds=True,
+                                    **_private_subprocess_kwargs())
         except Exception as e:  # noqa: BLE001
             logger.warning("登录进程启动失败 platform=%s error=%s", platform, type(e).__name__)
             return {**_empty_status(platform), "state": "error", "message": "登录进程启动失败，请检查浏览器运行环境或联系管理员"}
@@ -368,7 +421,7 @@ def get_login_status(platform: str, data_dir: Path | str | None = None) -> dict:
     f = _files(platform, data_dir)
     raw = _read_status_file(f["status"])
     state = raw.get("state", "unknown")
-    message = redact(str(raw.get("message") or ""))
+    message = safe_error_summary(raw.get("message"), "登录遇到问题，请重新发起扫码登录")
 
     proc = _LOGIN_PROCESSES.get(_process_key(platform, data_dir))
     proc_alive = proc is not None and proc.poll() is None
@@ -377,8 +430,7 @@ def get_login_status(platform: str, data_dir: Path | str | None = None) -> dict:
         state, message = "error", "登录流程已中断，请重新发起扫码登录"
     elif proc is not None and not proc_alive and state not in TERMINAL_STATES:
         # 与 Easel 一致：runner 没写终态就退出 → 明确的 error，而不是无限转圈的 unknown
-        tail = redact(_last_log_line(f["log"]))
-        state, message = "error", f"登录程序异常退出（退出码 {proc.returncode}）" + (f"：{tail}" if tail else "")
+        state, message = "error", f"登录程序异常退出（退出码 {proc.returncode}），请重新发起扫码登录"
     elif proc_alive and state == "unknown":
         state, message = "starting", "正在启动浏览器并准备二维码…"
 
@@ -478,13 +530,15 @@ def export_storage_state(platform: str, timeout: int | None = None, data_dir: Pa
         from .config import get_config
         timeout = get_config().timeouts.login_export_timeout_seconds
     _ensure_dirs(data_dir)
+    _ensure_profile_dir(platform, data_dir)
     _, profile_base, _ = _data_paths(data_dir)
     out = _files(platform, data_dir)["storage"]
     cmd = [sys.executable, "-m", "src.core.login_export",
            "--platform", platform, "--profile-base", str(profile_base), "--out", str(out)]
     try:
         r = subprocess.run(cmd, cwd=str(PROJECT_ROOT), env=_login_env(),
-                           capture_output=True, text=True, timeout=timeout)
+                           capture_output=True, text=True, timeout=timeout,
+                           **_private_subprocess_kwargs())
     except subprocess.TimeoutExpired:
         logger.warning("导出 %s 登录态超时", platform)
         return False

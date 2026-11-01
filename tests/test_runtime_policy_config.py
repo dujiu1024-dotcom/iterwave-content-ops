@@ -303,3 +303,89 @@ def test_retired_topic_path_is_purged_from_persisted_tenant_settings(conn):
     assert read_settings(conn)["topic_kb.path"] == "/tmp/evil_topics.csv"
     assert purge_disallowed_settings(conn, {"topic_kb.path"}) == 1
     assert "topic_kb.path" not in read_settings(conn)
+
+
+def test_config_persistence_errors_do_not_expose_sqlite_details(cfg, conn, monkeypatch):
+    import sqlite3
+    from src.core import config_repository
+
+    def fail_save(*args, **kwargs):
+        raise sqlite3.OperationalError("disk I/O error at /srv/iterwave/private/tenant.db")
+
+    monkeypatch.setattr(config_repository, "save_settings", fail_save)
+    with pytest.raises(ConfigPatchError) as caught:
+        patch_config(cfg, conn, {"scoring.stable_exploration_percent": 21})
+
+    assert str(caught.value) == "账号组配置保存失败，请检查数据库状态后重试"
+    assert "/srv/iterwave/private" not in str(caught.value)
+    assert "tenant.db" not in str(caught.value)
+
+
+def test_phase_timeout_and_draft_save_windows_are_runtime_configurable(cfg, conn):
+    expected = {
+        "timeouts.round_timeout_hours",
+        "timeouts.awaiting_publish_timeout_hours",
+        "timeouts.publish_confirm_timeout_hours",
+        "timeouts.publish_confirm_grace_hours",
+        "timeouts.collecting_metrics_timeout_hours",
+        "timeouts.metrics_initial_delay_hours",
+        "timeouts.goal_max_rounds",
+        "timeouts.round_min_interval_hours",
+        "rhythm.windows.draft_save.start_hour",
+        "rhythm.windows.draft_save.end_hour",
+    }
+    visible = {item["key"] for item in config_metadata_view(cfg)}
+    assert expected <= visible
+
+    patch_config(cfg, conn, {
+        "timeouts.publish_confirm_timeout_hours": 96,
+        "timeouts.publish_confirm_grace_hours": 24,
+        "rhythm.windows.draft_save.start_hour": 10,
+        "rhythm.windows.draft_save.end_hour": 21,
+    })
+    assert cfg.timeouts.publish_confirm_timeout_hours == 96
+    assert cfg.timeouts.publish_confirm_grace_hours == 24
+    assert cfg.rhythm.windows["draft_save"].start_hour == 10
+    assert cfg.rhythm.windows["draft_save"].end_hour == 21
+
+
+def test_llm_copy_and_activation_limits_are_runtime_configurable(cfg, conn):
+    expected = {
+        "llm.retry_attempts",
+        "llm.retry_backoff_seconds",
+        "copy_generation.max_output_tokens",
+        "activation.account_description_min_chars",
+        "activation.account_description_max_chars",
+        "activation.stale_task_timeout_minutes",
+        "activation.sample_max_output_tokens",
+        "activation.max_model_calls_per_run",
+    }
+    visible = {item["key"] for item in config_metadata_view(cfg)}
+    assert expected <= visible
+
+    patch_config(cfg, conn, {
+        "llm.retry_attempts": 3,
+        "llm.retry_backoff_seconds": 2.5,
+        "copy_generation.max_output_tokens": 1800,
+        "activation.stale_task_timeout_minutes": 45,
+        "activation.sample_max_output_tokens": 1600,
+        "activation.max_model_calls_per_run": 12,
+    })
+    assert cfg.llm.retry_attempts == 3
+    assert cfg.llm.retry_backoff_seconds == 2.5
+    assert cfg.copy_generation.max_output_tokens == 1800
+    assert cfg.activation.stale_task_timeout_minutes == 45
+    assert cfg.activation.sample_max_output_tokens == 1600
+    assert cfg.activation.max_model_calls_per_run == 12
+    assert "activation.max_runs_per_day" not in visible
+    with pytest.raises((ConfigNotAllowedError, ConfigPatchError)):
+        patch_config(cfg, conn, {"activation.max_runs_per_day": 8})
+
+
+def test_numeric_output_token_limits_are_not_misclassified_as_credentials():
+    from src.core.config_repository import _safe_value
+
+    assert _safe_value("copy_generation.max_output_tokens", 1800)
+    assert _safe_value("activation.sample_max_output_tokens", 1600)
+    assert not _safe_value("llm.api_token", "secret-value")
+    assert not _safe_value("provider.access_token", "secret-value")

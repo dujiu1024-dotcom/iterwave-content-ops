@@ -40,6 +40,8 @@ export default function Assets() {
   const [assetTotals, setAssetTotals] = useState<Record<AssetType, number>>({ reference: 0, voice: 0, template: 0 });
   const [assetPageCounts, setAssetPageCounts] = useState<Record<AssetType, number>>({ reference: 1, voice: 1, template: 1 });
   const [editingTemplate, setEditingTemplate] = useState<AssetItem | null>(null);
+  const [viewingTemplateId, setViewingTemplateId] = useState<number | null>(null);
+  const [templateVersions, setTemplateVersions] = useState<Array<{ version: number; title: string; body: string | null; created_at: string | null }>>([]);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -58,7 +60,7 @@ export default function Assets() {
         api.hotTopics(),
         api.assetsPage("reference", 1, 20),
         api.assetsPage("voice", 1, 20),
-        api.assetsPage("template", 1, 20),
+        api.assetsPage("template", 1, 20, true),
       ]);
       // 成功的逐个 set；失败的汇总成 error 提示
       const failures: string[] = [];
@@ -105,7 +107,7 @@ export default function Assets() {
 
   const loadAssetPage = async (type: AssetType, page: number) => {
     try {
-      const result = await api.assetsPage(type, page, 20);
+      const result = await api.assetsPage(type, page, 20, type === "template");
       setAssets((current) => ({ ...current, [type]: result.items }));
       setAssetPages((current) => ({ ...current, [type]: result.page }));
       setAssetTotals((current) => ({ ...current, [type]: result.total }));
@@ -124,6 +126,27 @@ export default function Assets() {
     } catch (e: any) {
       showToast(`保存失败: ${e?.message ?? e}`, "error");
       return false;
+    }
+  };
+
+  const openTemplateVersions = async (id: number) => {
+    try {
+      const result = await api.assetVersions(id);
+      setTemplateVersions(result.items);
+      setViewingTemplateId(id);
+    } catch (e) {
+      showToast(`模板版本历史加载失败：${e instanceof Error ? e.message : String(e)}`, "error");
+    }
+  };
+
+  const restoreTemplateVersion = async (id: number, version: number) => {
+    try {
+      await api.restoreAssetVersion(id, version);
+      showToast(`已从 v${version} 恢复；系统创建了新的版本记录`, "success");
+      setViewingTemplateId(null);
+      await load();
+    } catch (e) {
+      showToast(`模板版本恢复失败：${e instanceof Error ? e.message : String(e)}`, "error");
     }
   };
 
@@ -401,6 +424,33 @@ export default function Assets() {
             pending={isPending("asset:template")}
             onSubmit={addAsset}
           />
+          {viewingTemplateId !== null && (
+            <div className="panel">
+              <div className="panel-head">
+                <div>
+                  <div className="panel-title">模板版本历史</div>
+                  <div className="panel-sub">恢复历史版本会创建一个新的版本号，不会覆盖已有历史。</div>
+                </div>
+                <button className="btn xs" type="button" onClick={() => setViewingTemplateId(null)}>关闭</button>
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead><tr><th>版本</th><th>名称</th><th>结构说明</th><th>创建时间</th><th>操作</th></tr></thead>
+                  <tbody>
+                    {templateVersions.map((version) => (
+                      <tr key={version.version}>
+                        <td>v{version.version}</td>
+                        <td>{version.title}</td>
+                        <td style={{ whiteSpace: "pre-line" }}>{version.body || "—"}</td>
+                        <td>{version.created_at?.slice(0, 16).replace("T", " ") ?? "—"}</td>
+                        <td><button className="btn xs" type="button" onClick={() => void restoreTemplateVersion(viewingTemplateId, version.version)}>恢复此版本</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
           <div className="panel">
             <div className="panel-head">
               <div>
@@ -412,16 +462,26 @@ export default function Assets() {
               <EmptyHint next="先添加一套结构，例如「痛点引入 → 真实体验 → 证据 → 局限 → 结论」，然后在内容生产的生产线中选择它。">暂无模板</EmptyHint>
             ) : (
               <div className="grid three">
-                {assets.template.map((t) => (
-                  <div className="skill-card" key={t.id}>
-                    <div className="skill-name">{t.title}</div>
+                {assets.template.map((t) => {
+                  // 后端统一返回 bool；兼容旧数据的 0/1，缺省视为启用。
+                  const inactive = t.is_active !== undefined && t.is_active !== null && !Number(t.is_active);
+                  return (
+                  <div className="skill-card" key={t.id} style={{ opacity: inactive ? 0.62 : 1 }}>
+                    <div className="skill-name">{t.title} {inactive && <span className="tag gray">已停用</span>}</div>
                     <div className="skill-desc" style={{ whiteSpace: "pre-line" }}>{t.body || "（无结构说明）"}</div>
                     <div className="skill-foot">
-                      <span>{t.created_at?.slice(0, 10) ?? "—"}</span>
+                      <span>v{t.version ?? 1} · {t.updated_at?.slice(0, 10) ?? t.created_at?.slice(0, 10) ?? "—"}</span>
                       <button className="btn xs" type="button" onClick={() => setEditingTemplate(t)}>编辑模板</button>
+                      <button className="btn xs" type="button" onClick={() => void openTemplateVersions(t.id)}>版本历史</button>
+                      {inactive ? (
+                        <button className="btn xs" type="button" onClick={async () => { await api.restoreAsset(t.id); await loadAssetPage("template", assetPages.template); }}>恢复</button>
+                      ) : (
+                        <button className="btn xs" type="button" onClick={async () => { await api.archiveAsset(t.id); await loadAssetPage("template", assetPages.template); }}>停用</button>
+                      )}
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

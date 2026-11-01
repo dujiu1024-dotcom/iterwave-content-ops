@@ -15,7 +15,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 LEGACY_MIGRATION_KEY = "config_overrides_json_v1"
-_SECRET_KEY = re.compile(r"(api[_-]?key|secret|password|token|webhook|credential)", re.I)
+_SECRET_KEY = re.compile(r"(api[_-]?key|secret|password|(?<![a-z0-9])token(?![a-z0-9])|webhook|credential)", re.I)
 
 
 def _safe_value(key: str, value: Any) -> bool:
