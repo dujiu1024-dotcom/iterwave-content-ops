@@ -92,7 +92,7 @@ from src.core.plan_version import PlanVersionManager
 from src.core.ops.pause import pause_state, set_ops_paused
 from src.core.config_store import (
     ConfigNotAllowedError, ConfigPatchError, apply_overrides, config_metadata_view, current_config_view,
-    changed_job_ids, load_overrides, patch_config, scheduler_jobs_view,
+    changed_job_ids, config_audit_page, load_overrides, patch_config, scheduler_jobs_view,
 )
 from src.adapters.base import Platform
 from src.adapters import get_adapters
@@ -6575,6 +6575,13 @@ def _register_routes(app: FastAPI) -> None:
     def get_config():
         g2 = _g()
         return current_config_view(g2["cfg"], g2["conn"])
+
+    @app.get("/api/config/audit")
+    def get_config_audit(
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+    ):
+        return config_audit_page(_g()["conn"], page=page, page_size=page_size)
 
     @app.patch("/api/config")
     def patch_runtime_config(req: ConfigPatchRequest):
