@@ -7454,12 +7454,19 @@ def _register_routes(app: FastAPI) -> None:
         asset_type: Optional[str] = Query(None),
         page: Optional[int] = Query(None, ge=1),
         page_size: int = Query(20, ge=1, le=100),
+        include_inactive: bool = Query(False),
     ):
         conn = _g()["conn"]
         if asset_type and asset_type not in ("reference", "voice", "template"):
             raise HTTPException(400, "asset_type 只能是 reference / voice / template")
-        where = " WHERE asset_type = ?" if asset_type else ""
-        params: list = [asset_type] if asset_type else []
+        filters = []
+        params: list = []
+        if asset_type:
+            filters.append("asset_type = ?")
+            params.append(asset_type)
+        if asset_type == "template" and not include_inactive:
+            filters.append("is_active = 1")
+        where = (" WHERE " + " AND ".join(filters)) if filters else ""
         if page is None:
             # 兼容旧调用方；新页面通过 page 参数读取完整分页。
             rows = conn.execute(
@@ -7492,10 +7499,16 @@ def _register_routes(app: FastAPI) -> None:
         now = _now().isoformat(timespec="seconds")
         cur = conn.execute(
             "INSERT INTO content_assets "
-            "(asset_type, title, body, source_url, platform, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(asset_type, title, body, source_url, platform, created_at, updated_at, version, is_active) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1)",
             (req.asset_type, req.title, req.body, req.source_url, req.platform, now, now),
         )
+        if req.asset_type == "template":
+            conn.execute(
+                "INSERT INTO content_template_versions (template_id, version, title, body, created_at) "
+                "VALUES (?, 1, ?, ?, ?)",
+                (cur.lastrowid, req.title, req.body, now),
+            )
         conn.commit()
         row = conn.execute("SELECT * FROM content_assets WHERE id = ?",
                            (cur.lastrowid,)).fetchone()
@@ -7506,7 +7519,7 @@ def _register_routes(app: FastAPI) -> None:
         """编辑已有内容资产；类型不可变，避免模板/观点被误改为其他资产类别。"""
         conn = _g()["conn"]
         existing = conn.execute(
-            "SELECT asset_type FROM content_assets WHERE id = ?", (asset_id,),
+            "SELECT * FROM content_assets WHERE id = ?", (asset_id,),
         ).fetchone()
         if existing is None:
             raise HTTPException(404, "内容资产不存在")
@@ -7515,13 +7528,78 @@ def _register_routes(app: FastAPI) -> None:
         if req.asset_type == "reference" and not (req.source_url or "").strip():
             raise HTTPException(422, "外部参考必须填写原始链接 source_url（可溯源）")
         now = _now().isoformat(timespec="seconds")
-        conn.execute(
-            "UPDATE content_assets SET title=?, body=?, source_url=?, platform=?, updated_at=? WHERE id=?",
-            (req.title, req.body, req.source_url, req.platform, now, asset_id),
-        )
+        if req.asset_type == "template" and (
+            req.title != existing["title"] or (req.body or "") != (existing["body"] or "")
+        ):
+            next_version = int(existing["version"] or 1) + 1
+            conn.execute(
+                "INSERT INTO content_template_versions (template_id, version, title, body, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (asset_id, next_version, req.title, req.body, now),
+            )
+            conn.execute(
+                "UPDATE content_assets SET title=?, body=?, source_url=?, platform=?, "
+                "version=?, updated_at=? WHERE id=?",
+                (req.title, req.body, req.source_url, req.platform, next_version, now, asset_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE content_assets SET title=?, body=?, source_url=?, platform=?, updated_at=? WHERE id=?",
+                (req.title, req.body, req.source_url, req.platform, now, asset_id),
+            )
         conn.commit()
         row = conn.execute("SELECT * FROM content_assets WHERE id=?", (asset_id,)).fetchone()
         return dict(row)
+
+    @app.get("/api/assets/{asset_id}/versions")
+    def list_asset_versions(asset_id: int):
+        conn = _g()["conn"]
+        asset = conn.execute(
+            "SELECT asset_type FROM content_assets WHERE id=?", (asset_id,),
+        ).fetchone()
+        if asset is None:
+            raise HTTPException(404, "内容资产不存在")
+        if asset["asset_type"] != "template":
+            raise HTTPException(400, "只有内容模板支持版本历史")
+        rows = conn.execute(
+            "SELECT version, title, body, created_at FROM content_template_versions "
+            "WHERE template_id=? ORDER BY version DESC", (asset_id,),
+        ).fetchall()
+        return {"items": [dict(row) for row in rows]}
+
+    @app.post("/api/assets/{asset_id}/archive")
+    def archive_asset(asset_id: int):
+        conn = _g()["conn"]
+        row = conn.execute(
+            "SELECT asset_type, is_active FROM content_assets WHERE id=?", (asset_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, "内容资产不存在")
+        if row["asset_type"] != "template":
+            raise HTTPException(400, "目前只有内容模板支持停用")
+        conn.execute(
+            "UPDATE content_assets SET is_active=0, updated_at=? WHERE id=?",
+            (_now().isoformat(timespec="seconds"), asset_id),
+        )
+        conn.commit()
+        return {"id": asset_id, "is_active": False}
+
+    @app.post("/api/assets/{asset_id}/restore")
+    def restore_asset(asset_id: int):
+        conn = _g()["conn"]
+        row = conn.execute(
+            "SELECT asset_type FROM content_assets WHERE id=?", (asset_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, "内容资产不存在")
+        if row["asset_type"] != "template":
+            raise HTTPException(400, "目前只有内容模板支持恢复")
+        conn.execute(
+            "UPDATE content_assets SET is_active=1, updated_at=? WHERE id=?",
+            (_now().isoformat(timespec="seconds"), asset_id),
+        )
+        conn.commit()
+        return {"id": asset_id, "is_active": True}
 
     # --- 选题库来源（上传 / 远程 / 服务器路径）---
     @app.get("/api/kb/sources")
