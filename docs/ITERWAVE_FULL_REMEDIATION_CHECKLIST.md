@@ -713,3 +713,50 @@ A-02、A-04、B-05、D-07、D-08、F-01 至 F-08、G-01 至 G-06。
 - 轮次旧调用方盘点：Dashboard 原来使用兼容接口，只读取最近 50 条；已迁移到 `roundsPage(1, 20)`，明确首页只展示最近 20 条摘要，不再请求固定 50 条数组。
 - 追加提交：Dashboard 轮次分页调用 `9e9c016`。
 - 指标分页测试补充覆盖仅按 fetch_status 筛选（不传 platform）的查询，修复并防止该组合的 COUNT SQL 产生无效 AND 子句；同时验证旧 limit 参数仍兼容。追加测试提交 `c398fc2`。
+
+
+
+## 12. 2026-11-01 — 第一阶段续审：分支提交与文件级迁移盘点
+
+本节基于本轮重新执行的 GitHub compare、分支 commit 列表和 PR patch 回读。它修订并细化 0.1 节的初步判断；以下数量均为本轮查询时的快照。
+
+### 12.1 最新分支关系
+
+| 分支 / PR | 相对基线 | 本轮结论 | 处理 |
+|---|---:|---|---|
+| `main` | HEAD `6b538b2d` | 当前正式基线；包含 PR #63、#64 | 保留 |
+| `chore/full-remediation-plan-20261101`（PR #65） | 相对 main：115 ahead / 1 behind；25 个变更文件 | 主整改线，含服务端分页、热点筛选、草稿/轮次/指标迁移及审计文档；尚未同步 main 最新的 PR #64 merge commit | 保留为主线候选，不直接合并 |
+| `ci/ux-detail-pages-validation-v3-20261101`（PR #70） | 相对 PR #65：27 ahead / 74 behind；17 个变更文件 | 是详情页改造线的后续验证分支，包含多个补丁、测试和 UX 修正 | 保留；按文件/提交迁移，不整支覆盖 |
+| `feat/ux-detail-pages-20261101` | 相对 PR #65：24 ahead / 74 behind | 与 PR #70 共享大部分详情页提交；PR #70 比它恰好多 3 个提交，改动文件为 Assets、GlobalOperations、HotTopics | 保留到 PR #70 三个后续提交完成核对 |
+| `feat/ux-operations-accounts-templates-20261101` | 相对 main：26 ahead / 0 behind；16 个变更文件 | 从 main 直接分出的独立改造线，含账号、行业模板、素材、队列、全局运营中心、配额/节奏等改动；不可当作废弃分支 | 必须保留并迁移 |
+| `ci/ux-detail-pages-validation-20261101`、`ci/ux-detail-pages-validation-v2-20261101` | 历史验证分支 | 对应已关闭的旧验证 PR #67/#68/#69，v3 已继承并继续推进验证 | 仅列为清理候选；删除前再次核对分支 HEAD 与保护规则 |
+| `feat/ux-productivity-audit-20261101` | PR #64 已合并 | 已合并功能线 | 列为清理候选；本轮未删除 |
+
+### 12.2 关键提交关系
+
+- PR #70 的 v3 分支相对 `feat/ux-detail-pages-20261101` **仅多 3 个提交**：`fix(assets): display total records instead of current page size`、`fix(hot-topics): reset pagination when filters change`、`ux(global-ops): clarify failed task totals are global`。这 3 个提交必须随 v3 一并纳入迁移核对。
+- PR #70 相对 PR #65 的 27 个独有提交集中在：队列失败筛选/分页及统计、热点来源编辑、账号身份提示、侧栏滚动、行业模板入口/编辑、Skill 合约检查、素材分页和图片生成配额策略等；PR #65 自身的 115 个 ahead 提交则包含其独立的全量分页整改主线。两者不能通过简单“以一边覆盖另一边”合并。
+- `feat/ux-operations-accounts-templates-20261101` 相对 main 的 26 个提交是另一条独立提交链；其与 PR #65、PR #70 都有文件重叠。重叠重点包括 `src/api/main.py`、`tests/test_api_endpoints.py`、`tests/test_task_queue.py`、`web/src/Sidebar.tsx`、`web/src/api.ts`、`web/src/components/IndustryPresetPicker.tsx`、`web/src/components/MediaLibraryPane.tsx`、`web/src/pages/Accounts.tsx`、`web/src/pages/Assets.tsx`、`web/src/pages/GlobalOperations.tsx`、`web/src/pages/HotTopics.tsx`、`web/src/pages/Operations.tsx`、`web/src/pages/Production.tsx`、`web/src/pages/TaskQueue.tsx`、`web/src/styles.css`。这些文件必须按功能语义合并，不能整文件从某分支复制。
+- PR #65 相对 main 仍 behind 1，缺少 PR #64 的最新合并节点；必须先把 main 的 PR #64 内容纳入整改主线，再进行其他移植和回归。
+
+### 12.3 迁移顺序（避免回退）
+
+1. **同步主线基线**：以 main 当前 HEAD（含 PR #64）作为最终目标基线；先解决 PR #65 的唯一 behind 提交差异，并核对冲突文件。
+2. **移植 PR #65 独有整改**：保留服务端分页、统计聚合、完整草稿读取、轮次/指标/配置审计迁移等后续提交；对照 main 和 PR #64，确认没有重复或回退。
+3. **移植 operations 分支 26 个提交**：逐提交/逐文件对照，优先迁移账号身份、行业模板、Skills、队列/全局运营中心、素材与配额策略；保留 PR #65 中更新、更完整的后端分页实现。
+4. **移植 PR #70 v3 的 27 个独有提交**：对照 operations 分支已迁移内容，处理重复修复；特别保留 v3 相对 detail 分支多出的 3 个边界修正。
+5. **构建唯一整改分支和 PR**：在所有变更进入同一分支后，运行后端 pytest/Ruff、前端构建和 CI；PR 维持 Draft，直到自动化验证通过并完成代码审查。
+6. **清理分支**：只有在迁移提交可在唯一整改分支追溯、PR/CI 证据齐全后，才删除旧验证分支和已合并功能分支。未合并的 operations/detail 分支不得提前删除。
+
+### 12.4 第一阶段状态与执行边界
+
+- [x] 盘点 main、PR #65、PR #70、detail、operations 和历史 CI 分支。
+- [x] 对 PR #65、PR #70、detail、operations 执行 compare，记录 ahead/behind 和文件重叠。
+- [x] 回读 PR #65、PR #70 的文件 patch，识别主要迁移主题。
+- [x] 确认 operations 分支包含 26 个相对 main 的独有提交，撤销其“可清理”候选判断。
+- [ ] 将 PR #64 最新 main 基线同步进统一整改分支。
+- [ ] 完成 operations 26 个提交与 PR #70 27 个独有提交的逐项迁移。
+- [ ] 运行后端/前端 CI 并取得成功记录。
+- [ ] 建立唯一最终整改 PR，确认迁移后再清理旧分支。
+
+**执行限制说明：** 本轮连接器可读取 GitHub commit/patch、比较 refs、更新文件和创建 Git 对象，但没有本地仓库工作树及可运行 shell 的 Git 环境，无法可靠执行交互式 rebase/cherry-pick、冲突解决、pytest、Ruff 或 npm build。GitHub API 也没有提供本轮可用的 branch 删除操作。为避免把未测试的整文件覆盖伪装成合并，本轮没有强制移动分支、合并 PR 或删除分支。第一阶段的审计与迁移清单已细化，但 Git 历史整合和 CI 验证仍未完成；不得标记第一阶段完成。
