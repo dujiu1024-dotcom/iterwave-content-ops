@@ -1401,7 +1401,7 @@ def test_hot_topics_database_pagination_and_server_filters(client):
             "(id, source, evidence_status, title, heat_score, time_sensitive, last_seen_at) "
             "VALUES (?, ?, 'collected', ?, ?, 1, ?)",
             (f"paging-hot-{index:03d}", "test/xhs", f"分页热点-{index}",
-             float(index + 1), f"2026-11-01 10:{index // 60:02d}:{index % 60:02d}"),
+             float(index + 1), "2026-11-01 10:00:00"),
         )
     conn.commit()
 
