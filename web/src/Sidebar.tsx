@@ -11,6 +11,7 @@ export interface NavItem {
 }
 
 export const NAV_ITEMS: NavItem[] = [
+  { page: "accounts",   label: "账号与登录", icon: "◉", section: "账号管理" },
   { page: "dashboard",  label: "运营总览",   icon: "▦", section: "指挥与发现" },
   { page: "activation", label: "快速体验",   icon: "✧", section: "指挥与发现", hidden: true },
   { page: "global-ops", label: "全局运营中心", icon: "▥", section: "指挥与发现", hidden: true },
@@ -24,8 +25,6 @@ export const NAV_ITEMS: NavItem[] = [
   { page: "operations", label: "运营控制台", icon: "⌁", section: "运营与归因" },
   { page: "analytics",  label: "数据复盘",   icon: "⌁", section: "运营与归因" },
   { page: "gaps",       label: "缺口与实验", icon: "◇", section: "运营与归因" },
-
-  { page: "accounts",   label: "账号与登录", icon: "◎", section: "账号管理" },
 
   { page: "agent",      label: "Agent 编排与诊断", icon: "⎇", section: "Agent 中枢" },
   { page: "task-queue", label: "全局任务队列", icon: "⇅", section: "Agent 中枢", hidden: true },
