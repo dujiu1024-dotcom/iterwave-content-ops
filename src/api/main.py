@@ -5299,8 +5299,9 @@ def _register_routes(app: FastAPI) -> None:
             }
 
         history = [dict(r) for r in conn.execute(
-            "SELECT plan_signature, plan_snapshot, round_id, created_at, author "
-            "FROM signature_history ORDER BY id DESC LIMIT 10"
+            "SELECT h.plan_signature, h.plan_snapshot, h.round_id, r.round_number, h.created_at, h.author "
+            "FROM signature_history h LEFT JOIN spiral_rounds r ON r.id = h.round_id "
+            "ORDER BY h.id DESC LIMIT 10"
         ).fetchall()]
         for h in history:
             try:
@@ -6360,14 +6361,16 @@ def _register_routes(app: FastAPI) -> None:
         item = dict(row)
         item["platforms"] = json.loads(item.pop("platforms_json") or "[]")
         linked = conn.execute(
-            "SELECT d.id AS draft_id,d.platform,d.status,c.title,c.round_id,cpd.created_at "
+            "SELECT d.id AS draft_id,d.platform,d.status,c.title,c.round_id,r.round_number,cpd.created_at "
             "FROM content_plan_drafts cpd JOIN drafts d ON d.id=cpd.draft_id "
-            "JOIN contents c ON c.id=d.content_id WHERE cpd.plan_id=? ORDER BY cpd.created_at,d.id",
+            "JOIN contents c ON c.id=d.content_id LEFT JOIN spiral_rounds r ON r.id=c.round_id "
+            "WHERE cpd.plan_id=? ORDER BY cpd.created_at,d.id",
             (plan_id,),
         ).fetchall()
         rounds = conn.execute(
-            "SELECT round_id,task_id,created_at FROM content_plan_rounds "
-            "WHERE plan_id=? ORDER BY created_at DESC",
+            "SELECT cpr.round_id,r.round_number,cpr.task_id,cpr.created_at "
+            "FROM content_plan_rounds cpr LEFT JOIN spiral_rounds r ON r.id=cpr.round_id "
+            "WHERE cpr.plan_id=? ORDER BY cpr.created_at DESC",
             (plan_id,),
         ).fetchall()
         item["drafts"] = [dict(r) for r in linked]
