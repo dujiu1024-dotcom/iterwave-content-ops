@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import EmptyHint from "../components/EmptyHint";
-import { api, MetricsResponse, MetricRow, Platform, SpiralAnalysis, Draft, WeeklyReport, ActivationMetrics, ActivationStatus } from "../api";
+import { api, MetricsResponse, MetricRow, Platform, SpiralAnalysis, Draft, WeeklyReport, ActivationMetrics, ActivationStatus, GoalSummary } from "../api";
 
 const PLATFORM_NAME: Record<Platform, string> = {
   xhs: "小红书", douyin: "抖音",
@@ -47,6 +47,7 @@ export default function Analytics() {
   const [weeklyActionBusy, setWeeklyActionBusy] = useState<string | null>(null);
   const [activationMetrics, setActivationMetrics] = useState<ActivationMetrics | null>(null);
   const [activationStatus, setActivationStatus] = useState<ActivationStatus | null>(null);
+  const [goalSummary, setGoalSummary] = useState<GoalSummary | null>(null);
   const [reportError, setReportError] = useState<string | null>(null);
   const [snapshotHistory, setSnapshotHistory] = useState<Record<string, {
     id: string; source: string; measured_at: string; recorded_at: string;
@@ -83,6 +84,9 @@ export default function Analytics() {
   };
 
   useEffect(() => { loadGaps(); }, []);
+  useEffect(() => {
+    api.goalsSummary().then(setGoalSummary).catch((e) => setReportError(e.message));
+  }, []);
   useEffect(() => {
     loadMetrics(platformFilter, detailView === "details" ? metricsPage : undefined);
   }, [platformFilter, metricsPage, detailView]);
@@ -222,6 +226,11 @@ export default function Analytics() {
 
       <div className="grid kpis analytics-activation-kpis" style={{ marginBottom: 15, gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
         <div className="metric"><div className="metric-label">首次价值时间 TTV</div><div className="metric-val">{activationMetrics?.ttv_seconds == null ? "—" : `${Math.round(activationMetrics.ttv_seconds)} 秒`}</div><div className="metric-foot">输入 {activationMetrics?.activation_input_wait_seconds == null ? "—" : Math.round(activationMetrics.activation_input_wait_seconds)} 秒 · 排队 {activationMetrics?.model_queue_wait_seconds == null ? "—" : Math.round(activationMetrics.model_queue_wait_seconds)} 秒 · 生成 {activationMetrics?.generation_processing_seconds == null ? "—" : Math.round(activationMetrics.generation_processing_seconds)} 秒</div><div className="metric-foot">P50 {activationMetrics?.ttv_p50_seconds == null ? "—" : Math.round(activationMetrics.ttv_p50_seconds)} 秒 · P90 {activationMetrics?.ttv_p90_seconds == null ? "—" : Math.round(activationMetrics.ttv_p90_seconds)} 秒 · 样本 {activationMetrics?.ttv_sample_count ?? 0}</div><div className="metric-foot">{activationMetrics?.ttv_percentile_scope || "分位数范围待定"}</div></div>
+        <div className="metric">
+          <div className="metric-label">活跃目标完成率</div>
+          <div className="metric-val">{goalSummary?.percent == null ? "—" : `${goalSummary.percent.toFixed(1)}%`}</div>
+          <div className="metric-foot">{goalSummary ? `已纳入统计 ${goalSummary.counted_goals}/${goalSummary.active_goals} 个目标` : "目标进度尚未加载"}</div>
+        </div>
         <div className="metric"><div className="metric-label">7 日激活率</div><div className="metric-val">{activationMetrics?.seven_day_activation_rate == null ? "观察中" : `${(activationMetrics.seven_day_activation_rate * 100).toFixed(0)}%`}</div><div className="metric-foot">复制或保存至少一篇合格样稿</div></div>
         <div className="metric"><div className="metric-label">首次发布率</div><div className="metric-val">{activationMetrics?.first_publish_rate == null ? "观察中" : `${(activationMetrics.first_publish_rate * 100).toFixed(0)}%`}</div><div className="metric-foot">初始化后 7 日内确认发布</div></div>
         <div className="metric"><div className="metric-label">数据回流完成率</div><div className="metric-val">{activationMetrics?.data_return_rate == null ? "—" : `${(activationMetrics.data_return_rate * 100).toFixed(0)}%`}</div><div className="metric-foot">发布满 7 天且 7 日内补填链接或提交有效指标</div></div>
