@@ -5751,7 +5751,9 @@ def _register_routes(app: FastAPI) -> None:
             outcome = guard.check_content(row["title"], row["body"], tags, platform=plat)
         except Exception as exc:  # noqa: BLE001 — R2 红线
             logger.exception("G2 重检异常 content=%s", content_id)
-            raise HTTPException(500, f"检查器异常，不能默认通过：{redact(str(exc))}") from exc
+            raise HTTPException(
+                503, "质量检查服务暂时不可用，未放行本次内容；请检查服务状态后重试",
+            ) from exc
 
         conn.execute(
             "UPDATE contents SET guard_outcome = ?, guard_reason = ? WHERE id = ?",
