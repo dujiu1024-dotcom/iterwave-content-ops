@@ -6705,7 +6705,7 @@ def _register_routes(app: FastAPI) -> None:
             (since,),
         ).fetchone()[0])
         confirmed_published = int(conn.execute(
-            "SELECT COUNT(*) FROM drafts WHERE created_at >= ? "
+            "SELECT COUNT(*) FROM drafts WHERE datetime(created_at) >= datetime(?) "
             "AND status IN ('draft_saved','user_published','data_fetching','published') "
             "AND user_confirmed_at IS NOT NULL",
             (since,),
