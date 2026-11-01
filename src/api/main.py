@@ -2785,18 +2785,11 @@ def _register_routes(app: FastAPI) -> None:
             source_mime = source["mime_type"]
             source_filename = source["original_filename"]
 
-        # 整个配额检查与调用串行化，避免并发请求同时越过月度上限。
+        # 只保留并发互斥，避免同一账号组同时生成造成资源竞争；monthly_quota 为历史兼容字段，不再限制使用次数。
         if not _media_generation_lock.acquire(blocking=False):
             raise HTTPException(409, "已有图片生成任务正在执行，请稍后重试")
         try:
             now = _now().strftime("%Y-%m-%d %H:%M:%S")
-            month_start = _now().replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
-            used = int(conn.execute(
-                "SELECT COUNT(*) FROM media_generation_jobs WHERE created_at >= ? AND status = 'succeeded'", (month_start,),
-            ).fetchone()[0])
-            quota = int(settings.get("monthly_quota") or 0)
-            if quota <= 0 or used >= quota:
-                raise HTTPException(429, f"本账号组本月 AI 配图额度已用完（{used}/{quota}）")
             cur = conn.execute(
                 "INSERT INTO media_generation_jobs (prompt, final_prompt, model, status, created_at) "
                 "VALUES (?, ?, ?, 'running', ?)",
