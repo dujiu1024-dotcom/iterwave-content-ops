@@ -331,7 +331,7 @@ export default function Assets() {
           <div className="panel">
             <div className="panel-head">
               <div>
-                <div className="panel-title"><span className="icon">✎</span>个人观点库 · {assets.voice.length} 条</div>
+                <div className="panel-title"><span className="icon">✎</span>个人观点库 · {assetTotals.voice} 条</div>
                 <div className="panel-sub">真实录入，不预置演示观点</div>
               </div>
             </div>
@@ -395,7 +395,7 @@ export default function Assets() {
           <div className="panel">
             <div className="panel-head">
               <div>
-                <div className="panel-title"><span className="icon">▧</span>可复用内容模板 · {assets.template.length} 条</div>
+                <div className="panel-title"><span className="icon">▧</span>可复用内容模板 · {assetTotals.template} 条</div>
                 <div className="panel-sub">模板用于统一本轮内容的表达结构。保存后，在「内容生产 → 生产线 → 内容结构模板」中选择，系统会将模板结构注入本轮 AI 生成提示词。</div>
               </div>
             </div>
