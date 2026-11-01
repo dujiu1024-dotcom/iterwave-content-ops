@@ -4,7 +4,7 @@ import { useApp } from "../AppContext";
 import { navigate, useUrlTab } from "../nav";
 import {
   api, Platform, SystemStatus, AiCallRecord, UserOverrideRecord, RedlineRecord,
-  OrchestrationView, OrchestrationRun, DiagnoseResult, StepState, TenantSkillManifest,
+  OrchestrationView, OrchestrationRun, DiagnoseResult, StepState, TenantSkillManifest, BuiltinSkillManifest,
 } from "../api";
 
 const PLATFORM_LABEL: Record<string, string> = {
@@ -33,32 +33,6 @@ const ROUND_STATUS_LABEL: Record<string, string> = {
   created: "已创建", producing: "生产中", awaiting_publish: "待发布", collecting_metrics: "采集中",
   analyzing: "复盘中", completed: "已完成", partial_completed: "部分完成", failed: "失败", cancelled: "已取消",
 };
-
-const SKILLS = [
-  // 按「运营工作流」分组
-  { group: "内容生产", rows: [
-    { id: "topic_scoring",      name: "选题评分引擎",        src: "src/core/scoring/",                 status: "OK", note: "三模式自动切换" },
-    { id: "prompt_variants",    name: "四平台变体生成",      src: "src/core/content_pipeline.py",       status: "OK", note: "同选题 × 四风格" },
-    { id: "ultimate_goal_check",name: "终极目标检查（R2）", src: "src/core/guard/",                    status: "OK", note: "三入口 check_content/strategy/comment" },
-    { id: "image_card",         name: "图片卡片制作",        src: "src/core/content_pipeline.py",        status: "OK", note: "Pillow + OpenCV" },
-    { id: "draft_saver",        name: "Playwright 存草稿",  src: "src/adapters/",       status: "!", note: "R1：只点存草稿" },
-  ]},
-  { group: "运营与复盘", rows: [
-    { id: "circuit_breaker",    name: "熔断器（R6）",       src: "src/core/ops/circuit_breaker.py",   status: "OK", note: "5 信号 + 3 步恢复" },
-    { id: "rhythm_controller",  name: "节奏控制器",          src: "src/core/ops/rhythm.py",            status: "OK", note: "平台独立配额 + 时段窗口" },
-    { id: "ops_engine",         name: "运营引擎",           src: "src/core/ops/engine.py",            status: "!", note: "被动回复已接；主动评论/关注极低配额" },
-    { id: "spiral_engine",      name: "螺旋引擎 + 缺口分析", src: "src/core/spiral/",                  status: "OK", note: "三通道输出" },
-    { id: "zscore_normalize",   name: "跨平台归一化（R13）", src: "src/core/metrics/",                 status: "OK", note: "平台内 z-score" },
-  ]},
-  { group: "支撑层", rows: [
-    { id: "recovery_manager",  name: "断点恢复（R16）",    src: "src/core/recovery.py",              status: "OK", note: "任务记录持久化 + 幂等覆盖" },
-    { id: "autogrow",           name: "自动闭环（自生长）",   src: "src/core/autogrow.py",              status: "OK", note: "复盘→评分/文案，条件满足自动开下一轮" },
-    { id: "topic_pool",         name: "选题池",              src: "src/core/topic_pool.py",            status: "OK", note: "本地库 + 热点 + 手动，软删除可恢复" },
-    { id: "orchestration",      name: "编排与诊断",           src: "src/core/orchestration.py",         status: "OK", note: "步骤开关 / 依赖校验 / 自检清单" },
-    { id: "scheduler",          name: "定时任务调度（11 类）", src: "src/core/scheduler/",             status: "OK", note: "任务记录持久化到本地数据库" },
-    { id: "platform_readback",  name: "平台数据读回",        src: "src/vendor/easel/",                 status: "!", note: "account_stats / platform_readback 需登录态" },
-  ]},
-];
 
 export default function Agent() {
   const [tab, setTab] = useUrlTab<TabKey>(TABS.map((t) => t.key), "preview");
@@ -424,6 +398,7 @@ function inspectSkillManifest(skill: Pick<TenantSkillManifest, "skill_id" | "nam
 function SkillsPane() {
   const { showToast, withPending, isPending } = useApp();
   const [customSkills, setCustomSkills] = useState<TenantSkillManifest[]>([]);
+  const [builtinSkills, setBuiltinSkills] = useState<BuiltinSkillManifest[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [skillId, setSkillId] = useState("");
@@ -446,6 +421,7 @@ function SkillsPane() {
     try {
       const result = await api.tenantSkills();
       setCustomSkills(result.items ?? []);
+      setBuiltinSkills(result.builtin_items ?? []);
       setLoadError("");
     } catch (e: any) {
       setLoadError(e?.message ?? "加载自定义 Skills 失败");
@@ -525,26 +501,32 @@ function SkillsPane() {
       <div className="panel">
         <div className="panel-head"><div>
           <div className="panel-title"><span className="icon">▧</span>系统内置 Skills</div>
-          <div className="panel-sub">{SKILLS.reduce((a, g) => a + g.rows.length, 0)} 个内置能力 · 只读元数据</div>
+          <div className="panel-sub">{builtinSkills.length} 个内置能力 · 元数据由后端统一注册表提供</div>
         </div></div>
-        {SKILLS.map((g) => (
-          <div key={g.group} style={{ marginBottom: 14 }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", marginBottom: 6 }}>{g.group}</div>
+        {Object.entries(builtinSkills.reduce<Record<string, BuiltinSkillManifest[]>>((groups, skill) => {
+          (groups[skill.group] ??= []).push(skill);
+          return groups;
+        }, {})).map(([group, skills]) => (
+          <div key={group} style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", marginBottom: 6 }}>{group}</div>
             <div className="table-wrap">
               <table>
-                <thead><tr><th>能力</th><th>状态</th><th>说明</th></tr></thead>
+                <thead><tr><th>能力</th><th>安装</th><th>启用</th><th>运行方式</th><th>能力状态 / 说明</th></tr></thead>
                 <tbody>
-                  {g.rows.map((skill) => (
-                    <tr key={skill.id}>
-                      <td title={skill.src}>
+                  {skills.map((skill) => (
+                    <tr key={skill.skill_id}>
+                      <td title={skill.source}>
                         <strong>{skill.name.replace(/（R\d+）/g, "").replace("Playwright ", "")}</strong>
+                        <div className="tiny">{skill.skill_id}</div>
                         <details className="skill-manifest-preview">
                           <summary>预览能力定义</summary>
-                          <pre>{JSON.stringify({ schema_version: 1, skill_id: skill.id, name: skill.name, source: skill.src, status: skill.status === "OK" ? "available" : "limited", description: skill.note }, null, 2)}</pre>
+                          <pre>{JSON.stringify(skill, null, 2)}</pre>
                         </details>
                       </td>
-                      <td><span className={`tag ${skill.status === "OK" ? "green" : "orange"}`}>{skill.status === "OK" ? "正常" : "部分可用"}</span></td>
-                      <td style={{ fontSize: 12, color: "var(--muted)" }}>{skill.note.replace(/R\d+[：:]\s*/g, "")}</td>
+                      <td><span className="tag green">系统内置</span></td>
+                      <td><span className="tag">系统管理</span></td>
+                      <td>由可信工作流调用</td>
+                      <td><span className={`tag ${skill.capability_status === "normal" ? "green" : "orange"}`}>{skill.capability_status === "normal" ? "能力正常" : "能力受限"}</span><div className="tiny">{skill.description}</div></td>
                     </tr>
                   ))}
                 </tbody>
