@@ -45,7 +45,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     try {
       const s = await api.status();
       setStatus(s);
-    } catch (e) {
+    } catch {
       // Keep the last known status without exposing raw response details in the console.
     }
   }, []);
