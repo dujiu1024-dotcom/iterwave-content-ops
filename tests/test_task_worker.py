@@ -541,3 +541,47 @@ def test_worker_reconciles_interrupted_round_tasks_on_startup(tmp_path, monkeypa
     assert observed == [(task.task_id, "tenant-kill", "模拟进程意外退出")]
     worker._sync_terminal_rounds()
     assert len(observed) == 1
+
+
+def test_worker_reconciles_interrupted_rounds_beyond_first_500_queue_rows():
+    from src.core.task_queue import QueuedTask
+
+    all_tasks = [
+        QueuedTask(
+            queue_order=index,
+            task_id=f"task-{index}",
+            task_type="round_run",
+            tenant_id="tenant-a",
+            aggregate_id=str(index),
+            payload={"round_id": index},
+            status="interrupted",
+            created_at="2026-11-01T00:00:00+00:00",
+            available_at="2026-11-01T00:00:00+00:00",
+            started_at=None,
+            finished_at="2026-11-01T00:01:00+00:00",
+            attempts=1,
+            result=None,
+            error_code="worker_restarted",
+            error_message="worker restarted",
+        )
+        for index in range(501)
+    ]
+    calls = []
+
+    class FakeQueue:
+        def list_page(self, *, scope, page, page_size):
+            assert scope == "failed"
+            assert page_size == 500
+            calls.append(page)
+            start = (page - 1) * page_size
+            return all_tasks[start:start + page_size], len(all_tasks)
+
+    worker = GlobalTaskWorker(FakeQueue(), lambda _tenant_id: {})
+    reconciled = []
+    worker._reconcile_round_failure = lambda task, _reason: reconciled.append(task.task_id)
+
+    worker._sync_terminal_rounds()
+
+    assert calls == [1, 2]
+    assert len(reconciled) == 501
+    assert len(set(reconciled)) == 501
