@@ -222,7 +222,7 @@ export default function Assets() {
           <div className="panel">
             <div className="panel-head">
               <div>
-                <div className="panel-title"><span className="icon">↗</span>外部参考 · 已录入 {assets.reference.length} 条</div>
+                <div className="panel-title"><span className="icon">↗</span>外部参考 · 已录入 {assetTotals.reference} 条</div>
                 <div className="panel-sub">来源必须可溯源（原始链接 + 发现时间 + 证据状态），不存无法溯源的摘要</div>
               </div>
             </div>
