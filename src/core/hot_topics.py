@@ -253,7 +253,7 @@ class HotTopicCollector:
             urgent_total = sum(1 for item in items if item.get("time_sensitive") == 1)
             pagination = {}
         else:
-            items, sources, total, match_summary, urgent_total = self._load_page(
+            items, sources, total, match_summary, urgent_total, source_options = self._load_page(
                 page, page_size, tab=tab, source=source, keyword=keyword, sort_by=sort_by,
             )
             pagination = {
@@ -278,6 +278,7 @@ class HotTopicCollector:
             "items": items,
             "match": match_summary,
             "urgent_total": urgent_total,
+            **({"source_options": source_options} if page is not None else {}),
             **pagination,
             "filters": {
                 "heat_threshold": self.hcfg.filters.get("heat_threshold"),
@@ -300,7 +301,7 @@ class HotTopicCollector:
         }
 
 
-    def _load_page(self, page: int, page_size: int, *, tab: str = 'all', source: str | None = None, keyword: str | None = None, sort_by: str = 'heat') -> tuple[list[dict], list[dict], int, dict, int]:
+    def _load_page(self, page: int, page_size: int, *, tab: str = 'all', source: str | None = None, keyword: str | None = None, sort_by: str = 'heat') -> tuple[list[dict], list[dict], int, dict, int, list[str]]:
         """数据库分页读取热点；批次、失败屏蔽、去重、门限和趋势基准均先于分页。"""
         from .hot_topic_matcher import HotTopicMatcher, keyword_judgement
 
@@ -385,6 +386,12 @@ class HotTopicCollector:
             """,
             gate_params,
         ).fetchall()
+        source_options = [
+            redact(row["source"]) for row in self.conn.execute(
+                base + " SELECT DISTINCT source FROM eligible_base ORDER BY source",
+                gate_params,
+            ).fetchall()
+        ]
         sources = {
             row["platform_key"]: {
                 "platform": redact(row["platform_key"]),
@@ -528,7 +535,7 @@ class HotTopicCollector:
             item["also_on"] = also_on.get(item["id"], [])
             items.append(item)
         urgent_total = self.conn.execute(base + " SELECT COUNT(*) FROM visible WHERE time_sensitive = 1", gate_params).fetchone()[0]
-        return items, list(sources.values()) + list(failed.values()), total, match_summary, urgent_total
+        return items, list(sources.values()) + list(failed.values()), total, match_summary, urgent_total, source_options
 
     def refresh(self, on_progress: Optional[Callable[[dict], None]] = None) -> dict:
         """并发抓取综合热榜平台 + 自定义 RSS/JSON 行业源 → 落库。返回各来源采集结果。
