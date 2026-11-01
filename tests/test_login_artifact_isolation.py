@@ -45,8 +45,14 @@ def test_login_artifact_directories_and_files_are_private(tmp_path):
     xhs_file.write_bytes(b"test")
     web_publisher._secure_login_artifact(web_file)
     xhs_publish._secure_login_artifact(xhs_file)
+    web_profile = tmp_path / "tenant-a" / "data" / "_profiles" / "douyin"
+    xhs_profile = tmp_path / "tenant-a" / "data" / "_profiles" / "xhs"
+    web_publisher._secure_profile_dir(web_profile)
+    xhs_publish._secure_profile_dir(xhs_profile)
 
     assert stat.S_IMODE(web_dir.stat().st_mode) == 0o700
     assert stat.S_IMODE(xhs_dir.stat().st_mode) == 0o700
     assert stat.S_IMODE(web_file.stat().st_mode) == 0o600
     assert stat.S_IMODE(xhs_file.stat().st_mode) == 0o600
+    assert stat.S_IMODE(web_profile.stat().st_mode) == 0o700
+    assert stat.S_IMODE(xhs_profile.stat().st_mode) == 0o700
