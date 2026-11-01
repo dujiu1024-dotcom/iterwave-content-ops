@@ -560,6 +560,7 @@ function HotSourceManager({ onSaved }: { onSaved: () => void }) {
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [platform, setPlatform] = useState("");
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
 
   useEffect(() => {
     api.hotSources()
@@ -582,16 +583,31 @@ function HotSourceManager({ onSaved }: { onSaved: () => void }) {
     }
   };
 
-  const add = async () => {
+  const saveForm = async () => {
     if (!name.trim() || !url.trim()) {
       showToast("来源名称和地址都要填", "error");
       return;
     }
-    await save(
-      [...items, { name: name.trim(), type, url: url.trim(), platform: platform.trim() || name.trim(), enabled: true }],
-      "行业源已添加",
-    );
-    setName(""); setUrl(""); setPlatform("");
+    const existing = editingIndex == null ? null : items[editingIndex];
+    const nextSource: HotSource = {
+      name: name.trim(), type, url: url.trim(),
+      platform: platform.trim() || name.trim(),
+      enabled: existing?.enabled ?? true,
+    };
+    const nextItems = editingIndex == null
+      ? [...items, nextSource]
+      : items.map((item, index) => index === editingIndex ? nextSource : item);
+    await save(nextItems, editingIndex == null ? "行业源已添加" : "来源配置已更新");
+    setName(""); setUrl(""); setPlatform(""); setEditingIndex(null);
+  };
+
+  const beginEdit = (source: HotSource, index: number) => {
+    if (source.type !== "rss" && source.type !== "json") return;
+    setEditingIndex(index);
+    setType(source.type);
+    setName(source.name);
+    setUrl(source.url);
+    setPlatform(source.platform ?? "");
   };
 
   return (
@@ -617,6 +633,8 @@ function HotSourceManager({ onSaved }: { onSaved: () => void }) {
                   <td>{s.enabled === false ? <span className="tag gray">停用</span> : <span className="tag green">启用</span>}</td>
                   <td>
                     <div className="flex wrap" style={{ gap: 6 }}>
+                      {s.type !== "aggregate" && <button className="btn xs" type="button" disabled={busy}
+                        onClick={() => beginEdit(s, i)}>编辑</button>}
                       <button className="btn xs soft" type="button" disabled={busy}
                         onClick={() => save(items.map((x, idx) => idx === i ? { ...x, enabled: x.enabled === false } : x),
                           s.enabled === false ? "来源已启用" : "来源已停用")}>
@@ -651,7 +669,12 @@ function HotSourceManager({ onSaved }: { onSaved: () => void }) {
         <input className="field" style={{ flex: 1, minWidth: 220 }} placeholder="https://example.com/feed.xml"
           value={url} onChange={(e) => setUrl(e.target.value)} />
         <input className="field" style={{ width: 110 }} placeholder="平台（可选）" value={platform} onChange={(e) => setPlatform(e.target.value)} />
-        <button className="btn sm" type="button" disabled={busy} onClick={add}>添加来源</button>
+        <button className="btn sm" type="button" disabled={busy} onClick={saveForm}>
+          {editingIndex == null ? "添加来源" : "保存修改"}
+        </button>
+        {editingIndex != null && <button className="btn sm" type="button" disabled={busy} onClick={() => {
+          setEditingIndex(null); setName(""); setUrl(""); setPlatform("");
+        }}>取消编辑</button>}
       </div>
     </div>
   );
