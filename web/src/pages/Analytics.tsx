@@ -37,6 +37,7 @@ export default function Analytics() {
   const [platformFilter, setPlatformFilter] = useState<Platform | "">("");
   const [metricsPage, setMetricsPage] = useState(1);
   const [publishedDrafts, setPublishedDrafts] = useState<Draft[]>([]);
+  const [publishEligibleCount, setPublishEligibleCount] = useState(0);
   const [backfillBusy, setBackfillBusy] = useState<string | null>(null);
   const [backfillValues, setBackfillValues] = useState<Record<string, {
     note_url: string; measured_at: string; correction_of: string;
@@ -97,6 +98,9 @@ export default function Analytics() {
       const metrics = await api.activationMetrics();
       const published = allDrafts.filter((d) => !!d.user_confirmed_at);
       setPublishedDrafts(published);
+      setPublishEligibleCount(allDrafts.filter((d) =>
+        ["draft_saved", "user_published", "data_fetching", "published"].includes(d.status),
+      ).length);
       setWeeklyReport(report);
       setActivationMetrics(metrics);
       setActivationStatus(status);
@@ -203,9 +207,9 @@ export default function Analytics() {
       {detailView === "overview" && <>
       <div className="grid kpis" style={{ marginBottom: 15 }}>
         <div className="metric">
-          <div className="metric-top"><span className="metric-label">已采集内容</span><span className="metric-icon" aria-hidden="true">▤</span></div>
-          <div className="metric-val">{metrics ? metrics.total : "—"} <span className="metric-unit">篇</span></div>
-          <div className="metric-foot">近 {metrics?.z_window_days ?? 90} 天发布的内容</div>
+          <div className="metric-top"><span className="metric-label">指标采集记录</span><span className="metric-icon" aria-hidden="true">▤</span></div>
+          <div className="metric-val">{metrics ? metrics.total : "—"} <span className="metric-unit">条</span></div>
+          <div className="metric-foot">近 {metrics?.z_window_days ?? 90} 天有效指标记录，不代表生产量</div>
         </div>
         <div className="metric">
           <div className="metric-top"><span className="metric-label">平均互动率</span><span className="metric-icon" aria-hidden="true">↗</span></div>
@@ -226,6 +230,16 @@ export default function Analytics() {
 
       <div className="grid kpis analytics-activation-kpis" style={{ marginBottom: 15, gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
         <div className="metric"><div className="metric-label">首次价值时间 TTV</div><div className="metric-val">{activationMetrics?.ttv_seconds == null ? "—" : `${Math.round(activationMetrics.ttv_seconds)} 秒`}</div><div className="metric-foot">输入 {activationMetrics?.activation_input_wait_seconds == null ? "—" : Math.round(activationMetrics.activation_input_wait_seconds)} 秒 · 排队 {activationMetrics?.model_queue_wait_seconds == null ? "—" : Math.round(activationMetrics.model_queue_wait_seconds)} 秒 · 生成 {activationMetrics?.generation_processing_seconds == null ? "—" : Math.round(activationMetrics.generation_processing_seconds)} 秒</div><div className="metric-foot">P50 {activationMetrics?.ttv_p50_seconds == null ? "—" : Math.round(activationMetrics.ttv_p50_seconds)} 秒 · P90 {activationMetrics?.ttv_p90_seconds == null ? "—" : Math.round(activationMetrics.ttv_p90_seconds)} 秒 · 样本 {activationMetrics?.ttv_sample_count ?? 0}</div><div className="metric-foot">{activationMetrics?.ttv_percentile_scope || "分位数范围待定"}</div></div>
+        <div className="metric">
+          <div className="metric-label">累计确认发布量</div>
+          <div className="metric-val">{publishedDrafts.length}</div>
+          <div className="metric-foot">用户确认已发布的草稿总数</div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">草稿确认发布率</div>
+          <div className="metric-val">{publishEligibleCount > 0 ? `${(publishedDrafts.length / publishEligibleCount * 100).toFixed(1)}%` : "—"}</div>
+          <div className="metric-foot">确认发布 / 已保存及已发布草稿；不等同平台发布成功率</div>
+        </div>
         <div className="metric">
           <div className="metric-label">活跃目标完成率</div>
           <div className="metric-val">{goalSummary?.percent == null ? "—" : `${goalSummary.percent.toFixed(1)}%`}</div>
