@@ -1254,3 +1254,71 @@ def test_orchestration_rejects_unregistered_disabled_and_unsupported_custom_skil
 
     saved = tc.put("/api/orchestration", json={"steps": steps})
     assert saved.status_code == 422
+
+
+# ---------------------------------------------------------------- 图片素材库分页与统计
+def test_media_assets_pagination_and_counts_are_database_backed(client):
+    tc, conn, _ = client
+    rows = []
+    review_states = ("pending_review", "approved", "rejected")
+    for index in range(45):
+        rows.append((
+            f"分页素材 {index:02d}",
+            f"asset-{index:02d}.png",
+            f"stored-{index:02d}.png",
+            "image/png",
+            1024,
+            f"sha-{index:02d}",
+            100,
+            100,
+            "archived" if index >= 40 else "active",
+            review_states[index % 3],
+        ))
+    conn.executemany(
+        "INSERT INTO media_assets "
+        "(title, original_filename, stored_filename, mime_type, byte_size, sha256, width, height, status, review_status) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+
+    first = tc.get("/api/media?status=active&review_status=all&page=1&page_size=20")
+    second = tc.get("/api/media?status=active&review_status=all&page=2&page_size=20")
+    assert first.status_code == second.status_code == 200
+    first_body, second_body = first.json(), second.json()
+    assert first_body["total"] == 40
+    assert first_body["page"] == 1 and first_body["pages"] == 2
+    assert len(first_body["items"]) == 20
+    assert len(second_body["items"]) == 20
+    assert {item["id"] for item in first_body["items"]}.isdisjoint(
+        {item["id"] for item in second_body["items"]}
+    )
+    assert first_body["counts"] == {
+        "all": 40, "pending": 14, "approved": 13, "rejected": 13, "archived": 5,
+    }
+
+    pending = tc.get("/api/media?status=active&review_status=pending_review&page=1&page_size=20")
+    assert pending.status_code == 200
+    assert pending.json()["total"] == 14
+    assert all(item["review_status"] == "pending_review" for item in pending.json()["items"])
+
+
+def test_media_assets_search_counts_are_not_limited_to_current_page(client):
+    tc, conn, _ = client
+    for index in range(25):
+        conn.execute(
+            "INSERT INTO media_assets "
+            "(title, original_filename, stored_filename, mime_type, byte_size, sha256, width, height, status, review_status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 'approved')",
+            (f"目标关键词 {index}", f"target-{index}.png", f"target-{index}.png",
+             "image/png", 512, f"target-sha-{index}", 80, 80),
+        )
+    conn.commit()
+
+    response = tc.get("/api/media?query=目标关键词&status=active&page=1&page_size=10")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 25
+    assert body["pages"] == 3
+    assert body["counts"]["all"] == 25
+    assert body["counts"]["approved"] == 25
