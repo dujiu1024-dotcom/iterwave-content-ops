@@ -142,3 +142,5 @@
 - 前端统一 API 客户端进一步对 4xx 错误正文做内部信息检测；堆栈、Python 文件路径、SQLite/SQLAlchemy 内部异常、关键环境变量名和绝对路径统一替换为安全提示，保留 HTTP 状态码与业务错误码。
 
 - 修正热点采集关闭时的 HTTP 错误文案，不再向界面显示内部配置键 `hot_topics.enabled`，改为用户可理解的设置提示。
+
+- Agent Skill 契约测试界面不再显示内部 `manifest_version` 修订计数，改为显示 Skill 名称和对用户有意义的语义版本。
