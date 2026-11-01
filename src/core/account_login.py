@@ -191,6 +191,76 @@ def _login_env() -> dict[str, str]:
     return env
 
 
+def build_whoami_cmd(platform: str, data_dir: Path | str | None = None) -> list[str]:
+    """构造只读账号身份探测命令；不调用任何发布子命令。"""
+    if platform not in PLATFORMS:
+        raise ValueError(f"不支持的平台: {platform}")
+    _, profile_base, _ = _data_paths(data_dir)
+    py = sys.executable
+    if platform == "xhs":
+        cmd = [py, str(VENDOR_SCRIPTS / "xhs_publish.py"), "whoami",
+               "--profile-base", str(profile_base), "--no-proxy"]
+    elif platform == "douyin":
+        cmd = [py, str(VENDOR_SCRIPTS / "douyin_publish.py"), "whoami",
+               "--profile-base", str(profile_base), "--no-proxy"]
+    else:
+        cmd = [py, str(VENDOR_SCRIPTS / "web_publisher.py"), "whoami",
+               "--platform", WEB_PUBLISHER_KEYS[platform], "--profile-base", str(profile_base)]
+    return guard_vendor_cmd(cmd)
+
+
+def read_account_identity(
+    platform: str, data_dir: Path | str | None = None, timeout_seconds: int = 30,
+) -> dict:
+    """通过 vendor whoami 只读校验当前账号组登录态并读取昵称/头像。"""
+    import json
+    from urllib.parse import urlparse
+
+    try:
+        cmd = build_whoami_cmd(platform, data_dir=data_dir)
+    except ValueError as exc:
+        return {"platform": platform, "logged_in": False, "name": "", "avatar_url": None,
+                "error": str(exc)}
+    try:
+        result = subprocess.run(
+            cmd, cwd=str(PROJECT_ROOT), env=_login_env(), capture_output=True,
+            text=True, encoding="utf-8", errors="replace", timeout=max(5, min(timeout_seconds, 45)),
+            close_fds=True, **_private_subprocess_kwargs(),
+        )
+        payload = None
+        for line in reversed((result.stdout or "").splitlines()):
+            try:
+                candidate = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(candidate, dict) and "loggedIn" in candidate:
+                payload = candidate
+                break
+        if payload is None:
+            return {"platform": platform, "logged_in": False, "name": "", "avatar_url": None,
+                    "error": "平台身份信息暂不可读取，请稍后重试"}
+        logged_in = payload.get("loggedIn") is True
+        name = payload.get("name") if isinstance(payload.get("name"), str) else ""
+        avatar = payload.get("avatar") if isinstance(payload.get("avatar"), str) else ""
+        parsed = urlparse(avatar) if avatar else None
+        if parsed and (parsed.scheme not in ("http", "https") or not parsed.hostname
+                       or parsed.username or parsed.password):
+            avatar = ""
+        if result.returncode != 0 and not logged_in:
+            return {"platform": platform, "logged_in": False, "name": "", "avatar_url": None,
+                    "error": "平台身份校验未通过"}
+        return {"platform": platform, "logged_in": logged_in,
+                "name": name.strip()[:80], "avatar_url": avatar or None,
+                "error": None if logged_in else "当前平台登录态未通过校验"}
+    except subprocess.TimeoutExpired:
+        return {"platform": platform, "logged_in": False, "name": "", "avatar_url": None,
+                "error": "平台身份校验超时，请稍后重试"}
+    except Exception as exc:  # noqa: BLE001 — 不向 API 暴露命令行、路径或异常细节
+        logger.warning("读取平台身份失败 platform=%s error=%s", platform, type(exc).__name__)
+        return {"platform": platform, "logged_in": False, "name": "", "avatar_url": None,
+                "error": "平台身份校验失败，请检查登录状态后重试"}
+
+
 def build_cmd(platform: str, timeout_seconds: int | None = None, data_dir: Path | str | None = None) -> list[str]:
     """构造登录命令；等待时限来自当前账号组运行配置。"""
     if timeout_seconds is None:
