@@ -127,6 +127,7 @@ export default function TaskQueue() {
       setActiveItems(activeResponse.items || []);
       setActiveTotal(activeResponse.total ?? activeResponse.items?.length ?? 0);
       setActivePages(activeResponse.pages ?? 1);
+      if (activePage > (activeResponse.pages ?? 1)) setActivePage(activeResponse.pages ?? 1);
       setActiveCounts(activeResponse.counts?.by_status ?? {});
       setHistoryItems(historyResponse.items || []);
       setHistoryTotal(historyResponse.total ?? 0);
