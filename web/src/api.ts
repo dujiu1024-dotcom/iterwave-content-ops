@@ -1492,13 +1492,17 @@ export const api = {
   },
   draftsAll: async (status?: string, platform?: Platform): Promise<Draft[]> => {
     const first = await api.draftsPage(status, platform, 1, 100);
-    if (first.pages <= 1) return first.items;
-    const rest = await Promise.all(
-      Array.from({ length: first.pages - 1 }, (_, index) =>
-        api.draftsPage(status, platform, index + 2, 100),
-      ),
-    );
-    return first.items.concat(...rest.map((result) => result.items));
+    const all = [...first.items];
+    for (let start = 2; start <= first.pages; start += 5) {
+      const end = Math.min(first.pages, start + 4);
+      const batch = await Promise.all(
+        Array.from({ length: end - start + 1 }, (_, index) =>
+          api.draftsPage(status, platform, start + index, 100),
+        ),
+      );
+      all.push(...batch.flatMap((result) => result.items));
+    }
+    return all;
   },
   /** noteUrl：已发布笔记链接（可选；不填则该篇跳过被动评论轮询） */
   confirmPublish: (
