@@ -1960,7 +1960,11 @@ def test_custom_industry_preset_can_be_edited_and_deleted_but_builtin_is_protect
     deleted = tc.delete("/api/presets/test-custom")
     assert deleted.status_code == 200
     assert deleted.json()["deleted"] is True
-    assert tc.delete("/api/presets/test-custom").status_code == 404
+    # 软归档：重复归档幂等，记录保留且仍为归档状态；不存在的模板才是 404。
+    assert tc.delete("/api/presets/test-custom").status_code == 200
+    archived = next(i for i in tc.get("/api/presets").json()["items"] if i["key"] == "test-custom")
+    assert archived["is_active"] is False
+    assert tc.delete("/api/presets/no-such-custom").status_code == 404
 
     builtin_key = tc.get("/api/presets").json()["items"][0]["key"]
     assert tc.delete(f"/api/presets/{builtin_key}").status_code == 409
@@ -2641,3 +2645,30 @@ def test_content_plan_cancelled_can_be_restored_without_deleting_record(client):
         ("p1-plan-cancelled",),
     ).fetchone()
     assert tuple(row) == ("planned", 2)
+
+
+def test_archived_industry_preset_cannot_be_applied_until_restored(client, conn):
+    tc, _, _ = client
+    from src.core.industry_presets_repository import seed_builtins
+
+    seed_builtins(conn)
+    payload = {
+        "name": "归档测试模板",
+        "positioning": "为目标用户提供可执行建议",
+        "persona_keywords": ["测试"],
+        "forbidden_directions": [],
+        "extra_redlines": [],
+        "dimensions": ["问题"],
+        "platform_notes": {},
+    }
+    assert tc.put("/api/presets/archived-apply", json=payload).status_code == 200
+    assert tc.delete("/api/presets/archived-apply").status_code == 200
+
+    blocked = tc.post("/api/presets/archived-apply/apply")
+    assert blocked.status_code == 409
+    assert "已归档" in blocked.json()["detail"]
+
+    assert tc.post("/api/presets/archived-apply/restore").status_code == 200
+    applied = tc.post("/api/presets/archived-apply/apply")
+    assert applied.status_code == 200
+    assert applied.json()["positioning"] == "为目标用户提供可执行建议"
