@@ -238,8 +238,8 @@ export default function Analytics() {
           <option value={365}>近 365 天</option>
         </select>
       </div>
-      <div className="grid kpis analytics-activation-kpis" style={{ marginBottom: 15, gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
-                <div className="metric">
+      <div className="grid kpis business-kpis" style={{ marginBottom: 15, gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
+        <div className="metric">
           <div className="metric-top"><span className="metric-label">近 {businessSummary?.window_days ?? businessDays} 天内容生产量</span></div>
           <div className="metric-val">{businessSummary?.contents_created ?? "—"} <span className="metric-unit">篇</span></div>
           <div className="metric-foot">按内容创建时间统计</div>
@@ -249,7 +249,6 @@ export default function Analytics() {
           <div className="metric-val">{businessSummary?.drafts_created ?? "—"} <span className="metric-unit">篇</span></div>
           <div className="metric-foot">按草稿创建时间统计，含平台变体</div>
         </div>
-        <div className="metric"><div className="metric-label">首次价值时间 TTV</div><div className="metric-val">{activationMetrics?.ttv_seconds == null ? "—" : `${Math.round(activationMetrics.ttv_seconds)} 秒`}</div><div className="metric-foot">输入 {activationMetrics?.activation_input_wait_seconds == null ? "—" : Math.round(activationMetrics.activation_input_wait_seconds)} 秒 · 排队 {activationMetrics?.model_queue_wait_seconds == null ? "—" : Math.round(activationMetrics.model_queue_wait_seconds)} 秒 · 生成 {activationMetrics?.generation_processing_seconds == null ? "—" : Math.round(activationMetrics.generation_processing_seconds)} 秒</div><div className="metric-foot">P50 {activationMetrics?.ttv_p50_seconds == null ? "—" : Math.round(activationMetrics.ttv_p50_seconds)} 秒 · P90 {activationMetrics?.ttv_p90_seconds == null ? "—" : Math.round(activationMetrics.ttv_p90_seconds)} 秒 · 样本 {activationMetrics?.ttv_sample_count ?? 0}</div><div className="metric-foot">{activationMetrics?.ttv_percentile_scope || "分位数范围待定"}</div></div>
         <div className="metric">
           <div className="metric-label">累计确认发布量</div>
           <div className="metric-val">{businessSummary?.confirmed_published ?? "—"}</div>
@@ -270,6 +269,9 @@ export default function Analytics() {
           <div className="metric-val">{goalSummary?.percent == null ? "—" : `${goalSummary.percent.toFixed(1)}%`}</div>
           <div className="metric-foot">{goalSummary ? `已纳入统计 ${goalSummary.counted_goals}/${goalSummary.active_goals} 个目标` : "目标进度尚未加载"}</div>
         </div>
+      </div>
+      <div className="grid kpis analytics-activation-kpis" style={{ marginBottom: 15, gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
+                <div className="metric"><div className="metric-label">首次价值时间 TTV</div><div className="metric-val">{activationMetrics?.ttv_seconds == null ? "—" : `${Math.round(activationMetrics.ttv_seconds)} 秒`}</div><div className="metric-foot">输入 {activationMetrics?.activation_input_wait_seconds == null ? "—" : Math.round(activationMetrics.activation_input_wait_seconds)} 秒 · 排队 {activationMetrics?.model_queue_wait_seconds == null ? "—" : Math.round(activationMetrics.model_queue_wait_seconds)} 秒 · 生成 {activationMetrics?.generation_processing_seconds == null ? "—" : Math.round(activationMetrics.generation_processing_seconds)} 秒</div><div className="metric-foot">P50 {activationMetrics?.ttv_p50_seconds == null ? "—" : Math.round(activationMetrics.ttv_p50_seconds)} 秒 · P90 {activationMetrics?.ttv_p90_seconds == null ? "—" : Math.round(activationMetrics.ttv_p90_seconds)} 秒 · 样本 {activationMetrics?.ttv_sample_count ?? 0}</div><div className="metric-foot">{activationMetrics?.ttv_percentile_scope || "分位数范围待定"}</div></div>
         <div className="metric"><div className="metric-label">7 日激活率</div><div className="metric-val">{activationMetrics?.seven_day_activation_rate == null ? "观察中" : `${(activationMetrics.seven_day_activation_rate * 100).toFixed(0)}%`}</div><div className="metric-foot">复制或保存至少一篇合格样稿</div></div>
         <div className="metric"><div className="metric-label">首次发布率</div><div className="metric-val">{activationMetrics?.first_publish_rate == null ? "观察中" : `${(activationMetrics.first_publish_rate * 100).toFixed(0)}%`}</div><div className="metric-foot">初始化后 7 日内确认发布</div></div>
         <div className="metric"><div className="metric-label">数据回流完成率</div><div className="metric-val">{activationMetrics?.data_return_rate == null ? "—" : `${(activationMetrics.data_return_rate * 100).toFixed(0)}%`}</div><div className="metric-foot">发布满 7 天且 7 日内补填链接或提交有效指标</div></div>
