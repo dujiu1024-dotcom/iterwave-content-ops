@@ -541,6 +541,19 @@ export interface ScheduleEvent {
   day: number | null;
 }
 
+export interface BuiltinSkillManifest {
+  group: string;
+  skill_id: string;
+  name: string;
+  source: string;
+  capability_status: "normal" | "limited";
+  description: string;
+  installation_state: "built_in";
+  enabled_state: "system_managed";
+  runnable_state: "workflow_managed";
+  execution_mode: "trusted_application_workflow";
+}
+
 export interface TenantSkillManifest {
   skill_id: string;
   name: string;
@@ -1718,7 +1731,7 @@ export const api = {
     if (endDate) p.set("end_date", endDate);
     return fetchJson<{ items: ContentPlan[]; total: number }>(`/api/content-plans?${p}`);
   },
-  tenantSkills: (enabled?: boolean) => fetchJson<{ items: TenantSkillManifest[]; total: number; execution_enabled: false }>(`/api/skills${enabled === undefined ? "" : `?enabled=${enabled}`}`),
+  tenantSkills: (enabled?: boolean) => fetchJson<{ items: TenantSkillManifest[]; total: number; builtin_items: BuiltinSkillManifest[]; builtin_total: number; execution_enabled: false; custom_execution_enabled: false }>(`/api/skills${enabled === undefined ? "" : `?enabled=${enabled}`}`),
   registerTenantSkill: (data: Pick<TenantSkillManifest, "skill_id" | "name" | "version" | "description" | "category" | "inputs" | "outputs" | "permissions">) =>
     fetchJson<TenantSkillManifest & { execution_enabled: false }>("/api/skills", { method: "POST", body: JSON.stringify(data) }),
   setTenantSkillEnabled: (skill_id: string, enabled: boolean, manifest_version: number) =>
