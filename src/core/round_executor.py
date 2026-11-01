@@ -268,7 +268,7 @@ class RoundExecutor:
                     report["errors"].append("失败收尾：轮次状态未能迁移到 failed")
             except Exception as cleanup_exc:  # noqa: BLE001
                 logger.exception("轮次失败状态收尾异常 round=%s", round_id)
-                report["errors"].append(f"失败状态收尾异常: {cleanup_exc}")
+                report["errors"].append("失败状态收尾异常，请检查服务端运行日志")
         except Exception as exc:  # noqa: BLE001 — 执行器兜底，必须留痕
             logger.exception("轮次 %s 执行异常", round_id)
             report["errors"].append("执行异常，请检查运行日志")
@@ -278,7 +278,7 @@ class RoundExecutor:
             # 否则下方 task_runs 收尾和 run_report 持久化都不会执行。
             try:
                 transitioned = self.sm_round.transition(
-                    round_id, "failed", f"执行异常: {exc}",
+                    round_id, "failed", "执行异常，请检查服务端运行日志",
                 )
                 if not transitioned:
                     report["errors"].append("失败收尾：轮次状态未能迁移到 failed")
@@ -386,7 +386,7 @@ class RoundExecutor:
                 )
                 outcome = CheckOutcome(
                     result=CheckResult.ERROR,
-                    reason=f"恢复存草稿前质量门异常：{exc}",
+                    reason="恢复存草稿前质量检查服务异常，请检查服务端日志后重试",
                 )
 
             # 跟初始生产保持一致：只有模板降级（无 LLM）的 WARN 可带告警采用。
@@ -832,7 +832,7 @@ class RoundExecutor:
                         logger.exception("G2 检查器异常 platform=%s", platform.value)
                         outcome = CheckOutcome(
                             result=CheckResult.ERROR,
-                            reason=f"检查器异常: {exc}",
+                            reason="质量检查服务异常，请检查服务端日志后重试",
                         )
 
                     if outcome.passes:
@@ -1002,9 +1002,10 @@ class RoundExecutor:
             except Exception as exc:  # noqa: BLE001 — 单篇失败不影响整轮
                 logger.exception("存草稿异常 platform=%s", platform.value)
                 report["drafts_failed"] += 1
-                self._mark_draft_failed(row["draft_id"], f"存草稿异常: {exc}")
+                safe_error = "平台存草稿操作异常，请检查登录状态、网络连接或平台页面后重试"
+                self._mark_draft_failed(row["draft_id"], safe_error)
                 self._notify_failed(
-                    platform, row["title"], f"存草稿异常: {exc}",
+                    platform, row["title"], safe_error,
                     draft_id=row["draft_id"], round_id=round_id,
                 )
                 continue
