@@ -23,6 +23,7 @@ def _seed_tenant_db(db_path: Path, title: str, platform: str = "xhs") -> None:
             task_type TEXT NOT NULL,
             biz_id TEXT,
             status TEXT NOT NULL,
+            error_msg TEXT,
             started_at TEXT,
             finished_at TEXT,
             created_at TEXT
