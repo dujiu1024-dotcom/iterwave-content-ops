@@ -1359,3 +1359,34 @@ def test_operations_history_endpoints_return_database_totals_and_pages(client):
         assert {row["id"] for row in first_body["items"]}.isdisjoint(
             {row["id"] for row in second_body["items"]}
         )
+
+
+# ---------------------------------------------------------------- 配置审计历史分页
+def test_config_audit_endpoint_paginates_all_redacted_changes(client):
+    tc, conn, _ = client
+    for index in range(47):
+        conn.execute(
+            "INSERT INTO config_changes (key, old_value, new_value, changed_at) "
+            "VALUES (?, ?, ?, ?)",
+            (f"rhythm.daily_quotas.xhs.passive_replies.{index}",
+             f"old-{index}", f"new-{index}", f"2026-11-01 11:{index // 60:02d}:{index % 60:02d}"),
+        )
+    conn.commit()
+
+    first = tc.get("/api/config/audit?page=1&page_size=20")
+    second = tc.get("/api/config/audit?page=2&page_size=20")
+    third = tc.get("/api/config/audit?page=3&page_size=20")
+    assert first.status_code == second.status_code == third.status_code == 200
+    a, b, c = first.json(), second.json(), third.json()
+    assert a["total"] == b["total"] == c["total"] == 47
+    assert a["pages"] == 3 and c["page"] == 3
+    assert [len(a["items"]), len(b["items"]), len(c["items"])] == [20, 20, 7]
+    ids = [row["id"] for body in (a, b, c) for row in body["items"]]
+    assert len(ids) == len(set(ids)) == 47
+    assert a["items"][0]["new_value"] == "new-46"
+
+
+def test_config_audit_endpoint_rejects_invalid_pagination(client):
+    tc, _, _ = client
+    assert tc.get("/api/config/audit?page=0").status_code == 422
+    assert tc.get("/api/config/audit?page=1&page_size=101").status_code == 422
