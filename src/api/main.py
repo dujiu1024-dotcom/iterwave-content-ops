@@ -3920,19 +3920,40 @@ def _register_routes(app: FastAPI) -> None:
 
     # --- 轮次 ---
     @app.get("/api/rounds")
-    def list_rounds(status: Optional[str] = Query(None)):
+    def list_rounds(
+        status: Optional[str] = Query(None),
+        page: Optional[int] = Query(None, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+    ):
         conn = _g()["conn"]
-        sql = "SELECT * FROM spiral_rounds"
-        params: list = []
-        if status:
-            sql += " WHERE status = ?"
-            params.append(status)
-        sql += " ORDER BY created_at DESC LIMIT 50"
-        rows = conn.execute(sql, params).fetchall()
-        return [
-            {**dict(row), "created_at": _api_datetime(row["created_at"])}
-            for row in rows
-        ]
+        where = " WHERE status = ?" if status else ""
+        params: list = [status] if status else []
+        if page is None:
+            # 兼容旧调用方；新页面必须传 page 使用数据库分页。
+            rows = conn.execute(
+                "SELECT * FROM spiral_rounds" + where + " ORDER BY created_at DESC, id DESC LIMIT 50",
+                params,
+            ).fetchall()
+            return [
+                {**dict(row), "created_at": _api_datetime(row["created_at"])}
+                for row in rows
+            ]
+        total = conn.execute("SELECT COUNT(*) FROM spiral_rounds" + where, params).fetchone()[0]
+        rows = conn.execute(
+            "SELECT * FROM spiral_rounds" + where +
+            " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+            [*params, page_size, (page - 1) * page_size],
+        ).fetchall()
+        return {
+            "items": [
+                {**dict(row), "created_at": _api_datetime(row["created_at"])}
+                for row in rows
+            ],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "pages": max(1, (total + page_size - 1) // page_size),
+        }
 
     @app.post("/api/rounds")
     def create_round(req: CreateRoundRequest):
