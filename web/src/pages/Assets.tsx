@@ -13,7 +13,7 @@ import {
   api, AssetItem, AssetType, Draft, HotTopicItem, KbInspect, ScoredTopic, SystemConfigView,
 } from "../api";
 
-type Tab = "topics" | "scoring" | "created" | "media" | "sources" | "voice" | "templates" | "mapping";
+type Tab = "topics" | "scoring" | "created" | "media" | "sources" | "voice" | "industry" | "templates" | "mapping";
 
 const TABS: { key: Tab; label: string }[] = [
   { key: "topics", label: "选题池" },
@@ -22,6 +22,7 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "media", label: "图片素材库" },
   { key: "sources", label: "外部参考" },
   { key: "voice", label: "个人观点与画像" },
+  { key: "industry", label: "行业模板" },
   { key: "templates", label: "内容模板" },
   { key: "mapping", label: "知识库来源" },
 ];
@@ -302,8 +303,6 @@ export default function Assets() {
             </div>
           </div>
 
-          <IndustryPresetPicker onApplied={load} />
-
           <AssetForm
             type="voice"
             titleLabel="观点标题"
@@ -338,8 +337,29 @@ export default function Assets() {
         </>
       )}
 
+      {tab === "industry" && (
+        <IndustryPresetPicker onApplied={load} />
+      )}
+
       {tab === "templates" && (
         <>
+          <div className="panel template-howto">
+            <div className="panel-title">内容模板是 AI 生成时使用的“文章结构说明”</div>
+            <div className="panel-sub" style={{ marginTop: 6 }}>
+              它不是选题、不是完整文案，也不是行业画像。它告诉 AI 一篇内容按什么顺序组织，例如“问题 → 真实经历 → 方法 → 证据 → 局限 → 结论”。
+            </div>
+            <div className="template-howto-steps">
+              <span><b>1</b> 新建或添加示例模板</span>
+              <span><b>2</b> 在下方模板卡片点击“编辑”修改结构</span>
+              <span><b>3</b> 到“内容生产 → 生产线”选择模板</span>
+              <span><b>4</b> 本轮 AI 会参考结构生成，之后修改只影响新生产</span>
+            </div>
+            <div className="flex wrap" style={{ gap: 8, marginTop: 10 }}>
+              <button className="btn sm soft" type="button" onClick={() => void addAsset("template", { title: "知识科普结构", body: "1. 用一个具体问题开场\n2. 解释核心概念\n3. 分步骤讲清方法\n4. 给出真实案例或证据\n5. 说明适用边界\n6. 总结可执行建议" })}>＋ 添加知识科普示例</button>
+              <button className="btn sm soft" type="button" onClick={() => void addAsset("template", { title: "产品体验测评结构", body: "1. 先说使用场景与痛点\n2. 说明体验条件\n3. 按关键维度逐项体验\n4. 展示优点与不足\n5. 给出适合/不适合的人群\n6. 总结购买或使用建议" })}>＋ 添加体验测评示例</button>
+              <button className="btn sm" type="button" onClick={() => navigate("production")}>去内容生产选择模板 →</button>
+            </div>
+          </div>
           <AssetForm
             type="template"
             titleLabel="模板"
@@ -369,7 +389,7 @@ export default function Assets() {
                     <div className="skill-desc" style={{ whiteSpace: "pre-line" }}>{t.body || "（无结构说明）"}</div>
                     <div className="skill-foot">
                       <span>{t.created_at?.slice(0, 10) ?? "—"}</span>
-                      <button className="btn xs" type="button" onClick={() => setEditingTemplate(t)}>编辑模板</button>
+                      <button className="btn xs primary" type="button" onClick={() => setEditingTemplate(t)}>编辑结构</button>
                     </div>
                   </div>
                 ))}
