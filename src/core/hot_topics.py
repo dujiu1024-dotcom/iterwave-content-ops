@@ -349,7 +349,7 @@ class HotTopicCollector:
                     OR (? = 'matched' AND match_version = ? AND COALESCE(forbidden_hit, 0) = 0
                         AND match_score IS NOT NULL AND match_score >= ?))
                   AND (? IS NULL OR source = ?)
-                  AND (? IS NULL OR title LIKE ?)
+                  AND (? IS NULL OR instr(COALESCE(title, ''), ?) > 0)
             )
         """
         keyword = (keyword or '').strip() or None
