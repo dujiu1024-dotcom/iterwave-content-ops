@@ -1331,3 +1331,14 @@ A-02、A-04、B-05、D-07、D-08、F-01 至 F-08、G-01 至 G-06。
 - [x] 新增回归测试覆盖平台 ID、全角字符/空白归一化、唯一前缀、前缀歧义和任意子串误命中。
 - [ ] 最新匹配规则及测试 CI 尚待执行确认。
 - Commit：`35fd442b`（安全匹配规则）、`2276fb6b`（匹配回归测试）。
+
+
+### 58. P2 图片生成任务配置上下文修复与 F-06 复核（2026-11-01）
+
+- [x] 复核主分支后发现：media_quality.py 与 metrics/__init__.py 已读取 current_config()，但 media_generation.generate_image_bytes() 仍直接调用全局 get_config()；与 P2 记录中“已完成”的描述不一致。
+- [x] 新增统一 _resolve_config(cfg)：显式 cfg 优先，其次当前后台任务 ContextVar 绑定的租户 cfg，最后才回退全局配置；图片生成和图片字节校验共用该解析入口。
+- [x] 新增回归测试：绑定租户配置时禁止调用全局配置；显式 cfg 优先于 ContextVar。
+- [ ] 新增测试尚待 GitHub Actions 执行；未通过 CI 前不标记验证完成。
+- [ ] F-06 本轮针对 src/api/main.py、Worker、Scheduler、ConfigStore 与部分前端生产页面做定向扫描。发现 Production.tsx 多处直接展示 API 错误消息，需结合 API 错误响应是否经过脱敏逐条核查；main.py 中 TenantError/ConfigPatchError 等动态错误需要确认错误类型的消息是否仅包含安全业务提示。该扫描不是全仓逐文件穷尽审计，F-06 保持未关闭。
+- [ ] draft_saver.py 将适配器异常转成 DraftResult.error_msg；需核对上层 API/UI 是否会原样展示底层异常，作为下一轮 F-06 优先项。
+- Commit：789e2c2b（租户配置解析）、b0bd52d2（隔离回归测试）。
