@@ -319,3 +319,31 @@ def test_config_persistence_errors_do_not_expose_sqlite_details(cfg, conn, monke
     assert str(caught.value) == "账号组配置保存失败，请检查数据库状态后重试"
     assert "/srv/iterwave/private" not in str(caught.value)
     assert "tenant.db" not in str(caught.value)
+
+
+def test_phase_timeout_and_draft_save_windows_are_runtime_configurable(cfg, conn):
+    expected = {
+        "timeouts.round_timeout_hours",
+        "timeouts.awaiting_publish_timeout_hours",
+        "timeouts.publish_confirm_timeout_hours",
+        "timeouts.publish_confirm_grace_hours",
+        "timeouts.collecting_metrics_timeout_hours",
+        "timeouts.metrics_initial_delay_hours",
+        "timeouts.goal_max_rounds",
+        "timeouts.round_min_interval_hours",
+        "rhythm.windows.draft_save.start_hour",
+        "rhythm.windows.draft_save.end_hour",
+    }
+    visible = {item["key"] for item in config_metadata_view(cfg)}
+    assert expected <= visible
+
+    patch_config(cfg, conn, {
+        "timeouts.publish_confirm_timeout_hours": 96,
+        "timeouts.publish_confirm_grace_hours": 24,
+        "rhythm.windows.draft_save.start_hour": 10,
+        "rhythm.windows.draft_save.end_hour": 21,
+    })
+    assert cfg.timeouts.publish_confirm_timeout_hours == 96
+    assert cfg.timeouts.publish_confirm_grace_hours == 24
+    assert cfg.rhythm.windows["draft_save"].start_hour == 10
+    assert cfg.rhythm.windows["draft_save"].end_hour == 21
