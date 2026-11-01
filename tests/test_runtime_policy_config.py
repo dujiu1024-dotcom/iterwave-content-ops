@@ -303,3 +303,19 @@ def test_retired_topic_path_is_purged_from_persisted_tenant_settings(conn):
     assert read_settings(conn)["topic_kb.path"] == "/tmp/evil_topics.csv"
     assert purge_disallowed_settings(conn, {"topic_kb.path"}) == 1
     assert "topic_kb.path" not in read_settings(conn)
+
+
+def test_config_persistence_errors_do_not_expose_sqlite_details(cfg, conn, monkeypatch):
+    import sqlite3
+    from src.core import config_repository
+
+    def fail_save(*args, **kwargs):
+        raise sqlite3.OperationalError("disk I/O error at /srv/iterwave/private/tenant.db")
+
+    monkeypatch.setattr(config_repository, "save_settings", fail_save)
+    with pytest.raises(ConfigPatchError) as caught:
+        patch_config(cfg, conn, {"scoring.stable_exploration_percent": 21})
+
+    assert str(caught.value) == "账号组配置保存失败，请检查数据库状态后重试"
+    assert "/srv/iterwave/private" not in str(caught.value)
+    assert "tenant.db" not in str(caught.value)
