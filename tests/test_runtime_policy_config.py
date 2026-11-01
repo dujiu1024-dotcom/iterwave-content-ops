@@ -347,3 +347,38 @@ def test_phase_timeout_and_draft_save_windows_are_runtime_configurable(cfg, conn
     assert cfg.timeouts.publish_confirm_grace_hours == 24
     assert cfg.rhythm.windows["draft_save"].start_hour == 10
     assert cfg.rhythm.windows["draft_save"].end_hour == 21
+
+
+def test_llm_copy_and_activation_limits_are_runtime_configurable(cfg, conn):
+    expected = {
+        "llm.retry_attempts",
+        "llm.retry_backoff_seconds",
+        "copy_generation.max_output_tokens",
+        "activation.account_description_min_chars",
+        "activation.account_description_max_chars",
+        "activation.max_runs_per_day",
+        "activation.stale_task_timeout_minutes",
+        "activation.sample_max_output_tokens",
+        "activation.max_model_calls_per_run",
+    }
+    visible = {item["key"] for item in config_metadata_view(cfg)}
+    assert expected <= visible
+
+    patch_config(cfg, conn, {
+        "llm.retry_attempts": 3,
+        "llm.retry_backoff_seconds": 2.5,
+        "copy_generation.max_output_tokens": 1800,
+        "activation.max_runs_per_day": 8,
+        "activation.stale_task_timeout_minutes": 45,
+        "activation.sample_max_output_tokens": 1600,
+        "activation.max_model_calls_per_run": 12,
+    })
+    assert cfg.llm.retry_attempts == 3
+    assert cfg.llm.retry_backoff_seconds == 2.5
+    assert cfg.copy_generation.max_output_tokens == 1800
+    assert cfg.activation.max_runs_per_day == 8
+    assert cfg.activation.stale_task_timeout_minutes == 45
+    assert cfg.activation.sample_max_output_tokens == 1600
+    assert cfg.activation.max_model_calls_per_run == 12
+    with pytest.raises(ConfigPatchError):
+        patch_config(cfg, conn, {"activation.max_runs_per_day": 0})
