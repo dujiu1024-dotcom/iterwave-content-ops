@@ -27,7 +27,7 @@ export default function GlobalOperations() {
       api.globalOperationsSummary(30), api.taskQueue({ scope: "active" }), api.taskQueue({ scope: "failed" }),
     ]);
     if (results[0].status === "fulfilled") setMonitor(results[0].value);
-    if (results[1].status === "fulfilled") { setTasks(results[1].value.items ?? []); setActiveCount(results[1].value.total ?? results[1].value.items.length); }
+    if (results[1].status === "fulfilled") { setTasks(results[1].value.items ?? []); setActiveCount(results[1].value.total ?? results[1].value.items?.length ?? 0); }
     if (results[2].status === "fulfilled") { setFailedCount(results[2].value.total ?? 0); setFailedTasks(results[2].value.items ?? []); }
     const failures = results.flatMap((r, i) => r.status === "rejected"
       ? [`${["账号组汇总", "活跃任务", "失败任务统计"][i]}：${r.reason instanceof Error ? r.reason.message : String(r.reason)}`]
@@ -81,7 +81,7 @@ export default function GlobalOperations() {
       </div>}
 
       <div className="grid four" style={{ marginBottom: 16 }}>
-        <div className="metric"><div className="metric-label">账号组</div><div className="metric-val">{monitor?.totals.tenants ?? "—"}</div><div className="metric-foot">数据库可读取 {monitor?.totals.available_tenants ?? "—"} 个</div></div>
+        <div className="metric"><div className="metric-label">账号组</div><div className="metric-val">{monitor?.totals?.tenants ?? "—"}</div><div className="metric-foot">数据库可读取 {monitor?.totals?.available_tenants ?? "—"} 个</div></div>
         <div className="metric"><div className="metric-label">运行中任务</div><div className="metric-val">{activeCount == null ? "—" : active.filter((t) => t.status === "running").length}</div><div className="metric-foot">来自全局队列当前返回记录</div></div>
         <div className="metric"><div className="metric-label">等待任务</div><div className="metric-val">{activeCount == null ? "—" : active.filter((t) => t.status === "queued").length}</div><div className="metric-foot">按全局 FIFO 入队顺序</div></div>
         <div className="metric"><div className="metric-label">失败 / 中断</div><div className="metric-val">{failedCount ?? "—"}</div><div className="metric-foot">失败/中断记录（总数由数据库计数）</div></div>
@@ -90,13 +90,13 @@ export default function GlobalOperations() {
       <section className="panel" style={{ marginBottom: 16 }}>
         <div className="panel-head">
           <div><div className="panel-title">账号组运行矩阵</div><div className="panel-sub">账号组数据库、真实登录态、调度器和全局队列分布；查看详情不会切换当前账号组。</div></div>
-          <span className="muted">{monitor?.tenants.length ?? "—"} 个账号组</span>
+          <span className="muted">{monitor?.tenants?.length ?? "—"} 个账号组</span>
         </div>
         {loading && !monitor ? <div className="empty-state">正在汇总账号组…</div> : !monitor ? <div className="empty-state">账号组数据暂不可用。</div> : (
           <div className="table-wrap">
             <table>
               <thead><tr><th>账号组</th><th>数据库</th><th>平台账号</th><th>平台登录</th><th>运行中</th><th>排队中</th><th>失败 / 中断</th><th>定时调度</th><th>活跃轮次</th><th>操作</th></tr></thead>
-              <tbody>{monitor.tenants.map((tenant) => {
+              <tbody>{(monitor.tenants ?? []).map((tenant) => {
                 const q = byTenant.get(tenant.tenant_id) ?? { queued: 0, running: 0, failed: 0 };
                 return <tr key={tenant.tenant_id}>
                   <td><strong>{tenant.tenant_name}</strong><div className="tiny">{tenant.tenant_id}</div></td>
@@ -104,10 +104,10 @@ export default function GlobalOperations() {
                   <td>{tenant.registered_accounts_active ?? tenant.registered_accounts ?? "—"} / {tenant.registered_accounts ?? "—"}</td>
                   <td>{tenant.runtime?.available ? (
                     <div className="global-platform-cell">
-                      <strong>{tenant.runtime.logged_in_platforms.length}/{tenant.runtime.enabled_platforms.length} 已登录</strong>
-                      <span className="tiny">已登录：{tenant.runtime.logged_in_platforms.map((p) => PLATFORMS[p] ?? p).join("、") || "无"}</span>
-                      <span className="tiny">未登录：{tenant.runtime.platforms_without_login.map((p) => PLATFORMS[p] ?? p).join("、") || "无"}</span>
-                      {tenant.runtime.circuit_broken_platforms.length > 0 && <span className="tiny" style={{ color: "var(--red)" }}>熔断：{tenant.runtime.circuit_broken_platforms.map((p) => PLATFORMS[p] ?? p).join("、")}</span>}
+                      <strong>{(tenant.runtime.logged_in_platforms ?? []).length}/{(tenant.runtime.enabled_platforms ?? []).length} 已登录</strong>
+                      <span className="tiny">已登录：{(tenant.runtime.logged_in_platforms ?? []).map((p) => PLATFORMS[p] ?? p).join("、") || "无"}</span>
+                      <span className="tiny">未登录：{(tenant.runtime.platforms_without_login ?? []).map((p) => PLATFORMS[p] ?? p).join("、") || "无"}</span>
+                      {(tenant.runtime.circuit_broken_platforms ?? []).length > 0 && <span className="tiny" style={{ color: "var(--red)" }}>熔断：{(tenant.runtime.circuit_broken_platforms ?? []).map((p) => PLATFORMS[p] ?? p).join("、")}</span>}
                     </div>
                   ) : tenant.db_status === "uninitialized" ? <span className="tag gray">未初始化</span> : tenant.db_available ? <span className="tag gray">未启动</span> : <span className="tag red">数据库不可用</span>}</td>
                   <td>{q.running}</td><td>{q.queued}</td><td>{q.failed}</td>
@@ -147,7 +147,7 @@ export default function GlobalOperations() {
         <div className="panel-head"><div><div className="panel-title">平台与内容汇总</div><div className="panel-sub">近 30 天跨账号组内容产出；账号组登录态与调度状态来自各自运行时快照。</div></div></div>
         <div className="grid four">
           {Object.entries(monitor?.platform_totals ?? {}).map(([platform, value]) => <div className="metric" key={platform}>
-            <div className="metric-label">{PLATFORMS[platform] ?? platform}</div><div className="metric-val">{monitor?.tenants.reduce((sum, tenant) => sum + (tenant.platforms[platform]?.contents_period ?? 0), 0) ?? "—"}</div><div className="metric-foot">近 30 天内容 · 草稿 {value.drafts}</div>
+            <div className="metric-label">{PLATFORMS[platform] ?? platform}</div><div className="metric-val">{monitor?.tenants?.reduce((sum, tenant) => sum + (tenant.platforms?.[platform]?.contents_period ?? 0), 0) ?? "—"}</div><div className="metric-foot">近 30 天内容 · 草稿 {value.drafts}</div>
           </div>)}
         </div>
         {!monitor && <div className="empty-state">等待汇总数据。</div>}
