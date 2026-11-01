@@ -40,6 +40,7 @@ export default function GlobalOperations() {
       setTasks(response.items ?? []);
       setActiveCount(response.total ?? response.items?.length ?? 0);
       setActivePages(response.pages ?? 1);
+      if (activePage > (response.pages ?? 1)) setActivePage(response.pages ?? 1);
       setActiveCounts(response.counts?.by_status ?? {});
       setActiveByTenant(response.counts?.by_tenant ?? {});
     }
@@ -105,8 +106,8 @@ export default function GlobalOperations() {
 
       <div className="grid four" style={{ marginBottom: 16 }}>
         <div className="metric"><div className="metric-label">账号组</div><div className="metric-val">{monitor?.totals?.tenants ?? "—"}</div><div className="metric-foot">数据库可读取 {monitor?.totals?.available_tenants ?? "—"} 个</div></div>
-        <div className="metric"><div className="metric-label">运行中任务</div><div className="metric-val">{activeCount == null ? "—" : activeCounts.running ?? "—"}</div><div className="metric-foot">来自全局队列当前返回记录</div></div>
-        <div className="metric"><div className="metric-label">等待任务</div><div className="metric-val">{activeCount == null ? "—" : activeCounts.queued ?? "—"}</div><div className="metric-foot">按全局 FIFO 入队顺序</div></div>
+        <div className="metric"><div className="metric-label">运行中任务</div><div className="metric-val">{activeCount == null ? "—" : activeCounts.running ?? "—"}</div><div className="metric-foot">全量数据库聚合统计</div></div>
+        <div className="metric"><div className="metric-label">等待任务</div><div className="metric-val">{activeCount == null ? "—" : activeCounts.queued ?? "—"}</div><div className="metric-foot">全量数据库聚合统计 · 按 FIFO 执行</div></div>
         <div className="metric"><div className="metric-label">失败 / 中断</div><div className="metric-val">{failedCount ?? "—"}</div><div className="metric-foot">失败/中断记录（总数由数据库计数）</div></div>
       </div>
 
