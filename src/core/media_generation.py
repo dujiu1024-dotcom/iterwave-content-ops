@@ -31,8 +31,11 @@ class ImageGenerationError(RuntimeError):
 
 def validate_image_bytes(raw: bytes, cfg=None) -> tuple[str, str, int, int]:
     if cfg is None:
-        from src.core.config import get_config
-        cfg = get_config()
+        from src.core.task_context import current_config
+        cfg = current_config()
+        if cfg is None:
+            from src.core.config import get_config
+            cfg = get_config()
     policy = cfg.media_generation
     try:
         with Image.open(io.BytesIO(raw)) as image:
