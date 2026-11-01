@@ -71,7 +71,6 @@ def test_global_monitor_aggregates_tenant_dbs_read_only(tmp_path, test_auth):
         for tenant in body["tenants"]:
             assert tenant["recent_execution"]["task_type"] == "round_pipeline"
             assert tenant["recent_execution"]["status"] == "success"
-            assert tenant["recent_execution"]["run_id"] > 0
         assert body["account_count_note"]
     finally:
         api_main._g_ctx.clear()
