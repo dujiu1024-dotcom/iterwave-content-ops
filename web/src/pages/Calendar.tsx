@@ -24,7 +24,7 @@ export default function Calendar() {
 
   const [events, setEvents] = useState<ScheduleEvent[]>([]);
   const [plans, setPlans] = useState<ContentPlan[]>([]);
-  const [planDetail, setPlanDetail] = useState<(ContentPlan & { drafts: Array<{ draft_id: string; platform: Platform; status: string; title: string; round_id: number | null }>; rounds: Array<{ round_id: number; task_id: string | null; created_at: string }> }) | null>(null);
+  const [planDetail, setPlanDetail] = useState<(ContentPlan & { drafts: Array<{ draft_id: string; platform: Platform; status: string; title: string; round_id: number | null; round_number: number | null }>; rounds: Array<{ round_id: number; round_number: number | null; task_id: string | null; created_at: string }> }) | null>(null);
   const [planDetailLoading, setPlanDetailLoading] = useState(false);
   const [planTitle, setPlanTitle] = useState("");
   const [planTopic, setPlanTopic] = useState("");
