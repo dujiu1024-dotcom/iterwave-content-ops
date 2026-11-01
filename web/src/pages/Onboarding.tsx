@@ -55,6 +55,7 @@ function todayStr(offsetDays = 0): string {
 export default function Onboarding() {
   const { showToast } = useApp();
   const [stepIdx, setStepIdx] = useState(0);
+  const [onboardingTenantId, setOnboardingTenantId] = useState("");
   const [cfg, setCfg] = useState<SystemConfigView | null>(null);
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [goals, setGoals] = useState<Goal[]>([]);
@@ -104,6 +105,25 @@ export default function Onboarding() {
       setErr(e.message);
     }
   };
+
+  useEffect(() => {
+    let active = true;
+    api.tenants().then((tenants) => {
+      if (!active) return;
+      const tenantId = tenants.selected_tenant_id || "default";
+      setOnboardingTenantId(tenantId);
+      const saved = Number(window.localStorage.getItem(`iterwave:onboarding-step:${tenantId}`));
+      if (Number.isInteger(saved) && saved >= 0 && saved < STEPS.length) setStepIdx(saved);
+    }).catch(() => {
+      if (active) setOnboardingTenantId("default");
+    });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!onboardingTenantId) return;
+    window.localStorage.setItem(`iterwave:onboarding-step:${onboardingTenantId}`, String(stepIdx));
+  }, [onboardingTenantId, stepIdx]);
 
   useEffect(() => {
     (async () => {
@@ -178,6 +198,7 @@ export default function Onboarding() {
           <h1 className="page-title">正式运营设置</h1>
           <div className="page-desc">
             这里配置完整运营工作台。快速体验无需先完成这些步骤；正式生产前再按需补齐。
+                      首次配置按步骤推进；当前进度会保存在本浏览器，并按账号组分别记忆。
           </div>
         </div>
       </div>
