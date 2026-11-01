@@ -698,7 +698,7 @@ function SkillContractTester({ skill, onClose }: { skill: TenantSkillManifest; o
       </div>
       <div className="flex wrap" style={{ alignItems: "center", gap: 10 }}>
         <button className="btn sm primary" type="button" onClick={run}>运行契约测试</button>
-        <span className="tiny">测试对象：{skill.skill_id} · v{skill.version} · Manifest #{skill.manifest_version}</span>
+        <span className="tiny">测试对象：{skill.name} · v{skill.version}</span>
       </div>
       {error && <div className="note" role="alert" style={{ color: "var(--red)" }}>{error}</div>}
       {checks && <div className="skill-contract-results" role="status">
