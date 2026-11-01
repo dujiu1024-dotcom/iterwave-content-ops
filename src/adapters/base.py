@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import logging
 import re
+
+from src.core.redact import safe_error_summary
 from abc import ABC, abstractmethod
 from datetime import datetime
 from enum import Enum
@@ -324,10 +326,10 @@ class PlatformAdapter(ABC):
             works = await asyncio.to_thread(read_works_sync, self.platform)
         except ReadbackUnavailable as exc:
             logger.warning("读回不可用 platform=%s: %s", self.platform.value, exc)
-            return failed_snapshot(self.platform, str(exc))
+            return failed_snapshot(self.platform, safe_error_summary(exc, "平台数据读取失败，请检查登录状态后重试"))
         except Exception as exc:  # noqa: BLE001 — 登录失效 / 网络故障统一落 failed
             logger.exception("读回失败 platform=%s", self.platform.value)
-            return failed_snapshot(self.platform, f"读回失败: {exc}")
+            return failed_snapshot(self.platform, safe_error_summary(exc, "平台数据读取失败，请检查登录状态后重试"))
 
         if not works:
             return failed_snapshot(
