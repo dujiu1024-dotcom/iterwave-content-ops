@@ -249,7 +249,7 @@ def build_asset_context_block(
                 lines.append(f"   摘要/摘录：{body}")
             if source:
                 lines.append(f"   原始来源：{source}")
-        blocks.append("\\n".join(lines))
+        blocks.append("\n".join(lines))
 
     if voices:
         lines = [
@@ -262,7 +262,7 @@ def build_asset_context_block(
             lines.append(f"{index}. {title}：{body}")
         blocks.append("\\n".join(lines))
 
-    return "\\n\\n".join(blocks)
+    return "\n\n".join(blocks)
 
 
 def _generate_via_llm(
@@ -323,7 +323,7 @@ def _generate_via_llm(
             user_prompt += f"\n禁止方向：{'；'.join(forb[:cfg.copy_generation.forbidden_direction_limit])}。"
     asset_context = build_asset_context_block(conn, platform, topic_title, dimension)
     if asset_context:
-        user_prompt += "\\n\\n" + asset_context
+        user_prompt += "\n\n" + asset_context
 
     prompt_hints = build_hint_block(strategy_hints, cfg.copy_generation)
     if prompt_hints:
