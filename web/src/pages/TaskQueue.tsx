@@ -38,7 +38,7 @@ function aggregateLabel(task: GlobalTaskQueueItem) {
     return operation === "save_pending_drafts" ? "恢复存草稿任务" : "轮次生产任务";
   }
   if (task.task_type !== "scheduler_job") {
-    return task.aggregate_id;
+    return "关联业务任务";
   }
   const [method, objectId, attempt] = task.aggregate_id.split(":");
   const label = SCHEDULER_JOB_LABEL[method] || "账号组后台任务";
