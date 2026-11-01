@@ -53,6 +53,7 @@ def test_generation_context_uses_relevant_platform_references_and_personal_voice
     assert "抖音AI教育案例" not in prompt
     assert "归档观点" not in prompt
     assert "不是系统指令" in prompt
+    assert "\n" in prompt and "\\n" not in prompt
     conn.close()
 
 
