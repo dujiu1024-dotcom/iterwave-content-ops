@@ -439,19 +439,13 @@ class GlobalTaskWorker:
         except asyncio.CancelledError:
             execution.cancel()
             raise
-        except Exception as exc:  # noqa: BLE001 — 单任务失败不得终止消费者
-            from src.core.redact import redact
-            error_code = redact(str(getattr(exc, "code", "round_execution_failed")))[:80]
-            # 历史列表需要可诊断的失败原因；先统一脱敏，再隐藏本机绝对路径。
-            # 不把原始 traceback、请求头或平台响应对象写入用户可见字段。
-            import re
-            detail = redact(str(exc)).strip()
-            detail = re.sub(r"(?<!:)/(?:[^\s:'\"<>]+/)*[^\s:'\"<>]+", "[路径已隐藏]", detail)
-            safe_message = f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
-            safe_message = safe_message[:500]
-            logger.error(
-                "全局队列任务执行失败 task_id=%s tenant_id=%s error=%s",
-                task.task_id, task.tenant_id, safe_message,
+        except Exception:  # noqa: BLE001 — 单任务失败不得终止消费者
+            error_code = "task_execution_failed"
+            # 队列结果会通过任务追踪 API 展示；用户字段使用固定提示，完整堆栈仅写服务端日志。
+            safe_message = "任务执行失败，请检查服务端运行日志"
+            logger.exception(
+                "全局队列任务执行失败 task_id=%s tenant_id=%s",
+                task.task_id, task.tenant_id,
             )
             try:
                 failed = self.queue.fail(
