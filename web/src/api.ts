@@ -140,6 +140,14 @@ export interface SpiralRound {
   collecting_metrics_started_at: string | null;
 }
 
+export interface SpiralRoundPage {
+  items: SpiralRound[];
+  total: number;
+  page: number;
+  page_size: number;
+  pages: number;
+}
+
 export interface MetricsResponse {
   items: MetricRow[];
   total: number;
@@ -1409,6 +1417,11 @@ export const api = {
     }),
   rounds: (status?: string) =>
     fetchJson<SpiralRound[]>(status ? `/api/rounds?status=${status}` : "/api/rounds"),
+  roundsPage: (page: number, pageSize = 20, status?: string) => {
+    const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    if (status) params.set("status", status);
+    return fetchJson<SpiralRoundPage>(`/api/rounds?${params.toString()}`);
+  },
   round: (id: number) => fetchJson<SpiralRound & { drafts: Draft[] }>(`/api/rounds/${id}`),
   createRound: (data: { topic_count?: number; platforms?: Platform[]; goal_id?: string }) =>
     fetchJson<{ id: number; round_number: number; status: string }>("/api/rounds", {
