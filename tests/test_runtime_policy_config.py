@@ -382,3 +382,12 @@ def test_llm_copy_and_activation_limits_are_runtime_configurable(cfg, conn):
     assert cfg.activation.max_model_calls_per_run == 12
     with pytest.raises(ConfigPatchError):
         patch_config(cfg, conn, {"activation.max_runs_per_day": 0})
+
+
+def test_numeric_output_token_limits_are_not_misclassified_as_credentials():
+    from src.core.config_repository import _safe_value
+
+    assert _safe_value("copy_generation.max_output_tokens", 1800)
+    assert _safe_value("activation.sample_max_output_tokens", 1600)
+    assert not _safe_value("llm.api_token", "secret-value")
+    assert not _safe_value("provider.access_token", "secret-value")
