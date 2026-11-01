@@ -223,7 +223,7 @@ export default function HotTopics() {
   const pageCount = hot?.pages ?? 1;
   const pageItems = items;
   const sources = hot?.sources || [];
-  const sourceOptions = Array.from(new Set(sources.map((item) => item.source))).sort();
+  const sourceOptions = hot?.source_options ?? [];
   const failedSources = sources.filter((s) => s.status === "failed");
   const matched = hot?.match?.matched ?? items.filter((h) => h.dimension_match === true).length;
   const pending = hot?.match?.pending ?? items.filter((h) => h.dimension_match === null).length;
