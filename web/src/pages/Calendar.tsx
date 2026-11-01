@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useApp } from "../AppContext";
 import EmptyHint from "../components/EmptyHint";
 import { api, ContentPlan, Platform, ScheduleEvent, UnscheduledDraft } from "../api";
@@ -32,6 +32,7 @@ export default function Calendar() {
   const [planCount, setPlanCount] = useState("1");
   const [planPlatforms, setPlanPlatforms] = useState<Platform[]>([]);
   const [planNotes, setPlanNotes] = useState("");
+  const [planFormOpen, setPlanFormOpen] = useState(false);
   const [unscheduled, setUnscheduled] = useState<UnscheduledDraft[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -39,6 +40,8 @@ export default function Calendar() {
   const [selected, setSelected] = useState<{ id: string; title: string } | null>(null);
   const [draftTime, setDraftTime] = useState("");
   const [pendingDraft, setPendingDraft] = useState<Record<string, string>>({});
+  const scheduleDrawerRef = useRef<HTMLElement | null>(null);
+  const planDrawerRef = useRef<HTMLElement | null>(null);
 
   // API 查询范围与当前视图一致：月视图覆盖完整日历网格，周/日视图只请求可见日期。
   const visibleStart = useMemo(() => {
@@ -164,6 +167,32 @@ export default function Calendar() {
     }
   };
 
+  useEffect(() => {
+    const drawer = selected ? scheduleDrawerRef.current : planFormOpen ? planDrawerRef.current : null;
+    if (!drawer) return;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusable = () => Array.from(drawer.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    )).filter((element) => element.getAttribute("aria-hidden") !== "true");
+    const items = focusable();
+    (items[0] ?? drawer).focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (selected) { setSelected(null); setDraftTime(""); } else setPlanFormOpen(false);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const current = focusable();
+      if (!current.length) { event.preventDefault(); drawer.focus(); return; }
+      const first = current[0], last = current[current.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => { document.removeEventListener("keydown", onKeyDown); previousFocus?.focus(); };
+  }, [selected, planFormOpen]);
+
   return (
     <>
       <div className="page-head">
@@ -188,7 +217,8 @@ export default function Calendar() {
           <button className="btn sm" onClick={() => setCursorDate((d) => shiftCalendarDate(d, viewMode, -1))}>上一{viewMode === "month" ? "月" : viewMode === "week" ? "周" : "日"}</button>
           <button className="btn sm" onClick={() => setCursorDate(new Date(today))}>今天</button>
           <button className="btn sm" onClick={() => setCursorDate((d) => shiftCalendarDate(d, viewMode, 1))}>下一{viewMode === "month" ? "月" : viewMode === "week" ? "周" : "日"}</button>
-          <input aria-label="选择日历日期" className="field" type="date" value={_fmt(cursorDate)} onChange={(e) => { if (e.target.value) { const [y, m, d] = e.target.value.split("-").map(Number); setCursorDate(new Date(y, m - 1, d)); } }} />
+          <input aria-label="选择日历日期" className="field calendar-date-picker" type="date" value={_fmt(cursorDate)} onChange={(e) => { if (e.target.value) { const [y, m, d] = e.target.value.split("-").map(Number); setCursorDate(new Date(y, m - 1, d)); } }} />
+          <button className="btn sm primary" onClick={() => { setPlanDate(_fmt(cursorDate)); setPlanFormOpen(true); }}>＋ 新建计划</button>
           <button className="btn sm" onClick={load} disabled={loading}>↻ 刷新</button>
         </div>
       </div>
@@ -220,16 +250,16 @@ export default function Calendar() {
               {days.map((d) => {
                 const isToday = d.date.toDateString() === today.toDateString();
                 return (
-                  <div key={d.key} style={{
+                  <div key={d.key} className="calendar-month-cell" onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); const id = e.dataTransfer.getData("text/plain"); const event = events.find((item) => item.id === id); if (event) { const oldValue = _toLocalInput(event.scheduled || event.saved_at); const time = oldValue.includes("T") ? oldValue.slice(11, 16) : "09:00"; void saveSchedule(id, `${d.key}T${time}`); } }} style={{
                     border: "1px solid var(--line)", borderRadius: 8, padding: 6, minHeight: 76,
                     background: isToday ? "var(--blue-weak)" : "var(--surface)",
                     opacity: d.inMonth ? 1 : 0.48,
                   }}>
-                    <button className="calendar-day-number" onClick={() => { setCursorDate(d.date); setViewMode("day"); }} aria-label={`查看 ${d.key}`}>
+                    <button className="calendar-day-number" onClick={() => { setCursorDate(d.date); setViewMode("day"); }} aria-label={`查看 ${d.key} 当天内容`}>
                       {d.date.getDate()}
                     </button>
+                    <button type="button" className="calendar-day-add" aria-label={`在 ${d.key} 新建计划`} onClick={() => { setPlanDate(d.key); setPlanFormOpen(true); }}>＋</button>
                     {loading && <div className="loading" style={{ marginTop: 6, fontSize: 11, color: "var(--muted)" }}><div className="spinner" />加载中...</div>}
-                    {!loading && d.events.length === 0 && <div style={{ marginTop: 6, fontSize: 11, color: "var(--subtle)" }}>空</div>}
                     {d.plans.slice(0, 1).map((plan) => (
                       <button type="button" key={plan.id} className="calendar-plan-chip" title={`${plan.title} · ${plan.planned_count} 篇/平台`} onClick={() => void openPlanDetails(plan.id)}>
                         <strong>计划</strong><span>{plan.title}</span>
@@ -238,7 +268,8 @@ export default function Calendar() {
                     {d.events.slice(0, 2).map((e) => {
                       const editable = e.status === "draft_pending" || e.status === "draft_saved";
                       return (
-                        <button type="button" key={e.id} className="calendar-event"
+                        <button type="button" key={e.id} className="calendar-event" draggable={editable}
+                          onDragStart={(event) => { event.dataTransfer.setData("text/plain", e.id); event.dataTransfer.effectAllowed = "move"; }}
                           title={editable ? `${e.title} · 点击改排期` : `${e.title} · ${statusLabel[e.status] ?? e.status}（不可改排期）`}
                           disabled={!editable}
                           onClick={() => { setSelected({ id: e.id, title: e.title }); setDraftTime(_toLocalInput(e.scheduled || e.saved_at)); }}
@@ -248,9 +279,9 @@ export default function Calendar() {
                         </button>
                       );
                     })}
-                    {(d.plans.length + d.events.length > 3) && (
+                    {(Math.max(0, d.plans.length - 1) + Math.max(0, d.events.length - 2) > 0) && (
                       <button type="button" className="calendar-more-link" onClick={() => { setCursorDate(d.date); setViewMode("day"); }}>
-                        还有 {d.plans.length + d.events.length - 3} 项 · 查看当天
+                        还有 {Math.max(0, d.plans.length - 1) + Math.max(0, d.events.length - 2)} 项 · 查看当天
                       </button>
                     )}
                   </div>
@@ -259,10 +290,10 @@ export default function Calendar() {
             </div>
           </div>
         ) : (
-          <div className="calendar-agenda">
+          <div className={`calendar-agenda ${viewMode === "week" ? "calendar-week-grid" : ""}`}>
             {days.map((d) => (
-              <section className="calendar-agenda-day" key={d.key}>
-                <button className="calendar-agenda-date" onClick={() => { setCursorDate(d.date); setViewMode("day"); }}>
+              <section className="calendar-agenda-day" key={d.key} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); const id = e.dataTransfer.getData("text/plain"); const event = events.find((item) => item.id === id); if (event) { const oldValue = _toLocalInput(event.scheduled || event.saved_at); const time = oldValue.includes("T") ? oldValue.slice(11, 16) : "09:00"; void saveSchedule(id, `${d.key}T${time}`); } }}>
+                <button className="calendar-agenda-date" onClick={() => { if (viewMode === "week") { setCursorDate(d.date); setViewMode("day"); } else { setPlanDate(d.key); setPlanFormOpen(true); } }}>
                   <strong>{d.date.toLocaleDateString("zh-CN", { weekday: "long" })}</strong>
                   <span>{d.key}{d.date.toDateString() === today.toDateString() ? " · 今天" : ""}</span>
                 </button>
@@ -285,7 +316,8 @@ export default function Calendar() {
                 ) : d.events.map((e) => {
                   const editable = e.status === "draft_pending" || e.status === "draft_saved";
                   return (
-                    <button type="button" key={e.id} className="calendar-agenda-event" disabled={!editable}
+                    <button type="button" key={e.id} className="calendar-agenda-event" disabled={!editable} draggable={editable}
+                      onDragStart={(event) => { event.dataTransfer.setData("text/plain", e.id); event.dataTransfer.effectAllowed = "move"; }}
                       onClick={() => { setSelected({ id: e.id, title: e.title }); setDraftTime(_toLocalInput(e.scheduled || e.saved_at)); }}>
                       <span className="calendar-agenda-time">{e.scheduled ? e.scheduled.slice(11, 16) : "—"}</span>
                       <span className="calendar-agenda-color" style={{ background: platformColors[e.platform] || "#666" }} />
@@ -300,7 +332,8 @@ export default function Calendar() {
         )}
 
         {selected && (
-          <div className="panel" style={{ marginTop: 14, borderColor: "var(--blue)" }}>
+          <div className="calendar-drawer-backdrop" role="presentation" onClick={() => { setSelected(null); setDraftTime(""); }}>
+          <section ref={scheduleDrawerRef} tabIndex={-1} className="panel calendar-side-drawer" role="dialog" aria-modal="true" aria-label="排期编辑" onClick={(e) => e.stopPropagation()}>
             <div className="panel-head">
               <div>
                 <div className="panel-title"><span className="icon">✎</span>排期编辑 · {selected.title}</div>
@@ -336,6 +369,7 @@ export default function Calendar() {
                 </button>
               </div>
             </div>
+          </section>
           </div>
         )}
       </div>
@@ -362,9 +396,11 @@ export default function Calendar() {
         </div>
       )}
 
-      <section className="panel calendar-plan-create">
+      {planFormOpen && <div className="calendar-drawer-backdrop" role="presentation" onClick={() => setPlanFormOpen(false)}>
+      <section ref={planDrawerRef} tabIndex={-1} className="panel calendar-side-drawer calendar-plan-create" role="dialog" aria-modal="true" aria-label="新建内容计划" onClick={(e) => e.stopPropagation()}>
         <div className="panel-head">
-          <div><div className="panel-title">内容计划</div><div className="panel-sub">计划独立于草稿保存；创建不触发生产，点击「加入全局队列」才开始生成，发布仍需人工确认。</div></div>
+          <div><div className="panel-title">新建内容计划</div><div className="panel-sub">创建计划不会自动开始生产；加入全局队列后才会生成，发布仍需人工确认。</div></div>
+          <button className="btn sm" onClick={() => setPlanFormOpen(false)}>关闭</button>
         </div>
         <div className="calendar-plan-form">
           <label>计划名称<input className="field" value={planTitle} maxLength={160} onChange={(e) => setPlanTitle(e.target.value)} placeholder="例如：本周产品功能系列" /></label>
@@ -381,13 +417,13 @@ export default function Calendar() {
             try {
               await withPending("content-plan:create", () => api.createContentPlan({ title: planTitle.trim(), topic: planTopic.trim(), platforms: planPlatforms, planned_count: Number(planCount), scheduled_date: planDate, notes: planNotes.trim() }));
               showToast("内容计划已创建", "success");
-              setPlanTitle(""); setPlanTopic(""); setPlanCount("1"); setPlanPlatforms([]); setPlanNotes("");
+              setPlanTitle(""); setPlanTopic(""); setPlanCount("1"); setPlanPlatforms([]); setPlanNotes(""); setPlanFormOpen(false);
               setCursorDate(new Date(`${planDate}T12:00:00`));
               await load();
             } catch (e: any) { showToast(`创建计划失败：${e?.message ?? e}`, "error"); }
           }}>{isPending("content-plan:create") ? "创建中…" : "创建计划"}</button>
         </div>
-      </section>
+      </section></div>}
 
       {/* 未排期草稿：直接挑选时间写入排期 */}
       <div className="panel">

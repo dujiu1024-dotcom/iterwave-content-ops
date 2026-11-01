@@ -222,6 +222,13 @@ def _dedupe_once(key: str, produce: Callable[[], dict]) -> tuple[dict, bool]:
 
 
 
+def _reset_tenant_business_defaults(cfg, tenant_id: str) -> None:
+    """在启动和 Worker 重建上下文时执行相同的租户业务默认值隔离。"""
+    if tenant_id != "default":
+        from src.core.tenant_business_config import reset_new_tenant_business_defaults
+        reset_new_tenant_business_defaults(cfg)
+
+
 def _build_tenant_runtime_context(
     tenant_registry: TenantRegistry, tenant_id: str, *,
     run_startup_maintenance: bool = False,
@@ -230,11 +237,8 @@ def _build_tenant_runtime_context(
     cfg = load_config()
     base_llm_config = cfg.llm.model_dump()
     tenant = tenant_registry.get(tenant_id)
-    if tenant_id != "default":
-        # 部署级 config.yaml 只提供基础默认值，不能把默认账号组的行业画像带进新账号组。
-        # 后续会从该账号组自己的 tenant_settings / legacy override 恢复其显式配置。
-        from src.core.tenant_business_config import reset_new_tenant_business_defaults
-        reset_new_tenant_business_defaults(cfg)
+    # 部署级 config.yaml 只提供基础默认值；租户显式配置随后从自己的 SQLite 恢复。
+    _reset_tenant_business_defaults(cfg, tenant_id)
     tenant_paths = None
     if tenant_id != "default":
         tenant_paths = tenant_registry.paths(
@@ -499,8 +503,8 @@ _VALIDATION_FIELD_LABELS = {
 }
 
 
-def _api_datetime(value):
-    """API 时间统一携带时区；历史无时区时间按旧部署的 UTC 存储约定解释。"""
+def _api_datetime(value, *, naive_timezone=timezone.utc):
+    """API 时间统一携带时区；默认历史数据库时间按 UTC 解释，租户目录时间显式传业务时区。"""
     if not value or not isinstance(value, str):
         return value
     try:
@@ -508,7 +512,7 @@ def _api_datetime(value):
     except ValueError:
         return value
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=naive_timezone)
     return parsed.isoformat()
 
 
@@ -567,6 +571,8 @@ def _build_app() -> FastAPI:
         _task_queue.recover_expired()
         active_tenant_id = tenant_registry.active_id()
         active_tenant = tenant_registry.get(active_tenant_id)
+        # 必须与 Worker 重建上下文使用完全相同的默认值重置，保证任务快照指纹一致。
+        _reset_tenant_business_defaults(cfg, active_tenant_id)
         base_llm_config = cfg.llm.model_dump()
         if active_tenant_id != "default":
             tenant_paths = tenant_registry.paths(
@@ -1292,6 +1298,7 @@ class RunRoundRequest(BaseModel):
     topic_count: Optional[int] = Field(None, ge=1, le=50)
     platforms: Optional[list[str]] = None
     save_drafts: Optional[bool] = None
+    template_id: Optional[int] = Field(None, ge=1)
 
 
 class IdsRequest(BaseModel):
@@ -3916,7 +3923,10 @@ def _register_routes(app: FastAPI) -> None:
             params.append(status)
         sql += " ORDER BY created_at DESC LIMIT 50"
         rows = conn.execute(sql, params).fetchall()
-        return [dict(r) for r in rows]
+        return [
+            {**dict(row), "created_at": _api_datetime(row["created_at"])}
+            for row in rows
+        ]
 
     @app.post("/api/rounds")
     def create_round(req: CreateRoundRequest):
@@ -3974,6 +3984,9 @@ def _register_routes(app: FastAPI) -> None:
             (round_id,),
         ).fetchall()
         result = dict(row)
+        for timestamp_field in ("created_at", "producing_started_at", "collecting_metrics_started_at"):
+            if result.get(timestamp_field):
+                result[timestamp_field] = _api_datetime(result[timestamp_field])
         round_drafts = []
         for draft in drafts:
             item = dict(draft)
@@ -4003,6 +4016,19 @@ def _register_routes(app: FastAPI) -> None:
                 f"当前轮次状态为「{round_row['status']}」，不能再次启动生产；"
                 "只有「created」状态的轮次可以运行",
             )
+        template_snapshot = None
+        if req.template_id is not None:
+            template_row = runtime_context["conn"].execute(
+                "SELECT id, title, body FROM content_assets WHERE id=? AND asset_type='template'",
+                (req.template_id,),
+            ).fetchone()
+            if template_row is None:
+                raise HTTPException(404, "所选内容模板不存在或已删除，请刷新模板列表")
+            template_snapshot = {
+                "id": int(template_row["id"]),
+                "title": str(template_row["title"] or "")[:200],
+                "body": str(template_row["body"] or "")[:8000],
+            }
         from src.core.task_snapshot import StaleTaskSnapshot
         try:
             task, created = _task_queue.enqueue(
@@ -4014,12 +4040,14 @@ def _register_routes(app: FastAPI) -> None:
                     "topic_count": req.topic_count,
                     "platforms": req.platforms,
                     "save_drafts": req.save_drafts,
+                    "template_snapshot": template_snapshot,
                     "execution_snapshot": _build_task_execution_snapshot(
                         tenant_id, round_id, {
                             "round_id": round_id,
                             "topic_count": req.topic_count,
                             "platforms": req.platforms,
                             "save_drafts": req.save_drafts,
+                            "template_snapshot": template_snapshot,
                         }, runtime_context=runtime_context,
                     ),
                 },
