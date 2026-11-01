@@ -478,6 +478,7 @@ export interface HotTopicsResponse {
   storage?: { rows: number; retention_days: number; max_rows: number };
   sources: HotSourceStatus[];
   items: HotTopicItem[];
+  total?: number; page?: number; page_size?: number; pages?: number; urgent_total?: number;
   filters?: Record<string, unknown>;
   message?: string;
 }
@@ -1524,8 +1525,21 @@ export const api = {
   /** 触发后台大模型研判（立即返回，202），只研判当前榜单 */
   researchHotTopics: () =>
     fetchJson<HotResearchJob & { started: boolean }>("/api/hot_topics/research", { method: "POST" }),
-  hotTopics: (refresh = false) =>
-    fetchJson<HotTopicsResponse>(`/api/hot_topics${refresh ? "?refresh=true" : ""}`),
+  hotTopics: (refresh = false, options?: {
+    page?: number; pageSize?: number; tab?: "all" | "matched" | "urgent" | "unknown";
+    source?: string; keyword?: string; sortBy?: "heat" | "match";
+  }) => {
+    const params = new URLSearchParams();
+    if (refresh) params.set("refresh", "true");
+    if (options?.page != null) params.set("page", String(options.page));
+    if (options?.pageSize != null) params.set("page_size", String(options.pageSize));
+    if (options?.tab) params.set("tab", options.tab);
+    if (options?.source) params.set("source", options.source);
+    if (options?.keyword) params.set("keyword", options.keyword);
+    if (options?.sortBy) params.set("sort_by", options.sortBy);
+    const query = params.toString();
+    return fetchJson<HotTopicsResponse>(`/api/hot_topics${query ? `?${query}` : ""}`);
+  },
   gaps: (roundId?: number) =>
     fetchJson<SpiralAnalysis>(roundId ? `/api/gaps?round_id=${roundId}` : "/api/gaps"),
   /** 复盘洞察（螺旋引擎输出，每平台纵深分析 + 结论） */
