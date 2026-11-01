@@ -89,7 +89,10 @@ export default function HotTopics() {
     setLoading(true);
     setError(null);
     try {
-      const data = await api.hotTopics();
+      const data = await api.hotTopics(false, {
+        page, pageSize: 20, tab, source: sourceFilter === "all" ? undefined : sourceFilter,
+        keyword, sortBy,
+      });
       setHot(data);
       setRefreshing(!!data.refresh_job?.running);
       setResearching(!!data.research_job?.running);
@@ -134,7 +137,10 @@ export default function HotTopics() {
     if (!refreshing && !researching) return;
     const t = setInterval(async () => {
       try {
-        const data = await api.hotTopics();
+        const data = await api.hotTopics(false, {
+          page, pageSize: 20, tab, source: sourceFilter === "all" ? undefined : sourceFilter,
+          keyword, sortBy,
+        });
         setHot(data);
         if (refreshing && !data.refresh_job?.running) {
           setRefreshing(false);
@@ -157,12 +163,10 @@ export default function HotTopics() {
       } catch { /* 下次轮询重试 */ }
     }, 2000);
     return () => clearInterval(t);
-  }, [refreshing, researching]);
+  }, [refreshing, researching, page, tab, keyword, sortBy, sourceFilter]);
 
-  useEffect(() => {
-    loadHot();
-    loadConfig();
-  }, []);
+  useEffect(() => { loadHot(); }, [page, tab, keyword, sortBy, sourceFilter]);
+  useEffect(() => { loadConfig(); }, []);
 
   /** G-24：读门限配置（可编辑两项 + R22 两道硬锁只读） */
   async function loadConfig() {
@@ -215,30 +219,15 @@ export default function HotTopics() {
   }
 
   const items = hot?.items || [];
-  const kw = keyword.trim();
-  const filtered: HotTopicItem[] = items
-    .filter((h) =>
-      tab === "all" ? true
-        : tab === "matched" ? h.dimension_match === true
-          : tab === "urgent" ? h.time_sensitive === 1
-            : h.time_sensitive === null)
-    .filter((h) => sourceFilter === "all" || h.source === sourceFilter)
-    .filter((h) => !kw || h.title.includes(kw))
-    .slice()
-    .sort((a, b) => sortBy === "match"
-      ? (b.match_score ?? -1) - (a.match_score ?? -1)
-      : (b.heat ?? -1) - (a.heat ?? -1));
-
-  const sourceOptions = Array.from(new Set(items.map((item) => item.source))).sort();
   const pageSize = 20;
-  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
-  const pageItems = filtered.slice((page - 1) * pageSize, page * pageSize);
-
+  const pageCount = hot?.pages ?? 1;
+  const pageItems = items;
   const sources = hot?.sources || [];
+  const sourceOptions = Array.from(new Set(sources.map((item) => item.source))).sort();
   const failedSources = sources.filter((s) => s.status === "failed");
   const matched = hot?.match?.matched ?? items.filter((h) => h.dimension_match === true).length;
   const pending = hot?.match?.pending ?? items.filter((h) => h.dimension_match === null).length;
-  const urgent = items.filter((h) => h.time_sensitive === 1).length;
+  const urgent = hot?.urgent_total ?? 0;
   const prog = hot?.refresh_job?.progress;
 
   return (
@@ -538,7 +527,7 @@ export default function HotTopics() {
         {pageCount > 1 && (
           <div className="pagination-row" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, flexWrap: "wrap", marginTop: 14 }}>
             <button className="btn sm" disabled={page <= 1} onClick={() => setPage((n) => Math.max(1, n - 1))}>上一页</button>
-            <span className="tiny">第 {page} / {pageCount} 页 · 共 {filtered.length} 条热点</span>
+            <span className="tiny">第 {page} / {pageCount} 页 · 共 {hot?.total ?? items.length} 条热点</span>
             <button className="btn sm" disabled={page >= pageCount} onClick={() => setPage((n) => Math.min(pageCount, n + 1))}>下一页</button>
           </div>
         )}
