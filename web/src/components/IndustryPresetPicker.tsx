@@ -51,10 +51,10 @@ export default function IndustryPresetPicker({ onApplied }: { onApplied: () => v
     setName(preset.name);
     setDescription(preset.description);
     setPositioning(preset.positioning);
-    setKeywords(preset.persona_keywords.join("\\n"));
-    setForbidden(preset.forbidden_directions.join("\\n"));
-    setRedlines(preset.extra_redlines.join("\\n"));
-    setDimensions(preset.dimensions.join("\\n"));
+    setKeywords(preset.persona_keywords.join("\n"));
+    setForbidden(preset.forbidden_directions.join("\n"));
+    setRedlines(preset.extra_redlines.join("\n"));
+    setDimensions(preset.dimensions.join("\n"));
     setPlatformNotes(JSON.stringify(preset.platform_notes, null, 2));
     setShowEditor(true);
   };
