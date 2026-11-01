@@ -280,7 +280,7 @@ export default function Gaps() {
                   <div className="metric">
                     <div className="metric-label">样本数</div>
                     <div className="metric-val">{active.sample_count}</div>
-                    <div className="metric-foot">success + partial</div>
+                    <div className="metric-foot">已完成或部分完成内容</div>
                   </div>
                   <div className="metric">
                     <div className="metric-label">平均互动率</div>
