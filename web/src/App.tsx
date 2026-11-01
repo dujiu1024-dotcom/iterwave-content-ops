@@ -239,7 +239,7 @@ function Topbar({ label, onNavigate }: { label: string; onNavigate: (p: string, 
   const loadTenants = async () => {
     try {
       setTenantData(await api.tenants());
-    } catch (error) {
+    } catch {
       // Tenant switcher failures are surfaced by the page-level retry state.
     }
   };
