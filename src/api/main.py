@@ -4624,13 +4624,15 @@ def _register_routes(app: FastAPI) -> None:
         template_snapshot = None
         if req.template_id is not None:
             template_row = runtime_context["conn"].execute(
-                "SELECT id, title, body FROM content_assets WHERE id=? AND asset_type='template'",
+                "SELECT id, title, body, version FROM content_assets "
+                "WHERE id=? AND asset_type='template' AND is_active=1",
                 (req.template_id,),
             ).fetchone()
             if template_row is None:
                 raise HTTPException(404, "所选内容模板不存在或已删除，请刷新模板列表")
             template_snapshot = {
                 "id": int(template_row["id"]),
+                "version": int(template_row["version"] or 1),
                 "title": str(template_row["title"] or "")[:200],
                 "body": str(template_row["body"] or "")[:8000],
             }
