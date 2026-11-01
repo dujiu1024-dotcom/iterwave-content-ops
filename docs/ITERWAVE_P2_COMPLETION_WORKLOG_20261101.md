@@ -144,3 +144,6 @@
 - 修正热点采集关闭时的 HTTP 错误文案，不再向界面显示内部配置键 `hot_topics.enabled`，改为用户可理解的设置提示。
 
 - Agent Skill 契约测试界面不再显示内部 `manifest_version` 修订计数，改为显示 Skill 名称和对用户有意义的语义版本。
+
+- 新增 `safe_error_summary`，对适配器读回和 Playwright 存草稿错误做服务端摘要脱敏：堆栈/数据库异常/环境密钥名返回通用提示，绝对路径隐藏，保留短的业务错误首行。
+- 新增 `tests/test_safe_error_summary.py` 覆盖用户提示保留、堆栈/路径/环境变量脱敏和长度限制。
