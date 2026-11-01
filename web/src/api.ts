@@ -183,6 +183,31 @@ export interface SpiralRoundPage {
   pages: number;
 }
 
+export interface BusinessAnalyticsSummary {
+  window_days: number;
+  since: string;
+  contents_created: number;
+  drafts_created: number;
+  confirmed_published: number;
+  publish_eligible: number;
+  draft_publish_confirmation_rate: number | null;
+  platform_publish_success_rate: number | null;
+  platform_publish_success_note: string;
+  interactions: {
+    sample_count: number;
+    views: number | null;
+    likes: number | null;
+    collects: number | null;
+    comments: number | null;
+    shares: number | null;
+    new_followers: number | null;
+    known_samples: Record<string, number>;
+  };
+  followers_growth_by_platform: Record<string, {
+    growth: number; baseline_at: string; latest_at: string;
+  } | null>;
+}
+
 export interface MetricsResponse {
   items: MetricRow[];
   total: number;
@@ -1709,6 +1734,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  businessAnalyticsSummary: (days = 30) =>
+    fetchJson<BusinessAnalyticsSummary>(`/api/analytics/business-summary?days=${days}`),
   metrics: (platform?: Platform, page?: number, pageSize = 20) => {
     const params = new URLSearchParams();
     if (platform) params.set("platform", platform);
