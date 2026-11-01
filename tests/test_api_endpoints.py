@@ -1429,12 +1429,12 @@ def test_hot_topics_database_pagination_and_server_filters(client):
 def test_hot_topics_database_pagination_preserves_latest_batch_and_failure_suppression(client):
     tc, conn, _ = client
     conn.execute(
-        "INSERT INTO hot_topics (id, source, evidence_status, title, heat_score, last_seen_at) "
-        "VALUES ('old-batch', 'batch/xhs', 'collected', '旧批次', 999, '2026-10-30 10:00:00')"
+        "INSERT INTO hot_topics (id, source, evidence_status, title, heat_score, time_sensitive, last_seen_at) "
+        "VALUES ('old-batch', 'batch/xhs', 'collected', '旧批次', 999, 1, '2026-10-30 10:00:00')"
     )
     conn.execute(
-        "INSERT INTO hot_topics (id, source, evidence_status, title, heat_score, last_seen_at) "
-        "VALUES ('new-batch', 'batch/xhs', 'collected', '最新批次', 20, '2026-11-01 10:00:00')"
+        "INSERT INTO hot_topics (id, source, evidence_status, title, heat_score, time_sensitive, last_seen_at) "
+        "VALUES ('new-batch', 'batch/xhs', 'collected', '最新批次', 20, 1, '2026-11-01 10:00:00')"
     )
     conn.execute(
         "INSERT INTO hot_topics (id, source, evidence_status, title, discovered_at) "
