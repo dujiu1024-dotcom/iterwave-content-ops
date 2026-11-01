@@ -851,14 +851,17 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 /* ===== UX audit: independent fixed-height workspace scrolling ===== */
 .app { height: 100vh; min-height: 0; overflow: hidden; align-items: stretch; }
 .sidebar {
-  position: relative;
-  top: auto;
+  position: sticky;
+  top: 0;
   height: 100vh;
+  height: 100dvh;
   min-height: 0;
   flex: 0 0 242px;
   overflow: hidden;
   overscroll-behavior: contain;
+  align-self: flex-start;
 }
+.sidebar-nav, .side-bottom { scrollbar-width: thin; }
 .sidebar-nav {
   flex: 1 1 auto;
   min-height: 0;
