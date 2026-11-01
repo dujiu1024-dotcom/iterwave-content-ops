@@ -13,7 +13,7 @@ import src.api.main as api_main
 class FakeRegistry:
     def __init__(self):
         self.active = "A"
-        self.names = {"A": "账号组 A", "B": "账号组 B"}
+        self.names = {"A": "账号组 A", "B": "账号组 B", "C": "账号组 C"}
 
     def get(self, tenant_id):
         if tenant_id not in self.names:
@@ -212,3 +212,45 @@ def test_runtime_switch_does_not_stop_in_progress_tenant_login(monkeypatch):
     result = asyncio.run(api_main._switch_tenant_runtime("B"))
     assert result["switch_status"] == "completed"
     assert api_main._g_ctx["runtime_tenant_id"] == "B"
+
+
+
+def test_concurrent_switch_requests_leave_registry_and_runtime_consistent(monkeypatch):
+    """同一事件循环内并发提交的切换请求必须形成一致的最终前台状态。"""
+    registry = FakeRegistry()
+    contexts = {
+        "A": lambda: make_context(registry, "A"),
+        "B": lambda: make_context(registry, "B"),
+        "C": lambda: make_context(registry, "C"),
+    }
+    original_a = contexts["A"]()
+    monkeypatch.setattr(api_main, "_g_ctx", original_a)
+    monkeypatch.setattr(api_main, "_tenant_runtime_contexts", {})
+    monkeypatch.setattr(api_main, "set_active_notifier", lambda notifier: None)
+    monkeypatch.setattr(
+        api_main, "_build_tenant_runtime_context",
+        lambda _registry, tenant_id, run_startup_maintenance=False: contexts[tenant_id](),
+    )
+    from src.core import account_login, login_manager
+    monkeypatch.setattr(account_login, "stop_all_logins", lambda timeout_seconds=10.0: None)
+    monkeypatch.setattr(account_login, "configure_data_dir", lambda data_dir: None)
+    monkeypatch.setattr(login_manager, "configure_data_dir", lambda data_dir: None)
+
+    async def run():
+        results = await asyncio.gather(
+            api_main._switch_tenant_runtime("B"),
+            api_main._switch_tenant_runtime("C"),
+        )
+        assert [item["switch_status"] for item in results] == ["completed", "completed"]
+        assert registry.active == "C"
+        assert api_main._g_ctx["runtime_tenant_id"] == "C"
+        assert api_main._g_ctx["conn"].tenant_id == "C"
+        assert api_main._tenant_runtime_contexts["A"]["runtime_tenant_id"] == "A"
+        assert api_main._tenant_runtime_contexts["B"]["runtime_tenant_id"] == "B"
+        assert api_main._tenant_runtime_contexts["C"] is api_main._g_ctx
+
+    try:
+        asyncio.run(run())
+    finally:
+        monkeypatch.setattr(api_main, "_g_ctx", {})
+        monkeypatch.setattr(api_main, "_tenant_runtime_contexts", {})
