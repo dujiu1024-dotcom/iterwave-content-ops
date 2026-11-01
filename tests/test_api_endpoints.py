@@ -2618,6 +2618,13 @@ def test_content_template_versions_and_lifecycle_are_preserved(client):
     assert [item["version"] for item in versions.json()["items"]] == [2, 1]
     assert versions.json()["items"][1]["body"] == "问题 -> 证据 -> 结论"
 
+    restored_version = tc.post(f"/api/assets/{template_id}/versions/1/restore")
+    assert restored_version.status_code == 200
+    assert restored_version.json()["version"] == 3
+    assert restored_version.json()["title"] == "模板 v1"
+    history_after_restore = tc.get(f"/api/assets/{template_id}/versions").json()["items"]
+    assert [item["version"] for item in history_after_restore] == [3, 2, 1]
+
     archived = tc.post(f"/api/assets/{template_id}/archive")
     assert archived.status_code == 200
     assert archived.json()["is_active"] is False
