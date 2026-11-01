@@ -35,6 +35,10 @@ export default function Assets() {
   const [config, setConfig] = useState<SystemConfigView | null>(null);
   const [hot, setHot] = useState<HotTopicItem[]>([]);
   const [assets, setAssets] = useState<Record<AssetType, AssetItem[]>>({ reference: [], voice: [], template: [] });
+  const [assetPages, setAssetPages] = useState<Record<AssetType, number>>({ reference: 1, voice: 1, template: 1 });
+  const [assetTotals, setAssetTotals] = useState<Record<AssetType, number>>({ reference: 0, voice: 0, template: 0 });
+  const [assetPageCounts, setAssetPageCounts] = useState<Record<AssetType, number>>({ reference: 1, voice: 1, template: 1 });
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -50,9 +54,9 @@ export default function Assets() {
         api.kbInspect(),
         api.config(),
         api.hotTopics(),
-        api.assets("reference"),
-        api.assets("voice"),
-        api.assets("template"),
+        api.assetsPage("reference", 1, 20),
+        api.assetsPage("voice", 1, 20),
+        api.assetsPage("template", 1, 20),
       ]);
       // 成功的逐个 set；失败的汇总成 error 提示
       const failures: string[] = [];
@@ -73,6 +77,17 @@ export default function Assets() {
         voice: voices?.items ?? [],
         template: templates?.items ?? [],
       });
+      setAssetPages({ reference: 1, voice: 1, template: 1 });
+      setAssetTotals({
+        reference: refs?.total ?? 0,
+        voice: voices?.total ?? 0,
+        template: templates?.total ?? 0,
+      });
+      setAssetPageCounts({
+        reference: refs?.pages ?? 1,
+        voice: voices?.pages ?? 1,
+        template: templates?.pages ?? 1,
+      });
 
       if (failures.length > 0) {
         setError(`部分数据加载失败：${failures.join("、")} — 已展示成功部分`);
@@ -85,6 +100,18 @@ export default function Assets() {
   };
 
   useEffect(() => { load(); }, []);
+
+  const loadAssetPage = async (type: AssetType, page: number) => {
+    try {
+      const result = await api.assetsPage(type, page, 20);
+      setAssets((current) => ({ ...current, [type]: result.items }));
+      setAssetPages((current) => ({ ...current, [type]: result.page }));
+      setAssetTotals((current) => ({ ...current, [type]: result.total }));
+      setAssetPageCounts((current) => ({ ...current, [type]: result.pages }));
+    } catch (e) {
+      showToast(`资产列表加载失败：${e instanceof Error ? e.message : String(e)}`, "error");
+    }
+  };
 
   const addAsset = async (type: AssetType, data: { title: string; body?: string; source_url?: string }) => {
     try {
@@ -204,7 +231,7 @@ export default function Assets() {
           <div className="panel">
             <div className="panel-head">
               <div>
-                <div className="panel-title"><span className="icon">↗</span>外部参考 · 已录入 {assets.reference.length} 条</div>
+                <div className="panel-title"><span className="icon">↗</span>外部参考 · 已录入 {assetTotals.reference} 条</div>
                 <div className="panel-sub">来源必须可溯源（原始链接 + 发现时间 + 证据状态），不存无法溯源的摘要</div>
               </div>
             </div>
@@ -313,7 +340,7 @@ export default function Assets() {
           <div className="panel">
             <div className="panel-head">
               <div>
-                <div className="panel-title"><span className="icon">✎</span>个人观点库 · {assets.voice.length} 条</div>
+                <div className="panel-title"><span className="icon">✎</span>个人观点库 · {assetTotals.voice} 条</div>
                 <div className="panel-sub">真实录入，不预置演示观点</div>
               </div>
             </div>
@@ -349,7 +376,7 @@ export default function Assets() {
           <div className="panel">
             <div className="panel-head">
               <div>
-                <div className="panel-title"><span className="icon">▧</span>可复用内容模板 · {assets.template.length} 条</div>
+                <div className="panel-title"><span className="icon">▧</span>可复用内容模板 · {assetTotals.template} 条</div>
                 <div className="panel-sub">模板用于统一本轮内容的表达结构。保存后，在「内容生产 → 生产线 → 内容结构模板」中选择，系统会将模板结构注入本轮 AI 生成提示词。</div>
               </div>
             </div>
@@ -372,6 +399,20 @@ export default function Assets() {
         </>
       )}
 
+      {(tab === "sources" || tab === "voice" || tab === "templates") && (() => {
+        const type: AssetType = tab === "sources" ? "reference" : tab === "voice" ? "voice" : "template";
+        const page = assetPages[type];
+        const pages = assetPageCounts[type];
+        return assetTotals[type] > 0 ? (
+          <div className="panel flex between center" style={{ gap: 10, flexWrap: "wrap" }}>
+            <span className="note">共 {assetTotals[type]} 条 · 第 {page}/{pages} 页 · 每页 20 条</span>
+            <div className="flex" style={{ gap: 6 }}>
+              <button className="btn sm" disabled={page <= 1} onClick={() => void loadAssetPage(type, page - 1)}>上一页</button>
+              <button className="btn sm" disabled={page >= pages} onClick={() => void loadAssetPage(type, page + 1)}>下一页</button>
+            </div>
+          </div>
+        ) : null;
+      })()}
       {tab === "mapping" && <KbSourcesPanel />}
     </>
   );
