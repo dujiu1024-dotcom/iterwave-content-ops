@@ -7579,6 +7579,36 @@ def _register_routes(app: FastAPI) -> None:
         ).fetchall()
         return {"items": [dict(row) for row in rows]}
 
+    @app.post("/api/assets/{asset_id}/versions/{version}/restore")
+    def restore_asset_version(asset_id: int, version: int):
+        conn = _g()["conn"]
+        current = conn.execute(
+            "SELECT asset_type, version FROM content_assets WHERE id=?", (asset_id,),
+        ).fetchone()
+        if current is None:
+            raise HTTPException(404, "内容资产不存在")
+        if current["asset_type"] != "template":
+            raise HTTPException(400, "只有内容模板支持版本恢复")
+        previous = conn.execute(
+            "SELECT title, body FROM content_template_versions WHERE template_id=? AND version=?",
+            (asset_id, version),
+        ).fetchone()
+        if previous is None:
+            raise HTTPException(404, "模板版本不存在")
+        next_version = int(current["version"] or 1) + 1
+        now = _now().isoformat(timespec="seconds")
+        conn.execute(
+            "INSERT INTO content_template_versions (template_id, version, title, body, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (asset_id, next_version, previous["title"], previous["body"], now),
+        )
+        conn.execute(
+            "UPDATE content_assets SET title=?, body=?, version=?, is_active=1, updated_at=? WHERE id=?",
+            (previous["title"], previous["body"], next_version, now, asset_id),
+        )
+        conn.commit()
+        return dict(conn.execute("SELECT * FROM content_assets WHERE id=?", (asset_id,)).fetchone())
+
     @app.post("/api/assets/{asset_id}/archive")
     def archive_asset(asset_id: int):
         conn = _g()["conn"]
