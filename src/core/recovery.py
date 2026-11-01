@@ -91,37 +91,53 @@ class RecoveryManager:
                 logger.debug("查询 JobStore 失败，直接补登记 data_fetch 任务")
         for row in rows:
             draft_id = row["id"]
-            # 任务 id 形如 data_fetch_{draft_id}_a{n}（attempt 区分重试），按前缀判重
-            prefix = f"data_fetch_{draft_id}"
-            if any(jid.startswith(prefix) for jid in job_ids):
-                continue
-            if self.task_queue is not None and self.tenant_id:
-                retry_times = max(1, int(self.cfg.timeouts.metrics_retry_attempts))
-                queued = any(
-                    (task := self.task_queue.find_latest(
-                        tenant_id=self.tenant_id,
-                        task_type="scheduler_job",
-                        aggregate_id=f"_job_data_fetch:{draft_id}:{attempt}",
-                    )) is not None and task.status in ("queued", "running")
-                    for attempt in range(1, retry_times + 1)
-                )
-                if queued:
+            self.conn.execute("SAVEPOINT requeue_missing_data_fetch")
+            try:
+                # 任务 id 形如 data_fetch_{draft_id}_a{n}（attempt 区分重试），按前缀判重
+                prefix = f"data_fetch_{draft_id}"
+                if any(jid.startswith(prefix) for jid in job_ids):
+                    self.conn.execute("RELEASE SAVEPOINT requeue_missing_data_fetch")
                     continue
-            if self.scheduler is not None:
-                run_at = business_now(self.cfg) + timedelta(minutes=self.cfg.timeouts.recovery_retry_delay_minutes)
-                self.scheduler.schedule_data_fetch(draft_id, run_at)
-                requeued.append(draft_id)
+                if self.task_queue is not None and self.tenant_id:
+                    retry_times = max(1, int(self.cfg.timeouts.metrics_retry_attempts))
+                    queued = any(
+                        (task := self.task_queue.find_latest(
+                            tenant_id=self.tenant_id,
+                            task_type="scheduler_job",
+                            aggregate_id=f"_job_data_fetch:{draft_id}:{attempt}",
+                        )) is not None and task.status in ("queued", "running")
+                        for attempt in range(1, retry_times + 1)
+                    )
+                    if queued:
+                        self.conn.execute("RELEASE SAVEPOINT requeue_missing_data_fetch")
+                        continue
+                if self.scheduler is not None:
+                    run_at = business_now(self.cfg) + timedelta(
+                        minutes=self.cfg.timeouts.recovery_retry_delay_minutes
+                    )
+                    self.scheduler.schedule_data_fetch(draft_id, run_at)
 
-            self.conn.execute(
-                "INSERT INTO task_runs (task_type, biz_id, platform, status, attempt, "
-                "next_run_at) VALUES ('data_fetch', ?, ?, 'pending', 1, ?)",
-                (
-                    draft_id, row["platform"],
-                    (business_now(self.cfg) + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S"),
-                ),
-            )
-        if requeued:
-            self.conn.commit()
+                self.conn.execute(
+                    "INSERT INTO task_runs (task_type, biz_id, platform, status, attempt, "
+                    "next_run_at) VALUES ('data_fetch', ?, ?, 'pending', 1, ?)",
+                    (
+                        draft_id, row["platform"],
+                        (business_now(self.cfg) + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S"),
+                    ),
+                )
+                self.conn.execute("RELEASE SAVEPOINT requeue_missing_data_fetch")
+                self.conn.commit()
+                if self.scheduler is not None:
+                    requeued.append(draft_id)
+            except Exception:  # noqa: BLE001 — 单篇坏数据不得阻断其他账号组启动恢复
+                try:
+                    self.conn.execute("ROLLBACK TO SAVEPOINT requeue_missing_data_fetch")
+                    self.conn.execute("RELEASE SAVEPOINT requeue_missing_data_fetch")
+                    self.conn.commit()
+                except Exception:  # noqa: BLE001 — 保留原始异常并继续下一篇
+                    logger.exception("回滚数据采集补登记失败 draft=%s", draft_id)
+                logger.exception("补登记发布后数据采集失败 draft=%s，跳过并继续启动恢复", draft_id)
+                continue
         return requeued
 
     def _stale_producing_rounds(self) -> list[int]:
