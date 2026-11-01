@@ -179,8 +179,11 @@ class SchedulerEngine:
             with bind_task_context(task_run_id):
                 try:
                     await getattr(self, method_name)(*args)
-                except Exception as exc:
-                    self._finish_tracked_task_run(task_run_id, "failed", str(exc)[:500])
+                except Exception:
+                    logger.exception("定时任务执行失败 method=%s", method_name)
+                    self._finish_tracked_task_run(
+                        task_run_id, "failed", "定时任务执行失败，请检查服务端运行日志",
+                    )
                     raise
                 else:
                     self._finish_tracked_task_run(task_run_id, "success", None)
@@ -922,10 +925,14 @@ class SchedulerEngine:
                     await self.ops.active_comment(platform, target, content or "")
                 else:
                     await self.ops.follow(platform, target)
-            except Exception as exc:  # noqa: BLE001 — 单条失败不能中断整轮 daily_ops
-                logger.warning("❌ [APS] daily_ops %s %s 异常: %s",
-                               platform.value, action_type, exc)
-                self._finish_task_run(task_run_id, "failed", str(exc)[:500])
+            except Exception:  # noqa: BLE001 — 单条失败不能中断整轮 daily_ops
+                logger.exception(
+                    "daily_ops 单条动作异常 platform=%s action=%s",
+                    platform.value, action_type,
+                )
+                self._finish_task_run(
+                    task_run_id, "failed", "运营动作执行失败，请检查服务端运行日志",
+                )
                 return task_run_id
 
             status, error_msg = self._last_op_outcome(
