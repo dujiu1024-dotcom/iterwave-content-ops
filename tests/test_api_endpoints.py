@@ -1483,3 +1483,9 @@ def test_metrics_endpoint_database_pagination_and_filtered_total(client):
     assert filtered.status_code == 200
     assert filtered.json()["total"] == 0
     assert filtered.json()["items"] == []
+    status_only = tc.get("/api/metrics?page=1&page_size=20&fetch_status=failed")
+    assert status_only.status_code == 200
+    assert status_only.json()["total"] == 0
+    legacy = tc.get("/api/metrics?limit=1")
+    assert legacy.status_code == 200
+    assert len(legacy.json()["items"]) == 1
