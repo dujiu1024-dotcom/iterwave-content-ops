@@ -10,6 +10,7 @@ export default function IndustryPresetPicker({ onApplied }: { onApplied: () => v
   const [busy, setBusy] = useState("");
   const [applied, setApplied] = useState<{ dimensions: string[]; notes: Record<string, string> } | null>(null);
   const [showEditor, setShowEditor] = useState(false);
+  const [editingKey, setEditingKey] = useState<string | null>(null);
   const [key, setKey] = useState("");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -44,6 +45,27 @@ export default function IndustryPresetPicker({ onApplied }: { onApplied: () => v
     finally { setBusy(""); }
   };
 
+  const editCustom = (preset: IndustryPreset) => {
+    setEditingKey(preset.key);
+    setKey(preset.key);
+    setName(preset.name);
+    setDescription(preset.description);
+    setPositioning(preset.positioning);
+    setKeywords(preset.persona_keywords.join("\\n"));
+    setForbidden(preset.forbidden_directions.join("\\n"));
+    setRedlines(preset.extra_redlines.join("\\n"));
+    setDimensions(preset.dimensions.join("\\n"));
+    setPlatformNotes(JSON.stringify(preset.platform_notes, null, 2));
+    setShowEditor(true);
+  };
+
+  const resetEditor = () => {
+    setEditingKey(null);
+    setKey(""); setName(""); setDescription(""); setPositioning(""); setKeywords("");
+    setForbidden(""); setRedlines(""); setDimensions(""); setPlatformNotes("{}");
+    setShowEditor(false);
+  };
+
   const saveCustom = async () => {
     const safeKey = key.trim().toLowerCase().replace(/\s+/g, "-");
     if (!safeKey || !name.trim() || !positioning.trim()) {
@@ -71,10 +93,8 @@ export default function IndustryPresetPicker({ onApplied }: { onApplied: () => v
         platform_notes: notes,
       });
       await load();
-      setShowEditor(false);
-      setKey(""); setName(""); setDescription(""); setPositioning(""); setKeywords("");
-      setForbidden(""); setRedlines(""); setDimensions(""); setPlatformNotes("{}");
-      showToast("自定义行业模板已保存，可立即应用", "success");
+      resetEditor();
+      showToast(editingKey ? "行业模板已更新" : "自定义行业模板已保存，可立即应用", "success");
     } catch (e) { showToast(`保存失败：${(e as Error).message}`, "error"); }
     finally { setBusy(""); }
   };
@@ -95,13 +115,13 @@ export default function IndustryPresetPicker({ onApplied }: { onApplied: () => v
           <div className="panel-sub">选择模板可快速填入账号定位、关键词、禁止方向和合规红线。自定义模板保存在当前账号组。</div>
         </div>
         <button className="btn sm primary" type="button" onClick={() => setShowEditor((v) => !v)}>
-          {showEditor ? "收起新增" : "＋ 新增行业模板"}
+          {showEditor ? "收起编辑" : "＋ 新增行业模板"}
         </button>
       </div>
       {showEditor && (
         <div className="industry-preset-editor">
           <div className="grid two">
-            <label>模板标识（英文）<input className="field" value={key} onChange={(e) => setKey(e.target.value)} placeholder="例如 local-food" /></label>
+            <label>模板标识（英文）<input className="field" value={key} disabled={!!editingKey} onChange={(e) => setKey(e.target.value)} placeholder="例如 local-food" /></label>
             <label>模板名称<input className="field" value={name} onChange={(e) => setName(e.target.value)} placeholder="例如 本地餐饮" /></label>
           </div>
           <label>模板说明<input className="field" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="适用场景" /></label>
@@ -114,18 +134,29 @@ export default function IndustryPresetPicker({ onApplied }: { onApplied: () => v
           </div>
           <label>平台说明 JSON（可留空）<textarea className="field" rows={2} value={platformNotes} onChange={(e) => setPlatformNotes(e.target.value)} spellCheck={false} /></label>
           <div className="flex wrap" style={{ gap: 8, justifyContent: "flex-end" }}>
-            <button className="btn sm" type="button" onClick={() => setShowEditor(false)}>取消</button>
-            <button className="btn sm primary" type="button" disabled={busy === "save"} onClick={() => void saveCustom()}>{busy === "save" ? "保存中…" : "保存模板"}</button>
+            <button className="btn sm" type="button" onClick={resetEditor}>取消</button>
+            <button className="btn sm primary" type="button" disabled={busy === "save"} onClick={() => void saveCustom()}>{busy === "save" ? "保存中…" : editingKey ? "保存修改" : "保存模板"}</button>
           </div>
         </div>
       )}
-      <div className="flex wrap" style={{ gap: 8 }}>
+      <div className="industry-preset-list">
         {presets.map((p) => (
-          <button key={p.key} className={p.is_builtin ? "btn sm soft" : "btn sm"} type="button" disabled={busy === p.key}
-            title={p.description} onClick={() => void apply(p)}>
-            {busy === p.key ? "应用中…" : p.name}{!p.is_builtin && " · 自定义"}
-          </button>
+          <div className="industry-preset-item" key={p.key}>
+            <div className="industry-preset-copy">
+              <strong>{p.name}</strong>
+              <span>{p.description || p.positioning}</span>
+              <small>{p.is_builtin ? "系统内置模板" : "当前账号组自定义"}</small>
+            </div>
+            <div className="flex wrap" style={{ gap: 6 }}>
+              {!p.is_builtin && <button className="btn xs" type="button" onClick={() => editCustom(p)}>编辑</button>}
+              <button className={p.is_builtin ? "btn sm soft" : "btn sm"} type="button" disabled={busy === p.key}
+                onClick={() => void apply(p)}>
+                {busy === p.key ? "应用中…" : "应用模板"}
+              </button>
+            </div>
+          </div>
         ))}
+        {presets.length === 0 && <div className="empty-state">还没有行业模板，请先新增一套。</div>}
       </div>
       {active && applied && (
         <div className="note" style={{ marginTop: 12, lineHeight: 1.8 }}>
