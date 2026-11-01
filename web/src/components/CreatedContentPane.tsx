@@ -1,7 +1,7 @@
 /**
  * 已生产内容：按状态 / 平台筛选，单条或批量删除（已发布有数据的不能删）。
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useApp } from "../AppContext";
 import EmptyHint from "./EmptyHint";
 import { navigate } from "../nav";
@@ -26,18 +26,23 @@ export default function CreatedContentPane() {
   const [status, setStatus] = useState("");
   const [platform, setPlatform] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [page, setPage] = useState(1);
+  const pageSize = 20;
 
   const load = async () => {
     setError(null);
     try {
       setDrafts(await api.drafts(status || undefined, (platform || undefined) as any));
       setSelected(new Set());
+      setPage(1);
     } catch (e: any) { setError(e.message); }
   };
   useEffect(() => { load(); }, [status, platform]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const deletable = useMemo(() => (drafts ?? []).filter((d) => !LOCKED.has(d.status)), [drafts]);
-  const allChecked = deletable.length > 0 && deletable.every((d) => selected.has(d.content_id));
+  const pageCount = Math.max(1, Math.ceil((drafts?.length ?? 0) / pageSize));
+  const visibleDrafts = (drafts ?? []).slice((page - 1) * pageSize, page * pageSize);
+  const visibleDeletable = visibleDrafts.filter((d) => !LOCKED.has(d.status));
+  const allChecked = visibleDeletable.length > 0 && visibleDeletable.every((d) => selected.has(d.content_id));
   const toggle = (cid: string) => setSelected((prev) => {
     const n = new Set(prev);
     n.has(cid) ? n.delete(cid) : n.add(cid);
@@ -90,13 +95,13 @@ export default function CreatedContentPane() {
             <thead><tr>
               <th style={{ width: 32 }}>
                 <input type="checkbox" aria-label="全选可删除" checked={allChecked}
-                  onChange={() => setSelected(allChecked ? new Set() : new Set(deletable.map((d) => d.content_id)))} />
+                  onChange={() => setSelected((old) => { const next = new Set(old); visibleDeletable.forEach((d) => allChecked ? next.delete(d.content_id) : next.add(d.content_id)); return next; })} />
               </th>
               <th>标题</th><th style={{ width: 70 }}>平台</th><th style={{ width: 60 }}>轮次</th>
               <th style={{ width: 110 }}>状态</th><th style={{ width: 110 }}>配图状态</th><th style={{ width: 140 }}>排期 / 存草稿</th><th style={{ width: 70 }}>操作</th>
             </tr></thead>
             <tbody>
-              {drafts.map((d) => {
+              {visibleDrafts.map((d) => {
                 const st = STATUS_LABEL[d.status] ?? { text: d.status, cls: "gray" };
                 const locked = LOCKED.has(d.status);
                 return (
@@ -129,6 +134,13 @@ export default function CreatedContentPane() {
           </table>
         </div>
       )}
+      {(drafts?.length ?? 0) > pageSize && <div className="pagination-bar">
+        <span className="pagination-summary">最近 {drafts?.length ?? 0} 条 · 第 {page}/{pageCount} 页 · 每页 {pageSize} 条</span>
+        <div className="pagination-actions">
+          <button className="btn sm" disabled={page <= 1} onClick={() => setPage((v) => v - 1)}>上一页</button>
+          <button className="btn sm" disabled={page >= pageCount} onClick={() => setPage((v) => v + 1)}>下一页</button>
+        </div>
+      </div>}
     </div>
   );
 }

@@ -775,6 +775,8 @@ export interface KbPreview {
 /** 行业模板：一键填画像 / 维度 / 合规红线 */
 export interface IndustryPreset {
   key: string;
+  is_builtin?: boolean;
+  version?: number;
   name: string;
   description: string;
   positioning: string;
@@ -1024,6 +1026,14 @@ export interface PipelineResponse {
 }
 
 // ===== 账号管理 =====
+export interface RegisteredPlatformAccount {
+  id: number;
+  platform: Platform;
+  account_handle: string;
+  display_name: string;
+  status: "active" | "inactive";
+  notes: string;
+}
 export interface AccountInfo {
   platform: Platform;
   platform_display: string;
@@ -1564,10 +1574,16 @@ export const api = {
     return result;
   },
   // === 图片素材库 ===
-  mediaAssets: (query = "", status: "active" | "archived" | "all" = "active") =>
-    fetchJson<{ items: MediaAsset[]; limit: number; offset: number }>(
-      `/api/media?status=${encodeURIComponent(status)}&limit=200${query ? `&query=${encodeURIComponent(query)}` : ""}`,
-    ),
+  mediaAssets: (
+    query = "", status: "active" | "archived" | "all" = "active",
+    reviewStatus: "pending_review" | "approved" | "rejected" | "all" = "all",
+    limit = 24, offset = 0,
+  ) => fetchJson<{
+    items: MediaAsset[]; limit: number; offset: number; total: number;
+    counts: { all: number; pending: number; approved: number; rejected: number; archived: number };
+  }>(
+    `/api/media?status=${encodeURIComponent(status)}&review_status=${encodeURIComponent(reviewStatus)}&limit=${limit}&offset=${offset}${query ? `&query=${encodeURIComponent(query)}` : ""}`,
+  ),
   uploadMediaAsset: (data: { filename: string; title?: string; alt_text?: string; tags?: string[]; data_base64: string }) =>
     fetchJson<MediaAsset>("/api/media", { method: "POST", body: JSON.stringify(data) }),
   archiveMediaAsset: (id: number) =>
@@ -1601,6 +1617,8 @@ export const api = {
     ),
   createAsset: (data: { asset_type: AssetType; title: string; body?: string; source_url?: string; platform?: Platform }) =>
     fetchJson<AssetItem>("/api/assets", { method: "POST", body: JSON.stringify(data) }),
+  updateAsset: (id: number, data: { asset_type: AssetType; title: string; body?: string; source_url?: string; platform?: Platform }) =>
+    fetchJson<AssetItem>(`/api/assets/${id}`, { method: "PUT", body: JSON.stringify(data) }),
   kbInspect: () => fetchJson<KbInspect>("/api/kb/inspect"),
   // === 访问保护 ===
   authStatus: () => fetchJson<AuthStatus>("/api/auth/status"),
@@ -1632,6 +1650,8 @@ export const api = {
     fetchJson<{ total: number; inserted: number }>("/api/kb/import", { method: "POST" }),
   // === 行业模板 / 热点源 ===
   presets: () => fetchJson<{ items: IndustryPreset[] }>("/api/presets"),
+  savePreset: (key: string, data: Omit<IndustryPreset, "key" | "is_builtin" | "version">) =>
+    fetchJson<IndustryPreset>(`/api/presets/${encodeURIComponent(key)}`, { method: "PUT", body: JSON.stringify(data) }),
   applyPreset: (key: string) =>
     fetchJson<{ key: string; message: string; dimensions: string[]; platform_notes: Record<string, string> }>(
       `/api/presets/${key}/apply`, { method: "POST" },
@@ -1697,21 +1717,21 @@ export const api = {
     fetchJson<{ results: Record<string, "ok" | "failed" | "disabled"> }>("/api/notify/test", {
       method: "POST",
     }),
-  opsLogs: (platform?: Platform, action_type?: string, status?: string, limit = 100) => {
-    const p = new URLSearchParams({ limit: String(limit) });
+  opsLogs: (platform?: Platform, action_type?: string, status?: string, limit = 100, offset = 0) => {
+    const p = new URLSearchParams({ limit: String(limit), offset: String(offset) });
     if (platform) p.set("platform", platform);
     if (action_type) p.set("action_type", action_type);
     if (status) p.set("status", status);
     return fetchJson<{ items: OpsLogItem[]; total: number }>(`/api/ops_logs?${p}`);
   },
-  taskRuns: (taskType?: string, status?: string, limit = 100) => {
-    const p = new URLSearchParams({ limit: String(limit) });
+  taskRuns: (taskType?: string, status?: string, limit = 100, offset = 0) => {
+    const p = new URLSearchParams({ limit: String(limit), offset: String(offset) });
     if (taskType) p.set("task_type", taskType);
     if (status) p.set("status", status);
     return fetchJson<TaskRunItem[]>(`/api/task_runs?${p}`);
   },
-  notifications: (level?: string, limit = 50) => {
-    const p = new URLSearchParams({ limit: String(limit) });
+  notifications: (level?: string, limit = 50, offset = 0) => {
+    const p = new URLSearchParams({ limit: String(limit), offset: String(offset) });
     if (level) p.set("level", level);
     return fetchJson<NotificationItem[]>(`/api/notifications?${p}`);
   },
@@ -1812,6 +1832,11 @@ export const api = {
     fetchJson<RedlineRecord[]>(`/api/redline_history?limit=${limit}`),
   // === 账号管理 ===
   accounts: () => fetchJson<{ accounts: AccountInfo[] }>("/api/accounts"),
+  platformAccounts: () => fetchJson<{ items: RegisteredPlatformAccount[]; total: number; active_total: number }>("/api/platform-accounts"),
+  savePlatformAccount: (id: number | null, data: { platform: Platform; account_handle: string; display_name: string; status: "active" | "inactive"; notes: string }) =>
+    fetchJson<RegisteredPlatformAccount>(id == null ? "/api/platform-accounts" : `/api/platform-accounts/${id}`, {
+      method: id == null ? "POST" : "PUT", body: JSON.stringify(data),
+    }),
   /** 启动扫码登录；restart=true 会先结束仍在运行的旧登录进程 */
   startLogin: (platform: Platform, restart = false) =>
     fetchJson<LoginStatus>(`/api/accounts/${platform}/login${restart ? "?restart=true" : ""}`, { method: "POST" }),

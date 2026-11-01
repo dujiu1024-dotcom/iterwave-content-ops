@@ -407,6 +407,19 @@ function TracePane({ status, runs }: { status: SystemStatus | null; runs: Orches
   );
 }
 
+// 仅检查 manifest 声明是否完整；自定义 Skill 当前没有代码执行沙箱，不能将配置自检伪装成运行测试。
+function inspectSkillManifest(skill: Pick<TenantSkillManifest, "skill_id" | "name" | "version" | "description" | "inputs" | "outputs" | "permissions">) {
+  const checks = [
+    { label: "Skill ID 格式", pass: /^[a-z][a-z0-9_.-]{1,63}$/.test(skill.skill_id) },
+    { label: "名称与说明", pass: Boolean(skill.name.trim() && skill.description.trim()) },
+    { label: "版本号", pass: /^\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.-]+)?$/.test(skill.version) },
+    { label: "输入 Schema", pass: Array.isArray(skill.inputs) && skill.inputs.length <= 30 && skill.inputs.every((v) => Boolean(v) && typeof v === "object" && !Array.isArray(v)) },
+    { label: "输出 Schema", pass: Array.isArray(skill.outputs) && skill.outputs.length <= 30 && skill.outputs.every((v) => Boolean(v) && typeof v === "object" && !Array.isArray(v)) },
+    { label: "只读权限", pass: Array.isArray(skill.permissions) && skill.permissions.every((v) => ["read_content", "read_plan", "read_drafts"].includes(v)) },
+  ];
+  return { checks, passed: checks.filter((item) => item.pass).length, total: checks.length };
+}
+
 // ============================================================ Skills 注册表
 function SkillsPane() {
   const { showToast, withPending, isPending } = useApp();
@@ -421,6 +434,8 @@ function SkillsPane() {
   const [skillInputsJson, setSkillInputsJson] = useState("[]");
   const [skillOutputsJson, setSkillOutputsJson] = useState("[]");
   const [skillPermissions, setSkillPermissions] = useState<string[]>([]);
+  const [draftTest, setDraftTest] = useState<ReturnType<typeof inspectSkillManifest> | null>(null);
+  const [savedTests, setSavedTests] = useState<Record<string, ReturnType<typeof inspectSkillManifest>>>({});
 
   const load = async () => {
     setLoading(true);
@@ -536,9 +551,27 @@ function SkillsPane() {
               <label key={permission}><input type="checkbox" checked={skillPermissions.includes(permission)} onChange={(e) => setSkillPermissions((old) => e.target.checked ? [...old, permission] : old.filter((p) => p !== permission))} />{permission}</label>
             ))}
           </div>
-          <button className="btn primary" disabled={!skillId.trim() || !skillName.trim() || isPending("skill:register")} onClick={register}>
-            {isPending("skill:register") ? "登记中…" : "登记 Skill"}
-          </button>
+          <div className="flex wrap" style={{ gap: 8, alignItems: "center" }}>
+            <button className="btn" type="button" onClick={() => {
+              try {
+                const inputs = JSON.parse(skillInputsJson);
+                const outputs = JSON.parse(skillOutputsJson);
+                setDraftTest(inspectSkillManifest({
+                  skill_id: skillId.trim().toLowerCase(), name: skillName.trim(), version: skillVersion.trim(),
+                  description: skillDescription.trim(), inputs, outputs, permissions: skillPermissions,
+                }));
+              } catch {
+                setDraftTest({ checks: [{ label: "JSON 语法", pass: false }], passed: 0, total: 1 });
+              }
+            }}>运行配置自检</button>
+            <button className="btn primary" disabled={!skillId.trim() || !skillName.trim() || isPending("skill:register")} onClick={register}>
+              {isPending("skill:register") ? "登记中…" : "登记 Skill"}
+            </button>
+          </div>
+          {draftTest && <div className="note" role="status" style={{ marginTop: 8 }}>
+            自检结果：{draftTest.passed}/{draftTest.total} 项通过。{draftTest.checks.map((item) => <span key={item.label} style={{ display: "inline-block", marginRight: 10, color: item.pass ? "var(--green)" : "var(--red)" }}>{item.pass ? "✓" : "✕"} {item.label}</span>)}
+            <div>此功能只验证 Manifest 配置，不会执行 Skill 代码或调用真实业务工具。</div>
+          </div>}
         </div>
         {loading ? <div className="empty-state">正在加载登记表…</div> : customSkills.length === 0 ? (
           <EmptyHint next="填写上方 manifest 元数据后登记">暂无自定义 Skills</EmptyHint>
@@ -554,9 +587,12 @@ function SkillsPane() {
                   <td>{skill.permissions.length ? skill.permissions.join("、") : "无"}</td>
                   <td><span className={skill.enabled ? "tag green" : "tag gray"}>{skill.enabled ? "已启用（仅登记）" : "已停用"}</span></td>
                   <td><div className="skill-row-actions">
+                    <button className="btn sm" type="button" onClick={() => setSavedTests((old) => ({ ...old, [skill.skill_id]: inspectSkillManifest(skill) }))}>配置自检</button>
                     <button className="btn sm" disabled={isPending(`skill:toggle:${skill.skill_id}`)} onClick={() => void toggle(skill)}>{skill.enabled ? "停用" : "启用"}</button>
                     <button className="btn sm" disabled={skill.enabled || isPending(`skill:delete:${skill.skill_id}`)} onClick={() => void remove(skill)}>删除</button>
-                  </div></td>
+                  </div>
+                    {savedTests[skill.skill_id] && <div className="tiny" style={{ marginTop: 5 }}>自检 {savedTests[skill.skill_id].passed}/{savedTests[skill.skill_id].total} 项通过（仅配置检查）</div>}
+                  </td>
                 </tr>
               ))}</tbody>
             </table>
@@ -568,6 +604,21 @@ function SkillsPane() {
   );
 }
 
+
+function AuditPagination({ total, page, pageSize, onPageChange }: {
+  total: number; page: number; pageSize: number; onPageChange: (page: number) => void;
+}) {
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  if (total <= pageSize) return null;
+  return <div className="pagination-bar">
+    <span className="pagination-summary">共 {total} 条 · 第 {page}/{pages} 页{total >= 2000 ? " · 当前最多加载最近 2000 条" : ""}</span>
+    <div className="pagination-actions">
+      <button className="btn sm" disabled={page <= 1} onClick={() => onPageChange(page - 1)}>上一页</button>
+      <button className="btn sm" disabled={page >= pages} onClick={() => onPageChange(page + 1)}>下一页</button>
+    </div>
+  </div>;
+}
+
 // ============================================================ AI 审计链
 function AuditPane() {
   const [aiCalls, setAiCalls] = useState<AiCallRecord[] | null>(null);
@@ -577,12 +628,14 @@ function AuditPane() {
   const [redlines, setRedlines] = useState<RedlineRecord[] | null>(null);
   const [redlinesError, setRedlinesError] = useState<string | null>(null);
   const [auditTab, setAuditTab] = useState<"ai" | "override" | "redline">("ai");
+  const [auditPage, setAuditPage] = useState(1);
+  const auditPageSize = 25;
 
   const loadAudit = async () => {
     setAiCallsError(null); setOverridesError(null); setRedlinesError(null);
-    try { setAiCalls(await api.aiCalls(200)); } catch (e: any) { setAiCallsError(e.message); }
-    try { setOverrides(await api.userOverride(200)); } catch (e: any) { setOverridesError(e.message); }
-    try { setRedlines(await api.redlineHistory(200)); } catch (e: any) { setRedlinesError(e.message); }
+    try { setAiCalls(await api.aiCalls(2000)); } catch (e: any) { setAiCallsError(e.message); }
+    try { setOverrides(await api.userOverride(2000)); } catch (e: any) { setOverridesError(e.message); }
+    try { setRedlines(await api.redlineHistory(2000)); } catch (e: any) { setRedlinesError(e.message); }
   };
   useEffect(() => { loadAudit(); }, []);
 
@@ -605,7 +658,7 @@ function AuditPane() {
           ] as const).map((t) => (
             <button
               key={t.key}
-              onClick={() => setAuditTab(t.key)}
+              onClick={() => { setAuditTab(t.key); setAuditPage(1); }}
               style={{
                 padding: "6px 14px",
                 fontSize: 12,
@@ -636,7 +689,7 @@ function AuditPane() {
                     <th>Tokens In</th><th>Tokens Out</th><th>延迟</th><th>结果</th>
                   </tr></thead>
                   <tbody>
-                    {aiCalls.slice(0, 100).map((r) => (
+                    {aiCalls.slice((auditPage - 1) * auditPageSize, auditPage * auditPageSize).map((r) => (
                       <tr key={r.id}>
                         <td style={{ fontSize: 11, fontFamily: "monospace", color: "var(--subtle)" }}>{r.called_at}</td>
                         <td style={{ fontSize: 12, fontFamily: "monospace" }}>{r.step}</td>
@@ -652,7 +705,7 @@ function AuditPane() {
                     ))}
                   </tbody>
                 </table>
-                {aiCalls.length > 100 && <div style={{ fontSize: 11, color: "var(--subtle)", marginTop: 6 }}>只显示最近 100 条（共 {aiCalls.length} 条）</div>}
+                <AuditPagination total={aiCalls.length} page={auditPage} pageSize={auditPageSize} onPageChange={setAuditPage} />
               </div>
             )}
           </>
@@ -673,7 +726,7 @@ function AuditPane() {
                     <th>时间</th><th>轮次</th><th>字段</th><th>原值</th><th>新值</th><th>操作人</th><th>原因</th>
                   </tr></thead>
                   <tbody>
-                    {overrides.slice(0, 100).map((r) => (
+                    {overrides.slice((auditPage - 1) * auditPageSize, auditPage * auditPageSize).map((r) => (
                       <tr key={r.id}>
                         <td style={{ fontSize: 11, fontFamily: "monospace", color: "var(--subtle)" }}>{r.overridden_at}</td>
                         <td>{r.round_id ? `#${r.round_id}` : <span style={{ color: "var(--subtle)" }}>—</span>}</td>
@@ -686,6 +739,7 @@ function AuditPane() {
                     ))}
                   </tbody>
                 </table>
+                <AuditPagination total={overrides.length} page={auditPage} pageSize={auditPageSize} onPageChange={setAuditPage} />
               </div>
             )}
           </>
@@ -706,7 +760,7 @@ function AuditPane() {
                     <th>时间</th><th>轮次</th><th>平台</th><th>标题</th><th>拦截类型</th><th>原因</th>
                   </tr></thead>
                   <tbody>
-                    {redlines.slice(0, 100).map((r) => (
+                    {redlines.slice((auditPage - 1) * auditPageSize, auditPage * auditPageSize).map((r) => (
                       <tr key={r.id}>
                         <td style={{ fontSize: 11, fontFamily: "monospace", color: "var(--subtle)" }}>{r.created_at}</td>
                         <td>{r.round_id ? `#${r.round_id}` : "—"}</td>
@@ -725,6 +779,7 @@ function AuditPane() {
                 <div style={{ fontSize: 11, color: "var(--subtle)", marginTop: 6 }}>
                   ✦ 终极目标检查器 → 违反账号定位 → 拦截打回；拦截历史永久审计可追溯
                 </div>
+                <AuditPagination total={redlines.length} page={auditPage} pageSize={auditPageSize} onPageChange={setAuditPage} />
               </div>
             )}
           </>
