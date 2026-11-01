@@ -16,12 +16,12 @@ from __future__ import annotations
 
 import logging
 import re
-
-from src.core.redact import safe_error_summary
 from abc import ABC, abstractmethod
 from datetime import datetime
 from enum import Enum
 from typing import Optional
+
+from src.core.redact import safe_error_summary
 
 logger = logging.getLogger(__name__)
 
