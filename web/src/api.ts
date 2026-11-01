@@ -867,6 +867,8 @@ export interface IndustryPreset {
   key: string;
   is_builtin?: boolean;
   version?: number;
+  is_active?: boolean;
+  archived_at?: string | null;
   name: string;
   description: string;
   positioning: string;
@@ -1882,6 +1884,10 @@ export const api = {
     fetchJson<IndustryPreset>(`/api/presets/${encodeURIComponent(key)}`, { method: "PUT", body: JSON.stringify(data) }),
   deletePreset: (key: string) =>
     fetchJson<{ key: string; deleted: boolean }>(`/api/presets/${encodeURIComponent(key)}`, { method: "DELETE" }),
+  restorePreset: (key: string) =>
+    fetchJson<IndustryPreset>(`/api/presets/${encodeURIComponent(key)}/restore`, { method: "POST" }),
+  presetVersions: (key: string) =>
+    fetchJson<{ items: { version: number; snapshot: IndustryPreset; created_at: string }[] }>(`/api/presets/${encodeURIComponent(key)}/versions`),
   applyPreset: (key: string) =>
     fetchJson<{ key: string; message: string; dimensions: string[]; platform_notes: Record<string, string> }>(
       `/api/presets/${key}/apply`, { method: "POST" },
