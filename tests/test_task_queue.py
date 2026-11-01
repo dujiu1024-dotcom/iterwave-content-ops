@@ -680,7 +680,15 @@ def test_expired_worker_cannot_commit_after_recovery_and_manual_retry_is_require
     recovered = queue.get(original.task_id)
     assert recovered is not None and recovered.status == "interrupted"
     assert recovered.error_code == "worker_lost"
-    assert recovered.lease_owner is None
+    conn = queue._connect()
+    try:
+        lease_owner = conn.execute(
+            "SELECT lease_owner FROM global_task_queue WHERE task_id=?",
+            (original.task_id,),
+        ).fetchone()["lease_owner"]
+    finally:
+        conn.close()
+    assert lease_owner is None
 
     # 即使旧进程恢复执行，也不能把已中断任务提交为成功。
     assert queue.finish(original.task_id, "worker-old", result={"published": True}) is False
