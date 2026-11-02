@@ -52,7 +52,7 @@ from typing import Callable, Literal, Optional
 import httpx
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.routing import APIRoute
 import inspect
 from fastapi.exceptions import RequestValidationError
@@ -5774,18 +5774,24 @@ def _register_routes(app: FastAPI) -> None:
         return diagnose(_g()["cfg"], _g()["conn"], cb=_g()["cb"], live_llm=req.live_llm)
 
     # --- 删除：已生产内容 / 轮次 ---
+    # 同步写路由由 TransactionalAPIRoute 包在请求级事务内，响应前才提交；
+    # 卡片图片清理登记为 BackgroundTasks，在事务提交、响应发出后执行，提交失败则不删文件。
     @app.post("/api/contents/delete")
-    def delete_content_ids(req: IdsRequest):
+    def delete_content_ids(req: IdsRequest, background_tasks: BackgroundTasks):
         from src.core.content_admin import delete_contents
-        return delete_contents(_g()["cfg"], _g()["conn"], req.ids)
+        return delete_contents(
+            _g()["cfg"], _g()["conn"], req.ids, after_commit=background_tasks.add_task,
+        )
 
     @app.delete("/api/contents/{content_id}")
-    def delete_content(content_id: str):
+    def delete_content(content_id: str, background_tasks: BackgroundTasks):
         conn = _g()["conn"]
         row = _content_row(conn, content_id)
         _ensure_content_round_idle(row, "删除内容")
         from src.core.content_admin import delete_contents
-        res = delete_contents(_g()["cfg"], conn, [content_id])
+        res = delete_contents(
+            _g()["cfg"], conn, [content_id], after_commit=background_tasks.add_task,
+        )
         if res["not_found"]:
             raise HTTPException(404, f"内容 {content_id} 不存在")
         if res["blocked"]:
@@ -5793,12 +5799,14 @@ def _register_routes(app: FastAPI) -> None:
         return res
 
     @app.delete("/api/rounds/{round_id}")
-    def delete_round_api(round_id: int):
+    def delete_round_api(round_id: int, background_tasks: BackgroundTasks):
         from src.core.content_admin import DeleteBlocked, delete_round
         if _round_task_active(_g().get("runtime_tenant_id", "default"), round_id):
             raise HTTPException(409, f"轮次 {round_id} 正在排队或执行，不能删除")
         try:
-            return delete_round(_g()["cfg"], _g()["conn"], round_id)
+            return delete_round(
+                _g()["cfg"], _g()["conn"], round_id, after_commit=background_tasks.add_task,
+            )
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
         except DeleteBlocked as exc:
