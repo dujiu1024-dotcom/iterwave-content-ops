@@ -5007,13 +5007,17 @@ def _register_routes(app: FastAPI) -> None:
             "c.visual_status AS visual_status, c.visual_reason AS visual_reason, "
             "c.platform as cfg_platform, c.guard_outcome AS guard_outcome, c.guard_reason AS guard_reason, "
             "c.review_rejected AS review_rejected, "
-            "c.review_rejection_reason AS review_rejection_reason "
-            "FROM drafts d LEFT JOIN contents c ON d.content_id = c.id"
+            "c.review_rejection_reason AS review_rejection_reason, "
+            "v.status AS save_verification_status "
+            "FROM drafts d LEFT JOIN contents c ON d.content_id = c.id "
+            "LEFT JOIN draft_save_verifications v ON v.draft_id = d.id"
         )
         where: list[str] = []
         params: list = []
-        if status:
-            where.append("d.status = ?")
+        if status == "pending_verify":
+            where.append("v.status = 'pending_verify'")
+        elif status:
+            where.append("d.status = ? AND COALESCE(v.status, '') != 'pending_verify'")
             params.append(status)
         if platform:
             where.append("d.platform = ?")
@@ -5021,7 +5025,10 @@ def _register_routes(app: FastAPI) -> None:
         if draft_id:
             where.append("d.id = ?")
             params.append(draft_id)
-        count_sql = "SELECT COUNT(*) FROM drafts d LEFT JOIN contents c ON d.content_id = c.id"
+        count_sql = (
+            "SELECT COUNT(*) FROM drafts d LEFT JOIN contents c ON d.content_id = c.id "
+            "LEFT JOIN draft_save_verifications v ON v.draft_id = d.id"
+        )
         if where:
             where_sql = " WHERE " + " AND ".join(where)
             count_sql += where_sql
@@ -5039,6 +5046,8 @@ def _register_routes(app: FastAPI) -> None:
         from src.core.content_version import content_version_hash, parse_json_list
         for item in rows:
             result = dict(item)
+            if result.get("save_verification_status") == "pending_verify":
+                result["status"] = "pending_verify"
             outcome = result.get("guard_outcome")
             result["review_rejected"] = bool(result.get("review_rejected"))
             result["guard_confirmation_allowed"] = (
@@ -5065,6 +5074,7 @@ def _register_routes(app: FastAPI) -> None:
             # 尤其 image_paths 可能是本机绝对路径，不能随便随列表 API 下发。
             for internal_field in (
                 "body", "tags", "image_paths", "saved_content_hash", "saved_platform_title",
+                "save_verification_status",
             ):
                 result.pop(internal_field, None)
             items.append(result)
