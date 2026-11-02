@@ -8,6 +8,8 @@ from __future__ import annotations
 import base64
 import html
 import logging
+import shutil
+import subprocess
 import re
 import uuid
 from pathlib import Path
@@ -213,6 +215,55 @@ font-size:22px;line-height:1.35;overflow-wrap:anywhere}}
 </main></body></html>"""
 
 
+
+def _assert_font_available(font_family: str) -> None:
+    """Fail closed when the requested CJK font is absent; never silently render tofu."""
+    executable = shutil.which("fc-match")
+    if executable:
+        try:
+            result = subprocess.run(
+                [executable, "-f", "%{family}", font_family],
+                check=True, capture_output=True, text=True, timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError("无法验证视觉字体，请安装 fontconfig 和指定字体") from exc
+        matched = {name.strip().casefold() for name in result.stdout.split(",") if name.strip()}
+        aliases = {
+            "arial": {"arial", "liberation sans", "arial unicode ms"},
+            "microsoft yahei": {"microsoft yahei", "noto sans cjk sc"},
+            "noto sans cjk sc": {"noto sans cjk sc"},
+            "source han sans sc": {"source han sans sc", "noto sans cjk sc"},
+        }
+        accepted = aliases.get(font_family.casefold(), {font_family.casefold()})
+        if not matched.intersection(accepted):
+            raise RuntimeError(
+                f"视觉字体不可用：请求 {font_family}，系统实际匹配 {result.stdout.strip() or 'unknown'}；"
+                "请先安装对应字体，禁止静默回退"
+            )
+        return
+
+    candidates = {
+        "noto sans cjk sc": (
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        ),
+        "source han sans sc": (
+            "/usr/share/fonts/opentype/source-han-sans/SourceHanSansSC-Regular.otf",
+        ),
+        "microsoft yahei": (
+            "C:/Windows/Fonts/msyh.ttc",
+            "/System/Library/Fonts/PingFang.ttc",
+        ),
+        "arial": (
+            "C:/Windows/Fonts/arial.ttf",
+            "/Library/Fonts/Arial Unicode.ttf",
+        ),
+    }
+    if not any(Path(path).is_file() for path in candidates.get(font_family.casefold(), ())):
+        raise RuntimeError(
+            f"无法确认字体 {font_family} 已安装；请安装 fontconfig 或配置可用字体文件"
+        )
+
 def render_card_set(title: str, subtitle: str, body: str, output_dir: Path,
                     platform: Platform = Platform.XHS, footer: str = "",
                     max_pages: int = 9, theme: str = "knowledge_infographic",
@@ -221,6 +272,7 @@ def render_card_set(title: str, subtitle: str, body: str, output_dir: Path,
     """Render a cover and body pages with Chromium; raises on missing browser/overflow."""
     from playwright.sync_api import sync_playwright
 
+    _assert_font_available(font_family)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     pages = _pages(body, max_pages=max_pages)
@@ -343,6 +395,7 @@ def render_single_page(
     from playwright.sync_api import sync_playwright
     from .visual_ocr import validate_rendered_pages
 
+    _assert_font_available(font_family)
     if page_index < 0 or total_pages < 2 or page_index >= total_pages:
         raise ValueError("页面索引无效")
     body_pages = _pages(body, max_pages=max(9, total_pages - 1))
