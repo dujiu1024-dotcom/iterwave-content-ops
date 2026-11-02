@@ -543,6 +543,21 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
                 )
                 created.append({"subplan": identity, "draft": _version(int(version["id"]))})
         except (PlanVersionError, TypeError, ValueError) as exc:
+            # AI decomposition is one logical batch. If any item fails validation or
+            # persistence, remove every still-unapproved identity/version created by
+            # this request rather than leaving a partially generated batch behind.
+            try:
+                for item in created:
+                    created_id = item.get("subplan", {}).get("id")
+                    if created_id:
+                        conn.execute(
+                            "DELETE FROM sub_plans WHERE id=? AND status='draft' AND current_version_id IS NULL",
+                            (created_id,),
+                        )
+                conn.commit()
+            except sqlite3.Error:
+                conn.rollback()
+                logger.exception("清理失败的 AI 子计划拆解批次失败")
             fail(exc)
         return {"items": created, "effective": False, "requires_human_review": True,
                 "manual_creation_available": True}
