@@ -124,9 +124,9 @@ IterWave 的部分平台适配器代码基于 [Easel](https://github.com/kaichen
 
 ## 代码现状（Early Preview）
 
-> **非空代码**：Python 10,600+ 行 · TypeScript 5,700+ 行 · pytest 1,088 行 · 9 个 DB 迁移脚本
+> 代码规模随功能迭代持续变化，不再以固定行数作为完成度指标；以仓库目录、测试结果和本文件中的模块说明为准。
 >
-> 所有模块均有实质性实现，不是空壳。但真实平台连接（Playwright）、模型调用链路、端到端集成尚未在四平台完整验证。
+> 主要业务模块已有实质实现。真实平台连接（Playwright）、模型调用链路和端到端集成仍需在目标环境验证。
 
 ### 后端核心（src/core/）
 
@@ -142,7 +142,7 @@ IterWave 的部分平台适配器代码基于 [Easel](https://github.com/kaichen
 | APScheduler 调度器（6 类任务） | scheduler/__init__.py | 1,072 |
 | 内容管线 + 轮次执行器 | content_pipeline.py + round_executor.py | 1,065 |
 | 热点发现（60s.viki.moe 公益 API） | hot_topics.py | 362 |
-| 归一化 z-score + 洞察 | metrics/__init__.py + insights.py | 514 |
+| 平台内归一化 + 纵深洞察 | metrics/__init__.py + insights.py | Winsorized 基准、样本标准差、95% t 置信区间、按平台独立分析 |
 | 计划版本签名（§19 内容一致性） | plan_version.py | 227 |
 | 断点恢复（幂等 + pending_verify） | recovery.py | 151 |
 | 目标进度 + 终极目标口径 | goal_progress.py | 118 |
@@ -160,7 +160,7 @@ IterWave 的部分平台适配器代码基于 [Easel](https://github.com/kaichen
 
 ### API 层
 
-`src/api/main.py` — 1,645 行 FastAPI 路由，覆盖状态机、选题、评分、运营、熔断、配置、通知等全部端点。
+`src/api/main.py` — FastAPI 路由入口，覆盖状态机、选题、评分、运营、熔断、配置、通知、账号组与任务队列等端点；同步写请求提供请求级事务边界，异步写路径单独定义事务范围。
 
 ### React 前端（web/）
 
@@ -168,7 +168,7 @@ IterWave 的部分平台适配器代码基于 [Easel](https://github.com/kaichen
 
 ### 测试
 
-8 个 pytest 文件 1,088 行，覆盖状态机、三模式评分、NULL vs 0 红线、熔断退出路径、调度器任务、API 端点、适配器接口。
+`tests/` 按模块覆盖状态机、三模式评分、NULL vs 0 红线、事务锁与回滚、租户隔离、任务队列、调度器、API 端点、热点去重、分析统计和适配器安全。测试总量以当前仓库为准。
 
 ### 尚未验证
 
