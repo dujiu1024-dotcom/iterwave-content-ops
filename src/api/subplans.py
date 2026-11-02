@@ -150,17 +150,31 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
             raise HTTPException(422, "子计划平台必须属于生效主计划启用的平台")
         _validate_stage_inputs(stages)
         sub_id = str(req.get("id") or ("sub_" + uuid.uuid4().hex))
+        identity_created = False
         try:
             identity = store().create_subplan(
                 sub_id, master_plan_version_id=int(master_id),
                 platform=platform, title=title, author="user",
             )
+            identity_created = True
             version = store().create_subplan_version(
                 sub_id, snapshot, master_plan_version_id=int(master_id),
                 author="user", stages=stages, change_note="初始手工草稿",
             )
             return {"subplan": identity, "draft": _version(int(version["id"]))}
         except (PlanVersionError, TypeError, ValueError, sqlite3.IntegrityError) as exc:
+            # Identity and first version are written by separate store operations.
+            # Compensate if version creation fails so no unusable orphan subplan remains.
+            if identity_created:
+                try:
+                    conn.execute(
+                        "DELETE FROM sub_plans WHERE id=? AND status='draft' AND current_version_id IS NULL",
+                        (sub_id,),
+                    )
+                    conn.commit()
+                except sqlite3.Error:
+                    conn.rollback()
+                    logger.exception("清理未完成的子计划身份失败")
             fail(exc)
 
     @app.get("/api/subplans")
