@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -256,9 +257,14 @@ class PlanVersionStore:
                  based_on_version_id, now, author, change_note),
             )
             version_id = int(cur.lastrowid)
+            seen_stage_keys: set[str] = set()
             for index, stage in enumerate(stages, start=1):
                 if not isinstance(stage, dict):
                     raise PlanVersionError("阶段条目必须是对象")
+                stage_key = str(stage.get("stage_key") or uuid.uuid4().hex).strip()
+                if not stage_key or len(stage_key) > 100 or stage_key in seen_stage_keys:
+                    raise PlanVersionError("阶段稳定标识无效或重复")
+                seen_stage_keys.add(stage_key)
                 title = str(stage.get("title") or "").strip()
                 if not title or len(title) > 160:
                     raise PlanVersionError("阶段标题必须为 1-160 个字符")
@@ -290,10 +296,10 @@ class PlanVersionStore:
                     raise PlanVersionError("阶段状态无效")
                 self.conn.execute(
                     """INSERT INTO sub_plan_stages(
-                        sub_plan_version_id,stage_order,title,direction,target_count,
+                        sub_plan_version_id,stage_key,stage_order,title,direction,target_count,
                         start_date,end_date,completion_condition,status,notes,created_at,updated_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (version_id, stage_order, title,
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (version_id, stage_key, stage_order, title,
                      str(stage.get("direction") or ""), target_count,
                      start_date, end_date, str(stage.get("completion_condition") or ""),
                      stage_status, str(stage.get("notes") or ""), now, now),
