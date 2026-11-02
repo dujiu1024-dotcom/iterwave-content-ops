@@ -629,6 +629,13 @@ def test_queued_scheduler_job_binds_and_finishes_task_run_audit_context(tmp_path
             return None
 
     class ConnectionProxy:
+        def __enter__(self):
+            audit_conn.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return audit_conn.__exit__(exc_type, exc_value, traceback)
+
         def execute(self, *args):
             return audit_conn.execute(*args)
 
@@ -743,6 +750,13 @@ def test_worker_marks_scheduler_task_run_failed_for_structured_failure_report(tm
     observed = {}
 
     class ConnectionProxy:
+        def __enter__(self):
+            audit_conn.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return audit_conn.__exit__(exc_type, exc_value, traceback)
+
         def execute(self, *args):
             return audit_conn.execute(*args)
 
@@ -805,6 +819,13 @@ def test_worker_dispatches_hot_topic_refresh_as_a_tracked_scheduler_job(tmp_path
     audit_conn.commit()
 
     class ConnectionProxy:
+        def __enter__(self):
+            audit_conn.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return audit_conn.__exit__(exc_type, exc_value, traceback)
+
         def execute(self, *args):
             return audit_conn.execute(*args)
 
@@ -866,6 +887,13 @@ def test_scheduler_exception_audit_uses_safe_message(tmp_path):
     audit_conn.commit()
 
     class ConnectionProxy:
+        def __enter__(self):
+            audit_conn.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return audit_conn.__exit__(exc_type, exc_value, traceback)
+
         def execute(self, *args):
             return audit_conn.execute(*args)
         def commit(self):
@@ -899,6 +927,38 @@ def test_scheduler_exception_audit_uses_safe_message(tmp_path):
     audit_conn.close()
 
 
+def test_worker_content_plan_completion_ignores_late_result_after_plan_cancelled():
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE content_plan_rounds(plan_id INTEGER, round_id INTEGER);
+        CREATE TABLE content_plans(id INTEGER PRIMARY KEY, status TEXT, version INTEGER, updated_at TEXT);
+        CREATE TABLE contents(id INTEGER PRIMARY KEY, round_id INTEGER);
+        CREATE TABLE drafts(id INTEGER PRIMARY KEY, content_id INTEGER);
+        CREATE TABLE content_plan_drafts(
+            plan_id INTEGER, draft_id INTEGER, round_id INTEGER, created_at TEXT,
+            UNIQUE(plan_id, draft_id)
+        );
+        INSERT INTO content_plan_rounds VALUES (7, 11);
+        INSERT INTO content_plans VALUES (7, 'cancelled', 3, NULL);
+        INSERT INTO contents VALUES (21, 11);
+        INSERT INTO drafts VALUES (31, 21);
+    """)
+
+    GlobalTaskWorker._complete_content_plan(
+        conn, 11, {"final_status": "completed"},
+    )
+
+    plan = conn.execute(
+        "SELECT status, version FROM content_plans WHERE id=7"
+    ).fetchone()
+    assert tuple(plan) == ("cancelled", 3)
+    assert conn.execute("SELECT COUNT(*) FROM content_plan_drafts").fetchone()[0] == 0
+    conn.close()
+
+
 def test_interrupted_round_reconciliation_retries_after_transient_context_failure(tmp_path, monkeypatch):
     """一次性上下文/数据库故障不能让进程内缓存永久跳过 interrupted 对账。"""
     queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
@@ -928,11 +988,11 @@ def test_interrupted_round_reconciliation_retries_after_transient_context_failur
 
     monkeypatch.setattr(
         GlobalTaskWorker, "_mark_round_failed",
-        staticmethod(lambda *_args: calls.__setitem__("round", calls["round"] + 1) or True),
+        staticmethod(lambda *_args, **_kwargs: calls.__setitem__("round", calls["round"] + 1) or True),
     )
     monkeypatch.setattr(
         GlobalTaskWorker, "_mark_content_plan_failed",
-        staticmethod(lambda *_args: calls.__setitem__("plan", calls["plan"] + 1)),
+        staticmethod(lambda *_args, **_kwargs: calls.__setitem__("plan", calls["plan"] + 1)),
     )
     worker = GlobalTaskWorker(queue, build_context)
 
@@ -947,3 +1007,180 @@ def test_interrupted_round_reconciliation_retries_after_transient_context_failur
     # 对账成功后不重复执行数据库修复。
     worker._sync_terminal_rounds()
     assert calls == {"build": 2, "round": 1, "plan": 1}
+
+
+
+def test_worker_content_plan_completion_is_atomic_on_late_failure():
+    import sqlite3
+    from src.core.task_worker import GlobalTaskWorker
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE content_plan_rounds (round_id INTEGER, plan_id TEXT);
+        CREATE TABLE content_plans (id TEXT PRIMARY KEY, status TEXT, version INTEGER, updated_at TEXT);
+        CREATE TABLE contents (id TEXT PRIMARY KEY, round_id INTEGER);
+        CREATE TABLE drafts (id TEXT PRIMARY KEY, content_id TEXT);
+        CREATE TABLE content_plan_drafts (
+            plan_id TEXT, draft_id TEXT, round_id INTEGER, created_at TEXT,
+            PRIMARY KEY(plan_id, draft_id)
+        );
+        INSERT INTO content_plan_rounds VALUES (7, 'plan-7');
+        INSERT INTO content_plans VALUES ('plan-7', 'generating', 1, NULL);
+        INSERT INTO contents VALUES ('content-7', 7);
+        INSERT INTO drafts VALUES ('draft-7', 'content-7');
+        CREATE TRIGGER reject_plan_completion
+        BEFORE UPDATE ON content_plans
+        BEGIN SELECT RAISE(ABORT, 'simulated plan status write failure'); END;
+    """)
+
+    try:
+        GlobalTaskWorker._complete_content_plan(
+            conn, 7, {"final_status": "completed"},
+        )
+    except sqlite3.IntegrityError:
+        pass
+    else:
+        raise AssertionError("expected simulated plan status failure")
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM content_plan_drafts WHERE plan_id='plan-7'"
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT status, version FROM content_plans WHERE id='plan-7'"
+    ).fetchone()[:] == ("generating", 1)
+    conn.close()
+
+
+def test_worker_content_plan_completion_commits_links_and_status_together():
+    import sqlite3
+    from src.core.task_worker import GlobalTaskWorker
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE content_plan_rounds (round_id INTEGER, plan_id TEXT);
+        CREATE TABLE content_plans (id TEXT PRIMARY KEY, status TEXT, version INTEGER, updated_at TEXT);
+        CREATE TABLE contents (id TEXT PRIMARY KEY, round_id INTEGER);
+        CREATE TABLE drafts (id TEXT PRIMARY KEY, content_id TEXT);
+        CREATE TABLE content_plan_drafts (
+            plan_id TEXT, draft_id TEXT, round_id INTEGER, created_at TEXT,
+            PRIMARY KEY(plan_id, draft_id)
+        );
+        INSERT INTO content_plan_rounds VALUES (8, 'plan-8');
+        INSERT INTO content_plans VALUES ('plan-8', 'generating', 3, NULL);
+        INSERT INTO contents VALUES ('content-8', 8);
+        INSERT INTO drafts VALUES ('draft-8', 'content-8');
+    """)
+
+    GlobalTaskWorker._complete_content_plan(
+        conn, 8, {"final_status": "completed"},
+    )
+
+    assert conn.execute(
+        "SELECT plan_id, draft_id, round_id FROM content_plan_drafts"
+    ).fetchone()[:] == ("plan-8", "draft-8", 8)
+    assert conn.execute(
+        "SELECT status, version FROM content_plans WHERE id='plan-8'"
+    ).fetchone()[:] == ("generated", 4)
+    conn.close()
+
+
+
+def test_scheduler_task_run_audit_writes_use_connection_transaction_context():
+    import sqlite3
+    from src.core.task_worker import GlobalTaskWorker
+    from src.core.timezone import DEFAULT_TIMEZONE
+    from types import SimpleNamespace
+
+    class TrackingConnection(sqlite3.Connection):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.transaction_entries = 0
+
+        def __enter__(self):
+            self.transaction_entries += 1
+            return super().__enter__()
+
+    conn = sqlite3.connect(":memory:", factory=TrackingConnection)
+    conn.row_factory = sqlite3.Row
+    conn.execute("""
+        CREATE TABLE task_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_type TEXT, biz_id TEXT, status TEXT, attempt INTEGER,
+            started_at TEXT, created_at TEXT, finished_at TEXT, error_msg TEXT
+        )
+    """)
+    cfg = SimpleNamespace(business_timezone=DEFAULT_TIMEZONE)
+
+    task_run_id = GlobalTaskWorker._start_scheduler_task_run(
+        conn, cfg, "daily_ops", "_job_daily_ops", [],
+    )
+    assert task_run_id == 1
+    assert conn.execute(
+        "SELECT status FROM task_runs WHERE id=?", (task_run_id,),
+    ).fetchone()["status"] == "running"
+
+    GlobalTaskWorker._finish_scheduler_task_run(
+        conn, cfg, task_run_id, "success", None,
+    )
+    saved = conn.execute(
+        "SELECT status, finished_at FROM task_runs WHERE id=?", (task_run_id,),
+    ).fetchone()
+    assert saved["status"] == "success"
+    assert saved["finished_at"]
+    assert conn.transaction_entries == 2
+    conn.close()
+
+
+def test_multiple_workers_execute_different_tenants_concurrently(tmp_path):
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    for tenant_id, round_id in (("tenant-a", 31), ("tenant-b", 32)):
+        queue.enqueue(
+            task_type="round_run", tenant_id=tenant_id, aggregate_id=str(round_id),
+            payload={"round_id": round_id, "operation": "run"},
+        )
+
+    async def scenario():
+        stop = asyncio.Event()
+        both_started = asyncio.Event()
+        started = set()
+        completed = set()
+
+        class FakeExecutor:
+            async def run(self, round_id, **kwargs):
+                started.add(round_id)
+                if len(started) == 2:
+                    both_started.set()
+                await asyncio.wait_for(both_started.wait(), timeout=2)
+                completed.add(round_id)
+                if len(completed) == 2:
+                    stop.set()
+                return {"round_id": round_id, "final_status": "completed"}
+
+        def build_context(tenant_id):
+            return {
+                "cfg": SimpleNamespace(
+                    paths=SimpleNamespace(data_dir=str(tmp_path / tenant_id / "data")),
+                    resolve_path=lambda value: value,
+                ),
+                "executor": FakeExecutor(),
+                "scheduler": SimpleNamespace(shutdown=lambda: None),
+                "conn": SimpleNamespace(close=lambda: None),
+            }
+
+        workers = [
+            GlobalTaskWorker(queue, build_context, poll_interval_seconds=0.01,
+                             lease_seconds=30, heartbeat_seconds=1),
+            GlobalTaskWorker(queue, build_context, poll_interval_seconds=0.01,
+                             lease_seconds=30, heartbeat_seconds=1),
+        ]
+        await asyncio.wait_for(
+            asyncio.gather(*(worker.run(stop) for worker in workers)),
+            timeout=5,
+        )
+        assert started == {31, 32}
+        assert completed == {31, 32}
+
+    asyncio.run(scenario())

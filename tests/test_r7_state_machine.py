@@ -77,10 +77,11 @@ def test_round_transition_happy_path_and_illegal_jump(conn: sqlite3.Connection, 
         == "awaiting_publish"
 
 
-def test_round_transition_writes_local_time_log(conn: sqlite3.Connection, seed) -> None:
+def test_round_transition_writes_local_time_log(conn: sqlite3.Connection, seed, cfg) -> None:
     """R5：流转日志用本地时间，且 producing 起点独立落库（R8）。"""
     r = seed.round()
-    sm = RoundStateMachine(conn)
+    from src.core.timezone import business_now
+    sm = RoundStateMachine(conn, cfg=cfg)
     sm.transition(r, "producing", "测试")
     row = conn.execute(
         "SELECT transition_log, producing_started_at FROM spiral_rounds WHERE id = ?", (r,)
@@ -88,8 +89,8 @@ def test_round_transition_writes_local_time_log(conn: sqlite3.Connection, seed) 
     log, started = row[0], row[1]
     assert log and "producing" in log
     assert started is not None
-    # 本地时间与 now() 的差应远小于 1 天（若是 UTC 会差 8 小时）
-    delta = abs((datetime.now() - datetime.fromisoformat(started)).total_seconds())
+    # 与账号组业务时区的当前时间比较，而不是依赖 CI 主机操作系统时区。
+    delta = abs((business_now(cfg) - datetime.fromisoformat(started)).total_seconds())
     assert delta < 300, f"producing_started_at 疑似 UTC：{started}"
 
 
@@ -201,3 +202,82 @@ def test_each_timeout_is_used_independently(conn: sqlite3.Connection, seed) -> N
     assert sm.collect_metrics_phase_timeout(r) is True
     assert conn.execute("SELECT status FROM drafts WHERE id = ?", (d,)).fetchone()[0] \
         == "draft_saved"
+
+
+def test_draft_transition_does_not_overwrite_concurrent_status_change(conn, seed):
+    round_id = seed.round()
+    draft_id = seed.draft(
+        round_id, draft_status="draft_saved", fetch_status=None,
+    )
+
+    class RacingConnection:
+        def __init__(self, raw):
+            self.raw = raw
+            self.external = getattr(raw, 'raw', raw)
+            self.injected = False
+
+        def execute(self, sql, params=()):
+            result = self.raw.execute(sql, params)
+            if sql.startswith("SELECT status FROM drafts WHERE id = ?") and not self.injected:
+                self.injected = True
+                self.external.execute(
+                    "UPDATE drafts SET status='cancelled' WHERE id=?", (draft_id,),
+                )
+                self.external.commit()
+            return result
+
+        def __enter__(self):
+            self.raw.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self.raw.__exit__(*exc)
+
+        def commit(self):
+            self.raw.commit()
+
+    sm = DraftStateMachine(RacingConnection(conn))
+    assert sm.transition(draft_id, "expired", "timeout") is False
+    assert conn.execute(
+        "SELECT status FROM drafts WHERE id=?", (draft_id,)
+    ).fetchone()[0] == "cancelled"
+
+
+def test_round_transition_does_not_overwrite_concurrent_status_change(conn, seed):
+    round_id = seed.round(status="created")
+
+    class RacingConnection:
+        def __init__(self, raw):
+            self.raw = raw
+            self.external = getattr(raw, 'raw', raw)
+            self.injected = False
+
+        def execute(self, sql, params=()):
+            result = self.raw.execute(sql, params)
+            if sql.startswith(
+                "SELECT status, transition_log FROM spiral_rounds WHERE id = ?"
+            ) and not self.injected:
+                self.injected = True
+                self.external.execute(
+                    "UPDATE spiral_rounds SET status='failed' WHERE id=?", (round_id,),
+                )
+                self.external.commit()
+            return result
+
+        def __enter__(self):
+            self.raw.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self.raw.__exit__(*exc)
+
+        def commit(self):
+            self.raw.commit()
+
+    sm = RoundStateMachine(RacingConnection(conn))
+    assert sm.transition(round_id, "producing", "race") is False
+    assert conn.execute(
+        "SELECT status FROM spiral_rounds WHERE id=?", (round_id,)
+    ).fetchone()[0] == "failed"
+
+

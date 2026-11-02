@@ -102,7 +102,7 @@ def test_cross_platform_marks_duplicates(cfg, conn):
             (pid, f"60s.viki.moe/{plat}", first.isoformat(timespec="seconds"),
              now.isoformat(timespec="seconds"), title, plat, normalize_title(title)))
     conn.commit()
-    assert mark_cross_platform(conn, threshold=0.8, window_hours=48) == 1
+    assert mark_cross_platform(conn, threshold=0.8, window_hours=48, cfg=cfg) == 1
     dup = dict(conn.execute("SELECT id, duplicate_of FROM hot_topics").fetchall())
     assert dup == {"a": None, "b": "a", "c": None}      # 最早发现的为主条目
     items = HotTopicCollector(cfg, conn).overview()["items"]

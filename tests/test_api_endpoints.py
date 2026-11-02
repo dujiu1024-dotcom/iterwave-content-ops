@@ -48,6 +48,66 @@ def client(cfg, conn, seed, test_auth):
 
 
 # ---------------------------------------------------------------- R-2 采纳缺口
+def test_auth_middleware_runs_password_verification_off_event_loop(client, monkeypatch):
+    tc, _, _ = client
+    observed = {}
+    original_to_thread = asyncio.to_thread
+
+    def fake_is_authenticated(cookie_token, headers, ip=None):
+        observed["worker_thread"] = threading.get_ident()
+        return True
+
+    async def recording_to_thread(func, *args, **kwargs):
+        caller_thread = threading.get_ident()
+        result = await original_to_thread(func, *args, **kwargs)
+        observed["event_loop_thread"] = caller_thread
+        return result
+
+    monkeypatch.setattr(api_main.auth, "password_configured", lambda: True)
+    monkeypatch.setattr(api_main.auth, "is_trusted_local_setup", lambda request: False)
+    monkeypatch.setattr(api_main.auth, "is_rate_limited", lambda ip: False)
+    monkeypatch.setattr(api_main.auth, "is_authenticated", fake_is_authenticated)
+    monkeypatch.setattr(api_main.asyncio, "to_thread", recording_to_thread)
+
+    response = tc.get("/api/ops/pause")
+    assert response.status_code == 200
+    assert observed["worker_thread"] != observed["event_loop_thread"]
+
+def test_activation_samples_reject_second_active_run_and_replay_idempotently(client, monkeypatch):
+    tc, conn, _ = client
+    from src.core import content_pipeline
+
+    monkeypatch.setattr(content_pipeline, "_llm_available", lambda _cfg: False)
+    now = datetime.now().isoformat(sep=" ", timespec="seconds")
+    conn.execute(
+        "INSERT INTO sample_runs "
+        "(id, tenant_id, platform, account_description, status, model_mode, "
+        "idempotency_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("active-sample", "default", "xhs", "职场AI效率提升方法", "generating",
+         "byok", "request-active", now),
+    )
+    conn.commit()
+
+    # 相同幂等键必须返回原任务，不应被活动任务互斥规则误拒绝。
+    replay = tc.post("/api/activation/samples", json={
+        "platform": "xhs", "account_description": "职场AI效率提升方法",
+        "idempotency_key": "request-active",
+    })
+    assert replay.status_code == 202
+    assert replay.json()["sample_run_id"] == "active-sample"
+    assert replay.json()["deduplicated"] is True
+
+    # 不同幂等键不能绕过同一账号组的活动任务限制。
+    conflict = tc.post("/api/activation/samples", json={
+        "platform": "douyin", "account_description": "职场AI效率提升方法",
+        "idempotency_key": "request-another",
+    })
+    assert conflict.status_code == 409
+    assert conn.execute(
+        "SELECT COUNT(*) FROM sample_runs WHERE tenant_id='default' "
+        "AND status IN ('created','generating','quality_check')"
+    ).fetchone()[0] == 1
+
 def test_rhythm_config_exposes_quota_slots_for_all_supported_platforms(client):
     tc, _, _ = client
     response = tc.get("/api/rhythm")
@@ -1315,6 +1375,76 @@ def test_content_plan_start_enqueues_global_task_and_cancel_only_cancels_queued_
         "SELECT status FROM content_plans WHERE id=?", (plan_id,)
     ).fetchone()["status"] == "cancelled"
 
+
+def test_content_plan_start_cancels_unqueued_round_when_snapshot_admission_fails(client, tmp_path, monkeypatch):
+    tc, conn, _ = client
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    monkeypatch.setattr(api_main, "_task_queue", queue)
+
+    from src.core.task_snapshot import StaleTaskSnapshot
+
+    def reject_snapshot(*args, **kwargs):
+        raise StaleTaskSnapshot("计划执行快照已过期")
+
+    monkeypatch.setattr(api_main, "_build_task_execution_snapshot", reject_snapshot)
+    created = tc.post("/api/content-plans", json={
+        "title": "启动失败补偿计划", "scheduled_date": "2026-11-07",
+        "platforms": ["xhs"], "planned_count": 1,
+    })
+    assert created.status_code == 200
+    plan_id = created.json()["id"]
+
+    started = tc.post(f"/api/content-plans/{plan_id}/start")
+    assert started.status_code == 409
+
+    plan = conn.execute(
+        "SELECT status FROM content_plans WHERE id=?", (plan_id,),
+    ).fetchone()
+    relation = conn.execute(
+        "SELECT round_id,task_id FROM content_plan_rounds WHERE plan_id=?",
+        (plan_id,),
+    ).fetchone()
+    assert plan["status"] == "failed"
+    assert relation is not None and relation["task_id"] is None
+    assert conn.execute(
+        "SELECT status FROM spiral_rounds WHERE id=?", (relation["round_id"],),
+    ).fetchone()["status"] == "cancelled"
+    assert queue.list_page(scope="history", page=1, page_size=20)[1] == 0
+
+def test_content_plan_start_compensates_unexpected_queue_failure(client, tmp_path, monkeypatch):
+    tc, conn, _ = client
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    monkeypatch.setattr(api_main, "_task_queue", queue)
+    monkeypatch.setattr(api_main, "_build_task_execution_snapshot", lambda *args, **kwargs: {"test_snapshot": True})
+
+    def fail_enqueue(*args, **kwargs):
+        raise RuntimeError("injected queue adapter failure")
+
+    monkeypatch.setattr(queue, "enqueue", fail_enqueue)
+    created = tc.post("/api/content-plans", json={
+        "title": "意外入队异常补偿", "scheduled_date": "2026-11-10",
+        "platforms": ["xhs"], "planned_count": 1,
+    })
+    assert created.status_code == 200
+    plan_id = created.json()["id"]
+
+    started = tc.post(f"/api/content-plans/{plan_id}/start")
+    assert started.status_code == 503
+
+    plan = conn.execute(
+        "SELECT status FROM content_plans WHERE id=?", (plan_id,),
+    ).fetchone()
+    relation = conn.execute(
+        "SELECT round_id,task_id FROM content_plan_rounds WHERE plan_id=?",
+        (plan_id,),
+    ).fetchone()
+    assert plan["status"] == "failed"
+    assert relation is not None and relation["task_id"] is None
+    assert conn.execute(
+        "SELECT status FROM spiral_rounds WHERE id=?", (relation["round_id"],),
+    ).fetchone()["status"] == "cancelled"
 
 def test_worker_result_links_round_drafts_and_updates_plan_status(client):
     tc, conn, seed = client

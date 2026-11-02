@@ -77,7 +77,7 @@ uvicorn src.api.main:app --reload
 - 本机开发如需免引导口令完成首次设置，必须显式设置 `ITERWAVE_ALLOW_LOCAL_BOOTSTRAP=1`，且使用本机直连地址。默认情况下，本机也需引导口令。公网或反向代理部署前，先在服务端环境变量中设置强随机的 `ITERWAVE_BOOTSTRAP_TOKEN`，再通过首次设置页面提交该引导口令并设置正式访问口令。
 - 公网部署不要启用 `ITERWAVE_ALLOW_LOCAL_BOOTSTRAP=1`。不要把引导口令写进仓库、前端配置或日志；完成初始化后应从部署环境中移除引导口令。
 - 配置文件与数据库目录应限制为运行服务的操作系统用户可读写，并通过 HTTPS 访问管理界面。
-- 当前版本每个 Uvicorn 进程的应用生命周期都会启动账号组 APScheduler。部署请使用单个 Uvicorn worker（默认配置即可）；虽然全局任务消费者已用数据库租约保证单消费者，但跨进程 APScheduler 选主尚未实现，不要配置 `--workers` 大于 1。
+- 当前版本每个 Uvicorn 进程的应用生命周期都会启动账号组 APScheduler。部署仍应使用单个 Uvicorn worker；跨进程 APScheduler 选主尚未实现，不要配置 `--workers` 大于 1。全局任务队列可通过 `ITERWAVE_TASK_WORKERS` 配置 1–8 个进程内消费者，跨账号组并行、同账号组串行。
 - 多账号组即时热切换默认开启。部署环境如需关闭，设置 `ITERWAVE_ENABLE_TENANT_HOT_SWITCH=0` 后重启服务；关闭时，账号组选择只保存选择结果，需重启后才切换运行时。全局队列的跨账号组热切换验收必须在启用该能力并重启后进行，不能在任务执行期间通过重启来模拟切换，否则运行中任务会进入 `interrupted`，需要先核实业务结果。
 
 ### 前端
@@ -117,15 +117,16 @@ IterWave 的部分平台适配器代码基于 [Easel](https://github.com/kaichen
 
 - API Key、Cookie、Token 只存本地 `.env` / 登录态文件，已 `chmod 600`
 - 日志中的敏感信息脱敏（保留前 4 位 + `***`）
-- Playwright 永不点击"发布"按钮
-- 主动评论、关注等操作极低配额，崩溃场景标记 `pending_verify` 待用户核实
+- Playwright 永不点击"发布"按钮；默认仅存草稿与只读采集
+- 自动评论（含被动回复）、主动评论和关注默认关闭；只有部署者显式设置 `ITERWAVE_ENABLE_AUTOMATED_ENGAGEMENT=1` 才启用，启用前必须确认平台规则与账号授权；不设置时这些动作只记为 skipped
+- 反向代理限速按真实客户端 IP 统计；仅信任 `ITERWAVE_TRUSTED_PROXY_IPS` 指定的代理网段，默认仅信任 `127.0.0.1,::1`，禁止配置为无边界信任任意转发头
 - 熔断机制：检测到平台异常自动停止所有运营，3 步验证后方可恢复
 
 ## 代码现状（Early Preview）
 
-> **非空代码**：Python 10,600+ 行 · TypeScript 5,700+ 行 · pytest 1,088 行 · 9 个 DB 迁移脚本
+> 代码规模随功能迭代持续变化，不再以固定行数作为完成度指标；以仓库目录、测试结果和本文件中的模块说明为准。
 >
-> 所有模块均有实质性实现，不是空壳。但真实平台连接（Playwright）、模型调用链路、端到端集成尚未在四平台完整验证。
+> 主要业务模块已有实质实现。真实平台连接（Playwright）、模型调用链路和端到端集成仍需在目标环境验证。
 
 ### 后端核心（src/core/）
 
@@ -141,7 +142,7 @@ IterWave 的部分平台适配器代码基于 [Easel](https://github.com/kaichen
 | APScheduler 调度器（6 类任务） | scheduler/__init__.py | 1,072 |
 | 内容管线 + 轮次执行器 | content_pipeline.py + round_executor.py | 1,065 |
 | 热点发现（60s.viki.moe 公益 API） | hot_topics.py | 362 |
-| 归一化 z-score + 洞察 | metrics/__init__.py + insights.py | 514 |
+| 平台内归一化 + 纵深洞察 | metrics/__init__.py + insights.py | Winsorized 基准、样本标准差、95% t 置信区间、按平台独立分析 |
 | 计划版本签名（§19 内容一致性） | plan_version.py | 227 |
 | 断点恢复（幂等 + pending_verify） | recovery.py | 151 |
 | 目标进度 + 终极目标口径 | goal_progress.py | 118 |
@@ -159,7 +160,7 @@ IterWave 的部分平台适配器代码基于 [Easel](https://github.com/kaichen
 
 ### API 层
 
-`src/api/main.py` — 1,645 行 FastAPI 路由，覆盖状态机、选题、评分、运营、熔断、配置、通知等全部端点。
+`src/api/main.py` — FastAPI 路由入口，覆盖状态机、选题、评分、运营、熔断、配置、通知、账号组与任务队列等端点；同步写请求提供请求级事务边界，异步写路径单独定义事务范围。
 
 ### React 前端（web/）
 
@@ -167,7 +168,7 @@ IterWave 的部分平台适配器代码基于 [Easel](https://github.com/kaichen
 
 ### 测试
 
-8 个 pytest 文件 1,088 行，覆盖状态机、三模式评分、NULL vs 0 红线、熔断退出路径、调度器任务、API 端点、适配器接口。
+`tests/` 按模块覆盖状态机、三模式评分、NULL vs 0 红线、事务锁与回滚、租户隔离、任务队列、调度器、API 端点、热点去重、分析统计和适配器安全。测试总量以当前仓库为准。
 
 ### 尚未验证
 

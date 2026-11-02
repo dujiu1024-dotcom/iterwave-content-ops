@@ -15,7 +15,7 @@ import hashlib
 import logging
 import re
 import unicodedata
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -50,92 +50,104 @@ def similarity(a: str, b: str) -> float:
 
 
 def backfill(conn) -> int:
-    """迁移前的旧行补 platform / title_norm，并按规则 1 合并历史重复（保留最近在榜的一行）。"""
-    rows = conn.execute(
-        "SELECT id, source, title, discovered_at, last_seen_at FROM hot_topics "
-        "WHERE evidence_status = 'collected' AND (title_norm IS NULL OR platform IS NULL)"
-    ).fetchall()
-    for r in rows:
-        source = r["source"] or ""
-        platform = source.rsplit("/", 1)[-1] if "/" in source else source
-        conn.execute("UPDATE hot_topics SET platform = ?, title_norm = ? WHERE id = ?",
-                     (platform, normalize_title(r["title"] or ""), r["id"]))
-    merged = 0
-    groups = conn.execute(
-        "SELECT platform, title_norm, COUNT(*) AS n FROM hot_topics WHERE evidence_status = 'collected' "
-        "AND title_norm IS NOT NULL GROUP BY platform, title_norm HAVING n > 1"
-    ).fetchall()
-    for g in groups:
-        dup = conn.execute(
-            "SELECT id, discovered_at, seen_count FROM hot_topics WHERE platform = ? AND title_norm = ? "
-            "AND evidence_status = 'collected' ORDER BY last_seen_at DESC",
-            (g["platform"], g["title_norm"]),
+    """原子补齐旧行 platform / title_norm，并合并历史重复。"""
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            "SELECT id, source, title, discovered_at, last_seen_at FROM hot_topics "
+            "WHERE evidence_status = 'collected' AND (title_norm IS NULL OR platform IS NULL)"
         ).fetchall()
-        keep, rest = dup[0], dup[1:]
-        first_seen = min(d["discovered_at"] or "" for d in dup) or keep["discovered_at"]
-        seen = sum(d["seen_count"] or 1 for d in dup)
-        conn.execute("UPDATE hot_topics SET discovered_at = ?, seen_count = ? WHERE id = ?",
-                     (first_seen, seen, keep["id"]))
-        conn.executemany("DELETE FROM hot_topics WHERE id = ?", [(d["id"],) for d in rest])
-        merged += len(rest)
-    if rows or merged:
-        conn.commit()
+        for r in rows:
+            source = r["source"] or ""
+            platform = source.rsplit("/", 1)[-1] if "/" in source else source
+            conn.execute("UPDATE hot_topics SET platform = ?, title_norm = ? WHERE id = ?",
+                         (platform, normalize_title(r["title"] or ""), r["id"]))
+        merged = 0
+        groups = conn.execute(
+            "SELECT platform, title_norm, COUNT(*) AS n FROM hot_topics WHERE evidence_status = 'collected' "
+            "AND title_norm IS NOT NULL GROUP BY platform, title_norm HAVING n > 1"
+        ).fetchall()
+        for g in groups:
+            dup = conn.execute(
+                "SELECT id, discovered_at, seen_count FROM hot_topics WHERE platform = ? AND title_norm = ? "
+                "AND evidence_status = 'collected' ORDER BY last_seen_at DESC",
+                (g["platform"], g["title_norm"]),
+            ).fetchall()
+            keep, rest = dup[0], dup[1:]
+            first_seen = min(d["discovered_at"] or "" for d in dup) or keep["discovered_at"]
+            seen = sum(d["seen_count"] or 1 for d in dup)
+            conn.execute("UPDATE hot_topics SET discovered_at = ?, seen_count = ? WHERE id = ?",
+                         (first_seen, seen, keep["id"]))
+            conn.executemany("DELETE FROM hot_topics WHERE id = ?", [(d["id"],) for d in rest])
+            merged += len(rest)
     return merged
 
 
-def mark_cross_platform(conn, *, threshold: float, window_hours: int, length_prefilter_ratio: float | None = None) -> int:
-    """规则 2：时间窗内跨平台同一事件 → duplicate_of 主条目。返回被标记为重复的行数。"""
+def mark_cross_platform(
+    conn, *, threshold: float, window_hours: int,
+    length_prefilter_ratio: float | None = None, cfg=None,
+) -> int:
+    """规则 2：时间窗内跨平台同一事件 → duplicate_of 主条目。缺少租户配置时失败关闭。"""
+    if cfg is None:
+        from .task_context import current_config
+        cfg = current_config()
+    if cfg is None:
+        raise RuntimeError("mark_cross_platform 必须显式传入账号组配置或绑定任务配置")
     if length_prefilter_ratio is None:
-        from .config import get_config
-        length_prefilter_ratio = get_config().hot_topics.dedup.length_prefilter_ratio
-    since = (datetime.now() - timedelta(hours=window_hours)).isoformat(timespec="seconds")
-    rows = conn.execute(
-        "SELECT id, platform, title_norm, discovered_at FROM hot_topics "
-        "WHERE evidence_status = 'collected' AND title_norm IS NOT NULL AND title_norm != '' "
-        "AND last_seen_at >= ? ORDER BY discovered_at ASC, id ASC",
-        (since,),
-    ).fetchall()
-    canon: list[dict] = []          # 主条目（按首次发现先后）
-    assign: dict[str, str | None] = {}
-    for r in rows:
-        norm = r["title_norm"]
-        target = None
-        for c in canon:
-            if c["platform"] == r["platform"]:
-                continue        # 同平台已由规则 1 去重，不同标题视为不同话题
-            if abs(len(c["title_norm"]) - len(norm)) > max(len(norm), len(c["title_norm"])) * length_prefilter_ratio:
-                continue
-            if similarity(c["title_norm"], norm) >= threshold:
-                target = c["id"]
-                break
-        assign[r["id"]] = target
-        if target is None:
-            canon.append(dict(r))
-    conn.executemany("UPDATE hot_topics SET duplicate_of = ? WHERE id = ?",
-                     [(v, k) for k, v in assign.items()])
-    conn.commit()
+        length_prefilter_ratio = cfg.hot_topics.dedup.length_prefilter_ratio
+    from .timezone import business_now
+    since = (business_now(cfg) - timedelta(hours=window_hours)).isoformat(timespec="seconds")
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            "SELECT id, platform, title_norm, discovered_at FROM hot_topics "
+            "WHERE evidence_status = 'collected' AND title_norm IS NOT NULL AND title_norm != '' "
+            "AND last_seen_at >= ? ORDER BY discovered_at ASC, id ASC",
+            (since,),
+        ).fetchall()
+        canon: list[dict] = []          # 主条目（按首次发现先后）
+        assign: dict[str, str | None] = {}
+        for r in rows:
+            norm = r["title_norm"]
+            target = None
+            for c in canon:
+                if c["platform"] == r["platform"]:
+                    continue        # 同平台已由规则 1 去重，不同标题视为不同话题
+                if abs(len(c["title_norm"]) - len(norm)) > max(len(norm), len(c["title_norm"])) * length_prefilter_ratio:
+                    continue
+                if similarity(c["title_norm"], norm) >= threshold:
+                    target = c["id"]
+                    break
+            assign[r["id"]] = target
+            if target is None:
+                canon.append(dict(r))
+        conn.executemany("UPDATE hot_topics SET duplicate_of = ? WHERE id = ?",
+                         [(v, k) for k, v in assign.items()])
     return sum(1 for v in assign.values() if v)
 
 
-def prune(conn, *, retention_days: int, max_rows: int) -> int:
-    """规则 3：按保留天数与总量上限清理。返回删除行数。"""
-    cutoff = (datetime.now() - timedelta(days=retention_days)).isoformat(timespec="seconds")
-    deleted = conn.execute(
-        "DELETE FROM hot_topics WHERE COALESCE(last_seen_at, discovered_at) < ?", (cutoff,)
-    ).rowcount
-    total = conn.execute("SELECT COUNT(*) FROM hot_topics").fetchone()[0]
-    if total > max_rows:
-        deleted += conn.execute(
-            "DELETE FROM hot_topics WHERE id IN (SELECT id FROM hot_topics "
-            "ORDER BY COALESCE(last_seen_at, discovered_at) ASC LIMIT ?)",
-            (total - max_rows,),
+def prune(conn, *, retention_days: int, max_rows: int, cfg=None) -> int:
+    """规则 3：按账号组业务时区、保留天数与总量上限原子清理。"""
+    from .timezone import business_now
+
+    cutoff = (business_now(cfg) - timedelta(days=retention_days)).isoformat(timespec="seconds")
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        deleted = conn.execute(
+            "DELETE FROM hot_topics WHERE COALESCE(last_seen_at, discovered_at) < ?", (cutoff,)
         ).rowcount
-    # 主条目被删后，残留的 duplicate_of 指针清空（下一轮重新判定）
-    conn.execute(
-        "UPDATE hot_topics SET duplicate_of = NULL WHERE duplicate_of IS NOT NULL "
-        "AND duplicate_of NOT IN (SELECT id FROM hot_topics)"
-    )
-    conn.commit()
+        total = conn.execute("SELECT COUNT(*) FROM hot_topics").fetchone()[0]
+        if total > max_rows:
+            deleted += conn.execute(
+                "DELETE FROM hot_topics WHERE id IN (SELECT id FROM hot_topics "
+                "ORDER BY COALESCE(last_seen_at, discovered_at) ASC LIMIT ?)",
+                (total - max_rows,),
+            ).rowcount
+        # 主条目被删后，残留的 duplicate_of 指针清空（下一轮重新判定）
+        conn.execute(
+            "UPDATE hot_topics SET duplicate_of = NULL WHERE duplicate_of IS NOT NULL "
+            "AND duplicate_of NOT IN (SELECT id FROM hot_topics)"
+        )
     if deleted:
         logger.info("🧹 热点保留清理：删除 %d 行（保留 %d 天，上限 %d 行）", deleted, retention_days, max_rows)
     return deleted

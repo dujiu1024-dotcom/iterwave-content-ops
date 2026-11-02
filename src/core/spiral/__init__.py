@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
+from ..timezone import business_now
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -85,7 +86,7 @@ class SpiralEngine:
     def analyze_round(self, round_id: int) -> SpiralDecision:
         """分析某轮的已发布表现，输出三通道建议。"""
         logger.info("🌀 螺旋引擎分析 round_id=%d", round_id)
-        decision = SpiralDecision(round_id=round_id, created_at=datetime.now())
+        decision = SpiralDecision(round_id=round_id, created_at=business_now(self.cfg))
 
         # 1. 取本轮已发布数据
         published_metrics = self._fetch_published_metrics(round_id)
@@ -245,7 +246,7 @@ class SpiralEngine:
                     target_count=target_count,
                     sample_count=sample_count,
                     avg_interaction_rate=avg_ir,
-                    confidence="high",
+                    confidence="medium",
                 ))
 
         return gaps
