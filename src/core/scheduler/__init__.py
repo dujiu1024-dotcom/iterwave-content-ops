@@ -198,12 +198,12 @@ class SchedulerEngine:
         try:
             now = business_now(self.cfg).isoformat()
             identity = json.dumps(args, ensure_ascii=False, default=str)[:300]
-            cur = self.conn.execute(
-                "INSERT INTO task_runs (task_type, biz_id, status, attempt, started_at, created_at) "
-                "VALUES (?, ?, 'running', 1, ?, ?)",
-                (task_type, f"scheduler:{method_name}:{identity}", now, now),
-            )
-            self.conn.commit()
+            with self.conn:
+                cur = self.conn.execute(
+                    "INSERT INTO task_runs (task_type, biz_id, status, attempt, started_at, created_at) "
+                    "VALUES (?, ?, 'running', 1, ?, ?)",
+                    (task_type, f"scheduler:{method_name}:{identity}", now, now),
+                )
             return int(cur.lastrowid)
         except Exception:  # noqa: BLE001 — audit failure must not prevent scheduler work
             logger.exception("[APS] task_runs 起始留痕失败 method=%s", method_name)
@@ -215,11 +215,11 @@ class SchedulerEngine:
         if self.conn is None or task_run_id is None:
             return
         try:
-            self.conn.execute(
-                "UPDATE task_runs SET status = ?, finished_at = ?, error_msg = ? WHERE id = ?",
-                (status, business_now(self.cfg).isoformat(), error_msg, task_run_id),
-            )
-            self.conn.commit()
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE task_runs SET status = ?, finished_at = ?, error_msg = ? WHERE id = ?",
+                    (status, business_now(self.cfg).isoformat(), error_msg, task_run_id),
+                )
         except Exception:  # noqa: BLE001 — do not mask scheduler outcome
             logger.exception("[APS] task_runs 收尾留痕失败 id=%s", task_run_id)
 
