@@ -177,8 +177,17 @@ h1{{font-size:82px;line-height:1.22;letter-spacing:-2px;margin:0;font-weight:800
 overflow-wrap:anywhere;word-break:break-word}}
 h2{{font-size:54px;line-height:1.25;margin:0 0 42px;font-weight:800}}
 .rule{{width:150px;height:8px;background:{palette['accent']};margin-top:58px;border-radius:8px}}
-.body{{display:flex;flex-direction:column;gap:22px;overflow:hidden}}
-p{{font-size:36px;line-height:1.55;margin:0;overflow-wrap:anywhere;word-break:break-word}}
+.body{{display:flex;flex-direction:column;gap:20px;overflow:hidden}}
+.visual-component{{padding:22px 26px;border-radius:22px;background:rgba(255,255,255,.56);
+border:1px solid rgba(23,33,43,.10);overflow-wrap:anywhere;word-break:break-word}}
+.visual-component p{{font-size:34px;line-height:1.48;margin:0;overflow-wrap:anywhere;word-break:break-word}}
+.visual-stat{{border-left:10px solid {palette['accent']}}}
+.visual-stat strong{{display:inline-block;color:{palette['accent']};font-size:48px;font-weight:900;margin:0 5px}}
+.visual-step{{display:flex;align-items:flex-start;gap:18px}}
+.step-label{{flex:0 0 auto;padding:9px 16px;border-radius:999px;background:{palette['accent']};
+color:{_contrast_text(palette['accent'])};font-size:25px;font-weight:800}}
+.visual-quote{{margin:0;border-left:10px solid {palette['accent']};font-style:italic}}
+.visual-text{{background:rgba(255,255,255,.32)}}
 .footer{{position:absolute;left:92px;bottom:52px;max-width:760px;color:{palette['muted']};
 font-size:22px;line-height:1.35;overflow-wrap:anywhere}}
 .page{{position:absolute;right:92px;bottom:52px;color:{palette['muted']};font-size:22px}}
@@ -252,7 +261,7 @@ def render_card_set(title: str, subtitle: str, body: str, output_dir: Path,
                 layout = page.evaluate("""() => {
                   const root = document.querySelector('.canvas');
                   const rootRect = root.getBoundingClientRect();
-                  const selectors = '.eyebrow,h1,.rule,h2,.body p,.footer,.page';
+                  const selectors = '.eyebrow,h1,.rule,h2,.visual-component,.footer,.page';
                   const elements = [...root.querySelectorAll(selectors)]
                     .filter(el => {
                       const style = getComputedStyle(el);
@@ -370,7 +379,7 @@ def render_single_page(
                 )
             layout = page.evaluate("""() => {
               const root=document.querySelector('.canvas'), rr=root.getBoundingClientRect();
-              const nodes=[...root.querySelectorAll('.eyebrow,h1,.rule,h2,.body p,.footer,.page')];
+              const nodes=[...root.querySelectorAll('.eyebrow,h1,.rule,h2,.visual-component,.footer,.page')];
               const boxes=nodes.map(el=>{const r=el.getBoundingClientRect();return [r.left-rr.left,r.top-rr.top,r.right-rr.left,r.bottom-rr.top]});
               let overlap=false;
               for(let i=0;i<boxes.length;i++)for(let j=i+1;j<boxes.length;j++){
