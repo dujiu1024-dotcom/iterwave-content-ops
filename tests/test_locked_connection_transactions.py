@@ -89,3 +89,29 @@ def test_transaction_context_holds_lock_across_read_check_write():
     assert competing_read_finished.is_set()
     assert conn.execute("SELECT status FROM records WHERE id=1").fetchone()[0] == "saved"
     conn.close()
+
+
+def test_context_rolls_back_content_when_audit_insert_fails():
+    raw = sqlite3.connect(":memory:", check_same_thread=False)
+    conn = LockedConnection(raw)
+    conn.execute("CREATE TABLE contents (id INTEGER PRIMARY KEY, body TEXT NOT NULL)")
+    conn.execute(
+        "CREATE TABLE audit (id INTEGER PRIMARY KEY, body TEXT NOT NULL "
+        "CHECK(length(body) < 10))"
+    )
+    conn.execute("INSERT INTO contents(id, body) VALUES (1, 'original')")
+    conn.commit()
+
+    try:
+        with conn:
+            conn.execute("UPDATE contents SET body='partially changed' WHERE id=1")
+            # Simulate audit persistence failing after the business row was updated.
+            conn.execute("INSERT INTO audit(body) VALUES ('this audit row is too long')")
+    except sqlite3.IntegrityError:
+        pass
+    else:
+        raise AssertionError("expected audit constraint failure")
+
+    assert conn.execute("SELECT body FROM contents WHERE id=1").fetchone()[0] == "original"
+    assert conn.execute("SELECT COUNT(*) FROM audit").fetchone()[0] == 0
+    conn.close()
