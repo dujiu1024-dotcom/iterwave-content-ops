@@ -494,6 +494,37 @@ class GlobalTaskQueue:
         finally:
             conn.close()
 
+    def interrupt_running_after_worker_exit(self, *, reason: str) -> dict[str, Any]:
+        """Mark all running tasks interrupted after the owning worker process is confirmed dead.
+
+        A worker process hosts multiple tenant consumers. Killing its process group can
+        interrupt several tenants, so all running rows and all owner leases are reconciled
+        in one transaction. Uncertain platform effects are never replayed automatically.
+        """
+        message = (reason or "后台 Worker 进程已退出，任务结果需人工核实")[:500]
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT task_id FROM global_task_queue WHERE status='running' ORDER BY queue_order"
+            ).fetchall()
+            cursor = conn.execute(
+                "UPDATE global_task_queue SET status='interrupted', finished_at=?, "
+                "error_code='worker_process_lost', error_message=?, "
+                "lease_owner=NULL, lease_expires_at=NULL WHERE status='running'",
+                (_stamp(), message),
+            )
+            # Clear both the legacy singleton and the current per-consumer lease table.
+            conn.execute("DELETE FROM global_task_worker_lease WHERE singleton_id=1")
+            conn.execute("DELETE FROM global_task_worker_leases")
+            conn.commit()
+            return {"interrupted": cursor.rowcount, "task_ids": [row["task_id"] for row in rows]}
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def recover_expired(self) -> dict[str, int]:
         """只回收租约过期的 running 任务；转为 interrupted，避免不安全地重复执行副作用。"""
         now = _stamp()
@@ -680,6 +711,20 @@ class GlobalTaskQueue:
                 "AND aggregate_id=? ORDER BY queue_order DESC LIMIT 1",
                 (tenant_id, task_type, str(aggregate_id)),
             ).fetchone())
+        finally:
+            conn.close()
+
+    def list_running_tasks(self) -> list[QueuedTask]:
+        """Return every running task in one SQLite read snapshot for watchdog enforcement."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT q.*, a.action AS resolution_action, a.actor AS resolution_actor, "
+                "a.note AS resolution_note, a.acted_at AS resolution_at "
+                "FROM global_task_queue q LEFT JOIN global_task_actions a ON a.task_id=q.task_id "
+                "WHERE q.status='running' ORDER BY q.queue_order"
+            ).fetchall()
+            return [self._decode(row) for row in rows]
         finally:
             conn.close()
 
