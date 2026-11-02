@@ -25,8 +25,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from .config import PROJECT_ROOT
@@ -741,6 +743,48 @@ class RoundExecutor:
         from .content_pipeline import card_footer
         return card_footer(self.cfg, platform)
 
+    async def _maybe_generate_cover(
+        self, title: str, dimension: str, platform: Platform,
+    ) -> tuple[Optional[str], str]:
+        """文生图封面底图：media_generation_settings 启用时调用图片模型。
+
+        配置（模型/尺寸/风格前缀）来自平台设置，不写死；任何失败都返回 (None, 原因)，
+        由调用方退回本地模板，不阻断轮次。
+        """
+        try:
+            row = self.conn.execute(
+                "SELECT enabled, prompt_prefix, model, size FROM media_generation_settings WHERE id = 1"
+            ).fetchone()
+        except Exception:  # noqa: BLE001 — 旧库无此表
+            return None, "media_generation_settings 未就绪"
+        if not row or not row["enabled"]:
+            return None, "AI 配图未在图片素材库设置中启用"
+        prompt_prefix = (row["prompt_prefix"] or "").strip()
+        scene = (
+            f"知识类图文封面背景插画，主题：{title}（{dimension}）。"
+            "画面下方三分之一保持简洁留白，便于叠加标题；画面中不出现任何文字、字母、数字、水印。"
+        )
+        prompt = f"{prompt_prefix}\n\n{scene}" if prompt_prefix else scene
+        model = (row["model"] or "").strip() or os.getenv("ITERWAVE_IMAGE_MODEL", "gpt-image-1")
+        size = (row["size"] or "").strip() or "1024x1536"
+        try:
+            from .media_generation import generate_image_bytes
+            raw, _mime, suffix, _w, _h = await asyncio.to_thread(
+                generate_image_bytes, prompt, model=model, size=size, cfg=self.cfg,
+            )
+        except Exception as exc:  # noqa: BLE001 — 失败必须降级而不是阻断轮次
+            logger.warning("文生图封面失败，退回模板：%s", exc)
+            return None, str(exc)
+        out_dir = Path(self.cfg.resolve_path(self.cfg.paths.output_dir))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"cover_{platform.value}_{uuid.uuid4().hex[:8]}{suffix}"
+        path.write_bytes(raw)
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+        return str(path), "ok"
+
     async def _produce_contents(
         self, round_id: int, scored: list, platforms: list[Platform], report: dict,
         template_data: Optional[dict] = None,
@@ -870,28 +914,45 @@ class RoundExecutor:
 
                 title, body, tags, outcome = accepted
 
+                cover_path = None
+                cover_reason = "出图在质量门之前（编排模式），使用模板卡片"
                 # ⑤ 图片卡片（编排可关闭；可调到质量门之前——此时被拦重写的版本也会出图）
                 if not card_first:
                     image_paths = []
                     if make_cards:
+                        # 优先文生图封面底图（media_generation_settings 启用时），失败退回模板
+                        cover_path, cover_reason = await self._maybe_generate_cover(
+                            title, topic.dimension, platform,
+                        )
                         image_paths = await asyncio.to_thread(
                             make_card_set, title, topic.dimension, body, output_dir, platform,
                             self._card_footer(platform),
+                            cover_image=Path(cover_path) if cover_path else None,
                         )
+                        if cover_path:
+                            report.setdefault("model_visuals", 0)
+                            report["model_visuals"] += 1
+                        else:
+                            report["degraded_visuals"] += 1
 
-                # ⑥ 写 contents
+                # ⑥ 写 contents（DB CHECK 只允许 degraded/media_asset/generated）
+                visual_status = "generated" if cover_path else "degraded"
+                visual_reason = (
+                    "封面底图由文生图模型生成，标题文字由本地模板叠加"
+                    if cover_path else f"仅使用本地模板卡片（{cover_reason}）"
+                )
                 content_id = f"content-{uuid.uuid4().hex[:12]}"
                 self.conn.execute(
                     "INSERT INTO contents (id, round_id, topic_id, platform, title, body, "
                     "tags, image_paths, word_count, card_style, guard_outcome, guard_reason, "
                     "visual_status, visual_reason, template_id, template_version, template_snapshot_json) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'degraded', ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         content_id, round_id, topic.id, platform.value, title, body,
                         json.dumps(tags, ensure_ascii=False),
                         json.dumps([str(p) for p in image_paths], ensure_ascii=False),
                         len(body), "knowledge", outcome.result.value, outcome.reason,
-                        "仅使用本地模板卡片的文字排版与渐变背景，尚未选用正式视觉素材",
+                        visual_status, visual_reason,
                         template_data["id"] if template_data else None,
                         template_data["version"] if template_data else None,
                         json.dumps(template_data, ensure_ascii=False) if template_data else None,
@@ -917,7 +978,6 @@ class RoundExecutor:
                     "image_paths": [str(p) for p in image_paths],
                 })
                 report["contents_created"] += 1
-                report["degraded_visuals"] = int(report.get("degraded_visuals") or 0) + 1
                 report["drafts_created"] += 1
 
             variant_summary.append({

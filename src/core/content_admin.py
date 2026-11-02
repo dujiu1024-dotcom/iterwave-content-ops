@@ -72,7 +72,11 @@ def delete_contents(cfg, conn, ids: list[str]) -> dict:
         draft_ids = [d[0] for d in drafts]
         if draft_ids:
             marks = ",".join("?" * len(draft_ids))
+            # 通知/快照/指标都外键引用 drafts，必须先清理，否则删轮次会 FK 失败
+            conn.execute(f"DELETE FROM notifications WHERE draft_id IN ({marks})", draft_ids)
+            conn.execute(f"DELETE FROM metric_snapshots WHERE draft_id IN ({marks})", draft_ids)
             conn.execute(f"DELETE FROM metrics WHERE draft_id IN ({marks})", draft_ids)
+        conn.execute("DELETE FROM metric_snapshots WHERE content_id = ?", (cid,))
         conn.execute("DELETE FROM metrics WHERE content_id = ?", (cid,))
         conn.execute("DELETE FROM drafts WHERE content_id = ?", (cid,))
         conn.execute("DELETE FROM contents WHERE id = ?", (cid,))
@@ -99,7 +103,7 @@ def delete_round(cfg, conn, round_id: int) -> dict:
         raise DeleteBlocked(f"第 {row[1]} 轮有 {locked} 篇已发布或存在发布历史的内容，不能整轮删除")
     cids = [r[0] for r in conn.execute("SELECT id FROM contents WHERE round_id = ?", (round_id,))]
     res = delete_contents(cfg, conn, cids) if cids else {"deleted": [], "platform_drafts_left": 0, "files_removed": 0}
-    for table in ("ops_logs", "platform_insights", "user_override", "autogrow_runs"):
+    for table in ("ops_logs", "platform_insights", "user_override", "autogrow_runs", "notifications"):
         try:
             conn.execute(f"UPDATE {table} SET round_id = NULL WHERE round_id = ?", (round_id,))
         except Exception:  # noqa: BLE001 — 旧库缺表 / 列

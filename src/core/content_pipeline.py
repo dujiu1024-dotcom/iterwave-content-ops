@@ -265,6 +265,40 @@ def build_asset_context_block(
     return "\n\n".join(blocks)
 
 
+def _build_stage_goal_block(conn, platform_value: str) -> str:
+    """当前生效的阶段目标 → 转化约束提示词片段。
+
+    目标由用户在平台上配置（goals 表），这里只负责把目标读进提示词，
+    不在代码里写死任何产品名或固定 CTA；没有生效目标时不加这层约束。
+    """
+    if conn is None:
+        return ""
+    try:
+        rows = conn.execute(
+            "SELECT goal_text, target_metric, target_platform FROM goals "
+            "WHERE status = 'active' AND goal_type = 'stage'"
+        ).fetchall()
+    except Exception:  # noqa: BLE001 — 缺表/旧库等场景下不加约束
+        return ""
+    texts: list[str] = []
+    for goal_text, _metric, target_platform in rows:
+        scope = (target_platform or "").strip()
+        if scope and scope != platform_value:
+            continue
+        text = (goal_text or "").strip()
+        if text:
+            texts.append(text)
+    if not texts:
+        return ""
+    joined = "；".join(texts[:3])
+    return (
+        f"\n当前阶段目标（平台运营配置，文案必须服务于此目标）：{joined}。"
+        "要求：正文与账号定位强相关，自然体现定位中提到的主体/方法，不得写成与定位无关的泛泛方法论；"
+        "结尾必须给出与阶段目标一致的明确下一步行动引导（目标涉及私信/咨询线索就引导私信咨询，涉及关注就引导关注），"
+        "引导要自然不生硬，不得夸大承诺。"
+    )
+
+
 def _generate_via_llm(
     cfg, topic_title: str, topic_summary: str, dimension: str, platform: Platform,
     style: dict,
@@ -321,6 +355,9 @@ def _generate_via_llm(
             )
         if forb:
             user_prompt += f"\n禁止方向：{'；'.join(forb[:cfg.copy_generation.forbidden_direction_limit])}。"
+    stage_goal_block = _build_stage_goal_block(conn, getattr(platform, "value", str(platform)))
+    if stage_goal_block:
+        user_prompt += stage_goal_block
     asset_context = build_asset_context_block(conn, platform, topic_title, dimension)
     if asset_context:
         user_prompt += "\n\n" + asset_context
@@ -694,6 +731,51 @@ def _wrap_cjk(text: str, font, max_width: int) -> list[str]:
     return [line for line in lines if line.strip()]
 
 
+def _fit_text_width(draw, text: str, font, max_width: int) -> str:
+    """按像素宽截断文本，超出加省略号，避免被裁出画布。"""
+    if not text:
+        return ""
+    if draw.textlength(text, font=font) <= max_width:
+        return text
+    ellipsis = "…"
+    while text and draw.textlength(text + ellipsis, font=font) > max_width:
+        text = text[:-1]
+    return (text + ellipsis) if text else ""
+
+
+def _card_background(width: int, height: int, top_color, bottom_color, cover_image=None):
+    """封面背景：有 AI 底图则居中裁切到画布比例并暗化（保证白字可读），否则渐变。"""
+    from PIL import Image, ImageDraw
+
+    if cover_image is not None:
+        try:
+            cover = Image.open(cover_image).convert("RGB")
+            cw, ch = cover.size
+            target = width / height
+            cur = cw / ch
+            if cur > target:
+                new_w = int(ch * target)
+                x0 = (cw - new_w) // 2
+                cover = cover.crop((x0, 0, x0 + new_w, ch))
+            else:
+                new_h = int(cw / target)
+                y0 = (ch - new_h) // 2
+                cover = cover.crop((0, y0, cw, y0 + new_h))
+            base = cover.resize((width, height), Image.LANCZOS)
+            return Image.blend(base, Image.new("RGB", (width, height), (10, 10, 16)), 0.42)
+        except Exception:  # noqa: BLE001 — 底图不可用不阻断，退回渐变
+            logger.warning("封面底图不可用，退回渐变背景: %s", cover_image)
+    img = Image.new("RGB", (width, height))
+    grad = ImageDraw.Draw(img)
+    for y in range(height):
+        ratio = y / (height - 1)
+        color = tuple(
+            int(top_color[i] + (bottom_color[i] - top_color[i]) * ratio) for i in range(3)
+        )
+        grad.line([(0, y), (width, y)], fill=color)
+    return img
+
+
 def make_card(
     title: str,
     subtitle: str,
@@ -701,12 +783,13 @@ def make_card(
     platform: Platform = Platform.XHS,
     footer: str = "",
     page_text: str = "",
+    cover_image: "Path | None" = None,
 ) -> Path:
-    """生成 1080×1440 图文封面卡（渐变背景 + 折行标题 + 维度标签 + 页脚 + 页码）。
+    """生成 1080×1440 图文封面卡（渐变或 AI 底图背景 + 折行标题 + 维度标签 + 页脚 + 页码）。
 
     纯 Pillow 实现，无外部字体下载依赖。R6.5：Pillow 已有，无需自造图像引擎。
     """
-    from PIL import Image, ImageDraw
+    from PIL import ImageDraw
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -715,15 +798,8 @@ def make_card(
     width, height = CARD_SIZE
     top_color, bottom_color = _PLATFORM_PALETTE.get(platform, _PLATFORM_PALETTE[Platform.XHS])
 
-    # 垂直渐变背景
-    img = Image.new("RGB", (width, height))
+    img = _card_background(width, height, top_color, bottom_color, cover_image)
     draw = ImageDraw.Draw(img)
-    for y in range(height):
-        ratio = y / (height - 1)
-        color = tuple(
-            int(top_color[i] + (bottom_color[i] - top_color[i]) * ratio) for i in range(3)
-        )
-        draw.line([(0, y), (width, y)], fill=color)
 
     margin = 96
     text_max_width = width - margin * 2
@@ -757,11 +833,12 @@ def make_card(
         fill=(255, 255, 255), width=6,
     )
 
-    # 页脚（留空则不绘制，避免把某个垂类的品牌语写死进所有账号）
+    # 页脚（留空则不绘制，避免把某个垂类的品牌语写死进所有账号；按像素宽截断防裁切）
     if footer.strip():
         footer_font = _load_font(36)
         draw.text(
-            (margin, height - margin - 60), footer,
+            (margin, height - margin - 60),
+            _fit_text_width(draw, footer.strip(), footer_font, text_max_width - 120),
             fill=(255, 255, 255), font=footer_font,
         )
 
@@ -808,7 +885,11 @@ def _render_body_page(
 
     if footer.strip():
         footer_font = _load_font(36)
-        draw.text((margin, height - margin - 60), footer, fill=(255, 255, 255), font=footer_font)
+        draw.text(
+            (margin, height - margin - 60),
+            _fit_text_width(draw, footer.strip(), footer_font, width - margin * 2 - 120),
+            fill=(255, 255, 255), font=footer_font,
+        )
     page_font = _load_font(34)
     draw.text(
         (width - margin - draw.textlength(page_text, font=page_font), height - margin - 56),
@@ -843,6 +924,7 @@ def make_card_set(
     platform: Platform = Platform.XHS,
     footer: str = "",
     max_pages: int = 9,
+    cover_image: "Path | None" = None,
 ) -> list[Path]:
     """生成一组图文卡片：1 张封面 + N 张正文分页（首页图 + 内容图，最多 max_pages 张）。
 
@@ -859,7 +941,8 @@ def make_card_set(
         pages[-1] = pages[-1][-11:] + ["…（更多内容见正文）"]
 
     total = len(pages) + 1
-    paths = [make_card(title, subtitle, output_dir, platform, footer, page_text=f"1/{total}")]
+    paths = [make_card(title, subtitle, output_dir, platform, footer, page_text=f"1/{total}",
+                       cover_image=cover_image)]
     for idx, page_lines in enumerate(pages, start=2):
         paths.append(_render_body_page(page_lines, output_dir, platform, footer, f"{idx}/{total}"))
     return paths
