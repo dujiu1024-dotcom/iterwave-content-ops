@@ -543,10 +543,20 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         if broken:
             raise HTTPException(409, "子计划所属平台处于熔断状态，不能开轮")
         raw_count = req.get("topic_count")
-        requested_count = int(raw_count if raw_count is not None else runtime["cfg"].autogrow.topic_count)
+        if raw_count is None:
+            requested_count = int(runtime["cfg"].autogrow.topic_count)
+        else:
+            if isinstance(raw_count, bool):
+                raise HTTPException(422, "topic_count 必须是 1-50 的整数")
+            try:
+                requested_count = int(raw_count)
+            except (TypeError, ValueError, OverflowError):
+                raise HTTPException(422, "topic_count 必须是 1-50 的整数")
+            if str(raw_count).strip() != str(requested_count):
+                raise HTTPException(422, "topic_count 必须是 1-50 的整数")
         if requested_count < 1 or requested_count > 50:
             raise HTTPException(422, "topic_count 必须在 1-50 之间")
-        topic_count = max(1, min(requested_count, remaining, 50))
+        topic_count = min(requested_count, remaining, 50)
         now_slot = business_now(runtime["cfg"]).replace(minute=0, second=0, microsecond=0).isoformat()
         key = f"round-open:{now_slot}"
         request_hash = __import__("hashlib").sha256(json.dumps(
