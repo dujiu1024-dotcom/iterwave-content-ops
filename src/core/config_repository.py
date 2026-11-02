@@ -52,8 +52,12 @@ def _history_safe(value: Any) -> Any:
     return value
 
 
-def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+def _now(cfg=None) -> str:
+    from src.core.timezone import business_now
+    if cfg is None:
+        from src.core.task_context import current_config
+        cfg = current_config()
+    return business_now(cfg).isoformat(timespec="seconds")
 
 
 def legacy_import_completed(conn: sqlite3.Connection) -> bool:
@@ -75,7 +79,7 @@ def read_settings(conn: sqlite3.Connection) -> dict[str, Any]:
     return result
 
 
-def purge_disallowed_settings(conn: sqlite3.Connection, keys: set[str]) -> int:
+def purge_disallowed_settings(conn: sqlite3.Connection, keys: set[str], cfg=None) -> int:
     """Remove retired/unsafe runtime keys and persist a clean settings snapshot."""
     if not keys:
         return 0
@@ -102,7 +106,7 @@ def purge_disallowed_settings(conn: sqlite3.Connection, keys: set[str]) -> int:
         snapshot = json.dumps(_history_safe(current), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         conn.execute(
             "INSERT INTO tenant_setting_versions(version,snapshot_json,changed_at,changed_by) VALUES(?,?,?,?)",
-            (version, snapshot, _now(), "security_migration"),
+            (version, snapshot, _now(cfg), "security_migration"),
         )
         conn.commit()
         logger.warning("已移除 %d 项不再允许的运行时配置键", len(existing))
@@ -115,7 +119,7 @@ def purge_disallowed_settings(conn: sqlite3.Connection, keys: set[str]) -> int:
             lock.release()
 
 
-def import_legacy_overrides(conn: sqlite3.Connection, legacy_path: Path) -> dict[str, int]:
+def import_legacy_overrides(conn: sqlite3.Connection, legacy_path: Path, cfg=None) -> dict[str, int]:
     """Import legacy JSON exactly once; keep the source file untouched for rollback."""
     try:
         raw = json.loads(legacy_path.read_text(encoding="utf-8")) if legacy_path.exists() else {}
@@ -138,7 +142,7 @@ def import_legacy_overrides(conn: sqlite3.Connection, legacy_path: Path) -> dict
         except (ValueError, TypeError):
             rejected += 1
 
-    now = _now()
+    now = _now(cfg)
     lock = getattr(conn, "_lock", None)
     if lock:
         lock.acquire()
@@ -197,7 +201,7 @@ def import_legacy_overrides(conn: sqlite3.Connection, legacy_path: Path) -> dict
     return {"imported": len(accepted), "rejected": rejected}
 
 
-def save_settings(conn: sqlite3.Connection, updates: dict[str, Any], *, audit_rows: list[tuple[str, str | None, str]] | None = None, remove_keys: list[str] | None = None, changed_by: str = "settings_ui") -> int:
+def save_settings(conn: sqlite3.Connection, updates: dict[str, Any], *, cfg=None, audit_rows: list[tuple[str, str | None, str]] | None = None, remove_keys: list[str] | None = None, changed_by: str = "settings_ui") -> int:
     """Atomically upsert changed keys and persist a complete version snapshot."""
     if not updates:
         row = conn.execute("SELECT COALESCE(MAX(version),0) FROM tenant_setting_versions").fetchone()
@@ -205,7 +209,7 @@ def save_settings(conn: sqlite3.Connection, updates: dict[str, Any], *, audit_ro
     unsafe = [key for key, value in updates.items() if not _safe_value(key, value)]
     if unsafe:
         raise ValueError(f"配置包含凭据或带认证信息的 URL，拒绝持久化：{', '.join(unsafe)}")
-    now = _now()
+    now = _now(cfg)
     lock = getattr(conn, "_lock", None)
     if lock:
         lock.acquire()
