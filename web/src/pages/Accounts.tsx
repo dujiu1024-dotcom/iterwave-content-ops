@@ -36,6 +36,7 @@ export default function Accounts() {
   const [smsSubmitting, setSmsSubmitting] = useState(false);
   const [platformIdentities, setPlatformIdentities] = useState<Record<string, AccountIdentity>>({});
   const [identityLoading, setIdentityLoading] = useState<Platform | null>(null);
+  const activeLoginProfile = activeLogin ? platformIdentities[activeLogin] : undefined;
 
   const load = async () => {
     setErr(null);
@@ -377,13 +378,13 @@ export default function Accounts() {
               {PLATFORM_EMOJI[activeLogin]} {loginStatus?.platform_display || "登录中"}
             </div>
             <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8 }}>
-              {activeLoginProfile?.display_name || activeLoginProfile?.account_handle
-                ? `本次登录目标：${activeLoginProfile.display_name || activeLoginProfile.account_handle}`
+              {activeLoginProfile?.name
+                ? `本次登录目标：${activeLoginProfile.name}`
                 : "尚未登记该平台账号昵称，请登录后补充登记，避免多个账号混淆"}
             </div>
-            {activeLoginProfile?.account_handle && (
+            {activeLoginProfile?.avatar_url && (
               <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 10 }}>
-                账号标识：{activeLoginProfile.account_handle}
+                已登记头像 ✓
               </div>
             )}
             <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16 }}>

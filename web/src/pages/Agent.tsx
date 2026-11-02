@@ -415,8 +415,6 @@ function SkillsPane() {
   const [savedTests, setSavedTests] = useState<Record<string, ReturnType<typeof inspectSkillManifest>>>({});
   const [testingSkill, setTestingSkill] = useState<TenantSkillManifest | null>(null);
 
-  const [testingSkill, setTestingSkill] = useState<TenantSkillManifest | null>(null);
-
   const load = async () => {
     setLoading(true);
     try {
