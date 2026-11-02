@@ -131,7 +131,7 @@ def test_queued_subplan_task_is_rejected_after_confirmed_publish_target_reached(
 
 
 
-def test_queued_approved_subplan_round_keeps_its_master_snapshot_after_new_master_activation(cfg, conn):
+def test_queued_subplan_round_fails_closed_after_parent_master_superseded(cfg, conn):
     import json
     from src.core.plan_version_store import PlanVersionStore
 
@@ -182,5 +182,12 @@ def test_queued_approved_subplan_round_keeps_its_master_snapshot_after_new_maste
     new_master = store.create_master_draft(old_plan, based_on_version_id=master_id)
     store.activate_master_version(new_master["id"], reviewer="test")
 
-    # A later master version must not invalidate a round already bound to the reviewed snapshot.
-    validate_execution_snapshot(snapshot, cfg, conn)
+    # A activation pauses child plans tied to the superseded parent. The old round's
+    # immutable attribution remains intact, but its queued task must fail closed.
+    with pytest.raises(StaleTaskSnapshot, match="子计划已暂停"):
+        validate_execution_snapshot(snapshot, cfg, conn)
+    old_round = conn.execute(
+        "SELECT master_plan_version_id,sub_plan_version_id FROM spiral_rounds WHERE id=?",
+        (round_id,),
+    ).fetchone()
+    assert tuple(old_round) == (master_id, int(version["id"]))
