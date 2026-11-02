@@ -134,6 +134,7 @@ B 负责在自动开轮 Worker 中接入 reserve → `create_round_once()`。该
 - 复盘采纳必须创建新的主计划草稿，来源为 `review_adoption`；不能直接覆盖主计划，也不能自动审核生效。
 - 使用 `sub_plans`、`sub_plan_versions`、`sub_plan_stages` 构建平台子计划业务流程；不得复用旧 `content_plans`。
 - 新建轮次时绑定主计划版本、子计划版本和阶段快照。
+- 停止对已绑定旧版本的活跃轮次调用旧的 `PlanVersionManager.invalidate_changed_plans()`；旧版本轮次继续执行其绑定快照，不得仅因当前主计划签名变化就标记失效。未绑定版本的历史轮次按 `plan_attribution_status` 单独处理。
 - 自动开轮接入持久化幂等租约；所有旧自动入口不得绕过授权、暂停、阶段和幂等校验。
 - Worker 使用轮次绑定的不可变版本快照，不读取最新草稿替代。
 
