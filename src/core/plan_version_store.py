@@ -1,8 +1,4 @@
-"""Immutable persistence for master-plan and content-subplan versions.
-
-The module deliberately uses the existing sqlite3 connection and existing tables.
-Business orchestration/API handlers may call this store; it does not own publishing.
-"""
+"""Immutable SQLite persistence for master plans, platform subplans and stages."""
 from __future__ import annotations
 
 import json
@@ -21,12 +17,8 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _dict(row) -> Optional[dict[str, Any]]:
-    return dict(row) if row is not None else None
-
-
 class PlanVersionStore:
-    """Transactional version repository for a single tenant SQLite database."""
+    """Transactional version repository for one tenant's independent SQLite DB."""
 
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
@@ -36,6 +28,9 @@ class PlanVersionStore:
         if not self.conn.in_transaction:
             self.conn.execute("BEGIN IMMEDIATE")
 
+    # ------------------------------------------------------------------
+    # Master plan lifecycle
+    # ------------------------------------------------------------------
     def create_master_draft(
         self,
         snapshot: dict[str, Any],
@@ -68,11 +63,11 @@ class PlanVersionStore:
                 (version_no, signature, json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
                  source, based_on_version_id, now, author, change_note),
             )
-            row = self.conn.execute(
+            row = dict(self.conn.execute(
                 "SELECT * FROM master_plan_versions WHERE id=?", (cur.lastrowid,)
-            ).fetchone()
+            ).fetchone())
             self.conn.commit()
-            return dict(row)
+            return row
         except Exception:
             self.conn.rollback()
             raise
@@ -89,15 +84,12 @@ class PlanVersionStore:
             snapshot = json.loads(row["plan_snapshot"])
         except (TypeError, ValueError) as exc:
             raise PlanVersionError("历史版本快照损坏，拒绝恢复") from exc
-        # Restore is a new draft; historical/effective rows are never rewritten.
         return self.create_master_draft(
             snapshot, author=author, source="user",
             based_on_version_id=version_id, change_note=change_note,
         )
 
-    def activate_master_version(
-        self, version_id: int, *, reviewer: str
-    ) -> dict[str, Any]:
+    def activate_master_version(self, version_id: int, *, reviewer: str) -> dict[str, Any]:
         now = _now()
         self._begin()
         try:
@@ -112,11 +104,9 @@ class PlanVersionStore:
             signature = self._signer.compute_signature(snapshot)
             if signature != row["plan_signature"]:
                 raise PlanVersionError("主计划快照与签名不一致，拒绝生效")
-
             self.conn.execute(
                 """UPDATE master_plan_versions
-                   SET status='archived',superseded_at=?
-                   WHERE status='effective'""", (now,)
+                   SET status='archived',superseded_at=? WHERE status='effective'""", (now,)
             )
             self.conn.execute(
                 """UPDATE master_plan_versions
@@ -152,49 +142,91 @@ class PlanVersionStore:
 
     def list_master_versions(self, limit: int = 100) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 500))
-        rows = self.conn.execute(
+        return [dict(row) for row in self.conn.execute(
             "SELECT * FROM master_plan_versions ORDER BY version_no DESC LIMIT ?", (limit,)
-        ).fetchall()
-        return [dict(row) for row in rows]
+        ).fetchall()]
 
-    def create_subplan_version(
+    # ------------------------------------------------------------------
+    # Platform subplan identity and immutable versions
+    # ------------------------------------------------------------------
+    def create_subplan(
         self,
-        plan_id: str,
-        snapshot: dict[str, Any],
+        sub_plan_id: str,
         *,
-        master_plan_version_id: Optional[int],
+        master_plan_version_id: int,
+        platform: str,
+        title: str,
         author: str = "user",
-        stages: Optional[list[dict[str, Any]]] = None,
-        change_note: Optional[str] = None,
     ) -> dict[str, Any]:
+        allowed_platforms = {"xhs", "douyin", "kuaishou", "wechat_channels"}
+        title = str(title or "").strip()
+        if platform not in allowed_platforms:
+            raise PlanVersionError("子计划平台无效")
+        if not title or len(title) > 160:
+            raise PlanVersionError("子计划标题必须为 1-160 个字符")
         if self.conn.execute(
-            "SELECT 1 FROM content_plans WHERE id=?", (plan_id,)
-        ).fetchone() is None:
-            raise PlanVersionError("子计划不存在")
-        if master_plan_version_id is not None and self.conn.execute(
             "SELECT 1 FROM master_plan_versions WHERE id=?", (master_plan_version_id,)
         ).fetchone() is None:
             raise PlanVersionError("关联的主计划版本不存在")
+        now = _now()
+        self.conn.execute(
+            """INSERT INTO sub_plans(
+                id,master_plan_version_id,platform,title,status,created_at,updated_at,created_by
+            ) VALUES(?,?,?,?,'draft',?,?,?)""",
+            (sub_plan_id, master_plan_version_id, platform, title, now, now, author),
+        )
+        self.conn.commit()
+        return dict(self.conn.execute(
+            "SELECT * FROM sub_plans WHERE id=?", (sub_plan_id,)
+        ).fetchone())
+
+    def create_subplan_version(
+        self,
+        sub_plan_id: str,
+        snapshot: dict[str, Any],
+        *,
+        master_plan_version_id: int,
+        author: str = "user",
+        stages: Optional[list[dict[str, Any]]] = None,
+        based_on_version_id: Optional[int] = None,
+        change_note: Optional[str] = None,
+    ) -> dict[str, Any]:
         if not isinstance(snapshot, dict):
             raise PlanVersionError("子计划快照必须是对象")
         stages = stages or []
         if not isinstance(stages, list):
             raise PlanVersionError("阶段必须是数组")
+        identity = self.conn.execute(
+            "SELECT master_plan_version_id FROM sub_plans WHERE id=?", (sub_plan_id,)
+        ).fetchone()
+        if identity is None:
+            raise PlanVersionError("子计划不存在")
+        if self.conn.execute(
+            "SELECT 1 FROM master_plan_versions WHERE id=?", (master_plan_version_id,)
+        ).fetchone() is None:
+            raise PlanVersionError("关联的主计划版本不存在")
+        if based_on_version_id is not None:
+            base = self.conn.execute(
+                "SELECT sub_plan_id FROM sub_plan_versions WHERE id=?", (based_on_version_id,)
+            ).fetchone()
+            if base is None or base["sub_plan_id"] != sub_plan_id:
+                raise PlanVersionError("基准版本不属于当前子计划")
+
         now = _now()
         self._begin()
         try:
             version_no = int(self.conn.execute(
-                "SELECT COALESCE(MAX(version_no),0)+1 FROM content_plan_versions WHERE plan_id=?",
-                (plan_id,),
+                "SELECT COALESCE(MAX(version_no),0)+1 FROM sub_plan_versions WHERE sub_plan_id=?",
+                (sub_plan_id,),
             ).fetchone()[0])
             cur = self.conn.execute(
-                """INSERT INTO content_plan_versions(
-                    plan_id,version_no,master_plan_version_id,snapshot_json,
-                    status,created_at,created_by,change_note
-                ) VALUES(?,?,?,?,'draft',?,?,?)""",
-                (plan_id, version_no, master_plan_version_id,
+                """INSERT INTO sub_plan_versions(
+                    sub_plan_id,version_no,master_plan_version_id,snapshot_json,status,
+                    based_on_version_id,created_at,created_by,change_note
+                ) VALUES(?,?,?,?,'draft',?,?,?,?)""",
+                (sub_plan_id, version_no, master_plan_version_id,
                  json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
-                 now, author, change_note),
+                 based_on_version_id, now, author, change_note),
             )
             version_id = int(cur.lastrowid)
             for index, stage in enumerate(stages, start=1):
@@ -204,90 +236,168 @@ class PlanVersionStore:
                 if not title:
                     raise PlanVersionError("阶段标题不能为空")
                 self.conn.execute(
-                    """INSERT INTO content_plan_stages(
-                        content_plan_version_id,stage_order,title,target_count,
-                        start_date,end_date,status,notes,created_at,updated_at
-                    ) VALUES(?,?,?,?,?,?, 'pending',?,?,?)""",
+                    """INSERT INTO sub_plan_stages(
+                        sub_plan_version_id,stage_order,title,direction,target_count,
+                        start_date,end_date,completion_condition,status,notes,created_at,updated_at
+                    ) VALUES(?,?,?,?,?,?,?,?, 'pending',?,?,?)""",
                     (version_id, int(stage.get("stage_order") or index), title,
-                     int(stage.get("target_count") or 1), stage.get("start_date"),
-                     stage.get("end_date"), str(stage.get("notes") or ""), now, now),
+                     str(stage.get("direction") or ""), int(stage.get("target_count") or 1),
+                     stage.get("start_date"), stage.get("end_date"),
+                     str(stage.get("completion_condition") or ""),
+                     str(stage.get("notes") or ""), now, now),
                 )
-            self.conn.commit()
-            return dict(self.conn.execute(
-                "SELECT * FROM content_plan_versions WHERE id=?", (version_id,)
+            row = dict(self.conn.execute(
+                "SELECT * FROM sub_plan_versions WHERE id=?", (version_id,)
             ).fetchone())
+            self.conn.commit()
+            return row
         except Exception:
             self.conn.rollback()
             raise
 
-    def activate_subplan_version(self, version_id: int) -> dict[str, Any]:
+    def activate_subplan_version(self, version_id: int, *, reviewer: str) -> dict[str, Any]:
         now = _now()
         self._begin()
         try:
             row = self.conn.execute(
-                "SELECT * FROM content_plan_versions WHERE id=?", (version_id,)
+                "SELECT * FROM sub_plan_versions WHERE id=?", (version_id,)
             ).fetchone()
             if row is None:
                 raise PlanVersionError("子计划版本不存在")
             if row["status"] != "draft":
-                raise PlanVersionError("只有子计划草稿版本可以生效")
+                raise PlanVersionError("只有子计划草稿版本可以审核生效")
+            identity = self.conn.execute(
+                "SELECT * FROM sub_plans WHERE id=?", (row["sub_plan_id"],)
+            ).fetchone()
+            if identity is None:
+                raise PlanVersionError("子计划身份不存在")
+            if int(row["master_plan_version_id"]) != int(identity["master_plan_version_id"]):
+                raise PlanVersionError("子计划版本与所属主计划版本不一致")
             self.conn.execute(
-                """UPDATE content_plan_versions SET status='archived'
-                   WHERE plan_id=? AND status='effective'""", (row["plan_id"],)
+                """UPDATE sub_plan_versions SET status='archived',superseded_at=?
+                   WHERE sub_plan_id=? AND status='effective'""", (now, row["sub_plan_id"])
             )
             self.conn.execute(
-                """UPDATE content_plan_versions SET status='effective',effective_at=?
-                   WHERE id=? AND status='draft'""", (now, version_id)
+                """UPDATE sub_plan_versions
+                   SET status='effective',reviewed_at=?,reviewed_by=?,effective_at=?
+                   WHERE id=? AND status='draft'""",
+                (now, reviewer, now, version_id),
             )
             self.conn.execute(
-                """UPDATE content_plans SET version=?,master_plan_version_id=?,updated_at=?
-                   WHERE id=?""",
-                (row["version_no"], row["master_plan_version_id"], now, row["plan_id"]),
+                """UPDATE sub_plans SET current_version_id=?,master_plan_version_id=?,
+                       status='active',updated_at=? WHERE id=?""",
+                (version_id, row["master_plan_version_id"], now, row["sub_plan_id"]),
             )
             self.conn.commit()
             return dict(self.conn.execute(
-                "SELECT * FROM content_plan_versions WHERE id=?", (version_id,)
+                "SELECT * FROM sub_plan_versions WHERE id=?", (version_id,)
             ).fetchone())
         except Exception:
             self.conn.rollback()
             raise
 
+    def reject_subplan_version(self, version_id: int, *, reviewer: str, reason: str) -> dict[str, Any]:
+        reason = str(reason or "").strip()
+        if not reason:
+            raise PlanVersionError("审核拒绝必须填写原因")
+        cur = self.conn.execute(
+            """UPDATE sub_plan_versions
+               SET status='rejected',reviewed_at=?,reviewed_by=?,review_note=?
+               WHERE id=? AND status='draft'""",
+            (_now(), reviewer, reason[:1000], version_id),
+        )
+        if cur.rowcount != 1:
+            raise PlanVersionError("只有存在的草稿版本可以审核拒绝")
+        self.conn.commit()
+        return dict(self.conn.execute(
+            "SELECT * FROM sub_plan_versions WHERE id=?", (version_id,)
+        ).fetchone())
+
+    # ------------------------------------------------------------------
+    # Stage lifecycle and publish progress
+    # ------------------------------------------------------------------
+    def update_stage_status(self, stage_id: int, status: str) -> dict[str, Any]:
+        allowed = {"pending", "in_progress", "completed", "paused", "cancelled"}
+        if status not in allowed:
+            raise PlanVersionError("无效的阶段状态")
+        row = self.conn.execute(
+            "SELECT status FROM sub_plan_stages WHERE id=?", (stage_id,)
+        ).fetchone()
+        if row is None:
+            raise PlanVersionError("阶段不存在")
+        transitions = {
+            "pending": {"pending", "in_progress", "paused", "cancelled"},
+            "in_progress": {"in_progress", "completed", "paused", "cancelled"},
+            "paused": {"paused", "in_progress", "cancelled"},
+            "completed": {"completed"},
+            "cancelled": {"cancelled"},
+        }
+        if status not in transitions[row["status"]]:
+            raise PlanVersionError(f"阶段状态不允许从 {row['status']} 变更为 {status}")
+        self.conn.execute(
+            "UPDATE sub_plan_stages SET status=?,updated_at=? WHERE id=?",
+            (status, _now(), stage_id),
+        )
+        self.conn.commit()
+        return dict(self.conn.execute(
+            "SELECT * FROM sub_plan_stages WHERE id=?", (stage_id,)
+        ).fetchone())
+
+    def get_stage_publish_stats(self, stage_id: int) -> dict[str, Any]:
+        row = self.conn.execute(
+            "SELECT * FROM sub_plan_stage_publish_stats WHERE stage_id=?", (stage_id,)
+        ).fetchone()
+        if row is None:
+            raise PlanVersionError("阶段发布统计不存在")
+        return dict(row)
+
+    # ------------------------------------------------------------------
+    # Immutable round binding and persistent opening idempotency
+    # ------------------------------------------------------------------
     def bind_round(
         self,
         round_id: int,
         *,
         master_plan_version_id: int,
-        content_plan_version_id: Optional[int] = None,
-        content_plan_stage_id: Optional[int] = None,
+        sub_plan_id: Optional[str] = None,
+        sub_plan_version_id: Optional[int] = None,
+        sub_plan_stage_id: Optional[int] = None,
     ) -> None:
-        """Persist the exact versions consumed by a round; never infer from current settings."""
         master = self.conn.execute(
             "SELECT plan_signature FROM master_plan_versions WHERE id=?",
             (master_plan_version_id,),
         ).fetchone()
         if master is None:
             raise PlanVersionError("轮次绑定的主计划版本不存在")
-        if content_plan_stage_id is not None:
-            if content_plan_version_id is None:
-                raise PlanVersionError("指定阶段时必须同时指定子计划版本")
+
+        sub_snapshot = stage_snapshot = None
+        if any(value is not None for value in (sub_plan_id, sub_plan_version_id, sub_plan_stage_id)):
+            if not all(value is not None for value in (sub_plan_id, sub_plan_version_id, sub_plan_stage_id)):
+                raise PlanVersionError("子计划 ID、版本 ID 和阶段 ID 必须同时提供")
+            version = self.conn.execute(
+                """SELECT * FROM sub_plan_versions
+                   WHERE id=? AND sub_plan_id=? AND master_plan_version_id=?""",
+                (sub_plan_version_id, sub_plan_id, master_plan_version_id),
+            ).fetchone()
+            if version is None:
+                raise PlanVersionError("子计划版本与子计划/主计划归属不匹配")
             stage = self.conn.execute(
-                """SELECT 1 FROM content_plan_stages
-                   WHERE id=? AND content_plan_version_id=?""",
-                (content_plan_stage_id, content_plan_version_id),
+                """SELECT * FROM sub_plan_stages
+                   WHERE id=? AND sub_plan_version_id=?""",
+                (sub_plan_stage_id, sub_plan_version_id),
             ).fetchone()
             if stage is None:
                 raise PlanVersionError("阶段不属于指定的子计划版本")
-        elif content_plan_version_id is not None and self.conn.execute(
-            "SELECT 1 FROM content_plan_versions WHERE id=?",
-            (content_plan_version_id,),
-        ).fetchone() is None:
-            raise PlanVersionError("轮次绑定的子计划版本不存在")
+            sub_snapshot = version["snapshot_json"]
+            stage_snapshot = json.dumps(dict(stage), ensure_ascii=False, sort_keys=True)
+
         cur = self.conn.execute(
-            """UPDATE spiral_rounds SET master_plan_version_id=?,
-                   content_plan_version_id=?,content_plan_stage_id=?,
-                   plan_signature=?,plan_attribution_status='resolved'
+            """UPDATE spiral_rounds SET master_plan_version_id=?,sub_plan_id=?,
+                   sub_plan_version_id=?,sub_plan_stage_id=?,sub_plan_snapshot=?,
+                   sub_plan_stage_snapshot=?,plan_signature=?,plan_attribution_status='resolved'
                WHERE id=?""",
-            (master_plan_version_id, content_plan_version_id, content_plan_stage_id,
+            (master_plan_version_id, sub_plan_id, sub_plan_version_id,
+             sub_plan_stage_id, sub_snapshot, stage_snapshot,
              master["plan_signature"], round_id),
         )
         if cur.rowcount != 1:
@@ -298,19 +408,30 @@ class PlanVersionStore:
         self,
         idempotency_key: str,
         request_hash: str,
-        master_plan_version_id: int,
         *,
+        master_plan_version_id: int,
+        sub_plan_id: str,
+        sub_plan_version_id: int,
+        sub_plan_stage_id: int,
         lease_seconds: int = 300,
     ) -> dict[str, Any]:
-        """Acquire a durable scheduler lease; same key cannot open two rounds."""
+        """Acquire a tenant-local durable lease for one subplan/version/stage slot."""
         key = str(idempotency_key or "").strip()
         digest = str(request_hash or "").strip()
         if not key or len(key) > 200 or not digest or len(digest) > 128:
             raise PlanVersionError("自动开轮幂等键或请求摘要无效")
-        if self.conn.execute(
-            "SELECT 1 FROM master_plan_versions WHERE id=?", (master_plan_version_id,)
-        ).fetchone() is None:
-            raise PlanVersionError("自动开轮引用的主计划版本不存在")
+        version = self.conn.execute(
+            """SELECT 1 FROM sub_plan_versions
+               WHERE id=? AND sub_plan_id=? AND master_plan_version_id=? AND status='effective'""",
+            (sub_plan_version_id, sub_plan_id, master_plan_version_id),
+        ).fetchone()
+        stage = self.conn.execute(
+            """SELECT 1 FROM sub_plan_stages
+               WHERE id=? AND sub_plan_version_id=? AND status IN ('pending','in_progress')""",
+            (sub_plan_stage_id, sub_plan_version_id),
+        ).fetchone()
+        if version is None or stage is None:
+            raise PlanVersionError("自动开轮必须绑定有效子计划版本及可执行阶段")
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat(timespec="seconds")
         lease_until = (now_dt + timedelta(seconds=max(30, min(int(lease_seconds), 3600)))).isoformat(timespec="seconds")
@@ -319,8 +440,13 @@ class PlanVersionStore:
             row = self.conn.execute(
                 "SELECT * FROM round_open_idempotency WHERE idempotency_key=?", (key,)
             ).fetchone()
+            expected = (digest, int(master_plan_version_id), sub_plan_id,
+                        int(sub_plan_version_id), int(sub_plan_stage_id))
             if row is not None:
-                if row["request_hash"] != digest or int(row["master_plan_version_id"]) != int(master_plan_version_id):
+                actual = (row["request_hash"], int(row["master_plan_version_id"]),
+                          row["sub_plan_id"], int(row["sub_plan_version_id"]),
+                          int(row["sub_plan_stage_id"]))
+                if actual != expected:
                     raise PlanVersionError("相同幂等键对应不同开轮请求，拒绝重复执行")
                 if row["status"] == "created":
                     self.conn.commit()
@@ -336,10 +462,11 @@ class PlanVersionStore:
             else:
                 self.conn.execute(
                     """INSERT INTO round_open_idempotency(
-                        idempotency_key,request_hash,master_plan_version_id,status,
-                        lease_until,created_at,updated_at
-                    ) VALUES(?,?,?,'reserved',?,?,?)""",
-                    (key, digest, master_plan_version_id, lease_until, now, now),
+                        idempotency_key,request_hash,master_plan_version_id,sub_plan_id,
+                        sub_plan_version_id,sub_plan_stage_id,status,lease_until,created_at,updated_at
+                    ) VALUES(?,?,?,?,?,?,'reserved',?,?,?)""",
+                    (key, digest, master_plan_version_id, sub_plan_id,
+                     sub_plan_version_id, sub_plan_stage_id, lease_until, now, now),
                 )
             self.conn.commit()
             return {"acquired": True, "status": "reserved", "round_id": None, "lease_until": lease_until}
@@ -358,10 +485,14 @@ class PlanVersionStore:
             if lock is None or lock["status"] != "reserved":
                 raise PlanVersionError("自动开轮租约不存在或已失效")
             round_row = self.conn.execute(
-                "SELECT master_plan_version_id FROM spiral_rounds WHERE id=?", (round_id,)
+                """SELECT master_plan_version_id,sub_plan_id,sub_plan_version_id,sub_plan_stage_id
+                   FROM spiral_rounds WHERE id=?""", (round_id,)
             ).fetchone()
-            if round_row is None or round_row["master_plan_version_id"] != lock["master_plan_version_id"]:
-                raise PlanVersionError("轮次尚未绑定租约指定的主计划版本")
+            expected = (lock["master_plan_version_id"], lock["sub_plan_id"],
+                        lock["sub_plan_version_id"], lock["sub_plan_stage_id"])
+            actual = tuple(round_row) if round_row is not None else None
+            if actual != expected:
+                raise PlanVersionError("轮次绑定与自动开轮租约不一致")
             self.conn.execute(
                 """UPDATE round_open_idempotency
                    SET status='created',round_id=?,lease_until=NULL,updated_at=?
@@ -383,44 +514,10 @@ class PlanVersionStore:
         )
         self.conn.commit()
 
-    def update_stage_status(self, stage_id: int, status: str) -> dict[str, Any]:
-        allowed = {"pending", "in_progress", "completed", "paused", "cancelled"}
-        if status not in allowed:
-            raise PlanVersionError("无效的阶段状态")
-        row = self.conn.execute(
-            "SELECT status FROM content_plan_stages WHERE id=?", (stage_id,)
-        ).fetchone()
-        if row is None:
-            raise PlanVersionError("阶段不存在")
-        transitions = {
-            "pending": {"pending", "in_progress", "paused", "cancelled"},
-            "in_progress": {"in_progress", "completed", "paused", "cancelled"},
-            "paused": {"paused", "in_progress", "cancelled"},
-            "completed": {"completed"},
-            "cancelled": {"cancelled"},
-        }
-        if status not in transitions[row["status"]]:
-            raise PlanVersionError(f"阶段状态不允许从 {row['status']} 变更为 {status}")
-        self.conn.execute(
-            "UPDATE content_plan_stages SET status=?,updated_at=? WHERE id=?",
-            (status, _now(), stage_id),
-        )
-        self.conn.commit()
-        return dict(self.conn.execute(
-            "SELECT * FROM content_plan_stages WHERE id=?", (stage_id,)
-        ).fetchone())
-
-    def get_stage_publish_stats(self, stage_id: int) -> dict[str, Any]:
-        row = self.conn.execute(
-            "SELECT * FROM content_plan_stage_publish_stats WHERE stage_id=?",
-            (stage_id,),
-        ).fetchone()
-        if row is None:
-            raise PlanVersionError("阶段发布统计不存在")
-        return dict(row)
-
+    # ------------------------------------------------------------------
+    # Read-only consistency audit and legacy attribution queue
+    # ------------------------------------------------------------------
     def validate_integrity(self) -> dict[str, Any]:
-        """Read-only consistency audit for version links and legacy attribution."""
         issues: list[dict[str, Any]] = []
         fk_errors = self.conn.execute("PRAGMA foreign_key_check").fetchall()
         if fk_errors:
@@ -432,17 +529,13 @@ class PlanVersionStore:
         invalid_signatures = []
         for row in versions:
             try:
-                snapshot = json.loads(row["plan_snapshot"])
-                actual = self._signer.compute_signature(snapshot)
+                actual = self._signer.compute_signature(json.loads(row["plan_snapshot"]))
             except (TypeError, ValueError):
                 actual = None
             if actual != row["plan_signature"]:
                 invalid_signatures.append(int(row["id"]))
         if invalid_signatures:
-            issues.append({
-                "code": "master_plan_signature_mismatch",
-                "version_ids": invalid_signatures,
-            })
+            issues.append({"code": "master_plan_signature_mismatch", "version_ids": invalid_signatures})
 
         mismatched_rounds = self.conn.execute(
             """SELECT r.id FROM spiral_rounds r
@@ -452,71 +545,60 @@ class PlanVersionStore:
                       OR r.plan_signature != v.plan_signature)"""
         ).fetchall()
         if mismatched_rounds:
-            issues.append({
-                "code": "round_master_version_mismatch",
-                "round_ids": [int(r["id"]) for r in mismatched_rounds],
-            })
+            issues.append({"code": "round_master_version_mismatch",
+                           "round_ids": [int(r["id"]) for r in mismatched_rounds]})
 
-        unresolved = self.conn.execute(
-            """SELECT id,plan_signature,plan_attribution_status
-               FROM spiral_rounds
-               WHERE master_plan_version_id IS NULL
-                  OR plan_attribution_status!='resolved'"""
-        ).fetchall()
-        if unresolved:
-            issues.append({
-                "code": "round_attribution_pending",
-                "round_ids": [int(r["id"]) for r in unresolved],
-            })
-
-        bad_stage_links = self.conn.execute(
+        bad_subplan_links = self.conn.execute(
             """SELECT r.id FROM spiral_rounds r
-               LEFT JOIN content_plan_stages s
-                 ON s.id=r.content_plan_stage_id
-                AND s.content_plan_version_id=r.content_plan_version_id
-               WHERE r.content_plan_stage_id IS NOT NULL AND s.id IS NULL"""
+               LEFT JOIN sub_plan_versions v
+                 ON v.id=r.sub_plan_version_id AND v.sub_plan_id=r.sub_plan_id
+                AND v.master_plan_version_id=r.master_plan_version_id
+               LEFT JOIN sub_plan_stages s
+                 ON s.id=r.sub_plan_stage_id AND s.sub_plan_version_id=r.sub_plan_version_id
+               WHERE r.sub_plan_id IS NOT NULL
+                 AND (v.id IS NULL OR s.id IS NULL)"""
         ).fetchall()
-        if bad_stage_links:
-            issues.append({
-                "code": "round_subplan_stage_mismatch",
-                "round_ids": [int(r["id"]) for r in bad_stage_links],
-            })
+        if bad_subplan_links:
+            issues.append({"code": "round_subplan_stage_mismatch",
+                           "round_ids": [int(r["id"]) for r in bad_subplan_links]})
 
-        active_pointer = self.conn.execute(
-            "SELECT active_version_id FROM plan_settings WHERE id=1"
-        ).fetchone()
-        if active_pointer is not None:
-            effective_pointer = self.conn.execute(
-                "SELECT id FROM master_plan_versions WHERE status='effective'"
-            ).fetchone()
-            if effective_pointer is None or active_pointer["active_version_id"] != effective_pointer["id"]:
-                issues.append({"code": "active_plan_pointer_mismatch"})
-
-        effective_master_count = int(self.conn.execute(
+        pending = self.conn.execute(
+            """SELECT id FROM spiral_rounds
+               WHERE master_plan_version_id IS NULL OR plan_attribution_status!='resolved'"""
+        ).fetchall()
+        effective_count = int(self.conn.execute(
             "SELECT COUNT(*) FROM master_plan_versions WHERE status='effective'"
         ).fetchone()[0])
-        if effective_master_count > 1:
-            issues.append({
-                "code": "multiple_effective_master_versions",
-                "count": effective_master_count,
-            })
+        if effective_count > 1:
+            issues.append({"code": "multiple_effective_master_versions", "count": effective_count})
+
+        pointer = self.conn.execute(
+            "SELECT active_version_id FROM plan_settings WHERE id=1"
+        ).fetchone()
+        effective = self.conn.execute(
+            "SELECT id FROM master_plan_versions WHERE status='effective'"
+        ).fetchone()
+        if pointer is not None and (
+            effective is None or pointer["active_version_id"] != effective["id"]
+        ):
+            issues.append({"code": "active_plan_pointer_mismatch"})
 
         return {
             "ok": not issues,
             "issues": issues,
             "counts": {
                 "master_plan_versions": len(versions),
-                "rounds_pending_attribution": len(unresolved),
+                "rounds_pending_attribution": len(pending),
                 "foreign_key_violations": len(fk_errors),
-                "effective_master_versions": effective_master_count,
+                "effective_master_versions": effective_count,
             },
         }
 
     def list_pending_round_attribution(self, limit: int = 500) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 2000))
-        rows = self.conn.execute(
-            """SELECT id,round_number,status,created_at,plan_signature
-               FROM spiral_rounds WHERE plan_attribution_status IN ('pending','manual_review')
+        return [dict(row) for row in self.conn.execute(
+            """SELECT id,round_number,status,created_at,plan_signature,plan_attribution_status
+               FROM spiral_rounds
+               WHERE plan_attribution_status IN ('pending','manual_review')
                ORDER BY id LIMIT ?""", (limit,)
-        ).fetchall()
-        return [dict(row) for row in rows]
+        ).fetchall()]
