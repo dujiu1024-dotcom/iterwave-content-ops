@@ -222,8 +222,13 @@ DRAFT_TRANSITIONS: dict[str, set[str]] = {
 class DraftStateMachine:
     """单篇草稿状态机（drafts.status）。"""
 
-    def __init__(self, db_conn):
+    def __init__(self, db_conn, cfg=None):
         self.db = db_conn
+        self.cfg = cfg
+
+    def _business_now(self) -> datetime:
+        """使用该草稿所属账号组的业务时区。"""
+        return business_now(self.cfg)
 
     def transition(
         self, draft_id: str, target: str, reason: str = "",
@@ -249,9 +254,9 @@ class DraftStateMachine:
 
             update_fields = {"status": target}
             if target == "draft_saved":
-                update_fields["saved_at"] = datetime.now().isoformat()
+                update_fields["saved_at"] = self._business_now().isoformat()
             if target == "user_published":
-                update_fields["user_confirmed_at"] = datetime.now().isoformat()
+                update_fields["user_confirmed_at"] = self._business_now().isoformat()
             if extra_updates:
                 update_fields.update(extra_updates)
 
