@@ -31,21 +31,21 @@ def active_subplan_stage(conn, *, today: str | None = None, advance: bool = Fals
     ).fetchall()
     first_blocker = None
     if not identities:
-        paused = conn.execute(
-            "SELECT id FROM sub_plans WHERE status='paused' AND current_version_id IS NOT NULL ORDER BY updated_at DESC LIMIT 1"
-        ).fetchone()
-        if paused:
-            return {"blocker": "subplan_paused", "sub_plan_id": paused["id"]}
         superseded = conn.execute(
             """SELECT p.id,p.master_plan_version_id FROM sub_plans p
                JOIN master_plan_versions m ON m.id=p.master_plan_version_id
-               WHERE p.status='active' AND m.status!='effective'
+               WHERE p.status IN ('active','paused') AND m.status!='effective'
                ORDER BY p.updated_at DESC LIMIT 1"""
         ).fetchone()
         if superseded:
             return {"blocker": "master_version_superseded",
                     "sub_plan_id": superseded["id"],
                     "master_plan_version_id": superseded["master_plan_version_id"]}
+        paused = conn.execute(
+            "SELECT id FROM sub_plans WHERE status='paused' AND current_version_id IS NOT NULL ORDER BY updated_at DESC LIMIT 1"
+        ).fetchone()
+        if paused:
+            return {"blocker": "subplan_paused", "sub_plan_id": paused["id"]}
     for identity in identities:
         stages = conn.execute(
             """SELECT s.*,COALESCE(stats.confirmed_published_count,0) AS confirmed_published_count
