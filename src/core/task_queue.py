@@ -1,7 +1,7 @@
 """持久化全局任务队列。
 
 队列位于 shared/system.db，与当前活动账号组无关。所有业务任务必须显式携带
-tenant_id；消费者只根据任务快照构造对应账号组运行时，绝不读取活动账号组。
+tenant_id；不同账号组可并行消费，同一账号组同一时刻最多一个任务运行。
 """
 from __future__ import annotations
 
@@ -59,10 +59,10 @@ class TaskQueueError(RuntimeError):
 
 
 class GlobalTaskQueue:
-    """基于 SQLite 的单消费者 FIFO 队列，跨账号组共享且可在重启后恢复。
+    """基于 SQLite 的多消费者队列，跨账号组共享且可在重启后恢复。
 
-    claim_next 使用 BEGIN IMMEDIATE + 全局 worker lease，确保多个 API worker
-    不会同时消费不同任务。任务租约需要由消费者定期续期。
+    claim_next 使用 BEGIN IMMEDIATE 原子领取；worker lease 按 owner 隔离，
+    同一账号组只允许一个 running 任务，不同账号组可并行。任务租约需定期续期。
     """
 
     def __init__(self, system_db_file: Path | str):
@@ -121,6 +121,10 @@ class GlobalTaskQueue:
                 CREATE TABLE IF NOT EXISTS global_task_worker_lease (
                     singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
                     owner TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS global_task_worker_leases (
+                    owner TEXT PRIMARY KEY,
                     expires_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS global_task_actions (
@@ -286,28 +290,35 @@ class GlobalTaskQueue:
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            lease = conn.execute(
-                "SELECT owner,expires_at FROM global_task_worker_lease WHERE singleton_id=1"
+            owned_task = conn.execute(
+                "SELECT 1 FROM global_task_queue WHERE status='running' AND lease_owner=? LIMIT 1",
+                (owner,),
             ).fetchone()
-            if lease and lease["owner"] != owner and lease["expires_at"] > _stamp(now):
+            if owned_task:
+                # 不允许同一 worker 重入领取；保留其正在使用的租约供心跳续期。
                 conn.commit()
                 return None
             conn.execute(
-                "INSERT INTO global_task_worker_lease(singleton_id,owner,expires_at) VALUES(1,?,?) "
-                "ON CONFLICT(singleton_id) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at",
+                "INSERT INTO global_task_worker_leases(owner,expires_at) VALUES(?,?) "
+                "ON CONFLICT(owner) DO UPDATE SET expires_at=excluded.expires_at",
                 (owner, expires),
             )
+            # 全局可并行消费，但同一账号组同时只运行一个任务：
+            # 避免多个 worker 并发推进同一租户的轮次/调度状态，同时跳过被占用租户，
+            # 让其他账号组不再被队首的长任务阻塞。
             row = conn.execute(
-                "SELECT * FROM global_task_queue WHERE status='queued' "
-                "AND COALESCE(available_at, created_at)<=? "
-                "ORDER BY queue_order ASC LIMIT 1",
-                (_stamp(now),),
+                "SELECT q.* FROM global_task_queue q "
+                "WHERE q.status='queued' AND COALESCE(q.available_at,q.created_at)<=? "
+                "AND NOT EXISTS (SELECT 1 FROM global_task_queue running "
+                "                WHERE running.tenant_id=q.tenant_id AND running.status='running') "
+                "AND NOT EXISTS (SELECT 1 FROM global_task_queue owned "
+                "                WHERE owned.lease_owner=? AND owned.status='running') "
+                "ORDER BY q.queue_order ASC LIMIT 1",
+                (_stamp(now), owner),
             ).fetchone()
             if row is None:
-                # 空闲消费者不长期占用全局租约；多 API worker 场景下，
-                # 当前消费者进程退出后，其他 worker 无需等待租约超时即可接管。
                 conn.execute(
-                    "DELETE FROM global_task_worker_lease WHERE singleton_id=1 AND owner=?",
+                    "DELETE FROM global_task_worker_leases WHERE owner=?",
                     (owner,),
                 )
                 conn.commit()
@@ -335,9 +346,10 @@ class GlobalTaskQueue:
         try:
             conn.execute("BEGIN IMMEDIATE")
             lease = conn.execute(
-                "SELECT owner FROM global_task_worker_lease WHERE singleton_id=1"
+                "SELECT owner FROM global_task_worker_leases WHERE owner=? AND expires_at>?",
+                (owner, _stamp()),
             ).fetchone()
-            if not lease or lease["owner"] != owner:
+            if not lease:
                 conn.rollback()
                 return False
             cursor = conn.execute(
@@ -347,7 +359,7 @@ class GlobalTaskQueue:
             )
             if cursor.rowcount:
                 conn.execute(
-                    "UPDATE global_task_worker_lease SET expires_at=? WHERE singleton_id=1 AND owner=?",
+                    "UPDATE global_task_worker_leases SET expires_at=? WHERE owner=?",
                     (expires, owner),
                 )
             conn.commit()
@@ -424,7 +436,7 @@ class GlobalTaskQueue:
             conn.close()
 
     def recover_orphaned_running(self) -> dict[str, int]:
-        """单 Uvicorn worker 启动时，立即回收上一进程遗留的 running 任务。"""
+        """服务实例启动时，立即回收上一进程遗留的 running 任务和 worker leases。"""
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -435,7 +447,9 @@ class GlobalTaskQueue:
                 "lease_owner=NULL,lease_expires_at=NULL WHERE status='running'",
                 (_stamp(),),
             )
+            # 清理旧版单消费者租约和新版按 owner 分片的租约。
             conn.execute("DELETE FROM global_task_worker_lease WHERE singleton_id=1")
+            conn.execute("DELETE FROM global_task_worker_leases")
             conn.commit()
             return {"interrupted": cursor.rowcount}
         except Exception:
@@ -457,7 +471,7 @@ class GlobalTaskQueue:
                 conn.commit()
                 return False
             cursor = conn.execute(
-                "DELETE FROM global_task_worker_lease WHERE singleton_id=1 AND owner=?",
+                "DELETE FROM global_task_worker_leases WHERE owner=?",
                 (owner,),
             )
             conn.commit()
@@ -494,7 +508,7 @@ class GlobalTaskQueue:
                 (now, now),
             )
             conn.execute(
-                "DELETE FROM global_task_worker_lease WHERE singleton_id=1 AND expires_at<=?", (now,)
+                "DELETE FROM global_task_worker_leases WHERE expires_at<=?", (now,)
             )
             conn.commit()
             return {"interrupted": cursor.rowcount}

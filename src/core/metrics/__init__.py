@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Optional
 
 import statistics
@@ -52,14 +52,14 @@ class Normalizer:
 
         window_days: 时效窗口；缺省读取评分配置。
         """
-        if window_days is None:
-            cfg = self.cfg
+        cfg = self.cfg
+        if cfg is None:
+            from ..task_context import current_config
+            cfg = current_config()
             if cfg is None:
-                from ..task_context import current_config
-                cfg = current_config()
-                if cfg is None:
-                    from ..config import get_config
-                    cfg = get_config()
+                from ..config import get_config
+                cfg = get_config()
+        if window_days is None:
             window_days = cfg.scoring.normalization_window_days
         # 可直接做 z-score 的比率指标
         rate_metrics = {
@@ -86,7 +86,8 @@ class Normalizer:
             "new_followers": "new_followers",
         }[metric]
 
-        cutoff = (datetime.now() - timedelta(days=window_days)).isoformat()
+        from ..timezone import business_now
+        cutoff = (business_now(cfg) - timedelta(days=window_days)).isoformat(timespec="seconds")
         rows = self.db.execute(
             f"SELECT {col_name} FROM metrics "
             f"WHERE platform = ? AND fetch_status IN ('success','partial') "
@@ -96,11 +97,20 @@ class Normalizer:
         ).fetchall()
 
         values = [r[0] for r in rows if r[0] is not None]
-        if len(values) < 2:
-            return None  # 样本不够
+        if len(values) < 3:
+            return None  # 少于 3 个独立样本不输出 z-score，避免小样本误导
+
+        # 样本量达到 100 后按 1%/99% 分位数 Winsorize，降低极端采集值对基准的影响。
+        # 小样本不截断，避免分位数估计本身放大噪声。
+        if len(values) >= 100:
+            ordered = sorted(float(value) for value in values)
+            p01 = self._percentile(ordered, 0.01)
+            p99 = self._percentile(ordered, 0.99)
+            values = [self.winsorize(float(value), p01, p99) for value in values]
 
         mean = statistics.mean(values)
-        std = statistics.pstdev(values)
+        # 使用样本标准差（n-1），避免总体标准差在小样本下系统性放大 |z|。
+        std = statistics.stdev(values)
         if std == 0:
             return None  # 无波动，z-score 无意义
 
@@ -135,6 +145,19 @@ class Normalizer:
     def winsorize(value: float, p01: float, p99: float) -> float:
         """按 1% / 99% 分位数截断极端值。"""
         return max(p01, min(p99, value))
+
+    @staticmethod
+    def _percentile(values: list[float], quantile: float) -> float:
+        """线性插值分位数，values 必须已排序且非空。"""
+        if not values:
+            raise ValueError("percentile requires at least one value")
+        position = (len(values) - 1) * min(1.0, max(0.0, quantile))
+        lower = int(math.floor(position))
+        upper = int(math.ceil(position))
+        if lower == upper:
+            return values[lower]
+        fraction = position - lower
+        return values[lower] + (values[upper] - values[lower]) * fraction
 
     # ------------------------------------------------------------------
     # 归一化比率计算（views=NULL/0 时全部返回 None）

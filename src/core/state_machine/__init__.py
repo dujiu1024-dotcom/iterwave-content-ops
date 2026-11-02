@@ -16,6 +16,8 @@ import json
 import logging
 import uuid
 from datetime import datetime
+
+from src.core.timezone import business_now
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -49,8 +51,13 @@ ROUND_TRANSITIONS: dict[str, set[str]] = {
 class RoundStateMachine:
     """轮次状态机（spiral_rounds.status）。"""
 
-    def __init__(self, db_conn):
+    def __init__(self, db_conn, cfg=None):
         self.db = db_conn
+        self.cfg = cfg
+
+    def _business_now(self) -> datetime:
+        """使用该状态机所属账号组的业务时区。"""
+        return business_now(self.cfg)
 
     # ------------------------------------------------------------------
     def can_transition(self, round_id: int, target: str) -> tuple[bool, str]:
@@ -69,49 +76,69 @@ class RoundStateMachine:
 
     def transition(self, round_id: int, target: str, reason: str = "") -> bool:
         """执行状态变更，记录 transition_log。同状态幂等不报错。"""
-        row = self.db.execute(
-            "SELECT status, transition_log FROM spiral_rounds WHERE id = ?", (round_id,)
-        ).fetchone()
-        if not row:
-            logger.error("轮次 %s 不存在", round_id)
-            return False
-        current = row[0]
-        if current == target:
-            logger.debug("轮次 %s 已是 %s（幂等）", round_id, target)
+        with self.db:
+            row = self.db.execute(
+                "SELECT status, transition_log FROM spiral_rounds WHERE id = ?", (round_id,)
+            ).fetchone()
+            if not row:
+                logger.error("轮次 %s 不存在", round_id)
+                return False
+            current = row[0]
+            if current == target:
+                logger.debug("轮次 %s 已是 %s（幂等）", round_id, target)
+                return True
+            ok, msg = self.can_transition(round_id, target)
+            if not ok:
+                logger.error("轮次状态变更失败: round=%s %s", round_id, msg)
+                return False
+
+            try:
+                log = json.loads(row[1]) if row[1] else []
+            except (json.JSONDecodeError, TypeError):
+                log = []
+
+            log.append({
+                "from": current,
+                "to": target,
+                "at": self._business_now().isoformat(),
+                "reason": reason,
+            })
+
+            # R8：阶段起点独立落库，供 round_timeout_sweeper 分阶段判定超时
+            now_str = self._business_now().isoformat(timespec="seconds")
+            fields: dict = {
+                "status": target,
+                "transition_log": json.dumps(log, ensure_ascii=False),
+            }
+            if target == "producing":
+                fields["producing_started_at"] = now_str
+            elif target == "collecting_metrics":
+                fields["collecting_metrics_started_at"] = now_str
+
+            # 比较并交换：状态和旧日志必须仍与读取时一致，防止并发迁移覆盖彼此的日志。
+            sql = (
+                "UPDATE spiral_rounds SET " + ", ".join(f"{k} = ?" for k in fields)
+                + " WHERE id = ? AND status = ? "
+                "AND COALESCE(transition_log, '') = COALESCE(?, '')"
+            )
+            cursor = self.db.execute(
+                sql, (*fields.values(), round_id, current, row[1] or ""),
+            )
+            if cursor.rowcount != 1:
+                latest = self.db.execute(
+                    "SELECT status FROM spiral_rounds WHERE id = ?", (round_id,)
+                ).fetchone()
+                # 其他请求已完成相同目标状态时视为幂等；不同目标则拒绝覆盖。
+                if latest and latest[0] == target:
+                    return True
+                logger.warning(
+                    "轮次状态并发冲突，迁移未执行 round=%s expected=%s target=%s",
+                    round_id, current, target,
+                )
+                return False
+            self.db.commit()
+            logger.info("🔄 轮次 %s: %s → %s (%s)", round_id, current, target, reason)
             return True
-        ok, msg = self.can_transition(round_id, target)
-        if not ok:
-            logger.error("轮次状态变更失败: round=%s %s", round_id, msg)
-            return False
-
-        try:
-            log = json.loads(row[1]) if row[1] else []
-        except (json.JSONDecodeError, TypeError):
-            log = []
-
-        log.append({
-            "from": current,
-            "to": target,
-            "at": datetime.now().isoformat(),
-            "reason": reason,
-        })
-
-        # R8：阶段起点独立落库，供 round_timeout_sweeper 分阶段判定超时
-        now_str = datetime.now().isoformat(timespec="seconds")
-        fields: dict = {
-            "status": target,
-            "transition_log": json.dumps(log, ensure_ascii=False),
-        }
-        if target == "producing":
-            fields["producing_started_at"] = now_str
-        elif target == "collecting_metrics":
-            fields["collecting_metrics_started_at"] = now_str
-
-        sql = "UPDATE spiral_rounds SET " + ", ".join(f"{k} = ?" for k in fields) + " WHERE id = ?"
-        self.db.execute(sql, (*fields.values(), round_id))
-        self.db.commit()
-        logger.info("🔄 轮次 %s: %s → %s (%s)", round_id, current, target, reason)
-        return True
 
     # ------------------------------------------------------------------
     # 轮次流转触发（R9/R10）
@@ -201,44 +228,66 @@ DRAFT_TRANSITIONS: dict[str, set[str]] = {
 class DraftStateMachine:
     """单篇草稿状态机（drafts.status）。"""
 
-    def __init__(self, db_conn):
+    def __init__(self, db_conn, cfg=None):
         self.db = db_conn
+        self.cfg = cfg
+
+    def _business_now(self) -> datetime:
+        """使用该草稿所属账号组的业务时区。"""
+        return business_now(self.cfg)
 
     def transition(
         self, draft_id: str, target: str, reason: str = "",
         extra_updates: Optional[dict] = None,
     ) -> bool:
         """执行单篇状态变更。同状态幂等（R16）—— 不报错、不写日志。"""
-        row = self.db.execute(
-            "SELECT status FROM drafts WHERE id = ?", (draft_id,)
-        ).fetchone()
-        if not row:
-            logger.error("草稿 %s 不存在", draft_id)
-            return False
-        current = row[0]
+        with self.db:
+            row = self.db.execute(
+                "SELECT status FROM drafts WHERE id = ?", (draft_id,)
+            ).fetchone()
+            if not row:
+                logger.error("草稿 %s 不存在", draft_id)
+                return False
+            current = row[0]
 
-        if current == target:
-            logger.debug("草稿 %s 已是 %s（幂等）", draft_id, target)
+            if current == target:
+                logger.debug("草稿 %s 已是 %s（幂等）", draft_id, target)
+                return True
+
+            if target not in DRAFT_TRANSITIONS.get(current, set()):
+                logger.error("非法迁移: draft %s %s → %s", draft_id, current, target)
+                return False
+
+            update_fields = {"status": target}
+            if target == "draft_saved":
+                update_fields["saved_at"] = self._business_now().isoformat()
+            if target == "user_published":
+                update_fields["user_confirmed_at"] = self._business_now().isoformat()
+            if extra_updates:
+                update_fields.update(extra_updates)
+
+            sets = ", ".join(f"{k} = ?" for k in update_fields)
+            values = list(update_fields.values()) + [draft_id]
+            # 条件更新保证并发迁移只有一个写入者成功，不允许旧状态覆盖新状态。
+            cursor = self.db.execute(
+                f"UPDATE drafts SET {sets} WHERE id = ? AND status = ?",
+                values + [current],
+            )
+            if cursor.rowcount != 1:
+                latest = self.db.execute(
+                    "SELECT status FROM drafts WHERE id = ?", (draft_id,)
+                ).fetchone()
+                # 其他请求已完成相同目标状态时视为幂等；不同目标则拒绝覆盖。
+                if latest and latest[0] == target:
+                    return True
+                logger.warning(
+                    "草稿状态并发冲突，迁移未执行 draft=%s expected=%s target=%s",
+                    draft_id, current, target,
+                )
+                return False
+            self.db.commit()
+            logger.info("🔄 草稿 %s: %s → %s (%s)", draft_id, current, target, reason)
             return True
-
-        if target not in DRAFT_TRANSITIONS.get(current, set()):
-            logger.error("非法迁移: draft %s %s → %s", draft_id, current, target)
-            return False
-
-        update_fields = {"status": target}
-        if target == "draft_saved":
-            update_fields["saved_at"] = datetime.now().isoformat()
-        if target == "user_published":
-            update_fields["user_confirmed_at"] = datetime.now().isoformat()
-        if extra_updates:
-            update_fields.update(extra_updates)
-
-        sets = ", ".join(f"{k} = ?" for k in update_fields)
-        values = list(update_fields.values()) + [draft_id]
-        self.db.execute(f"UPDATE drafts SET {sets} WHERE id = ?", values)
-        self.db.commit()
-        logger.info("🔄 草稿 %s: %s → %s (%s)", draft_id, current, target, reason)
-        return True
 
     # ------------------------------------------------------------------
     # R8 独立超时判定
@@ -262,7 +311,7 @@ class DraftStateMachine:
             started = datetime.fromisoformat(row[1])
         except ValueError:
             return False
-        return (now or datetime.now()) - started > timedelta(hours=timeout_hours)
+        return (now or self._business_now()) - started > timedelta(hours=timeout_hours)
 
     def check_expired_drafts(
         self, now: Optional[datetime] = None,
@@ -274,7 +323,7 @@ class DraftStateMachine:
         grace_hours），与轮次阶段超时互相独立；R9：按各自 saved_at 独立计时。
         """
         from datetime import timedelta
-        now = now or datetime.now()
+        now = now or self._business_now()
         cursor = self.db.execute(
             "SELECT id, saved_at, created_at FROM drafts WHERE status = 'draft_saved'"
         )

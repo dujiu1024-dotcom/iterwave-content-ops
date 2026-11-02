@@ -45,13 +45,6 @@ def test_active_aggregate_is_idempotent(tmp_path):
     assert first.task_id == again.task_id
 
 
-def test_worker_lease_prevents_parallel_consumers(tmp_path):
-    queue = make_queue(tmp_path)
-    queue.enqueue(task_type="round_run", tenant_id="a", payload={})
-    claimed = queue.claim_next("worker-1", lease_seconds=120)
-    assert claimed is not None
-    assert queue.claim_next("worker-2", lease_seconds=120) is None
-
 
 def test_failure_releases_queue_for_next_task(tmp_path):
     queue = make_queue(tmp_path)
@@ -112,18 +105,6 @@ def test_concurrent_duplicate_enqueue_creates_one_active_task(tmp_path):
     assert sum(created for _, created in results) == 1
     assert len({task.task_id for task, _ in results}) == 1
 
-
-def test_worker_lease_is_held_until_consumer_releases_it(tmp_path):
-    queue = make_queue(tmp_path)
-    first, _ = queue.enqueue(task_type="round_run", tenant_id="a", payload={"round_id": 1})
-    second, _ = queue.enqueue(task_type="round_run", tenant_id="b", payload={"round_id": 2})
-    claimed = queue.claim_next("worker-1", lease_seconds=120)
-    assert claimed and claimed.task_id == first.task_id
-    assert queue.finish(first.task_id, "worker-1", result={"ok": True})
-    # 任务状态已完成，但 worker 尚未释放全局租约，其他进程不能并行领取下一项。
-    assert queue.claim_next("worker-2", lease_seconds=120) is None
-    next_task = queue.claim_next("worker-1", lease_seconds=120)
-    assert next_task and next_task.task_id == second.task_id
 
 
 def test_worker_cannot_release_lease_while_task_is_running(tmp_path):
@@ -756,3 +737,47 @@ def test_recover_expired_is_idempotent_and_preserves_nonexpired_running_task(tmp
     assert queue.get(expired.task_id).status == "interrupted"
     assert queue.get(active.task_id).status == "running"
     assert queue.finish(active.task_id, "worker-b", result={"ok": True})
+
+
+def test_workers_run_different_tenants_in_parallel_but_serialize_same_tenant(tmp_path):
+    queue = make_queue(tmp_path)
+    first_a, _ = queue.enqueue(task_type="round_run", tenant_id="a", payload={"n": 1})
+    second_a, _ = queue.enqueue(task_type="round_run", tenant_id="a", payload={"n": 2})
+    first_b, _ = queue.enqueue(task_type="round_run", tenant_id="b", payload={"n": 3})
+
+    claimed_a = queue.claim_next("worker-1", lease_seconds=120)
+    claimed_b = queue.claim_next("worker-2", lease_seconds=120)
+    assert claimed_a is not None and claimed_a.task_id == first_a.task_id
+    assert claimed_b is not None and claimed_b.task_id == first_b.task_id
+    # A second task for tenant A cannot overlap its first task.
+    assert queue.claim_next("worker-3", lease_seconds=120) is None
+
+    assert queue.finish(claimed_a.task_id, "worker-1", result={"ok": True})
+    next_a = queue.claim_next("worker-3", lease_seconds=120)
+    assert next_a is not None and next_a.task_id == second_a.task_id
+
+
+def test_worker_lease_is_scoped_to_owner_not_global_queue(tmp_path):
+    queue = make_queue(tmp_path)
+    first, _ = queue.enqueue(task_type="round_run", tenant_id="a", payload={"round_id": 1})
+    second, _ = queue.enqueue(task_type="round_run", tenant_id="b", payload={"round_id": 2})
+    claimed = queue.claim_next("worker-1", lease_seconds=120)
+    assert claimed and claimed.task_id == first.task_id
+    assert queue.finish(first.task_id, "worker-1", result={"ok": True})
+
+    # worker-1 仍持有自己的租约，不应阻塞 worker-2 处理另一个账号组。
+    next_task = queue.claim_next("worker-2", lease_seconds=120)
+    assert next_task and next_task.task_id == second.task_id
+    assert queue.release_worker("worker-1") is True
+    assert queue.release_worker("worker-2") is False
+
+
+def test_reentrant_claim_does_not_drop_current_worker_lease(tmp_path):
+    queue = make_queue(tmp_path)
+    task, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={})
+    claimed = queue.claim_next("worker-a", lease_seconds=120)
+    assert claimed is not None and claimed.task_id == task.task_id
+
+    assert queue.claim_next("worker-a", lease_seconds=120) is None
+    assert queue.renew(task.task_id, "worker-a", lease_seconds=120) is True
+    assert queue.finish(task.task_id, "worker-a", result={"ok": True})

@@ -72,6 +72,10 @@ coverage/
 htmlcov/
 .tox/
 
+# ===== 账号组专用资料（仅本地自用，禁止提交 git）=====
+# 每个账号组在 accounts/<tenant_id>/ 下保存定位、选题、文案与主页资料
+/accounts/
+
 # ===== 内部文档（不上开源）=====
 AGENTS.md
 RULES.md

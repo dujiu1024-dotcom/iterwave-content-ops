@@ -326,20 +326,23 @@ hot_topics:
     dimension_match_required: true  # 🎯 维度匹配（不可关）
     publishability_required: true   # ✅ 可发布性（不可关）
 
-# ===== 文案生成 LLM（Agent Plan / 方舟）=====
-# R23：API Key 只放 .env 的 ARK_API_KEY，禁止写进本文件/日志/前端
-# enabled=false 或 .env 无 key → 自动降级为模板文案（不伪装成 AI 生成）
+# ===== 文案生成 LLM（主模型：商汤 SenseNova；兜底：火山方舟）=====
+# R23：API Key 只放 .env（SENSENOVA_API_KEY / ARK_API_KEY），禁止写进本文件/日志/前端
+# enabled=false 或两把 key 都缺失 → 自动降级为模板文案（不伪装成 AI 生成）
+# 主模型失败（超时/鉴权/额度/返回非法 JSON）时自动切换兜底模型重试一次
 llm:
-  enabled: false
-  provider: "ark"
-  # ⚠️ 通道选择（「系统设置 → 主模型与备用」可直接选，无需手改本文件）：
-  #   /api/v3      → 按量付费通道
-  #   /api/plan/v3 → 专属 Agent Plan 通道（Agent Plan 只支持套餐内模型，
-  #                  e.g. doubao-seed-2.1-lite / doubao-seed-2.0-mini / deepseek-v4.1-flash-economy）
-  base_url: "https://ark.cn-beijing.volces.com/api/plan/v3"
-  model: "doubao-seed-2.1-lite"
-  fallback_model: "doubao-seed-2.0-mini"   # 主模型失败时兜底；空 = 不启用（可在「系统设置」在线改）
-  api_key_env: "ARK_API_KEY"
+  enabled: true
+  provider: "sensenova"
+  base_url: "https://token.sensenova.cn/v1"
+  model: "deepseek-flash"
+  # 商汤默认开启思考模式，与 JSON 输出不兼容；关闭思考
+  thinking: "disabled"
+  api_key_env: "SENSENOVA_API_KEY"
+  fallback_provider: "ark"
+  # ⚠️ 火山兜底通道：/api/v3 = 按量付费；/api/plan/v3 = 专属 Agent Plan
+  fallback_base_url: "https://ark.cn-beijing.volces.com/api/plan/v3"
+  fallback_model: "doubao-seed-2.0-mini"   # 兜底模型；空 = 不启用（可在「系统设置」在线改）
+  fallback_api_key_env: "ARK_API_KEY"
   temperature: 0.7
   timeout_seconds: 60
 

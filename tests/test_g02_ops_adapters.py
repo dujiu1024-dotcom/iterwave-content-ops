@@ -81,8 +81,9 @@ def test_wechat_is_platform_unsupported_not_failure(cfg, conn, monkeypatch) -> N
     assert issubclass(PlatformUnsupportedError, AdapterError)
 
 
-def test_ops_engine_logs_skipped_for_unsupported_platform(cfg, conn) -> None:
-    """视频号被动回复：ops_logs 记 skipped，不记 failed。"""
+def test_ops_engine_logs_skipped_for_unsupported_platform(cfg, conn, monkeypatch) -> None:
+    """视频号被动回复：显式开启测试动作后，ops_logs 记 skipped，不记 failed。"""
+    monkeypatch.setenv("ITERWAVE_ENABLE_AUTOMATED_ENGAGEMENT", "1")
 
     class _Unsupported:
         async def reply_comment(self, draft_id, comment_id, content):
@@ -118,8 +119,9 @@ def test_ops_engine_logs_skipped_for_unsupported_platform(cfg, conn) -> None:
     assert n_failed == 0
 
 
-def test_ops_engine_logs_failed_when_login_missing(cfg, conn, no_login) -> None:
-    """无登录态：ops_logs 记 failed 并带原因（不允许静默吞掉）。"""
+def test_ops_engine_logs_failed_when_login_missing(cfg, conn, no_login, monkeypatch) -> None:
+    """无登录态：显式开启测试动作后，ops_logs 记 failed 并带原因。"""
+    monkeypatch.setenv("ITERWAVE_ENABLE_AUTOMATED_ENGAGEMENT", "1")
     from src.adapters.douyin import DouyinAdapter
 
     ad = DouyinAdapter(cfg, conn)

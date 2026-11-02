@@ -63,14 +63,14 @@ def test_single_page_renderer_rejects_out_of_range_page_before_io(tmp_path):
         )
 
 
-def test_single_page_renderer_rejects_changed_pagination_before_io(tmp_path):
+def test_single_page_renderer_rejects_changed_pagination(tmp_path):
     with pytest.raises(ValueError, match="正文分页与历史版本不一致"):
         render_single_page(
             title="标题", subtitle="副标题", body="第一段\n第二段\n第三段\n第四段\n第五段\n第六段",
-            page_index=1, total_pages=2, output_dir=tmp_path,
+            page_index=1, total_pages=3, output_dir=tmp_path,
             platform=__import__("src.adapters.base", fromlist=["Platform"]).Platform.XHS,
             footer="", theme="knowledge_infographic",
-            background_path=tmp_path / "not-created.png",
+            background_path=None,
         )
 
 
@@ -88,12 +88,48 @@ def test_every_supported_platform_has_explicit_visual_spec():
 
 def test_renderer_fails_closed_when_requested_font_resolves_to_fallback(monkeypatch):
     from types import SimpleNamespace
-    import src.core.visual_renderer as renderer
+    import shutil
+    import subprocess
 
-    monkeypatch.setattr(renderer.shutil, "which", lambda _name: "/usr/bin/fc-match")
+    monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/fc-match")
     monkeypatch.setattr(
-        renderer.subprocess, "run",
+        subprocess, "run",
         lambda *args, **kwargs: SimpleNamespace(stdout="DejaVu Sans", returncode=0),
     )
     with pytest.raises(RuntimeError, match="视觉字体不可用"):
         _assert_font_available("Noto Sans CJK SC")
+
+
+def test_renderer_fails_closed_without_fontconfig(monkeypatch):
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    with pytest.raises(RuntimeError, match="禁止静默回退"):
+        _assert_font_available("Noto Sans CJK SC")
+
+
+def test_catalog_is_single_source_for_renderer_and_api():
+    from src.core import visual_catalog
+
+    assert set(THEMES) == set(visual_catalog.style_keys())
+    catalog = visual_catalog.public_catalog()
+    assert [s["key"] for s in catalog["styles"]] == visual_catalog.style_keys()
+    assert all("installed" in f for f in catalog["fonts"])
+    opts = visual_catalog.resolve_render_options({
+        "style_key": "lifestyle", "primary_color": "#123456", "background_color": "#FAFAFA",
+        "text_color": "#111111", "component_style": "minimal",
+    })
+    assert opts["theme"] == "lifestyle"
+    assert opts["brand_palette"] == {"accent": "#123456", "bg": "#FAFAFA", "fg": "#111111",
+                                     "component_style": "minimal"}
+    with pytest.raises(ValueError):
+        visual_catalog.resolve_render_options({"font_family": "Comic Sans"})
+
+
+def test_resolved_palette_honours_bg_fg_and_component_style():
+    from src.core.visual_renderer import _resolve_palette
+
+    palette = _resolve_palette("knowledge_infographic", {"bg": "#000000", "fg": "#FFFFFF",
+                                                          "component_style": "editorial"})
+    assert palette["bg"] == "#000000" and palette["fg"] == "#FFFFFF"
+    assert palette["component_style"] == "editorial"

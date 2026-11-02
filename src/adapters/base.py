@@ -196,7 +196,11 @@ class MetricsSnapshot:
     ):
         self.platform = platform
         self.fetch_status = fetch_status
-        self.fetched_at = fetched_at or datetime.now()
+        if fetched_at is None:
+            from src.core.task_context import current_config
+            from src.core.timezone import business_now
+            fetched_at = business_now(current_config())
+        self.fetched_at = fetched_at
         self.likes = likes
         self.collects = collects
         self.comments = comments
@@ -330,27 +334,27 @@ class PlatformAdapter(ABC):
                 self.platform.value, type(exc).__name__,
             )
             return failed_snapshot(
-                self.platform, "平台作品列表读取不可用，请检查登录状态或服务状态后重试",
+                self.platform, "平台作品列表读取不可用，请检查登录状态或服务状态后重试", self.cfg,
             )
         except Exception:  # noqa: BLE001 — 登录失效 / 网络故障统一落 failed
             logger.exception("读回失败 platform=%s", self.platform.value)
             return failed_snapshot(
-                self.platform, "平台作品列表读取失败，请检查服务端运行日志后重试",
+                self.platform, "平台作品列表读取失败，请检查服务端运行日志后重试", self.cfg,
             )
 
         if not works:
             return failed_snapshot(
-                self.platform, "未读到作品列表（可能登录态失效或暂无已发布内容）",
+                self.platform, "未读到作品列表（可能登录态失效或暂无已发布内容）", self.cfg,
             )
 
         work = match_work(works, title, platform_draft_id)
         if work is None:
             return pending_snapshot(
-                self.platform, f"作品列表暂未匹配到标题「{(title or '')[:20]}」",
+                self.platform, f"作品列表暂未匹配到标题「{(title or '')[:20]}」", self.cfg,
             )
 
         return snapshot_from_work(
-            self.platform, work, json.dumps(work, ensure_ascii=False),
+            self.platform, work, json.dumps(work, ensure_ascii=False), self.cfg,
         )
 
     # ------------------------------------------------------------------

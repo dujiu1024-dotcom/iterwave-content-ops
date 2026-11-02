@@ -1,31 +1,41 @@
 """HTML/CSS + Chromium card renderer.
 
-This module owns deterministic typography/layout only. It does not claim OCR or
-semantic quality validation; those are separate pipeline gates.
+This module owns deterministic typography/layout and the geometry hard gate:
+
+* pagination is measured in the real browser (greedy fill by rendered height), never
+  estimated from paragraph counts, and exceeding the page limit raises instead of
+  truncating;
+* the requested font must really be installed (fontconfig + in-browser probe);
+* every network request from the rendering page is blocked (content is self-contained);
+* text regions are reported from the DOM so the OCR gate can read each one separately.
+
+Styles, fonts and component styles come from ``visual_catalog`` (single source).
 """
 from __future__ import annotations
 
 import base64
 import html
 import logging
-import shutil
-import subprocess
 import re
+import shutil  # noqa: F401  (kept for test monkeypatching of font detection)
+import subprocess  # noqa: F401
 import uuid
 from pathlib import Path
 
 from ..adapters.base import Platform
-from .visual_specs import build_infographic_components, get_visual_platform_spec
+from . import visual_catalog
+from .visual_specs import NUMBER_TOKEN, build_infographic_components, get_visual_platform_spec
 
 logger = logging.getLogger(__name__)
 
 CARD_SIZE = (1080, 1440)
-THEMES = {
-    "knowledge_infographic": {"bg": "#F3F5F7", "fg": "#17212B", "accent": "#2563EB", "muted": "#526171"},
-    "editorial_magazine": {"bg": "#F4F0E8", "fg": "#25231F", "accent": "#A34F36", "muted": "#6F685F"},
-    "business_poster": {"bg": "#101827", "fg": "#FFFFFF", "accent": "#F2B84B", "muted": "#D2D8E2"},
-    "lifestyle": {"bg": "#F2EEE8", "fg": "#34332F", "accent": "#66816D", "muted": "#77766E"},
-}
+# Read-only view of the catalog palettes (kept for callers/tests); edit visual_catalog.json.
+THEMES = {key: visual_catalog.style_palette(key) for key in visual_catalog.style_keys()}
+DEFAULT_STYLE = visual_catalog.default_style()
+DEFAULT_FONT = visual_catalog.default_font()
+_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
+
+
 def _relative_luminance(color: str) -> float:
     channels = [int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
     linear = [v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4 for v in channels]
@@ -36,15 +46,33 @@ def _contrast_ratio(foreground: str, background: str) -> float:
     first, second = sorted((_relative_luminance(foreground), _relative_luminance(background)), reverse=True)
     return (first + 0.05) / (second + 0.05)
 
+
 def _contrast_text(background: str) -> str:
     """Choose black or white text with the stronger WCAG contrast."""
     return max(("#000000", "#FFFFFF"), key=lambda color: _contrast_ratio(color, background))
 
 
+def _light_text(palette: dict) -> bool:
+    return _relative_luminance(palette["fg"]) > 0.5
+
+
+def _resolve_palette(theme: str, brand_palette: dict | None) -> dict:
+    """Catalog palette for the style plus validated tenant overrides (colors + component style)."""
+    palette: dict = {**THEMES.get(theme, THEMES[DEFAULT_STYLE])}
+    for key, value in (brand_palette or {}).items():
+        if key in {"bg", "fg", "accent", "muted"}:
+            if not (isinstance(value, str) and visual_catalog.HEX_COLOR.fullmatch(value)):
+                raise ValueError(f"品牌配色 {key} 必须为 #RRGGBB")
+            palette[key] = value
+        elif key == "component_style":
+            palette[key] = value
+    return palette
+
+
 def _validate_theme_contrast(theme: str, has_background_image: bool, palette_override: dict | None = None) -> float:
-    palette = {**THEMES.get(theme, THEMES["knowledge_infographic"]), **(palette_override or {})}
-    if has_background_image and theme == "business_poster":
-        # The 58% minimum black overlay bounds the brightest possible image pixel.
+    palette = {**THEMES.get(theme, THEMES[DEFAULT_STYLE]), **(palette_override or {})}
+    if has_background_image and _light_text(palette):
+        # The 60% minimum dark overlay bounds the brightest possible image pixel.
         background = "#666B75"
     elif has_background_image:
         # The 72% minimum white overlay bounds the darkest possible image pixel.
@@ -77,94 +105,79 @@ def _split_paragraphs(text: str, limit: int = 150) -> list[str]:
     return result or [""]
 
 
-def _pages(body: str, max_pages: int, capacity: int = 5,
-           max_page_chars: int = 320) -> list[list[str]]:
-    """Pack paragraphs by both count and text volume to avoid fixed-count overflow.
-
-    Paragraph count alone is not a useful proxy for rendered height: five 150-character
-    chunks can exceed the available canvas by a wide margin. Keep every source character
-    while splitting pages at a conservative text budget; Chromium remains the final
-    geometry authority and rejects any residual overflow.
-    """
-    if max_pages < 2:
-        raise ValueError("max_pages must allow a cover and at least one body page")
-    if capacity < 1 or max_page_chars < 1:
-        raise ValueError("page capacity and text budget must be positive")
-    blocks = _split_paragraphs(body)
-    pages: list[list[str]] = []
-    current: list[str] = []
-    current_chars = 0
-    for block in blocks:
-        if current and (len(current) >= capacity or current_chars + len(block) > max_page_chars):
-            pages.append(current)
-            current = []
-            current_chars = 0
-        current.append(block)
-        current_chars += len(block)
-    if current:
-        pages.append(current)
-    pages = pages or [[""]]
-    if len(pages) + 1 > max_pages:
-        raise ValueError(
-            f"正文需要 {len(pages) + 1} 页，超过配置上限 {max_pages} 页；"
-            "请先由视觉策划提炼内容，不允许静默截断"
-        )
-    return pages
+def _rich(text: str, highlight: str = "") -> str:
+    """Escape text and wrap every numeric token in a nowrap ``.num`` span (the first token
+    equal to ``highlight`` becomes the emphasised ``<strong>``). The OCR gate verifies each
+    ``.num`` box on its own, so numbers are checked exactly and independently of prose."""
+    out: list[str] = []
+    cursor = 0
+    highlighted = False
+    for match in NUMBER_TOKEN.finditer(text or ""):
+        out.append(html.escape(text[cursor:match.start()]))
+        token = html.escape(match.group(1))
+        if highlight and not highlighted and match.group(1) == highlight:
+            out.append(f'<strong class="num">{token}</strong>')
+            highlighted = True
+        else:
+            out.append(f'<span class="num">{token}</span>')
+        cursor = match.end()
+    out.append(html.escape((text or "")[cursor:]))
+    return "".join(out)
 
 
 def _document(*, title: str, subtitle: str, paragraphs: list[str], footer: str,
               page_text: str, theme: str, cover: bool, width: int, height: int,
               background_data_uri: str = "", palette_override: dict | None = None,
-              font_family: str = "Noto Sans CJK SC") -> str:
+              font_family: str = DEFAULT_FONT) -> str:
     overrides = palette_override or {}
     for color_key in ("bg", "fg", "accent", "muted"):
         if color_key in overrides and not re.fullmatch(r"#[0-9A-Fa-f]{6}", str(overrides[color_key])):
             raise ValueError(f"品牌配色 {color_key} 必须为 #RRGGBB")
-    component_style = str(overrides.get("component_style") or "card")
-    if component_style not in {"card", "minimal", "editorial"}:
+    component_style = str(overrides.get("component_style") or visual_catalog.default_component_style())
+    if component_style not in visual_catalog.component_style_keys():
         raise ValueError("不支持的组件样式")
     palette = {
-        **THEMES.get(theme, THEMES["knowledge_infographic"]),
+        **THEMES.get(theme, THEMES[DEFAULT_STYLE]),
         **{key: value for key, value in overrides.items() if key in {"bg", "fg", "accent", "muted"}},
     }
+    if font_family not in visual_catalog.font_families():
+        raise ValueError("不支持的字体族")
+    light_text = _light_text(palette)
+    panel_bg = "rgba(255,255,255,.08)" if light_text else "rgba(255,255,255,.56)"
+    panel_border = "rgba(255,255,255,.18)" if light_text else "rgba(23,33,43,.10)"
+    text_bg = "rgba(255,255,255,.05)" if light_text else "rgba(255,255,255,.32)"
     component_style_css = {
         "card": "",
-        "minimal": ".visual-component{padding:14px 0;border:0;border-radius:0;background:transparent}.visual-stat{border-left:6px solid " + palette["accent"] + "}",
+        "minimal": ".visual-component{padding:14px 0;border:0;border-radius:0;background:transparent}.visual-stat{border-left:6px solid " + palette["accent"] + ";padding-left:22px}",
         "editorial": ".visual-component{padding:18px 22px;border:0;border-bottom:2px solid " + palette["muted"] + ";border-radius:0;background:transparent}.visual-quote{border-left:6px solid " + palette["accent"] + "}",
-    }[component_style]
-    allowed_fonts = {"Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", "Arial"}
-    if font_family not in allowed_fonts:
-        raise ValueError("不支持的字体族")
-    safe_title = html.escape(title or "")
+    }.get(component_style, "")
+    safe_title = _rich(title or "")
     safe_subtitle = html.escape(subtitle or "")
     safe_footer = html.escape(footer or "")
     component_markup = []
     for component in build_infographic_components(paragraphs):
-        safe_text = html.escape(component.text)
         if component.kind == "step":
-            rest = component.text[len(component.label):].lstrip(" ：:、-")
+            rest = component.text[len(component.label):].lstrip(" ：:、-.．)）")
             component_markup.append(
-                f'<div class="visual-component visual-step"><span class="step-label">{html.escape(component.label)}</span>'
-                f'<p>{html.escape(rest or component.text)}</p></div>'
+                f'<div class="visual-component visual-step"><span class="step-label{" num" if component.label.isdigit() else ""}">{html.escape(component.label)}</span>'
+                f'<p>{_rich(rest or component.text, component.value)}</p></div>'
             )
         elif component.kind == "stat":
-            safe_value = html.escape(component.value)
-            highlighted = safe_text.replace(safe_value, f"<strong>{safe_value}</strong>", 1)
             component_markup.append(
-                f'<div class="visual-component visual-stat"><p>{highlighted}</p></div>'
+                f'<div class="visual-component visual-stat"><p>{_rich(component.text, component.value)}</p></div>'
             )
         elif component.kind == "quote":
             component_markup.append(
-                f'<blockquote class="visual-component visual-quote"><p>{safe_text}</p></blockquote>'
+                f'<blockquote class="visual-component visual-quote"><p>{_rich(component.text)}</p></blockquote>'
             )
         else:
             component_markup.append(
-                f'<div class="visual-component visual-text"><p>{safe_text}</p></div>'
+                f'<div class="visual-component visual-text"><p>{_rich(component.text)}</p></div>'
             )
     body = "".join(component_markup)
     overlay = (
         "rgba(8,14,24,.60),rgba(8,14,24,.68)"
-        if theme == "business_poster"
+        if light_text
         else "rgba(255,255,255,.72),rgba(255,255,255,.82)"
     )
     background_css = (
@@ -184,7 +197,7 @@ def _document(*, title: str, subtitle: str, paragraphs: list[str], footer: str,
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 *{{box-sizing:border-box}} html,body{{margin:0;width:{width}px;height:{height}px}}
-body{{font-family:"{font_family}","Source Han Sans SC","Microsoft YaHei",sans-serif;
+body{{font-family:"{font_family}",sans-serif;
 background:{palette['bg']};color:{palette['fg']};{background_css}}}
 .canvas{{position:relative;width:{width}px;height:{height}px;padding:112px 92px 120px;
 overflow:hidden;display:flex;flex-direction:column;justify-content:center}}
@@ -193,19 +206,20 @@ border-radius:999px;background:{palette['accent']};color:{_contrast_text(palette
 font-weight:700;overflow-wrap:anywhere;margin-bottom:58px}}
 h1{{font-size:82px;line-height:1.22;letter-spacing:-2px;margin:0;font-weight:800;
 overflow-wrap:anywhere;word-break:break-word}}
-h2{{font-size:54px;line-height:1.25;margin:0 0 42px;font-weight:800}}
+h2{{font-size:54px;line-height:1.25;margin:0 0 42px;font-weight:800;overflow-wrap:anywhere;word-break:break-word}}
 .rule{{width:150px;height:8px;background:{palette['accent']};margin-top:58px;border-radius:8px}}
 .body{{display:flex;flex-direction:column;gap:20px;overflow:hidden}}
-.visual-component{{padding:22px 26px;border-radius:22px;background:rgba(255,255,255,.56);
-border:1px solid rgba(23,33,43,.10);overflow-wrap:anywhere;word-break:break-word}}
+.visual-component{{padding:22px 26px;border-radius:22px;background:{panel_bg};
+border:1px solid {panel_border};overflow-wrap:anywhere;word-break:break-word}}
 .visual-component p{{font-size:34px;line-height:1.48;margin:0;overflow-wrap:anywhere;word-break:break-word}}
 .visual-stat{{border-left:10px solid {palette['accent']}}}
-.visual-stat strong{{display:inline-block;color:{palette['accent']};font-size:48px;font-weight:900;margin:0 5px}}
-.visual-step{{display:flex;align-items:flex-start;gap:18px}}
+.visual-stat strong,.visual-step strong{{display:inline-block;color:{palette['accent']};font-size:48px;line-height:1.1;font-weight:900;margin:0 5px}}
+.num{{white-space:nowrap}}
+.visual-step{{display:flex;align-items:baseline;gap:18px}}
 .step-label{{flex:0 0 auto;padding:9px 16px;border-radius:999px;background:{palette['accent']};
-color:{_contrast_text(palette['accent'])};font-size:25px;font-weight:800}}
+color:{_contrast_text(palette['accent'])};font-size:25px;font-weight:800;min-width:52px;text-align:center}}
 .visual-quote{{margin:0;border-left:10px solid {palette['accent']};font-style:italic}}
-.visual-text{{background:rgba(255,255,255,.32)}}
+.visual-text{{background:{text_bg}}}
 {component_style_css}
 .footer{{position:absolute;left:92px;bottom:52px;max-width:760px;color:{palette['muted']};
 font-size:22px;line-height:1.35;overflow-wrap:anywhere}}
@@ -215,257 +229,366 @@ font-size:22px;line-height:1.35;overflow-wrap:anywhere}}
 </main></body></html>"""
 
 
-
 def _assert_font_available(font_family: str) -> None:
     """Fail closed when the requested CJK font is absent; never silently render tofu."""
-    executable = shutil.which("fc-match")
-    if executable:
-        try:
-            result = subprocess.run(
-                [executable, "-f", "%{family}", font_family],
-                check=True, capture_output=True, text=True, timeout=5,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise RuntimeError("无法验证视觉字体，请安装 fontconfig 和指定字体") from exc
-        matched = {name.strip().casefold() for name in result.stdout.split(",") if name.strip()}
-        aliases = {
-            "arial": {"arial", "liberation sans", "arial unicode ms"},
-            "microsoft yahei": {"microsoft yahei", "noto sans cjk sc"},
-            "noto sans cjk sc": {"noto sans cjk sc"},
-            "source han sans sc": {"source han sans sc", "noto sans cjk sc"},
-        }
-        accepted = aliases.get(font_family.casefold(), {font_family.casefold()})
-        if not matched.intersection(accepted):
-            raise RuntimeError(
-                f"视觉字体不可用：请求 {font_family}，系统实际匹配 {result.stdout.strip() or 'unknown'}；"
-                "请先安装对应字体，禁止静默回退"
-            )
-        return
+    if font_family not in visual_catalog.font_families():
+        raise ValueError("不支持的字体族")
+    import shutil as _shutil
+    import subprocess as _subprocess
 
-    candidates = {
-        "noto sans cjk sc": (
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-        ),
-        "source han sans sc": (
-            "/usr/share/fonts/opentype/source-han-sans/SourceHanSansSC-Regular.otf",
-        ),
-        "microsoft yahei": (
-            "C:/Windows/Fonts/msyh.ttc",
-            "/System/Library/Fonts/PingFang.ttc",
-        ),
-        "arial": (
-            "C:/Windows/Fonts/arial.ttf",
-            "/Library/Fonts/Arial Unicode.ttf",
-        ),
-    }
-    if not any(Path(path).is_file() for path in candidates.get(font_family.casefold(), ())):
-        raise RuntimeError(
-            f"无法确认字体 {font_family} 已安装；请安装 fontconfig 或配置可用字体文件"
+    executable = _shutil.which("fc-match")
+    if not executable:
+        raise RuntimeError("无法验证视觉字体：未安装 fontconfig（fc-match），禁止静默回退")
+    try:
+        result = _subprocess.run(
+            [executable, "-f", "%{family}", font_family],
+            check=True, capture_output=True, text=True, timeout=5,
         )
+    except (OSError, _subprocess.SubprocessError) as exc:
+        raise RuntimeError("无法验证视觉字体，请安装 fontconfig 和指定字体") from exc
+    matched = {name.strip().casefold() for name in result.stdout.split(",") if name.strip()}
+    if not matched.intersection(visual_catalog.accepted_font_matches(font_family)):
+        raise RuntimeError(
+            f"视觉字体不可用：请求 {font_family}，系统实际匹配 {result.stdout.strip() or 'unknown'}；"
+            "请先安装对应字体（scripts/install_visual_fonts.sh），禁止静默回退"
+        )
+
 
 def _ocr_expected_texts(title: str, pages: list[list[str]]) -> list[str]:
     """Gate primary content only; subtitle/footer/page labels are decorative metadata."""
-    return [title] + [title + "".join(items) for items in pages]
+    return [title] + ["\n".join([title, *items]) for items in pages]
+
+
+# Primary-content text regions read separately by the OCR gate.
+_OCR_REGION_SELECTOR = "h1,h2,.step-label,.visual-component p"
+_LAYOUT_JS = """() => {
+  const root = document.querySelector('.canvas');
+  const rootRect = root.getBoundingClientRect();
+  const selectors = '.eyebrow,h1,.rule,h2,.visual-component,.footer,.page';
+  const elements = [...root.querySelectorAll(selectors)].filter(el => {
+    const style = getComputedStyle(el); const rect = el.getBoundingClientRect();
+    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+  });
+  const boxes = elements.map(el => { const r = el.getBoundingClientRect();
+    return {name: el.className || el.tagName.toLowerCase(), left:r.left-rootRect.left, top:r.top-rootRect.top,
+            right:r.right-rootRect.left, bottom:r.bottom-rootRect.top}; });
+  const overlaps = [];
+  for (let i=0;i<boxes.length;i++) for (let j=i+1;j<boxes.length;j++) {
+    const a=boxes[i], b=boxes[j];
+    const w=Math.min(a.right,b.right)-Math.max(a.left,b.left);
+    const h=Math.min(a.bottom,b.bottom)-Math.max(a.top,b.top);
+    if (w > 3 && h > 3) overlaps.push({a:a.name,b:b.name,area:Math.round(w*h)});
+  }
+  const outOfBounds = boxes.filter(b => b.left < 0 || b.top < 0 || b.right > rootRect.width+1 || b.bottom > rootRect.height+1);
+  const overflowNodes = [...root.querySelectorAll('*')].filter(el => {
+    const style = getComputedStyle(el);
+    const clipsX = ['hidden','clip','auto','scroll'].includes(style.overflowX);
+    const clipsY = ['hidden','clip','auto','scroll'].includes(style.overflowY);
+    return (clipsX && el.scrollWidth > el.clientWidth + 2) || (clipsY && el.scrollHeight > el.clientHeight + 2);
+  }).map(el => el.className || el.tagName.toLowerCase());
+  const regions = [...root.querySelectorAll('""" + _OCR_REGION_SELECTOR + """')]
+    .filter(el => el.innerText.trim()).map(el => {
+      const r = el.getBoundingClientRect(); const cs = getComputedStyle(el);
+      let bg = 'rgba(0,0,0,0)'; let node = el;
+      while (node && node.nodeType === 1) {
+        const c = getComputedStyle(node).backgroundColor;
+        if (c && c !== 'rgba(0, 0, 0, 0)' && c !== 'transparent') { bg = c; break; }
+        node = node.parentElement;
+      }
+      const pl = parseFloat(cs.paddingLeft)||0, pr = parseFloat(cs.paddingRight)||0;
+      const pt = parseFloat(cs.paddingTop)||0, pb = parseFloat(cs.paddingBottom)||0;
+      return {text: el.innerText, x: r.left + pl, y: r.top + pt, w: r.width - pl - pr, h: r.height - pt - pb,
+              bx: r.left, by: r.top, bw: r.width, bh: r.height,
+              font_size: parseFloat(cs.fontSize),
+              line_height: parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.3,
+              color: cs.color, background: bg};
+    });
+  const numbers = [...root.querySelectorAll('.num')].map(el => {
+      const r = el.getBoundingClientRect(); const cs = getComputedStyle(el);
+      const pl = parseFloat(cs.paddingLeft)||0, pr = parseFloat(cs.paddingRight)||0;
+      const pt = parseFloat(cs.paddingTop)||0, pb = parseFloat(cs.paddingBottom)||0;
+      return {text: el.innerText, x: r.left + pl, y: r.top + pt, w: r.width - pl - pr,
+              h: r.height - pt - pb, font_size: parseFloat(cs.fontSize), color: cs.color};
+    });
+  return {overlaps, outOfBounds, overflowNodes, regions, numbers,
+          rootOverflow: root.scrollWidth > root.clientWidth + 1 || root.scrollHeight > root.clientHeight + 1};
+}"""
+
+
+def _data_uri(path: Path | str | None) -> str:
+    if not path:
+        return ""
+    path = Path(path)
+    mime = _MIME.get(path.suffix.lower())
+    if not mime:
+        raise ValueError("背景素材格式不支持")
+    return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
+
+
+class _IsolatedPage:
+    """Fresh non-persistent Chromium context with every network request blocked."""
+
+    def __init__(self, playwright, width: int, height: int):
+        self.blocked: list[str] = []
+        self.browser = playwright.chromium.launch(headless=True)
+        context = self.browser.new_context(
+            viewport={"width": width, "height": height}, device_scale_factor=1,
+            accept_downloads=False, service_workers="block",
+        )
+
+        def _route(route):
+            url = route.request.url
+            if url.startswith(("data:", "about:")):
+                route.continue_()
+            else:
+                self.blocked.append(url[:200])
+                route.abort()
+
+        context.route("**/*", _route)
+        self.page = context.new_page()
+
+    def load(self, document: str) -> dict:
+        self.page.set_content(document, wait_until="load")
+        self.page.evaluate("document.fonts.ready")
+        layout = self.page.evaluate(_LAYOUT_JS)
+        if self.blocked:
+            raise ValueError(f"渲染页面尝试访问外部网络，已拦截并阻止输出：{self.blocked[:3]}")
+        return layout
+
+    def close(self) -> None:
+        self.browser.close()
+
+
+def _layout_failed(layout: dict) -> bool:
+    return bool(layout["rootOverflow"] or layout["overflowNodes"] or layout["outOfBounds"] or layout["overlaps"])
+
+
+def _assert_font_in_browser(page, font_family: str) -> None:
+    """In-browser check that the font really renders (metrics differ from a generic fallback)."""
+    page.set_content("<html><body></body></html>")
+    ok = page.evaluate("f => document.fonts.check(`48px \"${f}\"`, '中文')", font_family)
+    probe = page.evaluate("""f => { const c=document.createElement('canvas').getContext('2d');
+        c.font = `48px "${f}", monospace`; const a=c.measureText('中文测试Ag').width;
+        c.font = '48px monospace'; const b=c.measureText('中文测试Ag').width; return a !== b; }""", font_family)
+    if not (ok and probe):
+        raise RuntimeError(
+            f"指定字体未安装或不可用：{font_family}；请运行 scripts/install_visual_fonts.sh，禁止静默回退"
+        )
+
+
+def _compact(text: str) -> str:
+    return re.sub(r"\s+", "", text or "")
+
+
+def _measure_pages(iso: _IsolatedPage, *, title: str, subtitle: str, body: str, footer: str,
+                   theme: str, width: int, height: int, palette: dict, font_family: str,
+                   max_pages: int) -> list[list[str]]:
+    """Greedy pagination by rendered height in the real browser; raises past the page limit."""
+    if max_pages < 2:
+        raise ValueError("max_pages must allow a cover and at least one body page")
+    blocks = [b for b in _split_paragraphs(body) if b]
+    if not blocks:
+        return [[""]]
+
+    def fits(items: list[str]) -> bool:
+        doc = _document(title=title, subtitle=subtitle, paragraphs=items, footer=footer,
+                        page_text=f"{max_pages}/{max_pages}", theme=theme, cover=False,
+                        width=width, height=height, palette_override=palette,
+                        font_family=font_family)
+        return not _layout_failed(iso.load(doc))
+
+    def atoms(block: str) -> list[str]:
+        """Split a block until every piece fits on an otherwise empty page."""
+        if fits([block]):
+            return [block]
+        if len(block) < 24:
+            raise ValueError("单段文字超出单页可排版区域，已阻止输出")
+        pieces = _split_paragraphs(block, limit=max(12, len(block) // 2))
+        if len(pieces) <= 1:
+            raise ValueError("单段文字超出单页可排版区域，已阻止输出")
+        return [atom for piece in pieces for atom in atoms(piece)]
+
+    pages: list[list[str]] = []
+    current: list[str] = []
+
+    def new_page() -> None:
+        nonlocal current
+        pages.append(current)
+        current = []
+        if len(pages) + 2 > max_pages:  # cover + full pages + the page being started
+            raise ValueError(
+                f"正文需要超过 {max_pages} 页，超过配置上限 {max_pages} 页；"
+                "请先由视觉策划提炼内容，不允许静默截断"
+            )
+
+    for block in blocks:
+        if fits(current + [block]):
+            current.append(block)
+            continue
+        if current and fits([block]):
+            new_page()
+            current.append(block)
+            continue
+        for atom in atoms(block):
+            if current and not fits(current + [atom]):
+                new_page()
+            current.append(atom)
+    if current:
+        pages.append(current)
+    # Deterministic completeness check: pagination must carry every source character.
+    if _compact("".join(item for page in pages for item in page)) != _compact("".join(blocks)):
+        raise ValueError("分页结果与正文不一致，已阻止输出")
+    if len(pages) + 1 > max_pages:
+        raise ValueError(
+            f"正文需要 {len(pages) + 1} 页，超过配置上限 {max_pages} 页；"
+            "请先由视觉策划提炼内容，不允许静默截断"
+        )
+    return pages
+
+
+def plan_card_pages(title: str, subtitle: str, body: str, platform: Platform = Platform.XHS,
+                    footer: str = "", max_pages: int = 9, theme: str = DEFAULT_STYLE,
+                    brand_palette: dict | None = None, font_family: str = DEFAULT_FONT) -> list[list[str]]:
+    """Return the measured body pagination (used to plan one AI background per page)."""
+    from playwright.sync_api import sync_playwright
+
+    _assert_font_available(font_family)
+    spec = get_visual_platform_spec(platform)
+    palette = _resolve_palette(theme, brand_palette)
+    with sync_playwright() as playwright:
+        iso = _IsolatedPage(playwright, spec.width, spec.height)
+        try:
+            _assert_font_in_browser(iso.page, font_family)
+            return _measure_pages(iso, title=title, subtitle=subtitle, body=body, footer=footer,
+                                  theme=theme, width=spec.width, height=spec.height, palette=palette,
+                                  font_family=font_family, max_pages=min(max_pages, spec.max_pages))
+        finally:
+            iso.close()
 
 
 def render_card_set(title: str, subtitle: str, body: str, output_dir: Path,
                     platform: Platform = Platform.XHS, footer: str = "",
-                    max_pages: int = 9, theme: str = "knowledge_infographic",
+                    max_pages: int = 9, theme: str = DEFAULT_STYLE,
                     background_path: Path | None = None, brand_palette: dict | None = None,
-                    font_family: str = "Noto Sans CJK SC") -> list[Path]:
-    """Render a cover and body pages with Chromium; raises on missing browser/overflow."""
+                    font_family: str = DEFAULT_FONT,
+                    page_backgrounds: "list[Path | None] | None" = None,
+                    pages: "list[list[str]] | None" = None) -> list[Path]:
+    """Render a cover and body pages with Chromium; raises on missing browser/font/overflow.
+
+    ``background_path`` is the cover background; ``page_backgrounds[i]`` is body page i's
+    background (None = plain style background). ``pages`` may carry a pagination from
+    :func:`plan_card_pages`; it is re-validated by the geometry gate and completeness check.
+    """
     from playwright.sync_api import sync_playwright
+    from .visual_ocr import validate_rendered_pages
 
     _assert_font_available(font_family)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    pages = _pages(body, max_pages=max_pages)
     spec = get_visual_platform_spec(platform)
     width, height = spec.width, spec.height
-    total = len(pages) + 1
-    background_data_uri = ""
-    if background_path is not None:
-        raw_background = Path(background_path).read_bytes()
-        suffix = Path(background_path).suffix.lower()
-        mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(suffix)
-        if not mime:
-            raise ValueError("背景素材格式不支持")
-        background_data_uri = f"data:{mime};base64,{base64.b64encode(raw_background).decode('ascii')}"
-    palette = {**THEMES.get(theme, THEMES["knowledge_infographic"])}
-    if brand_palette:
-        for key in ("accent", "muted"):
-            value = brand_palette.get(key)
-            if isinstance(value, str) and len(value) == 7 and value.startswith("#"):
-                palette[key] = value
-    contrast_ratio = _validate_theme_contrast(theme, bool(background_data_uri), palette)
-    logger.info("Visual contrast hard-gate passed theme=%s ratio=%.2f", theme, contrast_ratio)
-
-    documents = [
-        _document(title=title, subtitle=subtitle, paragraphs=[], footer=footer,
-                  page_text=f"1/{total}", theme=theme, cover=True, width=width, height=height,
-                  background_data_uri=background_data_uri, palette_override=palette,
-                  font_family=font_family)
-    ]
-    for index, paragraphs in enumerate(pages, start=2):
-        documents.append(_document(
-            title=title, subtitle=subtitle, paragraphs=paragraphs, footer=footer,
-            page_text=f"{index}/{total}", theme=theme, cover=False, width=width, height=height,
-            background_data_uri=background_data_uri, palette_override=palette,
-            font_family=font_family
-        ))
-
+    max_pages = min(max_pages, spec.max_pages)
+    palette = _resolve_palette(theme, brand_palette)
+    cover_uri = _data_uri(background_path)
     paths: list[Path] = []
-    expected_texts = _ocr_expected_texts(title, pages)
+    page_regions: list[list[dict]] = []
+    page_numbers: list[list[dict]] = []
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
+        iso = _IsolatedPage(playwright, width, height)
         try:
-            page = browser.new_page(viewport={"width": width, "height": height}, device_scale_factor=1)
-            for document in documents:
-                page.set_content(document, wait_until="load")
-                page.evaluate("document.fonts.ready")
-                font_loaded = page.evaluate(
-                    '(font) => document.fonts.check(`36px "${font}"`, "中文字体检查")',
-                    font_family,
-                )
-                if not font_loaded:
-                    raise RuntimeError(
-                        f"指定字体未安装或不可用：{font_family}；请运行 scripts/install_visual_fonts.sh"
-                    )
-                layout = page.evaluate("""() => {
-                  const root = document.querySelector('.canvas');
-                  const rootRect = root.getBoundingClientRect();
-                  const selectors = '.eyebrow,h1,.rule,h2,.visual-component,.footer,.page';
-                  const elements = [...root.querySelectorAll(selectors)]
-                    .filter(el => {
-                      const style = getComputedStyle(el);
-                      const rect = el.getBoundingClientRect();
-                      return style.display !== 'none' && style.visibility !== 'hidden' &&
-                        rect.width > 0 && rect.height > 0;
-                    });
-                  const boxes = elements.map(el => {
-                    const r = el.getBoundingClientRect();
-                    return {name: el.className || el.tagName.toLowerCase(),
-                      left:r.left-rootRect.left, top:r.top-rootRect.top,
-                      right:r.right-rootRect.left, bottom:r.bottom-rootRect.top};
-                  });
-                  const overlaps = [];
-                  for (let i=0;i<boxes.length;i++) for (let j=i+1;j<boxes.length;j++) {
-                    const a=boxes[i], b=boxes[j];
-                    const width=Math.min(a.right,b.right)-Math.max(a.left,b.left);
-                    const height=Math.min(a.bottom,b.bottom)-Math.max(a.top,b.top);
-                    if (width > 3 && height > 3) overlaps.push({a:a.name,b:b.name,area:Math.round(width*height)});
-                  }
-                  const outOfBounds = boxes.filter(b => b.left < 0 || b.top < 0 ||
-                    b.right > rootRect.width+1 || b.bottom > rootRect.height+1);
-                  const overflowNodes = [...root.querySelectorAll('*')].filter(el => {
-                    const style = getComputedStyle(el);
-                    const clipsX = ['hidden', 'clip', 'auto', 'scroll'].includes(style.overflowX);
-                    const clipsY = ['hidden', 'clip', 'auto', 'scroll'].includes(style.overflowY);
-                    return (clipsX && el.scrollWidth > el.clientWidth + 2) ||
-                      (clipsY && el.scrollHeight > el.clientHeight + 2);
-                  }).map(el => el.className || el.tagName.toLowerCase());
-                  return {overlaps,outOfBounds,overflowNodes,
-                    rootOverflow: root.scrollWidth > root.clientWidth + 1 ||
-                      root.scrollHeight > root.clientHeight + 1};
-                }""")
-                if (layout["rootOverflow"] or layout["overflowNodes"] or
-                        layout["outOfBounds"] or layout["overlaps"]):
-                    logger.error("Visual layout hard-gate failed: %s", layout)
-                    raise ValueError(
-                        "视觉页面布局硬门失败：存在溢出、越界或元素重叠，已阻止输出"
-                    )
+            _assert_font_in_browser(iso.page, font_family)
+            if pages is None:
+                pages = _measure_pages(iso, title=title, subtitle=subtitle, body=body, footer=footer,
+                                       theme=theme, width=width, height=height, palette=palette,
+                                       font_family=font_family, max_pages=max_pages)
+            else:
+                pages = [list(items) for items in pages] or [[""]]
+                if len(pages) + 1 > max_pages:
+                    raise ValueError(f"正文需要 {len(pages) + 1} 页，超过配置上限 {max_pages} 页；不允许静默截断")
+                if _compact("".join(i for p in pages for i in p)) != _compact("".join(_split_paragraphs(body))):
+                    raise ValueError("传入分页与正文不一致，已阻止输出")
+            total = len(pages) + 1
+            body_uris = []
+            for index in range(len(pages)):
+                override = page_backgrounds[index] if page_backgrounds and index < len(page_backgrounds) else None
+                body_uris.append(_data_uri(override))
+            ratio = _validate_theme_contrast(theme, bool(cover_uri) or any(body_uris), palette)
+            logger.info("Visual contrast hard-gate passed theme=%s ratio=%.2f", theme, ratio)
+            specs = [(True, [], cover_uri)] + [(False, items, body_uris[i]) for i, items in enumerate(pages)]
+            for index, (cover, items, uri) in enumerate(specs, start=1):
+                document = _document(title=title, subtitle=subtitle, paragraphs=items, footer=footer,
+                                     page_text=f"{index}/{total}", theme=theme, cover=cover,
+                                     width=width, height=height, background_data_uri=uri,
+                                     palette_override=palette, font_family=font_family)
+                layout = iso.load(document)
+                if _layout_failed(layout):
+                    logger.error("Visual layout hard-gate failed: %s",
+                                 {k: v for k, v in layout.items() if k != "regions"})
+                    raise ValueError("视觉页面布局硬门失败：存在溢出、越界或元素重叠，已阻止输出")
                 path = output_dir / f"card_{platform.value}_{uuid.uuid4().hex[:8]}.png"
-                page.screenshot(path=str(path), full_page=True, type="png")
+                iso.page.screenshot(path=str(path), full_page=False, type="png")
                 paths.append(path)
+                page_regions.append(layout["regions"])
+                page_numbers.append(layout["numbers"])
         finally:
-            browser.close()
-    from .visual_ocr import validate_rendered_pages
+            iso.close()
     ocr_report_path = output_dir / f"visual_ocr_{paths[0].stem}.json"
-    ocr_report = validate_rendered_pages(paths, expected_texts, ocr_report_path)
-    logger.info(
-        "Chromium rendered %d cards for %s; OCR status=%s",
-        len(paths), platform.value, ocr_report["status"],
+    ocr_report = validate_rendered_pages(
+        paths, _ocr_expected_texts(title, pages), ocr_report_path, regions=page_regions,
+        numbers=page_numbers,
     )
+    logger.info("Chromium rendered %d cards for %s; OCR status=%s",
+                len(paths), platform.value, ocr_report["status"])
     return paths
 
 
 def render_single_page(
     *, title: str, subtitle: str, body: str, page_index: int, total_pages: int,
     output_dir: Path, platform: Platform, footer: str, theme: str,
-    background_path: Path, brand_palette: dict | None = None,
-    font_family: str = "Noto Sans CJK SC",
+    background_path: Path | None, brand_palette: dict | None = None,
+    font_family: str = DEFAULT_FONT,
 ) -> tuple[Path, str]:
     """Render exactly one existing page; return image path and its expected OCR text."""
     from playwright.sync_api import sync_playwright
     from .visual_ocr import validate_rendered_pages
 
-    _assert_font_available(font_family)
     if page_index < 0 or total_pages < 2 or page_index >= total_pages:
         raise ValueError("页面索引无效")
-    body_pages = _pages(body, max_pages=max(9, total_pages - 1))
-    if len(body_pages) + 1 != total_pages:
-        raise ValueError("当前正文分页与历史版本不一致，拒绝错误覆盖")
+    _assert_font_available(font_family)
     spec = get_visual_platform_spec(platform)
     width, height = spec.width, spec.height
-    raw = Path(background_path).read_bytes()
-    suffix = Path(background_path).suffix.lower()
-    mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(suffix)
-    if not mime:
-        raise ValueError("背景素材格式不支持")
-    background_uri = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
-    palette = {**THEMES.get(theme, THEMES["knowledge_infographic"])}
-    if brand_palette:
-        for key in ("accent", "muted"):
-            value = brand_palette.get(key)
-            if isinstance(value, str) and len(value) == 7 and value.startswith("#"):
-                palette[key] = value
-    _validate_theme_contrast(theme, True, palette)
-    if page_index == 0:
-        paragraphs = []
-        expected = subtitle + title + footer
-        cover = True
-    else:
-        paragraphs = body_pages[page_index - 1]
-        expected = title + "".join(paragraphs) + footer
-        cover = False
-    document = _document(
-        title=title, subtitle=subtitle, paragraphs=paragraphs, footer=footer,
-        page_text=f"{page_index + 1}/{total_pages}", theme=theme, cover=cover,
-        width=width, height=height, background_data_uri=background_uri,
-        palette_override=palette, font_family=font_family,
-    )
+    background_uri = _data_uri(background_path)
+    palette = _resolve_palette(theme, brand_palette)
+    _validate_theme_contrast(theme, bool(background_uri), palette)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     target = output_dir / f"card_{platform.value}_revise_{uuid.uuid4().hex[:10]}.png"
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
+        iso = _IsolatedPage(playwright, width, height)
         try:
-            page = browser.new_page(viewport={"width": width, "height": height}, device_scale_factor=1)
-            page.set_content(document, wait_until="load")
-            page.evaluate("document.fonts.ready")
-            font_loaded = page.evaluate(
-                '(font) => document.fonts.check(`36px "${font}"`, "中文字体检查")',
-                font_family,
+            _assert_font_in_browser(iso.page, font_family)
+            body_pages = _measure_pages(iso, title=title, subtitle=subtitle, body=body, footer=footer,
+                                        theme=theme, width=width, height=height, palette=palette,
+                                        font_family=font_family, max_pages=max(spec.max_pages, total_pages))
+            if len(body_pages) + 1 != total_pages:
+                raise ValueError("当前正文分页与历史版本不一致，拒绝错误覆盖")
+            if page_index == 0:
+                paragraphs, cover = [], True
+            else:
+                paragraphs, cover = body_pages[page_index - 1], False
+            expected = _ocr_expected_texts(title, [paragraphs])[0 if cover else 1]
+            document = _document(
+                title=title, subtitle=subtitle, paragraphs=paragraphs, footer=footer,
+                page_text=f"{page_index + 1}/{total_pages}", theme=theme, cover=cover,
+                width=width, height=height, background_data_uri=background_uri,
+                palette_override=palette, font_family=font_family,
             )
-            if not font_loaded:
-                raise RuntimeError(
-                    f"指定字体未安装或不可用：{font_family}；请运行 scripts/install_visual_fonts.sh"
-                )
-            layout = page.evaluate("""() => {
-              const root=document.querySelector('.canvas'), rr=root.getBoundingClientRect();
-              const nodes=[...root.querySelectorAll('.eyebrow,h1,.rule,h2,.visual-component,.footer,.page')];
-              const boxes=nodes.map(el=>{const r=el.getBoundingClientRect();return [r.left-rr.left,r.top-rr.top,r.right-rr.left,r.bottom-rr.top]});
-              let overlap=false;
-              for(let i=0;i<boxes.length;i++)for(let j=i+1;j<boxes.length;j++){
-                const a=boxes[i],b=boxes[j];if(Math.min(a[2],b[2])-Math.max(a[0],b[0])>3&&Math.min(a[3],b[3])-Math.max(a[1],b[1])>3)overlap=true;
-              }
-              return {overflow:root.scrollWidth>root.clientWidth+1||root.scrollHeight>root.clientHeight+1,overlap};
-            }""")
-            if layout["overflow"] or layout["overlap"]:
+            layout = iso.load(document)
+            if _layout_failed(layout):
                 raise ValueError("单页重渲染布局硬门失败")
-            page.screenshot(path=str(target), full_page=True, type="png")
+            iso.page.screenshot(path=str(target), full_page=False, type="png")
         finally:
-            browser.close()
-    validate_rendered_pages([target], [expected], output_dir / f"visual_ocr_{target.stem}.json")
+            iso.close()
+    validate_rendered_pages([target], [expected], output_dir / f"visual_ocr_{target.stem}.json",
+                            regions=[layout["regions"]], numbers=[layout["numbers"]])
     return target, expected

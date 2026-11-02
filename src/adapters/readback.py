@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from src.core.redact import safe_error_summary
+from src.core.timezone import business_now
 
 from .base import Platform, FetchStatus, MetricsSnapshot
 from ..vendor.easel import VENDOR_DIR, ensure_vendor_path
@@ -365,7 +366,7 @@ def match_work(works: list[dict], title: str, platform_draft_id: Optional[str] =
     return prefix_matches[0] if len(prefix_matches) == 1 else None
 
 
-def snapshot_from_work(platform: Platform, work: dict, raw: str) -> MetricsSnapshot:
+def snapshot_from_work(platform: Platform, work: dict, raw: str, cfg=None) -> MetricsSnapshot:
     """把归一化作品字典转成 MetricsSnapshot，并按字段完整度定 fetch_status。
 
     R3：字段缺失保持 None；一个数字都没有 → parse_error（不是 success + 0）。
@@ -405,6 +406,7 @@ def snapshot_from_work(platform: Platform, work: dict, raw: str) -> MetricsSnaps
     return MetricsSnapshot(
         platform=platform,
         fetch_status=status,
+        fetched_at=business_now(cfg),
         likes=likes,
         collects=collects,
         comments=comments,
@@ -415,18 +417,20 @@ def snapshot_from_work(platform: Platform, work: dict, raw: str) -> MetricsSnaps
     )
 
 
-def pending_snapshot(platform: Platform, reason: str) -> MetricsSnapshot:
+def pending_snapshot(platform: Platform, reason: str, cfg=None) -> MetricsSnapshot:
     """A successful readback found no matching published work yet; this is not an execution failure."""
     return MetricsSnapshot(
         platform=platform,
         fetch_status=FetchStatus.PENDING,
+        fetched_at=business_now(cfg),
         error_msg=safe_error_summary(reason, "平台数据读取失败，请检查登录状态后重试"),
     )
 
 
-def failed_snapshot(platform: Platform, reason: str) -> MetricsSnapshot:
+def failed_snapshot(platform: Platform, reason: str, cfg=None) -> MetricsSnapshot:
     return MetricsSnapshot(
         platform=platform,
         fetch_status=FetchStatus.FAILED,
+        fetched_at=business_now(cfg),
         error_msg=safe_error_summary(reason, "平台数据读取失败，请检查登录状态后重试"),
     )

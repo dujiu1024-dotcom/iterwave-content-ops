@@ -19,9 +19,12 @@ DraftSaver — 通用 Playwright 存草稿工具（四平台共用）。
 
 from __future__ import annotations
 
+import base64
 import logging
+import mimetypes
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from playwright.async_api import Page, BrowserContext, async_playwright
@@ -207,16 +210,20 @@ PLATFORM_SELECTORS: dict[Platform, dict] = {
         ],
     },
     Platform.WECHAT_CHANNELS: {
-        # 2026-10 真机：图文入口 = 内容管理 → 图文（列表页 finderNewLifePostList）
-        # → 点「发表图文」→ 创作器在 iframe(platform/post/finderNewLifeCreate) 里，
-        # 表单实际在它嵌套的子 iframe(micro/content/post/finderNewLifeCreate) 中，
-        # 但 page / 父 iframe 的 locator 能直接取到子 iframe 元素（实测可用）。
+        # 2026-11 真机：图文入口 = 内容管理 → 图文（列表页 finderNewLifePostList）
+        # 注意：直接 goto 该 URL 会被 SPA 重定向回 /platform，必须先点侧边栏「图文」再点「发表图文」。
         "editor_url": "https://channels.weixin.qq.com/platform/post/finderNewLifePostList",
         "image_flow": "wechat_finder",
         "image_create_tab": ["text=发表图文"],
-        "composer_frame_suffix": "platform/post/finderNewLifeCreate",
+        # 2026-11 实测：创作器表单在 micro/content/post/finderNewLifeCreate；
+        # 外层 platform/post/finderNewLifeCreate 只是空壳。该 frame 的 DOM 对 Playwright
+        # locator 不可见（count()=0），只能用 Frame.evaluate 操作。
+        "image_list_frame_marker": "micro/content/post/finderNewLifePostList",
+        # 真正的创作器表单 frame（该 frame 对 locator 不可见，只能用 Frame.evaluate 操作）
+        "composer_frame_marker": "micro/content/post/finderNewLifeCreate",
         # 保存草稿后页面不弹 toast、URL 不变，只能去草稿箱按标题核对（实测唯一可靠信号）
         "draft_box_url": "https://channels.weixin.qq.com/platform/post/draftListManager",
+        "draft_box_frame_marker": "micro/content/post/draftListManager",
         "title": [
             "input[placeholder*='填写标题']",
             "input[placeholder*='标题']",
@@ -228,6 +235,7 @@ PLATFORM_SELECTORS: dict[Platform, dict] = {
         ],
         "image_upload": [
             "input[type='file'][accept*='image']",
+            "input[type='file']",
         ],
         "image_preview_selector": [],
         "save_success_selector": [
@@ -408,7 +416,7 @@ class DraftSaver:
             initial_draft_count = await self._draft_count(page)
 
             # 7. ⚠️ 存草稿（只点 save_draft_button，严禁点 _publish_button_audit_only！）
-            save_ok = await self.click_first_visible(page, self.selectors["save_draft_button"])
+            save_ok = await self._click_save_draft_button(page, self.selectors["save_draft_button"])
             if not save_ok:
                 logger.warning("存草稿按钮未找到，尝试兜底 ...")
                 save_ok = await self._fallback_save_draft(page)
@@ -516,9 +524,16 @@ class DraftSaver:
 
         # 登录过期（已在 _check_login_expired 覆盖，这里跳过）
         # 操作拦截
+        # 注意：不能用宽泛的 div:has-text('违规') —— 视频号后台侧边栏有「违规管理」，
+        # 祖先 div 会把整页包含进去，导致每次打开创作页都被误判成发布被拦截。
         for sel in [
-            "div:has-text('发布被拦截')", "div:has-text('违规')",
-            "div:has-text('无法发布')",
+            "[class*='toast']:has-text('发布被拦截')",
+            "[class*='modal']:has-text('违规')",
+            "[class*='dialog']:has-text('违规')",
+            "[class*='toast']:has-text('违规')",
+            "[role='alert']:has-text('违规')",
+            "[class*='modal']:has-text('无法发布')",
+            "[class*='dialog']:has-text('无法发布')",
         ]:
             try:
                 if await page.locator(sel).first.is_visible(timeout=1000):
@@ -569,6 +584,208 @@ class DraftSaver:
         if await self.click_first_visible(page, tabs, timeout=6000):
             await page.wait_for_timeout(2500)
 
+    @staticmethod
+    def _find_frame(page: Page, marker: str):
+        """按 URL 子串在 page.frames 里找目标 frame；找不到返回 None。"""
+        if not marker:
+            return None
+        return next((f for f in page.frames if marker in (f.url or "")), None)
+
+    async def _click_wechat_nav(self, page: Page, label: str) -> bool:
+        """点击视频号后台侧边栏菜单项。
+
+        视频号是 SPA，直接 goto 列表 URL 会被重定向回 /platform（2026-11 实测），
+        必须先点侧边栏「图文」/「草稿箱」再等内嵌 frame 渲染。
+        """
+        # 视频号侧边栏可能在 micro 子 frame 里（2026-11 实测），必须逐 frame 查找；
+        # 同一个文案可能同时命中容器和叶子节点，取最后一个叶子节点点击最稳。
+        script = """(label) => {
+            const nodes = [...document.querySelectorAll('*')].filter(e => {
+                const t = (e.innerText || '').trim();
+                return t === label && e.children.length <= 2;
+            });
+            if (nodes.length) { nodes[nodes.length - 1].click(); return true; }
+            const fuzzy = [...document.querySelectorAll('*')].filter(e => {
+                const t = (e.innerText || '').trim();
+                return t.startsWith(label) && e.children.length <= 2;
+            });
+            if (fuzzy.length) { fuzzy[fuzzy.length - 1].click(); return true; }
+            return false;
+        }"""
+        for frame in page.frames:
+            try:
+                if await frame.evaluate(script, label):
+                    logger.info("视频号侧边导航命中 frame: %s", (frame.url or "")[:80])
+                    return True
+            except Exception:  # noqa: BLE001 — 已被销毁的 frame 直接跳过
+                continue
+        return False
+
+    async def _wait_frame(self, page: Page, marker: str, timeout_s: int = 15):
+        """轮询等待 URL 含 marker 的 frame 出现。"""
+        for _ in range(max(1, timeout_s)):
+            frame = self._find_frame(page, marker)
+            if frame is not None:
+                return frame
+            await page.wait_for_timeout(1000)
+        return None
+
+    async def _open_wechat_composer(self, page: Page) -> bool:
+        """点侧边栏「图文」进入列表，并在「发表图文」出现时立刻点击。
+
+        视频号的 micro iframe 会反复重建：先挂空壳、再渲染列表、也可能再替换一次。
+        因此不能在「列表就绪」和「点击发表图文」之间留时间差，必须在同一次 evaluate
+        里找到按钮并点击，否则会点到已被替换的空 frame。
+        """
+        marker = str(self.selectors.get("image_list_frame_marker") or "")
+        clicked_nav = await self._click_wechat_nav(page, "图文")
+        if not clicked_nav:
+            logger.warning("视频号未找到侧边栏「图文」入口")
+        for _ in range(20):
+            frame = self._find_frame(page, marker)
+            if frame is not None:
+                try:
+                    if await frame.evaluate(
+                        """() => {
+                            const b = [...document.querySelectorAll('button')]
+                                .find(b => (b.innerText || '').trim() === '发表图文');
+                            if (!b) return false;
+                            b.click();
+                            return true;
+                        }"""
+                    ):
+                        return True
+                except Exception:
+                    pass
+            await page.wait_for_timeout(1000)
+        return False
+
+    async def _wechat_composer_frame(self, page: Page, timeout_s: int = 20):
+        """定位真正的图文创作器 frame（micro/content/post/finderNewLifeCreate）。
+
+        该 frame 的 DOM 对 Playwright locator 不可见（locator.count() 返回 0），
+        只能通过 Frame.evaluate 读写；frame 会被反复重建，因此每次操作前都重新查找。
+        """
+        marker = str(self.selectors.get("composer_frame_marker") or "")
+        for _ in range(max(1, timeout_s)):
+            for frame in page.frames:
+                if not marker or marker not in (frame.url or ""):
+                    continue
+                try:
+                    ready = await frame.evaluate(
+                        """() => !!document.querySelector("input[placeholder*='填写标题']")
+                           && !!document.querySelector("input[type='file']")"""
+                    )
+                except Exception:  # noqa: BLE001 — 已被销毁的 frame 直接跳过
+                    continue
+                if ready:
+                    return frame
+            await page.wait_for_timeout(1000)
+        return None
+
+    async def _wechat_inject_images(self, frame, image_paths: list[str]) -> Optional[str]:
+        """在创作器 frame 内用 DataTransfer 构造 File 注入 file input。
+
+        返回 None 表示成功，否则返回可展示的失败原因。
+        """
+        items = []
+        for path in image_paths:
+            try:
+                raw = Path(path).read_bytes()
+            except Exception as exc:  # noqa: BLE001 — 图片读不到要如实回报
+                return safe_error_summary(exc, "读取本地图片失败")
+            items.append({
+                "name": Path(path).name,
+                "type": mimetypes.guess_type(path)[0] or "image/png",
+                "b64": base64.b64encode(raw).decode("ascii"),
+            })
+        try:
+            res = await frame.evaluate(
+                """(items) => {
+                    const input = document.querySelector("input[type='file']");
+                    if (!input) return { ok: false, why: 'no input' };
+                    const dt = new DataTransfer();
+                    for (const it of items) {
+                        const bin = atob(it.b64);
+                        const bytes = new Uint8Array(bin.length);
+                        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                        dt.items.add(new File([bytes], it.name, { type: it.type }));
+                    }
+                    input.files = dt.files;
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                    return { ok: true, count: input.files.length };
+                }""",
+                items,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return safe_error_summary(exc, "图片注入失败")
+        if not res or not res.get("ok") or int(res.get("count") or 0) != len(image_paths):
+            return f"图片注入未生效: {res}"
+        return None
+
+    async def _wechat_fill_title(self, frame, text: str) -> Optional[str]:
+        """用原生 setter 写标题并回读校验；返回 None 表示成功。"""
+        want = (text or "").strip()
+        try:
+            got = await frame.evaluate(
+                """(v) => {
+                    const el = document.querySelector("input[placeholder*='填写标题']");
+                    if (!el) return null;
+                    const setter = Object.getOwnPropertyDescriptor(
+                        window.HTMLInputElement.prototype, 'value'
+                    ).set;
+                    setter.call(el, v);
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    return el.value;
+                }""",
+                want,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return safe_error_summary(exc, "标题填入失败")
+        if not got:
+            return "标题框未找到或未写入"
+        got = str(got).strip()
+        if got == want or want.startswith(got):
+            return None
+        return f"标题回读不一致: {got[:20]}"
+
+    async def _wechat_fill_body(self, frame, text: str) -> bool:
+        """写图文描述（失败不阻断存草稿）。"""
+        try:
+            return bool(await frame.evaluate(
+                """(v) => {
+                    const el = document.querySelector("div.input-editor[contenteditable]")
+                        || document.querySelector("div[contenteditable]");
+                    if (!el) return false;
+                    el.focus();
+                    el.innerText = v;
+                    el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+                    return true;
+                }""",
+                text,
+            ))
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _wechat_click_save(self, frame) -> bool:
+        """点击「保存草稿」（R1：绝不点「发表」）。"""
+        try:
+            return bool(await frame.evaluate(
+                """() => {
+                    const btns = [...document.querySelectorAll('button')].filter(b => {
+                        const t = (b.innerText || '').trim();
+                        return (t.includes('保存草稿') || t.includes('存草稿'))
+                            && !!(b.offsetWidth || b.offsetHeight);
+                    });
+                    if (!btns.length) return false;
+                    btns[btns.length - 1].click();
+                    return true;
+                }"""
+            ))
+        except Exception:  # noqa: BLE001
+            return False
+
     async def _save_wechat_image_draft(
         self, page: Page, content: ContentToPublish,
     ) -> DraftResult:
@@ -577,7 +794,7 @@ class DraftSaver:
         R1：只点「保存草稿」，永不点「发表」。
         """
         await page.goto(self.selectors["editor_url"], wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(5000)
+        await page.wait_for_timeout(4000)
 
         if await self._check_login_expired(page):
             return DraftResult(success=False, error_msg="登录态过期", login_required=True)
@@ -590,56 +807,67 @@ class DraftSaver:
                 cb_signal=cb_signal,
             )
 
-        if not await self.click_first_visible(page, self.selectors["image_create_tab"], timeout=8000):
+        # 直接 goto 会被重定向回首页，必须走侧边栏「图文」→「发表图文」
+        if not await self._open_wechat_composer(page):
             return DraftResult(success=False, error_msg="未找到「发表图文」入口")
 
-        # 创作器 iframe：父 iframe(url 以 suffix 结尾) 的 locator 能取到子 iframe 里的表单
-        suffix = str(self.selectors["composer_frame_suffix"])
-        target = None
-        for _ in range(20):
-            await page.wait_for_timeout(1000)
-            target = next((f for f in page.frames if (f.url or "").endswith(suffix)), None)
-            if target is not None:
+        # 创作器表单在 micro/content/post/finderNewLifeCreate frame 内；
+        # 该 frame 的 DOM 对 Playwright locator 不可见（count()=0），只能用 evaluate 操作。
+        last_err: Optional[str] = "视频号图文创作器未加载"
+        for _ in range(3):
+            frame = await self._wechat_composer_frame(page, timeout_s=10)
+            if frame is None:
+                last_err = "视频号图文创作器未加载"
+                continue
+            last_err = await self._wechat_inject_images(frame, content.image_paths)
+            if last_err is None:
                 break
-        if target is None:
-            return DraftResult(success=False, error_msg="视频号图文创作器 iframe 未加载")
-        await page.wait_for_timeout(3000)
+            logger.warning("视频号图片注入重试失败: %s", last_err)
+            await page.wait_for_timeout(2000)
+        if last_err:
+            return DraftResult(success=False, error_msg=f"图片上传失败: {last_err}"[:200])
 
-        try:
-            await target.locator(self.selectors["image_upload"][0]).first.set_input_files(
-                content.image_paths, timeout=30000,
+        # 等平台完成上传并渲染预览
+        await page.wait_for_timeout(8000)
+
+        title_err: Optional[str] = "标题未填入"
+        for _ in range(3):
+            frame = await self._wechat_composer_frame(page, timeout_s=8)
+            if frame is None:
+                continue
+            title_err = await self._wechat_fill_title(frame, content.title)
+            if title_err is None:
+                break
+            await page.wait_for_timeout(1500)
+        if title_err:
+            # 标题为空时平台会拒绝保存且不报错，必须在这里中止并如实回报
+            return DraftResult(
+                success=False, error_msg=f"视频号标题未填入，已中止存草稿: {title_err}"[:200],
             )
-        except Exception as exc:  # noqa: BLE001 — 上传失败要如实回报
-            logger.warning("视频号图片上传失败: %s", exc)
-            return DraftResult(success=False, error_msg=f"图片上传失败: {safe_error_summary(exc, '图片上传失败，请检查图片格式和网络后重试')}"[:200])
-        await page.wait_for_timeout(5000)
-
-        await self.fill_first_visible(target, self.selectors["title"], content.title)
 
         body_parts = [content.body]
         if content.tags:
             body_parts.append(" ".join(content.tags))
         body_text = "\n".join(body_parts)
-        body_ok = False
-        for sel in self.selectors["body"]:
-            try:
-                loc = target.locator(sel).first
-                if await loc.count() > 0:
-                    await loc.click(timeout=5000)
-                    await loc.fill(body_text, timeout=8000)
-                    body_ok = True
-                    break
-            except Exception:
-                continue
+        frame = await self._wechat_composer_frame(page, timeout_s=8)
+        body_ok = bool(frame) and await self._wechat_fill_body(frame, body_text)
         if not body_ok:
             logger.warning("视频号描述框未填入（不影响标题与图片存草稿）")
 
-        if not await self.click_first_visible(target, self.selectors["save_draft_button"], timeout=8000):
+        save_clicked = False
+        for _ in range(3):
+            frame = await self._wechat_composer_frame(page, timeout_s=8)
+            if frame is None:
+                continue
+            if await self._wechat_click_save(frame):
+                save_clicked = True
+                break
+            await page.wait_for_timeout(1500)
+        if not save_clicked:
             return DraftResult(success=False, error_msg="未找到「保存草稿」按钮")
 
-        evidence = await self._wait_save_success(page, timeout_ms=4000)
-        if not evidence:
-            evidence = await self._verify_wechat_draft(page, content.title)
+        await page.wait_for_timeout(3000)
+        evidence = await self._verify_wechat_draft(page, content.title)
         if evidence:
             return DraftResult(
                 success=True,
@@ -655,24 +883,35 @@ class DraftSaver:
         )
 
     async def _verify_wechat_draft(self, page: Page, title: str) -> Optional[str]:
-        """视频号草稿箱按标题核对（列表在 iframe 里，逐 frame 匹配）。"""
-        url = self.selectors.get("draft_box_url")
-        key = (title or "").strip()[:10]
-        if not url or not key:
+        """视频号草稿箱按标题核对（列表在嵌套 iframe 里，逐 frame 匹配）。
+
+        草稿箱列表是异步加载的，且 micro iframe 会重建，因此不能只扫一次：
+        进到草稿箱后按秒轮询，每次重新遍历当前存活 frame 的正文。
+        """
+        raw = (title or "").strip()
+        if not raw:
             return None
+        keys = list(dict.fromkeys(raw[:n] for n in (10, 8, 6) if len(raw) >= n))
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_timeout(8000)
-            texts = [await page.evaluate("() => document.body.innerText")]
-            for f in page.frames:
-                try:
-                    # Frame.inner_text 对视频号这类嵌套 iframe 返回空串，evaluate 才拿得到
-                    texts.append(await f.evaluate("() => document.body.innerText"))
-                except Exception:
-                    continue
-            for text in texts:
-                if text and key in text:
-                    return f"draftbox:{key}"
+            marker = str(self.selectors.get("draft_box_frame_marker") or "")
+            if self._find_frame(page, marker) is None:
+                if not await self._click_wechat_nav(page, "草稿箱"):
+                    return None
+                if await self._wait_frame(page, marker, timeout_s=20) is None:
+                    logger.warning("视频号草稿箱列表未加载")
+                    return None
+            for _ in range(25):
+                for f in page.frames:
+                    if marker and marker not in (f.url or ""):
+                        continue
+                    try:
+                        # Frame.inner_text 对视频号这类嵌套 iframe 返回空串，evaluate 才拿得到
+                        text = await f.evaluate("() => document.body.innerText")
+                    except Exception:
+                        continue
+                    if text and any(k in text for k in keys):
+                        return f"draftbox:{keys[0]}"
+                await page.wait_for_timeout(1000)
         except Exception as exc:  # noqa: BLE001 — 核对失败不阻断，如实返回 None
             logger.warning("视频号草稿箱核对失败: %s", exc)
         return None
@@ -749,6 +988,14 @@ class DraftSaver:
                     const el = document.querySelector('xhs-publish-btn');
                     if (!el || typeof el._onSave !== 'function') return false;
                     if (el.getAttribute('save-disabled') === 'true') return false;
+                    const label = [
+                        el.innerText, el.textContent,
+                        el.getAttribute('aria-label'), el.getAttribute('title')
+                    ].filter(Boolean).join(' ').replace(/\\s+/g, '');
+                    if (!['暂存离开', '存草稿', '保存草稿', '保存到草稿箱', 'Save draft']
+                        .some(token => label.includes(token))) return false;
+                    if (['发布', '发送', '立即发布', 'Publish', 'Send']
+                        .some(token => label.includes(token))) return false;
                     el._onSave();
                     return true;
                 }"""
@@ -760,20 +1007,44 @@ class DraftSaver:
             logger.exception("平台 %s 调用 _onSave 失败", self.platform)
             return False
 
-    async def _fallback_save_draft(self, page: Page) -> bool:
-        """兜底：只从 PLATFORM_SELECTORS[platform]['save_draft_button'] 候选选择器里挑第一个可见的。
-
-        不再用关键词启发式遍历全页按钮——页面改版易误点"发布/发送"类按钮（R1 红线）。
-        """
-        for sel in self.selectors.get("save_draft_button", []):
+    async def _click_save_draft_button(
+        self, page, selectors: list[str], timeout: int = 5000,
+    ) -> bool:
+        """仅点击文案明确表明为「保存草稿」的按钮；无法确认时失败关闭。"""
+        allowed = ("暂存离开", "存草稿", "保存草稿", "保存到草稿箱", "Save draft")
+        forbidden = ("发布", "发送", "立即发布", "Publish", "Send")
+        for selector in selectors:
             try:
-                btn = page.locator(sel).first
-                if await btn.is_visible():
-                    await btn.click()
-                    return True
+                button = page.locator(selector).first
+                if not await button.is_visible(timeout=1500):
+                    continue
+                labels = [
+                    await button.inner_text(timeout=1000),
+                    await button.get_attribute("aria-label"),
+                    await button.get_attribute("title"),
+                ]
+                label = "".join(str(value or "") for value in labels)
+                compact = "".join(label.split())
+                if any(token in compact for token in forbidden):
+                    logger.error("平台 %s 拒绝点击疑似发布按钮 selector=%s", self.platform, selector)
+                    continue
+                if not any(token in compact for token in allowed):
+                    logger.warning(
+                        "平台 %s 保存按钮文案无法确认，按失败关闭 selector=%s",
+                        self.platform, selector,
+                    )
+                    continue
+                await button.click(timeout=timeout)
+                return True
             except Exception:
                 continue
         return False
+
+    async def _fallback_save_draft(self, page: Page) -> bool:
+        """严格兜底：选择器命中后仍必须通过按钮文案白名单检查。"""
+        return await self._click_save_draft_button(
+            page, self.selectors.get("save_draft_button", []),
+        )
 
     async def _count_uploaded_images(self, page: Page) -> int:
         """P0-2：计算实际上传成功的图片预览卡片数量。"""

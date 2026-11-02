@@ -18,6 +18,8 @@ SQLite 连接管理 + schema 迁移。
 
 from __future__ import annotations
 
+import hashlib
+from contextlib import contextmanager
 import logging
 import shutil
 import sqlite3
@@ -70,6 +72,7 @@ class Database:
             # dict factory 让返回值可以像 dict 访问
             detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
             check_same_thread=False,  # 异步环境可能多线程访问
+            timeout=30.0,  # SQLite busy handler；单位为秒
         )
         # 数据库包含用户内容、运营日志等私有数据；限制同机其他用户直接读取。
         try:
@@ -79,7 +82,7 @@ class Database:
         conn.execute("PRAGMA foreign_keys = ON;")
         conn.execute("PRAGMA journal_mode = WAL;")    # 读写并发
         conn.execute("PRAGMA synchronous = NORMAL;")    # WAL 下足够安全
-        conn.execute("PRAGMA timeout = 30000;")        # 忙等 30s
+        conn.execute("PRAGMA busy_timeout = 30000;")  # 忙等 30s
         _restrict_sqlite_file_permissions(self.db_path)
         conn.row_factory = sqlite3.Row                  # 列名访问
         return conn
@@ -98,9 +101,25 @@ class Database:
 
         # 发现迁移脚本
         migrations = self._discover_migrations()
-        pending = [m for m in migrations if m.version > current_version]
+        # 不能用 MAX(version) 推断所有较小版本都已执行：并行分支晚合入的
+        # 低编号迁移必须仍能执行。以 schema_version 中的实际记录为准。
+        applied_versions = self._get_applied_versions()
+        # 相同 SQL 内容只执行一次。历史上 027/030 存在逐字重复迁移，
+        # 若只补齐缺失版本号，重复执行可能再次 ALTER/CREATE 并导致启动失败。
+        seen_checksums: set[str] = set()
+        pending: list[Migration] = []
+        duplicate_aliases: list[Migration] = []
+        for migration in migrations:
+            checksum = hashlib.sha256(migration.path.read_bytes()).hexdigest()
+            if migration.version in applied_versions:
+                seen_checksums.add(checksum)
+            elif checksum in seen_checksums:
+                duplicate_aliases.append(migration)
+            else:
+                pending.append(migration)
+                seen_checksums.add(checksum)
 
-        if not pending:
+        if not pending and not duplicate_aliases:
             logger.info("数据库已对齐最新 schema，无需迁移")
             return
 
@@ -116,7 +135,14 @@ class Database:
                     self._preflight_platform_account_singleton(conn)
                 self._run_migration(conn, mig)
 
-            logger.info("数据库迁移完成，最新版本 = %d", pending[-1].version)
+            for alias in duplicate_aliases:
+                self._record_migration_alias(conn, alias)
+
+            latest_version = max(
+                [migration.version for migration in pending + duplicate_aliases],
+                default=current_version,
+            )
+            logger.info("数据库迁移完成，最新版本 = %d", latest_version)
         except Exception:
             logger.exception("数据库迁移失败")
             conn.rollback()
@@ -141,6 +167,41 @@ class Database:
                 return 0
             row = conn.execute("SELECT COALESCE(MAX(version), 0) FROM schema_version").fetchone()
             return int(row[0]) if row else 0
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _record_migration_alias(conn: sqlite3.Connection, mig: "Migration") -> None:
+        """为内容完全重复的迁移登记版本号，但不重复执行 SQL。"""
+        description = f"{mig.name} (duplicate migration content; already applied)"
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_version (version, description) VALUES (?, ?)",
+                (int(mig.version), description),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        logger.info("迁移 %d 内容与已执行迁移相同，仅登记版本号", mig.version)
+
+    def _get_applied_versions(self) -> set[int]:
+        """读取实际已登记的迁移版本，避免较小编号的晚合入迁移被静默跳过。"""
+        if not self.db_path.exists():
+            return set()
+        conn = self.connect()
+        try:
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'"
+            ).fetchone()
+            if exists is None:
+                return set()
+            return {
+                int(row[0]) for row in conn.execute(
+                    "SELECT version FROM schema_version"
+                ).fetchall()
+            }
         finally:
             conn.close()
 
@@ -424,57 +485,222 @@ class _LockedCursor:
 
 
 class LockedConnection:
-    """线程安全的 sqlite3.Connection 代理（接口与原连接一致）。"""
+    """线程安全的 sqlite3.Connection 代理，并将隐式事务锁保持到 commit/rollback。
+
+    SQLite 在第一次 DML 后会开启隐式事务。若只在 execute() 单条语句期间加锁，
+    另一个线程仍可能调用 commit() 提交前一个线程的半截业务写入。这里在事务开启时
+    保留一层 RLock，直到事务结束；其他线程的 execute/commit/rollback 都会等待。
+    对「先 SELECT 校验、再 UPDATE」的关键业务操作，仍应使用 with conn: 显式包住
+    整个读-校验-写流程。
+    """
 
     def __init__(self, conn: sqlite3.Connection):
         object.__setattr__(self, "_conn", conn)
         object.__setattr__(self, "_lock", _threading.RLock())
+        object.__setattr__(self, "_transaction_owner", None)
+        object.__setattr__(self, "_context_owner", None)
+        object.__setattr__(self, "_context_depth", 0)
+        object.__setattr__(self, "_rollback_only", False)
 
     @property
     def raw(self) -> sqlite3.Connection:
         return self._conn
 
+    def _run_locked(self, operation):
+        self._lock.acquire()
+        owner = _threading.get_ident()
+        retain_current = False
+        release_retained = False
+        try:
+            try:
+                return operation()
+            except BaseException:
+                # SQL 语句失败后即使业务层捕获异常，也不能让此前的半截写入被提交。
+                if self._context_owner == owner and self._context_depth > 0:
+                    object.__setattr__(self, "_rollback_only", True)
+                elif self._transaction_owner == owner:
+                    try:
+                        self._conn.rollback()
+                    finally:
+                        if not self._conn.in_transaction:
+                            object.__setattr__(self, "_transaction_owner", None)
+                            release_retained = True
+                raise
+        finally:
+            # 发生 SQL 异常时也必须依据真实连接状态决定是否继续持锁。
+            try:
+                in_transaction = self._conn.in_transaction
+            except sqlite3.Error:
+                in_transaction = False
+            transaction_owner = self._transaction_owner
+            if in_transaction:
+                if transaction_owner is None:
+                    object.__setattr__(self, "_transaction_owner", owner)
+                    retain_current = True
+                elif transaction_owner != owner:
+                    # 正常情况下其他线程无法到达这里，因为事务持有 RLock。
+                    raise RuntimeError("SQLite 事务连接所有权异常")
+            elif transaction_owner == owner:
+                object.__setattr__(self, "_transaction_owner", None)
+                release_retained = True
+            if release_retained:
+                self._lock.release()
+            if not retain_current:
+                self._lock.release()
+
     def execute(self, sql, params=()):
-        with self._lock:
-            return _BufferedCursor(self._conn.execute(sql, params))
+        return self._run_locked(
+            lambda: _BufferedCursor(self._conn.execute(sql, params))
+        )
 
     def executemany(self, sql, seq):
-        with self._lock:
-            return _BufferedCursor(self._conn.executemany(sql, seq))
+        return self._run_locked(
+            lambda: _BufferedCursor(self._conn.executemany(sql, seq))
+        )
 
     def executescript(self, script):
-        with self._lock:
-            return _BufferedCursor(self._conn.executescript(script))
+        # sqlite3.executescript 会先提交已有事务；_run_locked 会在事务结束后释放保留锁。
+        return self._run_locked(
+            lambda: _BufferedCursor(self._conn.executescript(script))
+        )
 
     def cursor(self):
         return _LockedCursor(self)
 
     def commit(self) -> None:
-        with self._lock:
+        owner = _threading.get_ident()
+        if self._context_owner == owner and self._context_depth > 0:
+            # 请求/业务事务中的 commit 延迟到最外层 with conn 正常退出。
+            return
+        self._lock.acquire()
+        release_retained = False
+        try:
             self._conn.commit()
+            if not self._conn.in_transaction and self._transaction_owner == owner:
+                object.__setattr__(self, "_transaction_owner", None)
+                release_retained = True
+        finally:
+            if release_retained:
+                self._lock.release()
+            self._lock.release()
 
     def rollback(self) -> None:
-        with self._lock:
+        owner = _threading.get_ident()
+        if self._context_owner == owner and self._context_depth > 0:
+            object.__setattr__(self, "_rollback_only", True)
+            return
+        self._lock.acquire()
+        release_retained = False
+        try:
             self._conn.rollback()
+            if not self._conn.in_transaction and self._transaction_owner == owner:
+                object.__setattr__(self, "_transaction_owner", None)
+                release_retained = True
+        finally:
+            if release_retained:
+                self._lock.release()
+            self._lock.release()
+
+    @contextmanager
+    def transaction(self, *, immediate: bool = True):
+        """显式事务 API；事务期间独占连接，默认先取得 SQLite 写保留锁。"""
+        self._lock.acquire()
+        owner = _threading.get_ident()
+        if self._conn.in_transaction or self._context_owner is not None:
+            self._lock.release()
+            raise RuntimeError(
+                "LockedConnection.transaction 不支持隐式嵌套；"
+                "请让最外层事务统一管理提交与回滚"
+            )
+        object.__setattr__(self, "_context_owner", owner)
+        object.__setattr__(self, "_context_depth", 1)
+        object.__setattr__(self, "_rollback_only", False)
+        try:
+            self._conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+        except BaseException:
+            object.__setattr__(self, "_context_owner", None)
+            object.__setattr__(self, "_context_depth", 0)
+            object.__setattr__(self, "_rollback_only", False)
+            self._lock.release()
+            raise
+        try:
+            yield self
+        except BaseException as exc:
+            self.__exit__(type(exc), exc, exc.__traceback__)
+            raise
+        else:
+            self.__exit__(None, None, None)
 
     def close(self) -> None:
-        with self._lock:
+        self._lock.acquire()
+        owner = _threading.get_ident()
+        release_retained = self._transaction_owner == owner
+        try:
             self._conn.close()
+            if release_retained:
+                object.__setattr__(self, "_transaction_owner", None)
+        finally:
+            if release_retained:
+                self._lock.release()
+            self._lock.release()
 
     def __enter__(self):
         self._lock.acquire()
-        try:
-            self._conn.__enter__()
-        except BaseException:
+        owner = _threading.get_ident()
+        context_owner = self._context_owner
+        if context_owner is None:
+            object.__setattr__(self, "_context_owner", owner)
+            object.__setattr__(self, "_context_depth", 1)
+            object.__setattr__(self, "_rollback_only", False)
+        elif context_owner == owner:
+            object.__setattr__(self, "_context_depth", self._context_depth + 1)
+        else:
+            # 其他线程应被 RLock 阻塞，不能与当前上下文同时进入。
             self._lock.release()
-            raise
+            raise RuntimeError("SQLite 事务上下文所有权异常")
         return self
 
-    def __exit__(self, *exc):
-        try:
-            return self._conn.__exit__(*exc)
-        finally:
+    def __exit__(self, exc_type, exc_value, traceback):
+        owner = _threading.get_ident()
+        if self._context_owner != owner or self._context_depth < 1:
             self._lock.release()
+            raise RuntimeError("SQLite 事务上下文退出线程不匹配")
+
+        if exc_type is not None:
+            object.__setattr__(self, "_rollback_only", True)
+        depth = self._context_depth - 1
+        object.__setattr__(self, "_context_depth", depth)
+        if depth > 0:
+            # 内层上下文不提交；任一层失败都会让最外层整体回滚。
+            self._lock.release()
+            return False
+
+        release_retained = False
+        try:
+            if self._rollback_only:
+                self._conn.rollback()
+            else:
+                self._conn.commit()
+        except BaseException:
+            try:
+                self._conn.rollback()
+            except sqlite3.Error:
+                pass
+            raise
+        finally:
+            try:
+                if not self._conn.in_transaction and self._transaction_owner == owner:
+                    object.__setattr__(self, "_transaction_owner", None)
+                    release_retained = True
+            except sqlite3.Error:
+                pass
+            object.__setattr__(self, "_context_owner", None)
+            object.__setattr__(self, "_context_depth", 0)
+            object.__setattr__(self, "_rollback_only", False)
+            if release_retained:
+                self._lock.release()
+            self._lock.release()
+        return False
 
     def __getattr__(self, name):
         return getattr(self._conn, name)
@@ -482,3 +708,26 @@ class LockedConnection:
     def __setattr__(self, name, value):
         setattr(self._conn, name, value)
 
+
+
+
+@contextmanager
+def connection_transaction(conn, *, immediate: bool = True):
+    """兼容 LockedConnection 与原生 sqlite3.Connection 的事务上下文。"""
+    transaction = getattr(conn, "transaction", None)
+    if callable(transaction):
+        with transaction(immediate=immediate):
+            yield conn
+        return
+
+    if getattr(conn, "in_transaction", False):
+        raise RuntimeError(
+            "connection_transaction 不支持隐式嵌套；请让最外层事务统一管理提交与回滚"
+        )
+    conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+    try:
+        yield conn
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise

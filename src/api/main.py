@@ -47,12 +47,14 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Optional
+from typing import Callable, Literal, Optional
 
 import httpx
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.routing import APIRoute
+import inspect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -98,6 +100,37 @@ from src.adapters.base import Platform
 from src.adapters import get_adapters
 
 logger = logging.getLogger(__name__)
+
+
+class TransactionalAPIRoute(APIRoute):
+    """为同步写 API 提供请求级事务边界，异常时自动回滚并释放连接锁。
+
+    认证端点不依赖租户数据库，异步端点因可能跨线程 await 而单独审查，
+    不在此处自动包裹。
+    """
+
+    def __init__(self, path: str, endpoint, **kwargs):
+        methods = {str(method).upper() for method in (kwargs.get("methods") or [])}
+        if (
+            methods.intersection({"POST", "PUT", "PATCH", "DELETE"})
+            and not path.startswith("/api/auth/")
+            and not inspect.iscoroutinefunction(endpoint)
+        ):
+            original = endpoint
+
+            def transactional_endpoint(*args, **call_kwargs):
+                conn = _g_ctx.get("conn")
+                if conn is None:
+                    return original(*args, **call_kwargs)
+                with conn:
+                    return original(*args, **call_kwargs)
+
+            transactional_endpoint.__name__ = getattr(original, "__name__", "transactional_endpoint")
+            transactional_endpoint.__doc__ = getattr(original, "__doc__", None)
+            transactional_endpoint.__annotations__ = getattr(original, "__annotations__", {})
+            transactional_endpoint.__signature__ = inspect.signature(original)
+            endpoint = transactional_endpoint
+        super().__init__(path, endpoint, **kwargs)
 
 # =====================================================================
 # 全局单例（启动时初始化一次）
@@ -317,12 +350,12 @@ def _build_tenant_runtime_context(
         )
         from src.core.config_store import overrides_path
         try:
-            legacy_result = import_legacy_overrides(conn, overrides_path(cfg))
+            legacy_result = import_legacy_overrides(conn, overrides_path(cfg), cfg=cfg)
             if legacy_result["imported"] or legacy_result["rejected"]:
                 logger.info("账号组旧配置回填 tenant=%s imported=%d rejected=%d",
                             tenant_id, legacy_result["imported"], legacy_result["rejected"])
             # 与启动迁移保持一致：热切换进入任一账号组时清除历史危险路径配置。
-            purge_disallowed_settings(conn, {"topic_kb.path"})
+            purge_disallowed_settings(conn, {"topic_kb.path"}, cfg=cfg)
             persisted_settings = read_settings(conn)
         except Exception as exc:
             logger.exception("账号组 SQLite 配置回填失败，回退旧 JSON tenant=%s error=%s",
@@ -360,11 +393,11 @@ def _build_tenant_runtime_context(
         adapters = get_adapters(cfg, conn)
         cb = CircuitBreakerEngine(cfg, conn, adapters)
         rhythm = RhythmController(cfg)
-        sm_round = RoundStateMachine(conn)
-        sm_draft = DraftStateMachine(conn)
+        sm_round = RoundStateMachine(conn, cfg=cfg)
+        sm_draft = DraftStateMachine(conn, cfg=cfg)
         scoring = ScoringEngine(cfg, conn)
         guard = UltimateGoalChecker(cfg)
-        normalizer = Normalizer(conn)
+        normalizer = Normalizer(conn, cfg)
         spiral = SpiralEngine(cfg, conn)
         scheduler = SchedulerEngine(cfg, cfg.resolve_path(cfg.paths.db_file))
         ops = OperationsEngine(cfg, conn, adapters, cb, rhythm)
@@ -429,6 +462,7 @@ def _build_tenant_runtime_context(
 
 async def _switch_tenant_runtime(tenant_id: str) -> dict:
     """只切换前台运行时引用；所有账号组后台调度器和连接继续常驻。"""
+    global _g_ctx
     registry = _g_ctx.get("tenant_registry")
     if registry is None:
         raise HTTPException(503, "账号组注册表尚未初始化")
@@ -466,11 +500,11 @@ async def _switch_tenant_runtime(tenant_id: str) -> dict:
                 try:
                     new_context["scheduler"].shutdown()
                 except Exception:
-                    pass
+                    logger.warning("账号组切换失败后的调度器清理异常", exc_info=True)
                 try:
                     new_context["conn"].close()
                 except Exception:
-                    pass
+                    logger.warning("账号组切换失败后的数据库连接清理异常", exc_info=True)
             raise HTTPException(409, str(exc)) from exc
         except Exception as exc:
             _tenant_runtime_contexts[old_tenant_id] = _g_ctx
@@ -478,11 +512,11 @@ async def _switch_tenant_runtime(tenant_id: str) -> dict:
                 try:
                     new_context["scheduler"].shutdown()
                 except Exception:
-                    pass
+                    logger.warning("账号组初始化失败后的调度器清理异常", exc_info=True)
                 try:
                     new_context["conn"].close()
                 except Exception:
-                    pass
+                    logger.warning("账号组初始化失败后的数据库连接清理异常", exc_info=True)
             logger.exception("目标账号组后台运行时初始化失败 tenant=%s", tenant_id)
             raise HTTPException(
                 500, f"目标账号组初始化失败，当前账号组未变更：{type(exc).__name__}",
@@ -504,10 +538,9 @@ async def _switch_tenant_runtime(tenant_id: str) -> dict:
         # 账号组切换不终止任何租户的扫码登录；登录子进程按租户与平台分别管理。
         selected = registry.select_active(tenant_id)
         set_active_notifier(new_context["notifier"])
-        _g_ctx.clear()
-        _g_ctx.update(new_context)
-        # 活动账号组缓存直接引用前台字典；切走时会先快照，避免配置更新后缓存陈旧。
-        _tenant_runtime_contexts[tenant_id] = _g_ctx
+        # 原子替换前台上下文引用；不就地清空/改写正在被后台读取的共享字典。
+        _g_ctx = new_context
+        _tenant_runtime_contexts[tenant_id] = new_context
         with _dedupe_lock:
             _dedupe_cache.clear()
         logger.info("账号组前台工作空间切换成功 from=%s to=%s", old_tenant_id, tenant_id)
@@ -521,9 +554,8 @@ async def _switch_tenant_runtime(tenant_id: str) -> dict:
         try:
             registry.select_active(old_tenant_id)
             set_active_notifier(old_context["notifier"])
-            _g_ctx.clear()
-            _g_ctx.update(old_context)
-            _tenant_runtime_contexts[old_tenant_id] = _g_ctx
+            _g_ctx = old_context
+            _tenant_runtime_contexts[old_tenant_id] = old_context
         except Exception as rollback_exc:
             logger.exception("账号组前台切换回滚失败")
             raise TenantRuntimeRollbackError(
@@ -595,6 +627,32 @@ def _friendly_validation_messages(errors: list[dict]) -> list[str]:
             reason = "内容不符合要求"
         messages.append(f"{label}：{reason}")
     return messages or ["请求参数不符合要求"]
+
+
+def _persist_activation_sample_results(
+    conn, run_id: str, tenant_id: str, platform: str, results: list[tuple],
+    completed_at: str,
+) -> int:
+    """原子保存三篇体验样稿并将任务从 quality_check 推进到 ready。"""
+    with conn:
+        for angle, title, body, tags, findings in results:
+            conn.execute(
+                "INSERT INTO sample_contents "
+                "(id, sample_run_id, tenant_id, platform, angle, title, body, hashtags_json, "
+                "quality_status, quality_findings_json, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pass', ?, ?, ?)",
+                (uuid.uuid4().hex, run_id, tenant_id, platform, angle, title, body,
+                 json.dumps(tags, ensure_ascii=False), json.dumps(findings, ensure_ascii=False),
+                 completed_at, completed_at),
+            )
+        cursor = conn.execute(
+            "UPDATE sample_runs SET status='ready', completed_at=? "
+            "WHERE id=? AND tenant_id=? AND status='quality_check'",
+            (completed_at, run_id, tenant_id),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("体验任务状态已变化，拒绝提交迟到的样稿结果")
+    return len(results)
 
 
 def _build_app() -> FastAPI:
@@ -719,8 +777,8 @@ def _build_app() -> FastAPI:
         adapters = get_adapters(cfg, conn)
         cb = CircuitBreakerEngine(cfg, conn, adapters)
         rhythm = RhythmController(cfg)
-        sm_round = RoundStateMachine(conn)
-        sm_draft = DraftStateMachine(conn)
+        sm_round = RoundStateMachine(conn, cfg=cfg)
+        sm_draft = DraftStateMachine(conn, cfg=cfg)
         scoring = ScoringEngine(cfg, conn)
         guard = UltimateGoalChecker(cfg)
         normalizer = Normalizer(conn)
@@ -811,20 +869,35 @@ def _build_app() -> FastAPI:
                     try:
                         background_context["scheduler"].shutdown()
                     except Exception:
-                        pass
+                        logger.warning("后台上下文调度器清理异常", exc_info=True)
                     try:
                         background_context["conn"].close()
                     except Exception:
-                        pass
+                        logger.warning("后台上下文数据库连接清理异常", exc_info=True)
 
-        # 全局消费者独立于当前活动账号组；每个任务按 tenant_id 构造专属运行时。
+        # 多消费者跨账号组并行；队列确保同一账号组同时最多一个运行任务。
+        try:
+            task_worker_count = int(os.getenv("ITERWAVE_TASK_WORKERS", "4"))
+        except (TypeError, ValueError):
+            task_worker_count = 4
+        task_worker_count = max(1, min(task_worker_count, 8))
         task_worker_stop = asyncio.Event()
-        task_worker = GlobalTaskWorker(_task_queue, lambda tenant_id: _build_tenant_runtime_context(
-            tenant_registry, tenant_id,
-        ))
-        task_worker_task = asyncio.create_task(
-            task_worker.run(task_worker_stop), name="global-tenant-task-worker",
-        )
+        task_workers = [
+            GlobalTaskWorker(
+                _task_queue,
+                lambda tenant_id: _build_tenant_runtime_context(tenant_registry, tenant_id),
+                reconcile_terminal_rounds=(index == 0),
+            )
+            for index in range(task_worker_count)
+        ]
+        task_worker_tasks = [
+            asyncio.create_task(
+                worker.run(task_worker_stop),
+                name=f"global-tenant-task-worker-{index + 1}",
+            )
+            for index, worker in enumerate(task_workers)
+        ]
+        logger.info("全局任务消费者已启动 count=%d（同租户串行、跨租户并行）", task_worker_count)
 
         # 热点服务是独立资源池；后台线程持有启动时的账号组配置和独立数据库连接。
         from ..core import hot_topic_service
@@ -839,10 +912,13 @@ def _build_app() -> FastAPI:
             yield
         finally:
             task_worker_stop.set()
-            try:
-                await task_worker_task
-            except Exception:
-                logger.exception("全局任务消费者关闭异常")
+            worker_results = await asyncio.gather(*task_worker_tasks, return_exceptions=True)
+            for index, result in enumerate(worker_results, 1):
+                if isinstance(result, BaseException):
+                    logger.error(
+                        "全局任务消费者关闭异常 worker=%d error=%s",
+                        index, type(result).__name__, exc_info=result,
+                    )
             # 停止所有账号组常驻调度器并释放各自的数据库连接。
             for tenant_id, context in list(_tenant_runtime_contexts.items()):
                 try:
@@ -864,6 +940,8 @@ def _build_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+    # 所有同步写 API 在同一线程内持有事务锁；异常离开路由时由连接上下文自动回滚。
+    app.router.route_class = TransactionalAPIRoute
     _register_routes(app)
 
     @app.exception_handler(RequestValidationError)
@@ -920,18 +998,18 @@ def _build_app() -> FastAPI:
                 pass
             else:
                 cookie_token = request.cookies.get(auth.COOKIE_NAME)
-                client_ip = request.client.host if request.client else "unknown"
-                has_token_header = bool(request.headers.get("x-access-token")) or (
-                    (request.headers.get("authorization") or "").lower().startswith("bearer ")
+                client_ip = auth.client_ip(request)
+                # PBKDF2-HMAC-SHA256 是 CPU 密集型同步计算，不能在 ASGI 事件循环内执行。
+                authenticated, rate_limited = await asyncio.to_thread(
+                    auth.authenticate_request, cookie_token, request.headers, ip=client_ip,
                 )
-                limited_before = has_token_header and auth.is_rate_limited(client_ip)
-                if not auth.is_authenticated(cookie_token, request.headers, ip=client_ip):
+                if not authenticated:
                     return JSONResponse(
                         {
-                            "detail": "认证尝试次数过多，请 10 分钟后再试" if limited_before else "需要登录",
-                            "code": "auth_rate_limited" if limited_before else "auth_required",
+                            "detail": "认证尝试次数过多，请 10 分钟后再试" if rate_limited else "需要登录",
+                            "code": "auth_rate_limited" if rate_limited else "auth_required",
                         },
-                        status_code=429 if limited_before else 401,
+                        status_code=429 if rate_limited else 401,
                     )
 
         # Content-Length 可被省略或伪造；已通过认证的写请求还要按实际流量限额，
@@ -1266,6 +1344,8 @@ class LlmKeyRequest(BaseModel):
     """R23：Key 只写 .env（chmod 600），永不回传、不落库、不写日志。空串 = 删除。"""
 
     api_key: str = Field(default="")
+    # primary = 主模型密钥；fallback = 兜底模型密钥（可与主模型不同供应商）
+    target: Literal["primary", "fallback"] = "primary"
 
 
 class CreateRoundRequest(BaseModel):
@@ -1522,7 +1602,9 @@ def _unscheduled_drafts(conn) -> list[dict]:
     rows = conn.execute(
         "SELECT d.id, d.platform, d.status, c.title, c.round_id "
         "FROM drafts d JOIN contents c ON d.content_id = c.id "
+        "LEFT JOIN draft_save_verifications v ON v.draft_id=d.id "
         "WHERE d.scheduled_publish_at IS NULL AND d.status IN ('draft_pending','draft_saved') "
+        "AND COALESCE(v.status, '') != 'pending_verify' "
         "ORDER BY d.created_at DESC LIMIT 50"
     ).fetchall()
     return [dict(r) for r in rows]
@@ -1815,18 +1897,6 @@ def _register_routes(app: FastAPI) -> None:
         if not idempotency_key or len(idempotency_key) > 100:
             raise HTTPException(422, "请求标识无效，请刷新后重试")
         conn = _g()["conn"]
-        existing = conn.execute(
-            "SELECT id, status FROM sample_runs WHERE tenant_id=? AND idempotency_key=?",
-            (tenant_id, idempotency_key),
-        ).fetchone()
-        if existing:
-            return {"sample_run_id": existing["id"], "status": existing["status"], "deduplicated": True}
-        active = conn.execute(
-            "SELECT COUNT(*) FROM sample_runs WHERE tenant_id=? AND status IN ('created','generating','quality_check')",
-            (tenant_id,),
-        ).fetchone()[0]
-        if active:
-            raise HTTPException(409, "已有快速体验任务正在执行，请等待完成后再试")
         run_id = uuid.uuid4().hex
         now = _now().isoformat(sep=" ", timespec="seconds")
         from src.core.content_pipeline import _llm_available
@@ -1835,23 +1905,37 @@ def _register_routes(app: FastAPI) -> None:
         error_code = None if model_ready else "model_not_configured"
         error_message = None if model_ready else "尚未配置可用模型，请先到系统设置接入自己的模型"
         try:
-            conn.execute(
-                "INSERT INTO sample_runs "
-                "(id, tenant_id, platform, account_description, status, model_mode, error_code, error_message_safe, "
-                "idempotency_key, created_at, completed_at) VALUES (?, ?, ?, ?, ?, 'byok', ?, ?, ?, ?, ?)",
-                (run_id, tenant_id, platform, description, initial_status, error_code, error_message,
-                 idempotency_key, now, None if model_ready else now),
-            )
-            conn.commit()
+            # Async routes are excluded from TransactionalAPIRoute; admission must lock
+            # idempotency lookup, active-run check and insertion as one transaction.
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                existing = conn.execute(
+                    "SELECT id, status FROM sample_runs WHERE tenant_id=? AND idempotency_key=?",
+                    (tenant_id, idempotency_key),
+                ).fetchone()
+                if existing:
+                    return {"sample_run_id": existing["id"], "status": existing["status"], "deduplicated": True}
+                active = conn.execute(
+                    "SELECT COUNT(*) FROM sample_runs WHERE tenant_id=? AND status IN ('created','generating','quality_check')",
+                    (tenant_id,),
+                ).fetchone()[0]
+                if active:
+                    raise HTTPException(409, "已有快速体验任务正在执行，请等待完成后再试")
+                conn.execute(
+                    "INSERT INTO sample_runs "
+                    "(id, tenant_id, platform, account_description, status, model_mode, error_code, error_message_safe, "
+                    "idempotency_key, created_at, completed_at) VALUES (?, ?, ?, ?, ?, 'byok', ?, ?, ?, ?, ?)",
+                    (run_id, tenant_id, platform, description, initial_status, error_code, error_message,
+                     idempotency_key, now, None if model_ready else now),
+                )
         except sqlite3.IntegrityError as exc:
-            conn.rollback()
             duplicate = conn.execute(
                 "SELECT id, status FROM sample_runs WHERE tenant_id=? AND idempotency_key=?",
                 (tenant_id, idempotency_key),
             ).fetchone()
             if duplicate:
                 return {"sample_run_id": duplicate["id"], "status": duplicate["status"], "deduplicated": True}
-            raise HTTPException(409, "已有快速体验任务正在执行，请等待完成后再试") from exc
+            raise HTTPException(409, "已有快速体验任务正在执行，请稍后重试") from exc
         _record_content_event("sample_generation_started", sample_run_id=run_id,
                               idempotency_key=f"sample-start:{run_id}")
         if not model_ready:
@@ -1867,24 +1951,29 @@ def _register_routes(app: FastAPI) -> None:
         cfg_bg = _g()["cfg"]
 
         def record_sample_event(event_type: str, metadata: dict, event_key: str) -> None:
-            conn_bg.execute(
-                "INSERT OR IGNORE INTO content_events "
-                "(id, tenant_id, sample_run_id, event_type, event_at, source, metadata_json, idempotency_key) "
-                "VALUES (?, ?, ?, ?, ?, 'web', ?, ?)",
-                (uuid.uuid4().hex, tenant_id, run_id, event_type,
-                 business_now(cfg_bg).isoformat(sep=" ", timespec="seconds"),
-                 json.dumps(metadata, ensure_ascii=False), event_key),
-            )
-            conn_bg.commit()
+            with conn_bg:
+                conn_bg.execute(
+                    "INSERT OR IGNORE INTO content_events "
+                    "(id, tenant_id, sample_run_id, event_type, event_at, source, metadata_json, idempotency_key) "
+                    "VALUES (?, ?, ?, ?, ?, 'web', ?, ?)",
+                    (uuid.uuid4().hex, tenant_id, run_id, event_type,
+                     business_now(cfg_bg).isoformat(sep=" ", timespec="seconds"),
+                     json.dumps(metadata, ensure_ascii=False), event_key),
+                )
 
         async def generate_samples():
             from src.core.content_pipeline import ContentGenerationError, generate_copy_content
             from src.adapters.base import Platform as PlatformEnum
             try:
                 started = business_now(cfg_bg).isoformat(sep=" ", timespec="seconds")
-                conn_bg.execute("UPDATE sample_runs SET status='generating', started_at=? WHERE id=?",
-                                (started, run_id))
-                conn_bg.commit()
+                with conn_bg:
+                    cursor = conn_bg.execute(
+                        "UPDATE sample_runs SET status='generating', started_at=? "
+                        "WHERE id=? AND tenant_id=? AND status='created'",
+                        (started, run_id, tenant_id),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError("体验任务状态已变化，拒绝启动生成")
                 base_cfg = cfg_bg
                 sample_goal = base_cfg.ultimate_goal.model_copy(update={
                     "positioning": description,
@@ -1916,11 +2005,11 @@ def _register_routes(app: FastAPI) -> None:
                                         "本次体验已达到模型调用安全上限，请调整定位后重新体验",
                                     )
                                 model_call_count += 1
-                                conn_bg.execute(
-                                    "UPDATE sample_runs SET attempt_count=? WHERE id=?",
-                                    (model_call_count, run_id),
-                                )
-                                conn_bg.commit()
+                                with conn_bg:
+                                    conn_bg.execute(
+                                        "UPDATE sample_runs SET attempt_count=? WHERE id=?",
+                                        (model_call_count, run_id),
+                                    )
                                 title, body, tags = await asyncio.to_thread(
                                     generate_copy_content,
                                     f"{description}：{angle}",
@@ -1977,24 +2066,18 @@ def _register_routes(app: FastAPI) -> None:
                             "quality_rejected", "样稿多次未通过质量检查：" + "、".join(findings),
                         )
                     results.append((angle, title, body, tags, findings))
-                conn_bg.execute("UPDATE sample_runs SET status='quality_check' WHERE id=?", (run_id,))
-                conn_bg.commit()
-                now_done = business_now(cfg_bg).isoformat(sep=" ", timespec="seconds")
-                for angle, title, body, tags, findings in results:
-                    conn_bg.execute(
-                        "INSERT INTO sample_contents "
-                        "(id, sample_run_id, tenant_id, platform, angle, title, body, hashtags_json, "
-                        "quality_status, quality_findings_json, created_at, updated_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pass', ?, ?, ?)",
-                        (uuid.uuid4().hex, run_id, tenant_id, platform, angle, title, body,
-                         json.dumps(tags, ensure_ascii=False), json.dumps(findings, ensure_ascii=False),
-                         now_done, now_done),
+                with conn_bg:
+                    cursor = conn_bg.execute(
+                        "UPDATE sample_runs SET status='quality_check' "
+                        "WHERE id=? AND tenant_id=? AND status='generating'",
+                        (run_id, tenant_id),
                     )
-                conn_bg.execute(
-                    "UPDATE sample_runs SET status='ready', completed_at=? WHERE id=?",
-                    (now_done, run_id),
+                    if cursor.rowcount != 1:
+                        raise RuntimeError("体验任务状态已变化，拒绝进入质量检查")
+                now_done = business_now(cfg_bg).isoformat(sep=" ", timespec="seconds")
+                _persist_activation_sample_results(
+                    conn_bg, run_id, tenant_id, platform, results, now_done,
                 )
-                conn_bg.commit()
                 try:
                     record_sample_event("sample_generation_succeeded", {"sample_count": 3},
                                          f"sample-ready:{run_id}")
@@ -2012,14 +2095,15 @@ def _register_routes(app: FastAPI) -> None:
                     code = "sample_generation_failed"
                     safe_message = "样稿生成失败，请检查模型配置后重试"
                 try:
-                    conn_bg.rollback()
+                    with conn_bg:
+                        conn_bg.execute(
+                            "UPDATE sample_runs SET status='failed', error_code=?, error_message_safe=?, completed_at=? "
+                            "WHERE id=? AND tenant_id=? AND status IN ('created','generating','quality_check')",
+                            (code, safe_message[:300], business_now(cfg_bg).isoformat(sep=" ", timespec="seconds"),
+                             run_id, tenant_id),
+                        )
                 except Exception:
-                    logger.exception("快速体验失败事务回滚异常 run=%s", run_id)
-                conn_bg.execute(
-                    "UPDATE sample_runs SET status='failed', error_code=?, error_message_safe=?, completed_at=? WHERE id=?",
-                    (code, safe_message[:300], business_now(cfg_bg).isoformat(sep=" ", timespec="seconds"), run_id),
-                )
-                conn_bg.commit()
+                    logger.exception("快速体验失败状态收口失败 run=%s", run_id)
                 record_sample_event("sample_generation_failed", {"error_code": code},
                                     f"sample-failed:{run_id}")
         
@@ -2677,172 +2761,6 @@ def _register_routes(app: FastAPI) -> None:
             (tenant_id, suggestion_key),
         ).fetchone()
         return {"suggestion_key": suggestion_key, **dict(row)}
-
-    @app.get("/api/activation/metrics")
-    def activation_metrics():
-        conn = _g()["conn"]
-        tenant_id = _tenant_id()
-        cohort = conn.execute("SELECT first_seen_at FROM activation_cohort WHERE tenant_id=?",
-                              (tenant_id,)).fetchone()
-        now = _now()
-        if cohort is None:
-            return {"cohort_size": 0, "ttv_seconds": None, "ttv_sample_count": 0,
-                    "ttv_p50_seconds": None, "ttv_p90_seconds": None,
-                    "ttv_percentile_scope": "当前账号组；至少 5 个独立 cohort 才展示分位数", "seven_day_activation_rate": None,
-                    "first_publish_rate": None, "data_return_rate": None, "weekly_adopted_published": 0,
-                    "activation_input_wait_seconds": None, "model_queue_wait_seconds": None,
-                    "generation_processing_seconds": None,
-                    "weekly_effective_review_count": 0, "quick_experience_completion_rate": None,
-                    "sample_attempted_count": 0, "sample_ready_count": 0, "platform_model_breakdown": [],
-                    "observation_window_complete": False}
-        started = datetime.fromisoformat(cohort["first_seen_at"])
-        first_ready_run = conn.execute(
-            "SELECT created_at, started_at, completed_at FROM sample_runs "
-            "WHERE tenant_id=? AND status='ready' AND completed_at IS NOT NULL AND started_at IS NOT NULL "
-            "AND created_at>=? ORDER BY completed_at ASC LIMIT 1",
-            (tenant_id, cohort["first_seen_at"]),
-        ).fetchone()
-        if first_ready_run:
-            first_created = datetime.fromisoformat(first_ready_run["created_at"])
-            first_started = datetime.fromisoformat(first_ready_run["started_at"])
-            first_completed = datetime.fromisoformat(first_ready_run["completed_at"])
-            activation_input_wait_seconds = max(0.0, (first_created - started).total_seconds())
-            model_queue_wait_seconds = max(0.0, (first_started - first_created).total_seconds())
-            generation_processing_seconds = max(0.0, (first_completed - first_started).total_seconds())
-            ttv = (first_completed - started).total_seconds()
-        else:
-            activation_input_wait_seconds = None
-            model_queue_wait_seconds = None
-            generation_processing_seconds = None
-            ttv = None
-        # TTV 分位数按当前数据库内可观察的账号组 cohort 计算；不伪装成跨安装实例统计。
-        ttv_values: list[float] = []
-        for cohort_row in conn.execute(
-            "SELECT tenant_id, first_seen_at FROM activation_cohort WHERE tenant_id=?",
-            (tenant_id,),
-        ).fetchall():
-            ready_row = conn.execute(
-                "SELECT completed_at FROM sample_runs WHERE tenant_id=? AND status='ready' "
-                "AND completed_at IS NOT NULL AND created_at>=? ORDER BY completed_at ASC LIMIT 1",
-                (cohort_row["tenant_id"], cohort_row["first_seen_at"]),
-            ).fetchone()
-            if ready_row:
-                duration = (
-                    datetime.fromisoformat(ready_row["completed_at"])
-                    - datetime.fromisoformat(cohort_row["first_seen_at"])
-                ).total_seconds()
-                if duration >= 0:
-                    ttv_values.append(duration)
-        ttv_values.sort()
-        def _ttv_percentile(percentile: float) -> float | None:
-            # 少于 5 个独立 cohort 不展示分位数，避免把单个安装实例的单点值伪装成 P50/P90。
-            if len(ttv_values) < 5:
-                return None
-            import math
-            index = max(0, math.ceil(percentile * len(ttv_values)) - 1)
-            return round(ttv_values[index], 1)
-
-        adopted = conn.execute(
-            "SELECT COUNT(DISTINCT e.sample_content_id) FROM content_events e "
-            "JOIN sample_contents sc ON sc.id=e.sample_content_id "
-            "WHERE e.tenant_id=? AND e.event_type IN ('content_copied','content_saved') "
-            "AND e.event_at<=? AND e.event_at>=?",
-            (tenant_id, (started + timedelta(days=7)).isoformat(sep=" "), started.isoformat(sep=" ")),
-        ).fetchone()[0]
-        publish_count = conn.execute(
-            "SELECT COUNT(DISTINCT content_id) FROM content_events WHERE tenant_id=? "
-            "AND event_type='publish_confirmed' AND event_at>=? AND event_at<=?",
-            (tenant_id, started.isoformat(sep=" "), (started + timedelta(days=7)).isoformat(sep=" ")),
-        ).fetchone()[0]
-        mature_publish_cutoff = (now - timedelta(days=7)).isoformat(sep=" ")
-        published = conn.execute(
-            "SELECT COUNT(DISTINCT id) FROM drafts "
-            "WHERE user_confirmed_at>=? AND user_confirmed_at<=?",
-            (started.isoformat(sep=" "), mature_publish_cutoff),
-        ).fetchone()[0]
-        returned_count = conn.execute(
-            "SELECT COUNT(DISTINCT d.id) FROM drafts d "
-            "WHERE d.user_confirmed_at>=? AND d.user_confirmed_at<=? AND ("
-            "EXISTS (SELECT 1 FROM content_events e WHERE e.tenant_id=? "
-            "AND e.content_id=d.content_id AND e.event_type='note_url_added' "
-            "AND e.event_at>=d.user_confirmed_at "
-            "AND e.event_at<=datetime(d.user_confirmed_at, '+7 days')) "
-            "OR EXISTS (SELECT 1 FROM metric_snapshots ms WHERE ms.tenant_id=? "
-            "AND ms.draft_id=d.id AND ms.recorded_at>=d.user_confirmed_at "
-            "AND ms.recorded_at<=datetime(d.user_confirmed_at, '+7 days') "
-            "AND (ms.views IS NOT NULL OR ms.likes IS NOT NULL OR ms.collects IS NOT NULL "
-            "OR ms.comments IS NOT NULL OR ms.shares IS NOT NULL)) "
-            "OR EXISTS (SELECT 1 FROM metrics m WHERE m.draft_id=d.id "
-            "AND m.fetch_status IN ('success','partial') AND m.fetched_at>=d.user_confirmed_at "
-            "AND m.fetched_at<=datetime(d.user_confirmed_at, '+7 days') "
-            "AND (m.views IS NOT NULL OR m.likes IS NOT NULL OR m.collects IS NOT NULL "
-            "OR m.comments IS NOT NULL OR m.shares IS NOT NULL)))",
-            (started.isoformat(sep=" "), mature_publish_cutoff, tenant_id, tenant_id),
-        ).fetchone()[0]
-        # 确认发布本身即代表用户已采纳该内容；不依赖一个当前流程不会稳定写入的独立 content_adopted 事件。
-        weekly_adopted_published = conn.execute(
-            "SELECT COUNT(DISTINCT content_id) FROM content_events "
-            "WHERE tenant_id=? AND event_type='publish_confirmed' AND event_at>=? AND event_at<=?",
-            (tenant_id, (now - timedelta(days=7)).isoformat(sep=" "), now.isoformat(sep=" ")),
-        ).fetchone()[0]
-        weekly_effective_review_count = conn.execute(
-            "SELECT COUNT(DISTINCT content_id) FROM ("
-            "SELECT ms.content_id FROM metric_snapshots ms JOIN drafts d ON d.id=ms.draft_id "
-            "WHERE ms.tenant_id=? AND ms.measured_at>=? AND d.user_confirmed_at IS NOT NULL "
-            "AND (ms.views IS NOT NULL OR ms.likes IS NOT NULL OR ms.collects IS NOT NULL "
-            "OR ms.comments IS NOT NULL OR ms.shares IS NOT NULL) "
-            "UNION SELECT m.content_id FROM metrics m JOIN drafts d ON d.id=m.draft_id "
-            "WHERE m.fetch_status IN ('success','partial') AND m.fetched_at>=? "
-            "AND d.user_confirmed_at IS NOT NULL "
-            "AND (m.views IS NOT NULL OR m.likes IS NOT NULL OR m.collects IS NOT NULL "
-            "OR m.comments IS NOT NULL OR m.shares IS NOT NULL))",
-            (tenant_id, (now - timedelta(days=7)).isoformat(sep=" "),
-             (now - timedelta(days=7)).isoformat(sep=" ")),
-        ).fetchone()[0]
-        sample_counts = conn.execute(
-            "SELECT COUNT(*) AS attempted, "
-            "SUM(CASE WHEN status='ready' THEN 1 ELSE 0 END) AS completed "
-            "FROM sample_runs WHERE tenant_id=? AND created_at>=? AND created_at<=?",
-            (tenant_id, started.isoformat(sep=" "), (started + timedelta(days=7)).isoformat(sep=" ")),
-        ).fetchone()
-        platform_breakdown = [
-            dict(row) for row in conn.execute(
-                "SELECT platform, model_mode, COUNT(*) AS run_count, "
-                "SUM(CASE WHEN status='ready' THEN 1 ELSE 0 END) AS ready_count "
-                "FROM sample_runs WHERE tenant_id=? AND created_at>=? "
-                "GROUP BY platform, model_mode ORDER BY platform, model_mode",
-                (tenant_id, started.isoformat(sep=" ")),
-            ).fetchall()
-        ]
-        complete = now >= started + timedelta(days=7)
-        cohort_size = int(conn.execute("SELECT COUNT(*) FROM activation_cohort WHERE tenant_id=?", (tenant_id,)).fetchone()[0])
-        return {
-            "cohort_size": cohort_size,
-            "sample_attempted_count": int(sample_counts["attempted"] or 0),
-            "sample_ready_count": int(sample_counts["completed"] or 0),
-            "quick_experience_completion_rate": (
-                round(int(sample_counts["completed"] or 0) / int(sample_counts["attempted"]), 4)
-                if int(sample_counts["attempted"] or 0) > 0 else None
-            ),
-            "ttv_seconds": round(float(ttv), 1) if ttv is not None else None,
-            "ttv_sample_count": len(ttv_values),
-            "ttv_p50_seconds": _ttv_percentile(0.50),
-            "ttv_p90_seconds": _ttv_percentile(0.90),
-            "ttv_percentile_scope": "当前账号组内；至少 5 个独立 cohort 才展示分位数，跨安装实例需集中汇总",
-            "activation_input_wait_seconds": round(activation_input_wait_seconds, 1) if activation_input_wait_seconds is not None else None,
-            "model_queue_wait_seconds": round(model_queue_wait_seconds, 1) if model_queue_wait_seconds is not None else None,
-            "generation_processing_seconds": round(generation_processing_seconds, 1) if generation_processing_seconds is not None else None,
-            "seven_day_activation_rate": (1.0 if adopted else 0.0) if complete else None,
-            "first_publish_rate": (1.0 if publish_count else 0.0) if complete else None,
-            "weekly_adopted_published": int(weekly_adopted_published or 0),
-            "weekly_effective_review_count": int(weekly_effective_review_count or 0),
-            "data_return_rate": (min(1.0, returned_count / published) if published else None),
-            "published_content_count": int(published),
-            "data_returned_count": int(returned_count),
-            "platform_model_breakdown": platform_breakdown,
-            "observation_window_complete": complete,
-            "limitations": ["首期按当前账号组/安装实例统计", "7 日指标仅纳入已完成观察窗的 cohort"],
-        }
 
     # --- 健康检查 ---
     @app.get("/health")
@@ -4174,7 +4092,7 @@ def _register_routes(app: FastAPI) -> None:
             provided = str((payload or {}).get("bootstrap_token") or "")
             if not local_direct:
                 client_ip = request.client.host if request.client else "unknown"
-                if auth.is_rate_limited(client_ip):
+                if not auth.reserve_auth_attempt(client_ip):
                     raise HTTPException(
                         status_code=429,
                         detail="引导口令尝试次数过多，请 10 分钟后再试",
@@ -4182,7 +4100,6 @@ def _register_routes(app: FastAPI) -> None:
                     )
                 valid_bootstrap = bool(bootstrap and provided) and hmac.compare_digest(provided, bootstrap)
                 if not valid_bootstrap:
-                    auth.record_failure(client_ip)
                     raise HTTPException(
                         status_code=403,
                         detail="首次设置口令需本机访问，或先在服务器配置 ITERWAVE_BOOTSTRAP_TOKEN 后提交引导口令",
@@ -4652,8 +4569,10 @@ def _register_routes(app: FastAPI) -> None:
         # 附带 drafts 列表
         drafts = conn.execute(
             "SELECT d.*, c.review_rejected AS review_rejected, "
-            "c.review_rejection_reason AS review_rejection_reason "
-            "FROM drafts d JOIN contents c ON c.id = d.content_id WHERE c.round_id = ?",
+            "c.review_rejection_reason AS review_rejection_reason, "
+            "v.status AS save_verification_status "
+            "FROM drafts d JOIN contents c ON c.id = d.content_id "
+            "LEFT JOIN draft_save_verifications v ON v.draft_id=d.id WHERE c.round_id = ?",
             (round_id,),
         ).fetchall()
         result = dict(row)
@@ -4663,6 +4582,9 @@ def _register_routes(app: FastAPI) -> None:
         round_drafts = []
         for draft in drafts:
             item = dict(draft)
+            if item.get("save_verification_status") == "pending_verify":
+                item["status"] = "pending_verify"
+            item.pop("save_verification_status", None)
             item["review_rejected"] = bool(item.get("review_rejected"))
             round_drafts.append(item)
         result["drafts"] = round_drafts
@@ -4840,18 +4762,37 @@ def _register_routes(app: FastAPI) -> None:
             queued = await run_round(round_id, RunRoundRequest(
                 topic_count=int(plan["planned_count"]), platforms=platforms, save_drafts=True,
             ))
-        except HTTPException:
+        except Exception as exc:
+            # 入队失败时 Worker 尚未开始执行；计划和未启动轮次必须一起补偿。
+            try:
+                from src.core.timezone import business_now
+                with conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute(
+                        "UPDATE content_plans SET status='failed',version=version+1,updated_at=? "
+                        "WHERE id=? AND status='generating'",
+                        (business_now(_g()["cfg"]).isoformat(timespec="seconds"), plan_id),
+                    )
+                    conn.execute(
+                        "UPDATE spiral_rounds SET status='cancelled' "
+                        "WHERE id=? AND status='created'",
+                        (round_id,),
+                    )
+            except Exception as compensation_error:
+                logger.exception(
+                    "内容计划启动失败后的轮次补偿失败 plan_id=%s round_id=%s",
+                    plan_id, round_id,
+                )
+                raise HTTPException(503, "计划启动失败，且状态补偿未完成，请检查计划和轮次状态") from compensation_error
+            if isinstance(exc, HTTPException):
+                raise
+            logger.exception("内容计划加入全局队列失败 plan_id=%s round_id=%s", plan_id, round_id)
+            raise HTTPException(503, "计划加入生产队列失败，已回滚本次启动状态") from exc
+        with conn:
             conn.execute(
-                "UPDATE content_plans SET status='failed',version=version+1,updated_at=? WHERE id=? AND status='generating'",
-                (_now().isoformat(timespec="seconds"), plan_id),
+                "UPDATE content_plan_rounds SET task_id=? WHERE plan_id=? AND round_id=?",
+                (queued["task_id"], plan_id, round_id),
             )
-            conn.commit()
-            raise
-        conn.execute(
-            "UPDATE content_plan_rounds SET task_id=? WHERE plan_id=? AND round_id=?",
-            (queued["task_id"], plan_id, round_id),
-        )
-        conn.commit()
         return {"plan_id": plan_id, "round_id": round_id, "task_id": queued["task_id"],
                 "status": queued["status"], "queued": queued["queued"]}
 
@@ -4998,7 +4939,9 @@ def _register_routes(app: FastAPI) -> None:
                 # cancelled 轮次里仍可恢复存平台的 draft_pending 记录。
                 pending = conn.execute(
                     "SELECT d.id FROM drafts d JOIN contents c ON c.id = d.content_id "
-                    "WHERE c.round_id = ? AND d.status = 'draft_pending'",
+                    "WHERE c.round_id = ? AND d.status = 'draft_pending' "
+                    "AND NOT EXISTS (SELECT 1 FROM draft_save_verifications v "
+                    "                WHERE v.draft_id=d.id AND v.status='pending_verify')",
                     (round_id,),
                 ).fetchall()
                 for item in pending:
@@ -5027,13 +4970,17 @@ def _register_routes(app: FastAPI) -> None:
             "c.visual_status AS visual_status, c.visual_reason AS visual_reason, "
             "c.platform as cfg_platform, c.guard_outcome AS guard_outcome, c.guard_reason AS guard_reason, "
             "c.review_rejected AS review_rejected, "
-            "c.review_rejection_reason AS review_rejection_reason "
-            "FROM drafts d LEFT JOIN contents c ON d.content_id = c.id"
+            "c.review_rejection_reason AS review_rejection_reason, "
+            "v.status AS save_verification_status "
+            "FROM drafts d LEFT JOIN contents c ON d.content_id = c.id "
+            "LEFT JOIN draft_save_verifications v ON v.draft_id = d.id"
         )
         where: list[str] = []
         params: list = []
-        if status:
-            where.append("d.status = ?")
+        if status == "pending_verify":
+            where.append("v.status = 'pending_verify'")
+        elif status:
+            where.append("d.status = ? AND COALESCE(v.status, '') != 'pending_verify'")
             params.append(status)
         if platform:
             where.append("d.platform = ?")
@@ -5041,7 +4988,10 @@ def _register_routes(app: FastAPI) -> None:
         if draft_id:
             where.append("d.id = ?")
             params.append(draft_id)
-        count_sql = "SELECT COUNT(*) FROM drafts d LEFT JOIN contents c ON d.content_id = c.id"
+        count_sql = (
+            "SELECT COUNT(*) FROM drafts d LEFT JOIN contents c ON d.content_id = c.id "
+            "LEFT JOIN draft_save_verifications v ON v.draft_id = d.id"
+        )
         if where:
             where_sql = " WHERE " + " AND ".join(where)
             count_sql += where_sql
@@ -5059,6 +5009,8 @@ def _register_routes(app: FastAPI) -> None:
         from src.core.content_version import content_version_hash, parse_json_list
         for item in rows:
             result = dict(item)
+            if result.get("save_verification_status") == "pending_verify":
+                result["status"] = "pending_verify"
             outcome = result.get("guard_outcome")
             result["review_rejected"] = bool(result.get("review_rejected"))
             result["guard_confirmation_allowed"] = (
@@ -5085,6 +5037,7 @@ def _register_routes(app: FastAPI) -> None:
             # 尤其 image_paths 可能是本机绝对路径，不能随便随列表 API 下发。
             for internal_field in (
                 "body", "tags", "image_paths", "saved_content_hash", "saved_platform_title",
+                "save_verification_status",
             ):
                 result.pop(internal_field, None)
             items.append(result)
@@ -5096,6 +5049,80 @@ def _register_routes(app: FastAPI) -> None:
             "page": page,
             "page_size": page_size,
             "pages": (total + page_size - 1) // page_size,
+        }
+
+    @app.post("/api/drafts/{draft_id}/verify_save")
+    def verify_draft_save(draft_id: str, payload: dict):
+        """人工核实平台草稿保存结果；不确定结果不得直接终结为 failed。"""
+        saved = payload.get("saved") if isinstance(payload, dict) else None
+        note = str((payload or {}).get("note") or "").strip() if isinstance(payload, dict) else ""
+        if not isinstance(saved, bool) or len(note) < 3 or len(note) > 500:
+            raise HTTPException(422, "必须提供 saved 布尔值及至少 3 个字符的核实说明")
+
+        conn = _g()["conn"]
+        row = conn.execute(
+            "SELECT d.status, d.platform, d.content_id, c.round_id, c.title, c.body, "
+            "c.tags, c.image_paths, v.status AS verification_status, "
+            "v.platform_draft_id FROM drafts d JOIN contents c ON c.id=d.content_id "
+            "LEFT JOIN draft_save_verifications v ON v.draft_id=d.id WHERE d.id=?",
+            (draft_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, f"草稿 {draft_id} 不存在")
+        if row["verification_status"] != "pending_verify":
+            if saved and row["status"] == "draft_saved" and row["verification_status"] == "verified_saved":
+                return {"draft_id": draft_id, "status": "draft_saved", "already_verified": True}
+            raise HTTPException(409, f"草稿核实状态为 {row['verification_status'] or 'none'}，不是待核实状态")
+        if row["status"] != "draft_pending":
+            raise HTTPException(409, f"待核实草稿的本地状态异常：{row['status']}")
+
+        if saved:
+            from src.core.content_version import content_version_hash, parse_json_list
+            stored_images = parse_json_list(row["image_paths"])
+            payload_images = [str(stored_images[0])] if stored_images and stored_images[0] else []
+            saved_hash = content_version_hash(
+                row["title"], row["body"], parse_json_list(row["tags"]), payload_images,
+            )
+            if not _g()["sm_draft"].transition(
+                draft_id, "draft_saved",
+                reason=f"人工核实平台存草稿结果：已保存；{note}",
+                extra_updates={
+                    "draft_id": row["platform_draft_id"],
+                    "saved_content_hash": saved_hash,
+                    "saved_platform_title": row["title"],
+                    "error_msg": None,
+                },
+            ):
+                raise HTTPException(409, "草稿状态更新失败，请刷新后重试")
+            target = "draft_saved"
+            verification_status = "verified_saved"
+        else:
+            conn.execute(
+                "UPDATE drafts SET draft_id=NULL, error_msg=NULL WHERE id=? AND status='draft_pending'",
+                (draft_id,),
+            )
+            target = "draft_pending"
+            verification_status = "verified_missing"
+
+        conn.execute(
+            "UPDATE draft_save_verifications SET status=?, verified_at=?, note=? WHERE draft_id=? AND status='pending_verify'",
+            (
+                verification_status, _now().strftime("%Y-%m-%d %H:%M:%S"),
+                note, draft_id,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO user_override (round_id, override_field, original_value, "
+            "override_value, reason, overridden_by, overridden_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                row["round_id"], "draft_save_verify", "pending_verify", target,
+                note, "web-ui", _now().strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        )
+        return {
+            "draft_id": draft_id, "status": target,
+            "message": "已记录人工核实结果；未保存的草稿已恢复为待存状态" if not saved else "已确认平台草稿存在",
         }
 
     @app.post("/api/drafts/{draft_id}/publish_confirm")
@@ -5410,6 +5437,11 @@ def _register_routes(app: FastAPI) -> None:
         row = conn.execute("SELECT status FROM drafts WHERE id = ?", (draft_id,)).fetchone()
         if not row:
             raise HTTPException(404, "草稿不存在")
+        verification = conn.execute(
+            "SELECT status FROM draft_save_verifications WHERE draft_id=?", (draft_id,),
+        ).fetchone()
+        if verification and verification["status"] == "pending_verify":
+            raise HTTPException(409, "平台保存结果尚待人工核实；核实前不能取消或删除该草稿")
         ok = _g()["sm_draft"].transition(draft_id, "cancelled", reason="用户取消发布")
         if not ok:
             raise HTTPException(400, f"状态迁移失败（当前 {row['status']}）")
@@ -5619,7 +5651,7 @@ def _register_routes(app: FastAPI) -> None:
         from src.core.topic_pool import add_manual_topic
         try:
             return add_manual_topic(_g()["conn"], title=req.title, dimension=req.dimension,
-                                    summary=req.summary, link=req.link)
+                                    summary=req.summary, link=req.link, cfg=_g()["cfg"])
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
@@ -5851,6 +5883,8 @@ def _register_routes(app: FastAPI) -> None:
         _content_row(conn, content_id)
         from src.core.visual_persistence import get_visual_version_history
         versions = get_visual_version_history(conn, content_id)
+        from src.core.content_pipeline import image_generation_settings
+        image_settings_ready = image_generation_settings(conn)[0] is not None
         for version in versions:
             design = version.get("design") or {}
             safe_pages = []
@@ -5859,11 +5893,7 @@ def _register_routes(app: FastAPI) -> None:
                     continue
                 output_root = Path(_g()["cfg"].resolve_path(_g()["cfg"].paths.output_dir)).resolve()
                 background_path = Path(str(page.get("background_path") or "")).resolve()
-                image_key_env = os.getenv("ITERWAVE_IMAGE_API_KEY_ENV", "OPENAI_API_KEY").strip()
-                ai_revision_ready = (
-                    os.getenv("ITERWAVE_ENABLE_AI_VISUALS", "").strip() == "1"
-                    and bool(image_key_env) and bool(os.getenv(image_key_env))
-                )
+                ai_revision_ready = image_settings_ready
                 can_revise = bool(
                     ai_revision_ready
                     and isinstance(page.get("page_index"), int)
@@ -5953,23 +5983,28 @@ def _register_routes(app: FastAPI) -> None:
         output_root = Path(cfg.resolve_path(cfg.paths.output_dir)).resolve()
         if output_root not in background.parents or not background.is_file():
             raise HTTPException(409, "该页面没有可用的原始背景素材，无法进行单页重做")
-        if os.getenv("ITERWAVE_ENABLE_AI_VISUALS", "").strip() != "1":
-            raise HTTPException(409, "单页 AI 重做未启用；请设置 ITERWAVE_ENABLE_AI_VISUALS=1")
+        from src.core.content_pipeline import image_generation_settings
+        image_settings, settings_reason = image_generation_settings(conn)
+        if image_settings is None:
+            raise HTTPException(409, f"单页 AI 重做不可用：{settings_reason}")
         instruction = str((req or {}).get("instruction") or "改善本页构图、色彩协调和视觉层次").strip()[:500]
         if not instruction:
             raise HTTPException(422, "重做说明不能为空")
         from src.core.visual_persistence import create_visual_page_job, create_visual_version, transition_visual_job
-        job_id = create_visual_page_job(
-            conn, content_id=content_id, visual_version_id=version_id,
-            page_index=page_index, job_type="revise",
-            input_data={"instruction": instruction, "source_version_id": version_id},
-        )
-        transition_visual_job(conn, job_id=job_id, expected_status="queued", new_status="running")
+        # 任务登记单独提交：调用图像模型（数十秒）期间绝不持有 SQLite 写事务，避免 database is locked。
+        with conn:
+            job_id = create_visual_page_job(
+                conn, content_id=content_id, visual_version_id=version_id,
+                page_index=page_index, job_type="revise",
+                input_data={"instruction": instruction, "source_version_id": version_id},
+            )
+            transition_visual_job(conn, job_id=job_id, expected_status="queued", new_status="running")
         revised_path = None
         try:
             from src.core.visual_generation import revise_visual_background
             result = revise_visual_background(
-                source_path=background, feedback=[instruction], output_dir=output_root, cfg=cfg,
+                source_path=background, feedback=[instruction], output_dir=output_root,
+                settings=image_settings, cfg=cfg,
             )
             if result.get("status") != "revised" or not result.get("path"):
                 raise HTTPException(503, "AI 背景重做未成功，请检查图像模型配置")
@@ -5986,7 +6021,8 @@ def _register_routes(app: FastAPI) -> None:
                 theme=str(design.get("render_options", {}).get("theme") or current["style_key"]),
                 background_path=revised_background,
                 brand_palette=design.get("render_options", {}).get("brand_palette"),
-                font_family=str(design.get("render_options", {}).get("font_family") or "Noto Sans CJK SC"),
+                font_family=str(design.get("render_options", {}).get("font_family")
+                                or __import__("src.core.visual_catalog", fromlist=["default_font"]).default_font()),
             )
             new_pages = [dict(item) for item in pages]
             for item in new_pages:
@@ -6041,10 +6077,6 @@ def _register_routes(app: FastAPI) -> None:
                     error_code="visual_revision_failed", error_message=type(exc).__name__,
                 )
             raise HTTPException(500, "单页视觉重做失败，请查看服务端日志") from exc
-
-    _VISUAL_STYLE_KEYS = {
-        "knowledge_infographic", "editorial_magazine", "business_poster", "lifestyle",
-    }
 
     def _visual_brand_profile(conn, tenant_id: str) -> dict:
         row = conn.execute(
@@ -6139,6 +6171,12 @@ def _register_routes(app: FastAPI) -> None:
             "by_platform": list(by_platform.values()), "recent": recent[:100],
         }
 
+    @app.get("/api/visual/catalog")
+    def get_visual_catalog():
+        """可选视觉风格/字体/组件样式的唯一来源（visual_catalog.json），含本机字体安装状态。"""
+        from src.core.visual_catalog import public_catalog
+        return public_catalog()
+
     @app.get("/api/visual/brand-profile")
     def get_visual_brand_profile():
         ctx = _g()
@@ -6150,41 +6188,17 @@ def _register_routes(app: FastAPI) -> None:
         """Update only the active tenant's visual brand defaults."""
         ctx = _g()
         tenant_id = str(ctx.get("runtime_tenant_id") or "default")
-        allowed = {"style_key", "brand_name", "primary_color", "secondary_color",
-                   "background_color", "text_color", "component_style",
-                   "font_family", "footer", "forbidden_styles"}
-        unknown = set(req) - allowed
-        if unknown:
-            raise HTTPException(422, f"不支持的品牌配置字段：{', '.join(sorted(unknown))}")
+        from src.core.visual_catalog import validate_brand_profile
+        if not isinstance(req, dict):
+            raise HTTPException(422, "品牌配置必须是对象")
         profile = _visual_brand_profile(ctx["conn"], tenant_id)["profile"]
         merged = {**profile, **req}
-        style_key = merged.get("style_key", "knowledge_infographic")
-        if style_key not in _VISUAL_STYLE_KEYS:
-            raise HTTPException(422, "未知视觉风格")
-        for key in ("primary_color", "secondary_color", "background_color", "text_color"):
-            value = merged.get(key)
-            if value is not None and (
-                not isinstance(value, str) or
-                not __import__("re").fullmatch(r"#[0-9A-Fa-f]{6}", value)
-            ):
-                raise HTTPException(422, f"{key} 必须是 #RRGGBB 格式")
-        for key in ("brand_name", "font_family", "footer"):
-            value = merged.get(key)
-            if value is not None and (not isinstance(value, str) or len(value) > 120):
-                raise HTTPException(422, f"{key} 必须是 120 字以内文本")
-        component_style = merged.get("component_style", "card")
-        if component_style not in {"card", "minimal", "editorial"}:
-            raise HTTPException(422, "component_style 必须为 card、minimal 或 editorial")
-        forbidden = merged.get("forbidden_styles", [])
-        if not isinstance(forbidden, list) or len(forbidden) > 20 or any(
-            not isinstance(item, str) or item not in _VISUAL_STYLE_KEYS for item in forbidden
-        ):
-            raise HTTPException(422, "forbidden_styles 必须是最多 20 个有效风格键")
-        if style_key in forbidden:
-            raise HTTPException(422, "默认风格不能同时列入禁用风格")
-        allowed_fonts = {"Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", "Arial"}
-        if merged.get("font_family") not in (None, "", *allowed_fonts):
-            raise HTTPException(422, "字体必须选择系统支持的字体族")
+        # 空字符串表示「使用默认」，不落库
+        merged = {key: value for key, value in merged.items() if value not in ("", None)}
+        try:
+            validate_brand_profile(merged)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
         # LockedConnection 的 __enter__ 持有事务级 RLock，避免语句锁之间被其他线程插入。
         with ctx["conn"]:
             ctx["conn"].execute(
@@ -6199,64 +6213,74 @@ def _register_routes(app: FastAPI) -> None:
     def update_content(content_id: str, req: UpdateContentRequest):
         """人工编辑未发布文案 → 写 user_override 留痕；已发布内容保持不可变。"""
         conn = _g()["conn"]
-        row = _content_row(conn, content_id)
-        _ensure_content_round_idle(row, "编辑内容")
-        published = conn.execute(
-            "SELECT status FROM drafts WHERE content_id = ? "
-            "AND (user_confirmed_at IS NOT NULL "
-            "     OR status IN ('user_published', 'data_fetching', 'published')) "
-            "ORDER BY rowid DESC LIMIT 1",
-            (content_id,),
-        ).fetchone()
-        if published:
-            raise HTTPException(
-                409,
-                "该内容已确认发布或已进入数据采集，不能原地修改历史记录；请新建一篇修订内容",
+        with conn:
+            row = _content_row(conn, content_id)
+            _ensure_content_round_idle(row, "编辑内容")
+            pending_verify = conn.execute(
+                "SELECT 1 FROM draft_save_verifications v JOIN drafts d ON d.id=v.draft_id "
+                "WHERE d.content_id = ? AND v.status = 'pending_verify' LIMIT 1",
+                (content_id,),
+            ).fetchone()
+            if pending_verify:
+                raise HTTPException(
+                    409, "该内容的存草稿结果尚待人工核实，核实前不能修改文案，以免版本指纹失真",
+                )
+            published = conn.execute(
+                "SELECT status FROM drafts WHERE content_id = ? "
+                "AND (user_confirmed_at IS NOT NULL "
+                "     OR status IN ('user_published', 'data_fetching', 'published')) "
+                "ORDER BY rowid DESC LIMIT 1",
+                (content_id,),
+            ).fetchone()
+            if published:
+                raise HTTPException(
+                    409,
+                    "该内容已确认发布或已进入数据采集，不能原地修改历史记录；请新建一篇修订内容",
+                )
+    
+            title = req.title if req.title is not None else row["title"]
+            body = req.body if req.body is not None else row["body"]
+            tags_json = (
+                json.dumps(req.tags, ensure_ascii=False)
+                if req.tags is not None else row["tags"]
             )
-
-        title = req.title if req.title is not None else row["title"]
-        body = req.body if req.body is not None else row["body"]
-        tags_json = (
-            json.dumps(req.tags, ensure_ascii=False)
-            if req.tags is not None else row["tags"]
-        )
-        changed = (
-            title != row["title"] or body != row["body"] or tags_json != row["tags"]
-        )
-
-        if changed:
-            # G2 结果绑定的是具体文案版本。修改标题/正文/标签后，旧的 PASS 不能继续显示为有效。
-            conn.execute(
-                "UPDATE contents SET title = ?, body = ?, tags = ?, word_count = ?, "
-                "guard_outcome = NULL, guard_reason = NULL WHERE id = ?",
-                (title, body, tags_json, len(body or ""), content_id),
+            changed = (
+                title != row["title"] or body != row["body"] or tags_json != row["tags"]
             )
-        else:
-            conn.execute(
-                "UPDATE contents SET title = ?, body = ?, tags = ?, word_count = ? WHERE id = ?",
-                (title, body, tags_json, len(body or ""), content_id),
-            )
-        if changed:
-            conn.execute(
-                "INSERT INTO user_override (round_id, override_field, original_value, "
-                "override_value, reason, overridden_by, overridden_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    row["round_id"], "content",
-                    json.dumps({"title": row["title"], "body_len": len(row["body"] or "")},
-                               ensure_ascii=False)[:500],
-                    json.dumps({"title": title, "body_len": len(body or "")},
-                               ensure_ascii=False)[:500],
-                    req.reason or "UI 编辑", "web-ui",
-                    _now().strftime("%Y-%m-%d %H:%M:%S"),
-                ),
-            )
-        conn.commit()
-        return {
-            "id": content_id, "changed": changed, "title": title, "body": body,
-            "tags": json.loads(tags_json) if tags_json else [],
-        }
-
+    
+            if changed:
+                # G2 结果绑定的是具体文案版本。修改标题/正文/标签后，旧的 PASS 不能继续显示为有效。
+                conn.execute(
+                    "UPDATE contents SET title = ?, body = ?, tags = ?, word_count = ?, "
+                    "guard_outcome = NULL, guard_reason = NULL WHERE id = ?",
+                    (title, body, tags_json, len(body or ""), content_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE contents SET title = ?, body = ?, tags = ?, word_count = ? WHERE id = ?",
+                    (title, body, tags_json, len(body or ""), content_id),
+                )
+            if changed:
+                conn.execute(
+                    "INSERT INTO user_override (round_id, override_field, original_value, "
+                    "override_value, reason, overridden_by, overridden_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        row["round_id"], "content",
+                        json.dumps({"title": row["title"], "body_len": len(row["body"] or "")},
+                                   ensure_ascii=False)[:500],
+                        json.dumps({"title": title, "body_len": len(body or "")},
+                                   ensure_ascii=False)[:500],
+                        req.reason or "UI 编辑", "web-ui",
+                        _now().strftime("%Y-%m-%d %H:%M:%S"),
+                    ),
+                )
+            conn.commit()
+            return {
+                "id": content_id, "changed": changed, "title": title, "body": body,
+                "tags": json.loads(tags_json) if tags_json else [],
+            }
+    
     @app.post("/api/contents/{content_id}/cards")
     def regenerate_cards(content_id: str):
         """按当前标题/正文重新出图（封面 + 正文分页），补上历史内容的「只有文没有图」。"""
@@ -6277,36 +6301,55 @@ def _register_routes(app: FastAPI) -> None:
         except Exception:  # noqa: BLE001 — 维度只是装饰，取不到不影响出图
             dimension = ""
 
-        from ..core.content_pipeline import make_card_set, card_footer
+        from ..core.content_pipeline import (
+            body_page_prompt, card_footer, cover_prompt, image_generation_settings,
+            make_card_set, plan_visual_pages, render_ai_background,
+        )
+        from ..core.visual_catalog import brand_footer_text, resolve_render_options
         tenant_id = _tenant_id()
         profile = _visual_brand_profile(conn, tenant_id)["profile"]
-        styles = {"knowledge_infographic", "editorial_magazine", "business_poster", "lifestyle"}
-        forbidden = set(profile.get("forbidden_styles") or [])
-        theme = profile.get("style_key", "knowledge_infographic")
-        if theme not in styles or theme in forbidden:
-            theme = "knowledge_infographic"
-        colors = {}
-        for key, source in (("accent", "primary_color"), ("muted", "secondary_color"), ("bg", "background_color"), ("fg", "text_color")):
-            value = profile.get(source)
-            if isinstance(value, str) and __import__("re").fullmatch(r"#[0-9A-Fa-f]{6}", value):
-                colors[key] = value
-        allowed_fonts = {"Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", "Arial"}
-        font = profile.get("font_family")
-        if font not in allowed_fonts:
-            font = "Noto Sans CJK SC"
-        component_style = profile.get("component_style", "card")
-        if component_style not in {"card", "minimal", "editorial"}:
-            component_style = "card"
-        brand_footer = " · ".join(
-            str(profile.get(key) or "").strip() for key in ("brand_name", "footer")
-            if str(profile.get(key) or "").strip()
+        try:
+            render_options = resolve_render_options(profile)
+        except ValueError as exc:
+            raise HTTPException(409, f"当前账号组视觉品牌配置无效：{exc}") from exc
+        footer = " · ".join(
+            item for item in (card_footer(cfg, platform), brand_footer_text(profile)) if item
         )
-        footer = " · ".join(item for item in (card_footer(cfg, platform), brand_footer) if item)
         output_dir = cfg.resolve_path(cfg.paths.output_dir)
-        paths = make_card_set(
-            title, dimension or "知识卡片", body, output_dir, platform, footer,
-            theme=theme, brand_palette={**colors, "component_style": component_style}, font_family=font,
-        )
+        subtitle = dimension or "知识卡片"
+        # AI 配图配置唯一来源：media_generation_settings（与轮次生产一致）。
+        settings, _settings_reason = image_generation_settings(conn)
+        # 出图要调外部服务（数十秒），先结束读事务释放 SQLite 锁，避免长时间持锁把其它写入卡死
+        conn.commit()
+        try:
+            pages = plan_visual_pages(title, subtitle, body, platform, footer, **render_options)
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(422, f"视觉排版失败：{exc}") from exc
+        body_images: list = []
+        cover_image = None
+        if settings:
+            cover_text = cover_prompt(title, subtitle)
+            if settings["prefix"]:
+                cover_text = f"{settings['prefix']}\n\n{cover_text}"
+            cover_image = render_ai_background(
+                cover_text, model=settings["model"], size=settings["size"],
+                cfg=cfg, platform=platform, kind="cover",
+            )
+            for lines in pages:
+                prompt = body_page_prompt(title, subtitle, lines)
+                if settings["prefix"]:
+                    prompt = f"{settings['prefix']}\n\n{prompt}"
+                body_images.append(render_ai_background(
+                    prompt, model=settings["model"], size=settings["size"],
+                    cfg=cfg, platform=platform,
+                ))
+        try:
+            paths = make_card_set(
+                title, subtitle, body, output_dir, platform, footer, **render_options,
+                cover_image=cover_image, body_images=body_images, pages=pages,
+            )
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(422, f"视觉硬门未通过：{exc}") from exc
         from src.core.visual_ocr import load_ocr_report
         from src.core.visual_persistence import (
             compute_content_hash, create_visual_page_job, create_visual_version,
@@ -6314,17 +6357,31 @@ def _register_routes(app: FastAPI) -> None:
         )
         ocr_report = load_ocr_report(paths)
         content_hash = compute_content_hash(title, body)
+        body_ai = sum(1 for item in body_images if item)
+        has_ai = bool(cover_image) or body_ai > 0
+        visual_status = "generated" if has_ai else "degraded"
+        visual_reason = (
+            (f"{'封面底图 + ' if cover_image else ''}{body_ai}/{len(pages)} 张正文配图由文生图模型生成，"
+             "文字由 Chromium 排版叠加") if has_ai else "仅使用 Chromium 排版叠字（手动重出图）"
+        ) + ("；OCR 硬门通过，仍需人工审核" if ocr_report.get("status") == "passed"
+             else "；OCR 硬门未通过或不可用，需人工复核")
         with conn:
             version_id = create_visual_version(
                 conn, content_id=content_id, content_hash=content_hash,
-                renderer="chromium_v2", style_key=theme,
+                renderer="chromium_v2", style_key=render_options["theme"],
                 design={
                     "platform": platform.value, "title": title,
-                    "subtitle": dimension or "知识卡片", "body": body,
+                    "subtitle": subtitle, "body": body,
                     "footer": footer,
-                    "render_options": {"theme": theme, "brand_palette": colors, "font_family": font},
+                    "render_options": render_options,
+                    "background_path": str(cover_image) if cover_image else None,
+                    "body_pages": pages,
                     "pages": [
-                        {"page_index": index, "image_path": str(path)}
+                        {"page_index": index, "image_path": str(path),
+                         "background_path": (
+                             (str(cover_image) if cover_image else None) if index == 0 else
+                             (str(body_images[index - 1]) if index - 1 < len(body_images) and body_images[index - 1] else None)
+                         )}
                         for index, path in enumerate(paths)
                     ],
                     "ocr": ocr_report,
@@ -6346,8 +6403,9 @@ def _register_routes(app: FastAPI) -> None:
                     output_data={"image_path": str(path)},
                 )
             conn.execute(
-                "UPDATE contents SET image_paths = ? WHERE id = ?",
-                (json.dumps([str(path) for path in paths], ensure_ascii=False), content_id),
+                "UPDATE contents SET image_paths = ?, visual_status = ?, visual_reason = ? WHERE id = ?",
+                (json.dumps([str(path) for path in paths], ensure_ascii=False),
+                 visual_status, visual_reason, content_id),
             )
         # 历史版本图片保留，版本接口继续可读取；不做破坏性清理。
         return {"id": content_id, "image_count": len(paths),
@@ -7720,7 +7778,7 @@ def _register_routes(app: FastAPI) -> None:
             step_key, step_index = validate_onboarding_progress(req)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
-        return set_onboarding_progress(_g()["conn"], step_key, step_index, by="web-ui")
+        return set_onboarding_progress(_g()["conn"], step_key, step_index, by="web-ui", cfg=_g()["cfg"])
 
     # --- 通知通道自检（不落 notifications 表）---
     @app.post("/api/notify/test")
@@ -8244,13 +8302,19 @@ def _register_routes(app: FastAPI) -> None:
 
     @app.post("/api/config/llm_key")
     def save_llm_api_key(req: LlmKeyRequest):
-        """把 API Key 写入 config/.env（chmod 600），立即生效；永不回传明文。"""
+        """把主模型/兜底模型 API Key 写入 config/.env（chmod 600），立即生效；永不回传明文。"""
         cfg = _g()["cfg"]
-        key_name = cfg.llm.api_key_env
+        key_name = (
+            cfg.llm.fallback_api_key_env if req.target == "fallback" else cfg.llm.api_key_env
+        )
         value = req.api_key.strip()
         write_env(key_name, value)
         # R23：只回报状态，绝不回报 Key 本身
-        return {"ok": True, "has_key": bool(os.environ.get(key_name))}
+        return {
+            "ok": True,
+            "target": req.target,
+            "has_key": bool(os.environ.get(key_name)),
+        }
 
     # --- 内容资产（G-13：外部参考 / 个人观点 / 内容模板）---
     def _asset_out(row) -> dict:
@@ -8570,7 +8634,7 @@ def _register_routes(app: FastAPI) -> None:
         from src.core.ops_targets_repository import load_ops_targets, replace_targets
         conn = _g()["conn"]
         try:
-            items = replace_targets(conn, req)
+            items = replace_targets(conn, req, cfg=_g()["cfg"])
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         _g()["cfg"].ops_targets = load_ops_targets(conn)
@@ -8586,7 +8650,7 @@ def _register_routes(app: FastAPI) -> None:
     def save_custom_preset(key: str, req: dict):
         from src.core.industry_presets_repository import upsert_custom_preset
         try:
-            return upsert_custom_preset(_g()["conn"], {**req, "key": key})
+            return upsert_custom_preset(_g()["conn"], {**req, "key": key}, cfg=_g()["cfg"])
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -8594,7 +8658,7 @@ def _register_routes(app: FastAPI) -> None:
     def delete_custom_preset(key: str):
         from src.core.industry_presets_repository import delete_custom_preset
         try:
-            deleted = delete_custom_preset(_g()["conn"], key)
+            deleted = delete_custom_preset(_g()["conn"], key, cfg=_g()["cfg"])
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
         if not deleted:
@@ -8605,7 +8669,7 @@ def _register_routes(app: FastAPI) -> None:
     def restore_custom_preset(key: str):
         from src.core.industry_presets_repository import restore_custom_preset as _restore
         try:
-            item = _restore(_g()["conn"], key)
+            item = _restore(_g()["conn"], key, cfg=_g()["cfg"])
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
         if item is None:
