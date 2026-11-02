@@ -255,12 +255,12 @@ class GlobalTaskWorker:
         try:
             now = business_now(cfg).isoformat(timespec="seconds")
             identity = json.dumps(args, ensure_ascii=False, default=str)[:300]
-            cur = conn.execute(
-                "INSERT INTO task_runs (task_type, biz_id, status, attempt, started_at, created_at) "
-                "VALUES (?, ?, 'running', 1, ?, ?)",
-                (task_type, f"scheduler:{method}:{identity}", now, now),
-            )
-            conn.commit()
+            with conn:
+                cur = conn.execute(
+                    "INSERT INTO task_runs (task_type, biz_id, status, attempt, started_at, created_at) "
+                    "VALUES (?, ?, 'running', 1, ?, ?)",
+                    (task_type, f"scheduler:{method}:{identity}", now, now),
+                )
             return int(cur.lastrowid)
         except Exception:
             logger.exception("创建定时任务审计记录失败 method=%s", method)
@@ -272,11 +272,11 @@ class GlobalTaskWorker:
             return
         from src.core.timezone import business_now
         try:
-            conn.execute(
-                "UPDATE task_runs SET status=?, finished_at=?, error_msg=? WHERE id=? AND status='running'",
-                (status, business_now(cfg).isoformat(timespec="seconds"), error_msg, task_run_id),
-            )
-            conn.commit()
+            with conn:
+                conn.execute(
+                    "UPDATE task_runs SET status=?, finished_at=?, error_msg=? WHERE id=? AND status='running'",
+                    (status, business_now(cfg).isoformat(timespec="seconds"), error_msg, task_run_id),
+                )
         except Exception:
             logger.exception("结束定时任务审计记录失败 task_run_id=%s", task_run_id)
 
@@ -287,14 +287,15 @@ class GlobalTaskWorker:
             return False
         from src.core.state_machine import RoundStateMachine
 
-        row = conn.execute(
-            "SELECT status FROM spiral_rounds WHERE id=?", (round_id,),
-        ).fetchone()
-        if row is None or row["status"] not in {"producing", "analyzing"}:
-            return False
-        return RoundStateMachine(conn, cfg=cfg).transition(
-            round_id, "failed", f"Worker 异常兜底收口：{str(reason)[:300]}",
-        )
+        with conn:
+            row = conn.execute(
+                "SELECT status FROM spiral_rounds WHERE id=?", (round_id,),
+            ).fetchone()
+            if row is None or row["status"] not in {"producing", "analyzing"}:
+                return False
+            return RoundStateMachine(conn, cfg=cfg).transition(
+                round_id, "failed", f"Worker 异常兜底收口：{str(reason)[:300]}",
+            )
 
     def _reconcile_round_failure(self, task: QueuedTask, reason: str) -> bool:
         """重新构建任务所属账号组上下文，对账轮次和内容计划状态。
