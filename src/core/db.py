@@ -605,7 +605,7 @@ class LockedConnection:
         """显式事务 API；事务期间独占连接，默认先取得 SQLite 写保留锁。"""
         self._lock.acquire()
         owner = _threading.get_ident()
-        if self._conn.in_transaction:
+        if self._conn.in_transaction or self._context_owner is not None:
             self._lock.release()
             raise RuntimeError(
                 "LockedConnection.transaction 不支持隐式嵌套；"
