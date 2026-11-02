@@ -295,6 +295,9 @@ def test_subplan_can_rebase_to_new_master_without_rewriting_old_rounds():
     )
     assert next_master["status"] == "draft"
     store.activate_master_version(next_master["id"], reviewer="reviewer-2")
+    assert conn.execute(
+        "SELECT status FROM sub_plans WHERE id='sub-xhs'"
+    ).fetchone()[0] == "paused"
 
     next_subplan = store.create_subplan_version(
         "sub-xhs", {"title": "新主计划下的小红书子计划", "platform": "xhs"},
