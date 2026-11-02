@@ -1029,6 +1029,16 @@ class RoundExecutor:
                         "saved_platform_title": payload.title,
                     },
                 )
+                from src.core.timezone import business_now
+                self.conn.execute(
+                    "UPDATE draft_save_verifications SET status='verified_saved', verified_at=?, "
+                    "platform_draft_id=?, error_msg=NULL WHERE draft_id=? AND status='verified_missing'",
+                    (
+                        business_now(self.cfg).isoformat(timespec="seconds"),
+                        result.platform_draft_id, row["draft_id"],
+                    ),
+                )
+                self.conn.commit()
                 report["drafts_saved"] += 1
                 saved_draft_ids.append(row["draft_id"])
                 if self.notifier:
