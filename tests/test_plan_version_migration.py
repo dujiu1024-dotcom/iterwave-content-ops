@@ -44,6 +44,8 @@ def _legacy_db():
         VALUES(1,1,'completed','sig-a','2026-01-01');
         INSERT INTO spiral_rounds(id,round_number,status,plan_signature,created_at)
         VALUES(2,2,'failed',NULL,'2026-01-02');
+        INSERT INTO spiral_rounds(id,round_number,status,plan_signature,created_at)
+        VALUES(4,4,'completed','sig-a','2026-01-04');
         INSERT INTO content_plans(id,title,topic,platforms_json,planned_count,scheduled_date,status,notes,version,created_at,updated_at)
         VALUES('cp-1','legacy calendar plan','topic','["xhs"]',3,'2026-01-01','generated','',2,'2026-01-01','2026-01-02');
     """)
@@ -76,6 +78,11 @@ def test_migration_restores_history_and_marks_missing_round_signature_pending():
     ).fetchone()
     assert round_two["master_plan_version_id"] is None
     assert round_two["plan_attribution_status"] == "pending"
+    ambiguous_round = conn.execute(
+        "SELECT master_plan_version_id,plan_attribution_status FROM spiral_rounds WHERE id=4"
+    ).fetchone()
+    assert ambiguous_round["master_plan_version_id"] is None
+    assert ambiguous_round["plan_attribution_status"] == "manual_review"
 
     # The legacy content calendar schema is intentionally not repurposed or altered.
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(content_plans)")}
