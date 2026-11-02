@@ -116,3 +116,12 @@ def test_document_rejects_unknown_component_style():
             theme="knowledge_infographic", cover=False, width=1080, height=1440,
             palette_override={"component_style": "untrusted-css"},
         )
+
+
+def test_document_rejects_invalid_brand_color_tokens():
+    with pytest.raises(ValueError, match="品牌配色"):
+        _document(
+            title="标题", subtitle="", paragraphs=["正文"], footer="", page_text="2/2",
+            theme="knowledge_infographic", cover=False, width=1080, height=1440,
+            palette_override={"accent": "red; background:url(javascript:alert(1))"},
+        )
