@@ -3,7 +3,7 @@
 > Migration: `115_plan_version_lifecycle.sql`
 > Data access: 原生 `sqlite3`，`src/core/plan_version_store.py`
 > Scope: 每个账号组自己的 `easel.db`；不得跨账号组共享业务记录。
-> 与 B 组契约：`docs/B_SUBPLAN_BUSINESS_FLOW_AUDIT_20261102.md`（若文件后续合入，以 B 的最终文档为准）。
+> 与 B 组契约：GitHub PR #101（B01-B31 业务流程/API/自动闭环契约）。
 
 ## 1. 设计边界
 
