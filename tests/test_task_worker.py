@@ -629,6 +629,13 @@ def test_queued_scheduler_job_binds_and_finishes_task_run_audit_context(tmp_path
             return None
 
     class ConnectionProxy:
+        def __enter__(self):
+            audit_conn.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return audit_conn.__exit__(exc_type, exc_value, traceback)
+
         def execute(self, *args):
             return audit_conn.execute(*args)
 
@@ -743,6 +750,13 @@ def test_worker_marks_scheduler_task_run_failed_for_structured_failure_report(tm
     observed = {}
 
     class ConnectionProxy:
+        def __enter__(self):
+            audit_conn.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return audit_conn.__exit__(exc_type, exc_value, traceback)
+
         def execute(self, *args):
             return audit_conn.execute(*args)
 
@@ -805,6 +819,13 @@ def test_worker_dispatches_hot_topic_refresh_as_a_tracked_scheduler_job(tmp_path
     audit_conn.commit()
 
     class ConnectionProxy:
+        def __enter__(self):
+            audit_conn.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return audit_conn.__exit__(exc_type, exc_value, traceback)
+
         def execute(self, *args):
             return audit_conn.execute(*args)
 
@@ -866,6 +887,13 @@ def test_scheduler_exception_audit_uses_safe_message(tmp_path):
     audit_conn.commit()
 
     class ConnectionProxy:
+        def __enter__(self):
+            audit_conn.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return audit_conn.__exit__(exc_type, exc_value, traceback)
+
         def execute(self, *args):
             return audit_conn.execute(*args)
         def commit(self):
