@@ -89,6 +89,20 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         result["stages"] = _stages(version_id)
         return result
 
+    def _check_expected_version(version: dict[str, Any], expected: Any) -> None:
+        if expected is None:
+            raise HTTPException(428, "缺少 expected_version_no，请基于明确版本进行修改")
+        if isinstance(expected, bool):
+            raise HTTPException(422, "expected_version_no 必须是正整数")
+        try:
+            value = int(expected)
+        except (TypeError, ValueError, OverflowError):
+            raise HTTPException(422, "expected_version_no 必须是正整数")
+        if str(expected).strip() != str(value) or value < 1:
+            raise HTTPException(422, "expected_version_no 必须是正整数")
+        if value != int(version["version_no"]):
+            raise HTTPException(409, "子计划版本已变化，请刷新后重试")
+
     def _create_revision(sub_plan_id: str, base_version_id: int | None,
                          snapshot: dict, stages: list[dict], note: str | None = None):
         conn = get_runtime()["conn"]
@@ -204,9 +218,7 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         base = _version(int(base_id))
         if base["sub_plan_id"] != sub_plan_id:
             raise HTTPException(404, "子计划版本不存在")
-        expected = req.get("expected_version_no")
-        if expected is not None and int(expected) != int(base["version_no"]):
-            raise HTTPException(409, "子计划版本已变化，请刷新后重试")
+        _check_expected_version(base, req.get("expected_version_no"))
         snapshot = req.get("snapshot", base["snapshot"])
         stages = req.get("stages", base["stages"])
         if not isinstance(snapshot, dict) or not isinstance(stages, list) or not stages:
@@ -230,6 +242,7 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         version = _version(base)
         if version["sub_plan_id"] != sub_plan_id:
             raise HTTPException(404, "子计划版本不存在")
+        _check_expected_version(version, req.get("expected_version_no"))
         stages = [{k: v for k, v in s.items() if k not in ("id", "sub_plan_version_id", "created_at", "updated_at", "status")}
                   for s in version["stages"]]
         new_stage = dict(req["stage"])
@@ -248,6 +261,7 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         version = _version(base)
         if version["sub_plan_id"] != sub_plan_id:
             raise HTTPException(404, "子计划版本不存在")
+        _check_expected_version(version, req.get("expected_version_no"))
         stages = [{k: v for k, v in s.items() if k not in ("id", "sub_plan_version_id", "created_at", "updated_at", "status")}
                   for s in version["stages"]]
         index = next((i for i, s in enumerate(version["stages"]) if int(s["id"]) == stage_id), None)
@@ -262,10 +276,12 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
             fail(exc)
 
     @app.delete("/api/subplans/{sub_plan_id}/stages/{stage_id}")
-    def delete_stage(sub_plan_id: str, stage_id: int, based_on_version_id: int = Query(...)):
+    def delete_stage(sub_plan_id: str, stage_id: int, based_on_version_id: int = Query(...),
+                     expected_version_no: int = Query(..., ge=1)):
         version = _version(based_on_version_id)
         if version["sub_plan_id"] != sub_plan_id:
             raise HTTPException(404, "子计划版本不存在")
+        _check_expected_version(version, expected_version_no)
         stages = [{k: v for k, v in s.items() if k not in ("id", "sub_plan_version_id", "created_at", "updated_at", "status")}
                   for s in version["stages"] if int(s["id"]) != stage_id]
         if len(stages) == len(version["stages"]):
@@ -292,6 +308,7 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         version = _version(base)
         if version["sub_plan_id"] != sub_plan_id:
             raise HTTPException(404, "子计划版本不存在")
+        _check_expected_version(version, req.get("expected_version_no"))
         by_id = {int(s["id"]): s for s in version["stages"]}
         if set(map(int, order)) != set(by_id):
             raise HTTPException(422, "排序必须包含该版本全部阶段且不能包含其他阶段")
