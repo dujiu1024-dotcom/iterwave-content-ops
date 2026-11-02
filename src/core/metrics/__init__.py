@@ -96,11 +96,12 @@ class Normalizer:
         ).fetchall()
 
         values = [r[0] for r in rows if r[0] is not None]
-        if len(values) < 2:
-            return None  # 样本不够
+        if len(values) < 5:
+            return None  # 少于 5 个独立样本不输出 z-score，避免小样本误导
 
         mean = statistics.mean(values)
-        std = statistics.pstdev(values)
+        # 使用样本标准差（n-1），避免总体标准差在小样本下系统性放大 |z|。 
+        std = statistics.stdev(values)
         if std == 0:
             return None  # 无波动，z-score 无意义
 
