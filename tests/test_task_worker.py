@@ -1024,3 +1024,51 @@ def test_worker_content_plan_completion_commits_links_and_status_together():
         "SELECT status, version FROM content_plans WHERE id='plan-8'"
     ).fetchone()[:] == ("generated", 4)
     conn.close()
+
+
+
+def test_scheduler_task_run_audit_writes_use_connection_transaction_context():
+    import sqlite3
+    from src.core.task_worker import GlobalTaskWorker
+    from src.core.timezone import DEFAULT_TIMEZONE
+    from zoneinfo import ZoneInfo
+    from types import SimpleNamespace
+
+    class TrackingConnection(sqlite3.Connection):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.transaction_entries = 0
+
+        def __enter__(self):
+            self.transaction_entries += 1
+            return super().__enter__()
+
+    conn = sqlite3.connect(":memory:", factory=TrackingConnection)
+    conn.row_factory = sqlite3.Row
+    conn.execute("""
+        CREATE TABLE task_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_type TEXT, biz_id TEXT, status TEXT, attempt INTEGER,
+            started_at TEXT, created_at TEXT, finished_at TEXT, error_msg TEXT
+        )
+    """)
+    cfg = SimpleNamespace(business_timezone=DEFAULT_TIMEZONE)
+
+    task_run_id = GlobalTaskWorker._start_scheduler_task_run(
+        conn, cfg, "daily_ops", "_job_daily_ops", [],
+    )
+    assert task_run_id == 1
+    assert conn.execute(
+        "SELECT status FROM task_runs WHERE id=?", (task_run_id,),
+    ).fetchone()["status"] == "running"
+
+    GlobalTaskWorker._finish_scheduler_task_run(
+        conn, cfg, task_run_id, "success", None,
+    )
+    saved = conn.execute(
+        "SELECT status, finished_at FROM task_runs WHERE id=?", (task_run_id,),
+    ).fetchone()
+    assert saved["status"] == "success"
+    assert saved["finished_at"]
+    assert conn.transaction_entries == 2
+    conn.close()
