@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
@@ -247,13 +248,20 @@ class AutogrowController:
         self.enqueue_task = enqueue_task
 
     # ------------------------------------------------------------------
-    def evaluate(self, force: bool = False) -> dict:
-        """只判断不执行：返回 {can_start, action, reason, ...}，供状态接口与 tick 共用。"""
+    def _evaluate(self, force: bool = False, *, advance_stages: bool = False) -> dict:
+        """只判断不执行；阶段状态仅在 tick 的正式生产决策中推进。"""
         ag = self.cfg.autogrow
         now = business_now(self.cfg)
 
         if not ag.enabled and not force:
             return {"can_start": False, "action": "skipped", "reason": "自动闭环已关闭"}
+
+        # 子计划体系启用后，自动开轮必须有明确的人工审核授权。
+        # ops_paused 原本只控制评论/关注等运营动作，不复用为内容生产暂停开关。
+        from .subplan_production import active_subplan_stage, production_paused
+        if production_paused(self.conn):
+            return {"can_start": False, "action": "skipped",
+                    "reason": "内容生产已暂停", "reason_code": "production_paused"}
 
         active = self.conn.execute(
             "SELECT id, round_number, status FROM spiral_rounds "
@@ -336,16 +344,9 @@ class AutogrowController:
 
         plan, plan_at, plan_source = self._plan()
         cadence = (plan.get("cadence") or {}) if plan_source == "plan_settings" else {}
-        if cadence.get("rounds_planned"):
-            done = self.conn.execute(
-                "SELECT COUNT(*) FROM spiral_rounds WHERE created_at >= ? AND status != 'cancelled'",
-                (plan_at or "1970-01-01",),
-            ).fetchone()[0]
-            if done >= int(cadence["rounds_planned"]):
-                return {"can_start": False, "action": "stopped",
-                        "reason": f"母计划本阶段计划 {cadence['rounds_planned']} 轮已全部开出，"
-                                  f"自动闭环停止；调整母计划节奏后自动恢复"}
-
+        # 新体系由子计划阶段的确认发布目标驱动，不再使用旧母计划 rounds_planned
+        # 轮数上限提前截断阶段目标；旧 round_interval_days 仍作为冷却间隔使用。
+        
         if not force:
             if ag.max_rounds_per_day == 0:
                 return {"can_start": False, "action": "skipped", "reason": "每日自动轮上限为 0（已暂停）"}
@@ -379,7 +380,45 @@ class AutogrowController:
                                       + ("（母计划节奏）" if cadence.get("round_interval_days") else ""),
                             "next_eligible_at": ready.isoformat(timespec="minutes")}
 
-        wanted = list(plan.get("enabled_platforms") or []) if plan_source == "plan_settings" else None
+
+        stage = active_subplan_stage(
+            self.conn, today=now.date().isoformat(), advance=advance_stages,
+        )
+        if stage is None:
+            return {"can_start": False, "action": "stopped",
+                    "reason": "没有待执行的已审核子计划阶段，或所有阶段已完成",
+                    "reason_code": "no_active_subplan_stage"}
+        if stage.get("blocker") == "subplan_paused":
+            return {"can_start": False, "action": "skipped",
+                    "reason": "当前子计划已暂停",
+                    "reason_code": "subplan_paused"}
+        if stage.get("blocker") == "stage_paused":
+            return {"can_start": False, "action": "skipped",
+                    "reason": "当前阶段已暂停",
+                    "reason_code": "stage_paused"}
+        if stage.get("blocker") == "master_version_superseded":
+            return {"can_start": False, "action": "stopped",
+                    "reason": "子计划关联的主计划版本已被新版本替代，请重新审核子计划",
+                    "reason_code": "master_version_superseded",
+                    "sub_plan_id": stage.get("sub_plan_id"),
+                    "master_plan_version_id": stage.get("master_plan_version_id")}
+        if stage.get("blocker") == "stage_not_started":
+            return {"can_start": False, "action": "skipped",
+                    "reason": "当前阶段尚未到执行日期",
+                    "reason_code": "stage_not_started",
+                    "next_eligible_at": stage.get("next_eligible_at")}
+        if stage.get("blocker") == "stage_window_expired":
+            return {"can_start": False, "action": "stopped",
+                    "reason": "当前阶段执行窗口已结束", "reason_code": "stage_window_expired"}
+        if stage.get("blocker") == "stage_target_reached":
+            return {"can_start": False, "action": "stopped",
+                    "reason": "当前阶段用户确认发布目标已达成",
+                    "reason_code": "stage_target_reached"}
+        if int(stage.get("remaining_count") or 0) <= 0:
+            return {"can_start": False, "action": "stopped",
+                    "reason": "当前阶段用户确认发布目标已达成",
+                    "reason_code": "stage_target_reached"}
+        wanted = [stage["platform"]]
         platforms = self.executor._resolve_platforms(wanted) if self.executor else []
         usable = [p for p in platforms if not self.executor._platform_broken(p)]
         # 分平台 / 总目标+分平台：某平台自己的目标都已达成、且没有进行中的目标 → 这个平台不再自动开轮
@@ -396,10 +435,52 @@ class AutogrowController:
                     done_only.add(p)
             usable = [p for p in usable if p not in done_only]
         if not usable:
-            return {"can_start": False, "action": "skipped", "reason": "没有可用平台（未启用或全部熔断）"}
-
+            return {"can_start": False, "action": "skipped",
+                    "reason": "子计划所属平台未启用或已熔断", "reason_code": "platform_unavailable"}
         return {"can_start": True, "action": "start", "reason": "条件满足",
-                "platforms": [p.value for p in usable], "plan_source": plan_source}
+                "platforms": [p.value for p in usable], "plan_source": plan_source,
+                "subplan_stage": stage, "reason_code": "eligible"}
+
+    def evaluate(self, force: bool = False, *, advance_stages: bool = False) -> dict:
+        result = self._evaluate(force=force, advance_stages=advance_stages)
+        if not result.get("can_start") and not result.get("reason_code"):
+            reason = str(result.get("reason") or "")
+            mappings = (
+                ("自动闭环已关闭", "autogrow_disabled"),
+                ("仍在进行", "active_round"),
+                ("第一轮请手动", "manual_seed_required"),
+                ("全部目标已达成", "goals_achieved"),
+                ("总目标已达成", "north_star_achieved"),
+                ("连续", "failure_or_unpublished_circuit"),
+                ("目标周期内", "goal_round_limit"),
+                ("每日自动轮上限", "daily_round_limit"),
+                ("达到每日上限", "daily_round_limit"),
+                ("冷却中", "cooldown"),
+                ("没有可用平台", "platform_unavailable"),
+            )
+            result["reason_code"] = next(
+                (code for fragment, code in mappings if fragment in reason),
+                "production_blocked",
+            )
+        details = dict(result.get("blocker_details") or {})
+        stage = result.get("subplan_stage")
+        if stage:
+            details.update({
+                "sub_plan_id": stage.get("sub_plan_id"),
+                "sub_plan_version_id": stage.get("current_version_id"),
+                "stage_id": stage.get("id"),
+                "platform": stage.get("platform"),
+                "target_count": stage.get("target_count"),
+                "confirmed_published_count": stage.get("confirmed_published_count"),
+                "remaining_count": stage.get("remaining_count"),
+                "stage_start_date": stage.get("start_date"),
+                "stage_end_date": stage.get("end_date"),
+            })
+        if result.get("next_eligible_at"):
+            details["next_eligible_at"] = result["next_eligible_at"]
+        details.setdefault("reason_code", result.get("reason_code"))
+        result["blocker_details"] = details
+        return result
 
     def _plan(self) -> tuple[dict, Optional[str], str]:
         if self.pvm is None:
@@ -420,7 +501,7 @@ class AutogrowController:
             except Exception:  # noqa: BLE001
                 logger.exception("autogrow 刷新目标进度失败（继续判定）")
 
-        verdict = self.evaluate(force=force)
+        verdict = self.evaluate(force=force, advance_stages=True)
         if not verdict["can_start"]:
             self._log(verdict["action"], verdict["reason"])
             if verdict["action"] == "stopped":
@@ -430,17 +511,76 @@ class AutogrowController:
 
         ag = self.cfg.autogrow
         feedback = build_feedback(self.cfg, self.conn, self.guard) if ag.apply_feedback else StrategyFeedback()
-        by_plan = verdict.get("plan_source") == "plan_settings"
-        created = create_round_record(
-            self.cfg, self.conn, self.pvm,
-            topic_count=ag.topic_count, platforms=verdict["platforms"],
-            trigger_source="auto", applied_feedback=feedback.to_json(),
-        )
-        round_id = created["id"]
+        from .plan_version_store import PlanVersionStore
+        stage = verdict["subplan_stage"]
+        store = PlanVersionStore(self.conn)
+        now = business_now(self.cfg)
+        slot = now.replace(minute=0, second=0, microsecond=0).isoformat()
+        idempotency_key = f"round-open:{slot}"
+        topic_count = max(1, min(int(ag.topic_count), int(stage["remaining_count"])))
+        request_payload = {
+            "sub_plan_id": stage["sub_plan_id"], "sub_plan_version_id": stage["current_version_id"],
+            "stage_id": stage["id"], "slot": slot, "topic_count": topic_count,
+            "platforms": verdict["platforms"],
+        }
+        request_hash = hashlib.sha256(
+            json.dumps(request_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+        master_version_id = int(stage["master_plan_version_id"])
+        lease = None
+        try:
+            lease = store.reserve_round_open(
+                idempotency_key, request_hash,
+                master_plan_version_id=master_version_id,
+                sub_plan_id=stage["sub_plan_id"],
+                sub_plan_version_id=int(stage["current_version_id"]),
+                sub_plan_stage_id=int(stage["id"]),
+            )
+            if not lease["acquired"] and lease["status"] == "in_progress":
+                return {"can_start": False, "action": "skipped",
+                        "reason": "同一账号组执行时段已有开轮任务正在处理",
+                        "reason_code": "round_open_in_progress"}
+            if not lease["acquired"] and lease["status"] == "created":
+                existing = self.conn.execute(
+                    "SELECT status FROM spiral_rounds WHERE id=?", (lease.get("round_id"),),
+                ).fetchone()
+                if existing is not None and existing["status"] != "created":
+                    return {"can_start": False, "action": "skipped",
+                            "reason": "当前账号组本调度时段已经完成开轮，等待下一调度周期",
+                            "reason_code": "round_open_slot_taken"}
+            goal_row = self.conn.execute(
+                "SELECT id FROM goals WHERE status='active' ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+            created = store.create_round_once(
+                idempotency_key, goal_id=goal_row[0] if goal_row else None,
+                topic_ids=[], content_variants=[{"platform": stage["platform"]}],
+                trigger_source="auto", applied_feedback=feedback.to_json(),
+            )
+            round_id = int(created["round_id"])
+            if stage.get("status") == "pending":
+                store.update_stage_status(int(stage["id"]), "in_progress")
+            created["round_number"] = int(self.conn.execute(
+                "SELECT round_number FROM spiral_rounds WHERE id=?", (round_id,),
+            ).fetchone()[0])
+        except Exception as exc:
+            from .plan_version_store import PlanVersionError
+            if lease and lease.get("acquired"):
+                try:
+                    store.fail_round_open(idempotency_key, str(exc))
+                except Exception:
+                    logger.exception("自动开轮租约失败状态写入失败")
+            if isinstance(exc, PlanVersionError) and "相同幂等键对应不同开轮请求" in str(exc):
+                return {"can_start": False, "action": "skipped",
+                        "reason": "当前账号组本调度时段已经开过生产轮次，等待下一调度周期",
+                        "reason_code": "round_open_slot_taken"}
+            logger.exception("子计划自动开轮失败")
+            return {"can_start": False, "action": "failed",
+                    "reason": "子计划自动开轮失败，请检查版本授权、幂等租约和数据库日志",
+                    "reason_code": "subplan_round_open_failed"}
         if self.enqueue_task is not None:
             task, created_task = self.enqueue_task(
                 round_id=round_id,
-                topic_count=None if by_plan else ag.topic_count,
+                topic_count=topic_count,
                 platforms=verdict["platforms"],
                 save_drafts=None,
                 feedback=feedback.to_dict(),
@@ -457,7 +597,7 @@ class AutogrowController:
             }
         try:
             report = await self.executor.run(
-                round_id, topic_count=None if by_plan else ag.topic_count,
+                round_id, topic_count=topic_count,
                 platform_values=verdict["platforms"], save_drafts=None, feedback=feedback,
             )
         except Exception as exc:  # noqa: BLE001 — 必须留痕，不能静默
