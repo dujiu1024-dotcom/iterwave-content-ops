@@ -256,17 +256,33 @@ class PlanVersionStore:
                 if not isinstance(stage, dict):
                     raise PlanVersionError("阶段条目必须是对象")
                 title = str(stage.get("title") or "").strip()
-                if not title:
-                    raise PlanVersionError("阶段标题不能为空")
+                if not title or len(title) > 160:
+                    raise PlanVersionError("阶段标题必须为 1-160 个字符")
+                try:
+                    stage_order = int(stage.get("stage_order", index))
+                    target_count = int(stage.get("target_count", 1))
+                except (TypeError, ValueError) as exc:
+                    raise PlanVersionError("阶段顺序和目标篇数必须是整数") from exc
+                if stage_order < 1:
+                    raise PlanVersionError("阶段顺序必须大于等于 1")
+                if not 1 <= target_count <= 10000:
+                    raise PlanVersionError("阶段目标篇数必须在 1 到 10000 之间")
+                start_date = stage.get("start_date")
+                end_date = stage.get("end_date")
+                for field_name, date_value in (("start_date", start_date), ("end_date", end_date)):
+                    if date_value is not None:
+                        try:
+                            datetime.strptime(str(date_value), "%Y-%m-%d")
+                        except ValueError as exc:
+                            raise PlanVersionError(f"{field_name} 必须为 YYYY-MM-DD") from exc
                 self.conn.execute(
                     """INSERT INTO sub_plan_stages(
                         sub_plan_version_id,stage_order,title,direction,target_count,
                         start_date,end_date,completion_condition,status,notes,created_at,updated_at
                     ) VALUES(?,?,?,?,?,?,?,?, 'pending',?,?,?)""",
-                    (version_id, int(stage.get("stage_order") or index), title,
-                     str(stage.get("direction") or ""), int(stage.get("target_count") or 1),
-                     stage.get("start_date"), stage.get("end_date"),
-                     str(stage.get("completion_condition") or ""),
+                    (version_id, stage_order, title,
+                     str(stage.get("direction") or ""), target_count,
+                     start_date, end_date, str(stage.get("completion_condition") or ""),
                      str(stage.get("notes") or ""), now, now),
                 )
             row = dict(self.conn.execute(
