@@ -10,6 +10,7 @@ import logging
 import os
 import threading
 import uuid
+from contextlib import nullcontext
 from datetime import datetime
 from collections.abc import Callable
 from pathlib import Path
@@ -343,47 +344,49 @@ class GlobalTaskWorker:
         """生产异常时将关联计划标记失败，允许用户修复后重试。"""
         if conn is None or not callable(getattr(conn, "execute", None)):
             return
-        relation = conn.execute(
-            "SELECT plan_id FROM content_plan_rounds WHERE round_id=?", (round_id,),
-        ).fetchone()
-        if relation is None:
-            return
-        conn.execute(
-            "UPDATE content_plans SET status='failed',version=version+1,updated_at=? "
-            "WHERE id=? AND status='generating'",
-            (datetime.now().astimezone().isoformat(timespec="seconds"), relation["plan_id"]),
-        )
-        conn.commit()
+        transaction = conn if callable(getattr(conn, "__enter__", None)) else nullcontext()
+        with transaction:
+            relation = conn.execute(
+                "SELECT plan_id FROM content_plan_rounds WHERE round_id=?", (round_id,),
+            ).fetchone()
+            if relation is None:
+                return
+            conn.execute(
+                "UPDATE content_plans SET status='failed',version=version+1,updated_at=? "
+                "WHERE id=? AND status='generating'",
+                (datetime.now().astimezone().isoformat(timespec="seconds"), relation["plan_id"]),
+            )
 
     @staticmethod
     def _complete_content_plan(conn, round_id: int, report: Any) -> None:
         """生产完成后把轮次产出的草稿关联回计划，并推进计划状态。"""
         if conn is None or not callable(getattr(conn, "execute", None)):
             return
-        relation = conn.execute(
-            "SELECT plan_id FROM content_plan_rounds WHERE round_id=?", (round_id,),
-        ).fetchone()
-        if relation is None:
-            return
-        plan_id = relation["plan_id"]
-        now = datetime.now().astimezone().isoformat(timespec="seconds")
-        drafts = conn.execute(
-            "SELECT d.id FROM drafts d JOIN contents c ON c.id=d.content_id WHERE c.round_id=?",
-            (round_id,),
-        ).fetchall()
-        for draft in drafts:
+        transaction = conn if callable(getattr(conn, "__enter__", None)) else nullcontext()
+        with transaction:
+            relation = conn.execute(
+                "SELECT plan_id FROM content_plan_rounds WHERE round_id=?", (round_id,),
+            ).fetchone()
+            if relation is None:
+                return
+            plan_id = relation["plan_id"]
+            now = datetime.now().astimezone().isoformat(timespec="seconds")
+            drafts = conn.execute(
+                "SELECT d.id FROM drafts d JOIN contents c ON c.id=d.content_id WHERE c.round_id=?",
+                (round_id,),
+            ).fetchall()
+            for draft in drafts:
+                conn.execute(
+                    "INSERT OR IGNORE INTO content_plan_drafts(plan_id,draft_id,round_id,created_at) VALUES(?,?,?,?)",
+                    (plan_id, draft["id"], round_id, now),
+                )
+            failed = isinstance(report, dict) and report.get("final_status") == "failed"
+            status = "failed" if failed else "generated"
             conn.execute(
-                "INSERT OR IGNORE INTO content_plan_drafts(plan_id,draft_id,round_id,created_at) VALUES(?,?,?,?)",
-                (plan_id, draft["id"], round_id, now),
+                "UPDATE content_plans SET status=?,version=version+1,updated_at=? "
+                "WHERE id=? AND status='generating'",
+                (status, now, plan_id),
             )
-        failed = isinstance(report, dict) and report.get("final_status") == "failed"
-        status = "failed" if failed else "generated"
-        conn.execute(
-            "UPDATE content_plans SET status=?,version=version+1,updated_at=? "
-            "WHERE id=? AND status='generating'",
-            (status, now, plan_id),
-        )
-        conn.commit()
 
     async def _execute(
         self, task: QueuedTask, *, stop_event: asyncio.Event | None = None,
