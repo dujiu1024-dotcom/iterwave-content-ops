@@ -6309,11 +6309,11 @@ def _register_routes(app: FastAPI) -> None:
         )
         from src.core.visual_ocr import load_ocr_report
         from src.core.visual_persistence import (
-            create_visual_page_job, create_visual_version, transition_visual_job,
+            compute_content_hash, create_visual_page_job, create_visual_version,
+            transition_visual_job,
         )
         ocr_report = load_ocr_report(paths)
-        import hashlib
-        content_hash = hashlib.sha256((title + "\\0" + body).encode("utf-8")).hexdigest()
+        content_hash = compute_content_hash(title, body)
         with conn:
             version_id = create_visual_version(
                 conn, content_id=content_id, content_hash=content_hash,
