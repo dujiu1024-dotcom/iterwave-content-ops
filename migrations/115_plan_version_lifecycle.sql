@@ -122,10 +122,10 @@ SET master_plan_version_id=(
     plan_attribution_status='resolved'
 WHERE plan_signature IS NOT NULL
   AND master_plan_version_id IS NULL
-  AND EXISTS (
-      SELECT 1 FROM master_plan_versions v
+  AND (
+      SELECT COUNT(*) FROM master_plan_versions v
       WHERE v.plan_signature=spiral_rounds.plan_signature
-  );
+  ) = 1;
 
 -- A non-empty signature with no matching snapshot needs human attribution.
 UPDATE spiral_rounds
