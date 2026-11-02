@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from src.core.timezone import business_now
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -13,8 +13,8 @@ PLATFORMS = ("xhs", "douyin", "kuaishou", "wechat_channels")
 SEED_MARKER = "ops_targets_yaml_seed_v1"
 
 
-def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+def _now(cfg=None) -> str:
+    return business_now(cfg).isoformat(timespec="seconds")
 
 
 def _lock(conn):
@@ -110,7 +110,7 @@ def load_ops_targets(conn) -> dict[str, OpsTargetsConfig]:
     }
 
 
-def seed_from_yaml(conn, configured: dict[str, Any]) -> dict[str, int]:
+def seed_from_yaml(conn, configured: dict[str, Any], cfg=None) -> dict[str, int]:
     """One-time import from config.yaml; empty YAML still records completion."""
     payload: dict[str, Any] = {}
     for platform in PLATFORMS:
@@ -135,7 +135,7 @@ def seed_from_yaml(conn, configured: dict[str, Any]) -> dict[str, int]:
         if marker:
             conn.commit()
             return {"imported": 0}
-        now = _now()
+        now = _now(cfg)
         for platform, action, target, content, order in rows:
             conn.execute(
                 "INSERT INTO ops_targets(platform,action_type,target,content,sort_order,created_at,updated_at) "
@@ -156,13 +156,13 @@ def seed_from_yaml(conn, configured: dict[str, Any]) -> dict[str, int]:
     return {"imported": len(rows)}
 
 
-def replace_targets(conn, payload: dict[str, Any]) -> dict[str, dict[str, list]]:
+def replace_targets(conn, payload: dict[str, Any], cfg=None) -> dict[str, dict[str, list]]:
     rows = _normalize(payload)
     lock = _lock(conn)
     try:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute("DELETE FROM ops_targets")
-        now = _now()
+        now = _now(cfg)
         for platform, action, target, content, order in rows:
             conn.execute(
                 "INSERT INTO ops_targets(platform,action_type,target,content,sort_order,created_at,updated_at) "
