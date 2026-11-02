@@ -337,6 +337,14 @@ def render_single_page(
             page = browser.new_page(viewport={"width": width, "height": height}, device_scale_factor=1)
             page.set_content(document, wait_until="load")
             page.evaluate("document.fonts.ready")
+            font_loaded = page.evaluate(
+                '(font) => document.fonts.check(`36px "${font}"`, "中文字体检查")',
+                font_family,
+            )
+            if not font_loaded:
+                raise RuntimeError(
+                    f"指定字体未安装或不可用：{font_family}；请运行 scripts/install_visual_fonts.sh"
+                )
             layout = page.evaluate("""() => {
               const root=document.querySelector('.canvas'), rr=root.getBoundingClientRect();
               const nodes=[...root.querySelectorAll('.eyebrow,h1,.rule,h2,.body p,.footer,.page')];
