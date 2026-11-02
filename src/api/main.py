@@ -8192,7 +8192,7 @@ def _register_routes(app: FastAPI) -> None:
         from src.core.ops_targets_repository import load_ops_targets, replace_targets
         conn = _g()["conn"]
         try:
-            items = replace_targets(conn, req)
+            items = replace_targets(conn, req, cfg=_g()["cfg"])
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         _g()["cfg"].ops_targets = load_ops_targets(conn)
@@ -8208,7 +8208,7 @@ def _register_routes(app: FastAPI) -> None:
     def save_custom_preset(key: str, req: dict):
         from src.core.industry_presets_repository import upsert_custom_preset
         try:
-            return upsert_custom_preset(_g()["conn"], {**req, "key": key})
+            return upsert_custom_preset(_g()["conn"], {**req, "key": key}, cfg=_g()["cfg"])
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -8216,7 +8216,7 @@ def _register_routes(app: FastAPI) -> None:
     def delete_custom_preset(key: str):
         from src.core.industry_presets_repository import delete_custom_preset
         try:
-            deleted = delete_custom_preset(_g()["conn"], key)
+            deleted = delete_custom_preset(_g()["conn"], key, cfg=_g()["cfg"])
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
         if not deleted:
@@ -8227,7 +8227,7 @@ def _register_routes(app: FastAPI) -> None:
     def restore_custom_preset(key: str):
         from src.core.industry_presets_repository import restore_custom_preset as _restore
         try:
-            item = _restore(_g()["conn"], key)
+            item = _restore(_g()["conn"], key, cfg=_g()["cfg"])
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
         if item is None:
