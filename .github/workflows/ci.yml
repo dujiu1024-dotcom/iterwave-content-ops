@@ -23,6 +23,10 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: python -m pip install --upgrade pip && pip install -e ".[dev]"
+      - name: Install OCR language data
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng fonts-noto-cjk
+      - name: Install Chromium for visual renderer tests
+        run: python -m playwright install --with-deps chromium
       - name: Run tests
         run: python -m pytest -q
       - name: Compile Python sources
