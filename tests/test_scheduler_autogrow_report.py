@@ -22,6 +22,8 @@ def test_autogrow_scheduler_propagates_failed_execution_report():
 
     assert actual is expected
     assert actual["action"] == "failed"
+    assert actual["final_status"] == "failed"
+    assert actual["errors"] == ["内容生成失败"]
 
 
 def test_autogrow_scheduler_rejects_non_dict_execution_report():
