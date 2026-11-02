@@ -272,3 +272,46 @@ def test_plan_versions_are_isolated_by_tenant_database_file(tmp_path):
     assert json.loads(store_b.list_master_versions()[0]["plan_snapshot"])["topic_count_per_platform"] == 9
     tenant_a.close()
     tenant_b.close()
+
+
+
+def test_subplan_can_rebase_to_new_master_without_rewriting_old_rounds():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    first_master = _active_master(store)
+    first_subplan, first_stage = _active_subplan(store, first_master)
+    store.bind_round(
+        1, master_plan_version_id=first_master["id"],
+        sub_plan_id="sub-xhs", sub_plan_version_id=first_subplan["id"],
+        sub_plan_stage_id=first_stage,
+    )
+    old_snapshot = conn.execute(
+        "SELECT sub_plan_snapshot,sub_plan_stage_snapshot FROM spiral_rounds WHERE id=1"
+    ).fetchone()
+
+    next_master = store.create_master_draft(
+        _plan(7), source="review_adoption", based_on_version_id=first_master["id"],
+        change_note="复盘采纳生成的新主计划草稿",
+    )
+    assert next_master["status"] == "draft"
+    store.activate_master_version(next_master["id"], reviewer="reviewer-2")
+
+    next_subplan = store.create_subplan_version(
+        "sub-xhs", {"title": "新主计划下的小红书子计划", "platform": "xhs"},
+        master_plan_version_id=next_master["id"], based_on_version_id=first_subplan["id"],
+        stages=[{"title": "新阶段", "target_count": 10}],
+    )
+    store.activate_subplan_version(next_subplan["id"], reviewer="reviewer-2")
+
+    identity = conn.execute(
+        "SELECT master_plan_version_id,current_version_id FROM sub_plans WHERE id='sub-xhs'"
+    ).fetchone()
+    assert tuple(identity) == (next_master["id"], next_subplan["id"])
+    old_round = conn.execute(
+        "SELECT master_plan_version_id,sub_plan_version_id,sub_plan_snapshot,sub_plan_stage_snapshot "
+        "FROM spiral_rounds WHERE id=1"
+    ).fetchone()
+    assert old_round["master_plan_version_id"] == first_master["id"]
+    assert old_round["sub_plan_version_id"] == first_subplan["id"]
+    assert old_round["sub_plan_snapshot"] == old_snapshot["sub_plan_snapshot"]
+    assert old_round["sub_plan_stage_snapshot"] == old_snapshot["sub_plan_stage_snapshot"]
