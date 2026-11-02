@@ -1562,7 +1562,17 @@ class SchedulerEngine:
                 "final_status": "failed",
                 "errors": ["自动闭环返回了无效执行报告"],
             }
-        return report
+        normalized = dict(report)
+        # autogrow 使用 action 表达业务结果；全局 Worker 统一识别 final_status。
+        if normalized.get("action") == "failed":
+            normalized["final_status"] = "failed"
+            reason = str(normalized.get("reason") or "自动闭环执行失败")
+            errors = normalized.get("errors")
+            normalized["errors"] = list(errors) if isinstance(errors, list) else [reason]
+        else:
+            normalized.setdefault("final_status", "success")
+            normalized.setdefault("errors", [])
+        return normalized
 
     async def _job_cb_recovery(self) -> dict:
         """熔断恢复 3 步验证（冷却到期 + test_login + test_lightweight_action，R6）。"""
