@@ -99,9 +99,13 @@ def test_migration_is_safe_to_reapply_with_column_skipper():
     conn = _legacy_db()
     migration_sql = MIGRATION.read_text(encoding="utf-8")
     first = Database._skip_existing_columns(conn, migration_sql)
-    conn.executescript("BEGIN IMMEDIATE;\n" + first + "\nCOMMIT;")
+    conn.executescript("BEGIN IMMEDIATE;
+" + first + "
+COMMIT;")
     second = Database._skip_existing_columns(conn, migration_sql)
-    conn.executescript("BEGIN IMMEDIATE;\n" + second + "\nCOMMIT;")
+    conn.executescript("BEGIN IMMEDIATE;
+" + second + "
+COMMIT;")
     assert conn.execute("SELECT COUNT(*) FROM master_plan_versions").fetchone()[0] == 2
     assert conn.execute("SELECT COUNT(*) FROM sub_plans").fetchone()[0] == 0
     conn.close()
@@ -182,7 +186,9 @@ def test_round_metadata_migration_adds_origin_and_feedback_columns():
     migration = Path(__file__).resolve().parents[1] / "migrations" / "116_subplan_round_metadata.sql"
     db._run_migration(conn, Migration(116, migration, "subplan_round_metadata"))
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(spiral_rounds)")}
-    assert {"trigger_source", "applied_feedback"} <= columns\n    stage_columns = {row["name"] for row in conn.execute("PRAGMA table_info(sub_plan_stages)")}\n    assert "stage_key" in stage_columns
+    assert {"trigger_source", "applied_feedback"} <= columns
+    stage_columns = {row["name"] for row in conn.execute("PRAGMA table_info(sub_plan_stages)")}
+    assert "stage_key" in stage_columns
     conn.execute(
         "INSERT INTO spiral_rounds(id,round_number,status) VALUES(9,9,'created')"
     )
