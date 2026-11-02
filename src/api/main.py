@@ -1905,24 +1905,24 @@ def _register_routes(app: FastAPI) -> None:
         cfg_bg = _g()["cfg"]
 
         def record_sample_event(event_type: str, metadata: dict, event_key: str) -> None:
-            conn_bg.execute(
-                "INSERT OR IGNORE INTO content_events "
-                "(id, tenant_id, sample_run_id, event_type, event_at, source, metadata_json, idempotency_key) "
-                "VALUES (?, ?, ?, ?, ?, 'web', ?, ?)",
-                (uuid.uuid4().hex, tenant_id, run_id, event_type,
-                 business_now(cfg_bg).isoformat(sep=" ", timespec="seconds"),
-                 json.dumps(metadata, ensure_ascii=False), event_key),
-            )
-            conn_bg.commit()
+            with conn_bg:
+                conn_bg.execute(
+                    "INSERT OR IGNORE INTO content_events "
+                    "(id, tenant_id, sample_run_id, event_type, event_at, source, metadata_json, idempotency_key) "
+                    "VALUES (?, ?, ?, ?, ?, 'web', ?, ?)",
+                    (uuid.uuid4().hex, tenant_id, run_id, event_type,
+                     business_now(cfg_bg).isoformat(sep=" ", timespec="seconds"),
+                     json.dumps(metadata, ensure_ascii=False), event_key),
+                )
 
         async def generate_samples():
             from src.core.content_pipeline import ContentGenerationError, generate_copy_content
             from src.adapters.base import Platform as PlatformEnum
             try:
                 started = business_now(cfg_bg).isoformat(sep=" ", timespec="seconds")
-                conn_bg.execute("UPDATE sample_runs SET status='generating', started_at=? WHERE id=?",
-                                (started, run_id))
-                conn_bg.commit()
+                with conn_bg:
+                    conn_bg.execute("UPDATE sample_runs SET status='generating', started_at=? WHERE id=?",
+                                    (started, run_id))
                 base_cfg = cfg_bg
                 sample_goal = base_cfg.ultimate_goal.model_copy(update={
                     "positioning": description,
@@ -1954,11 +1954,11 @@ def _register_routes(app: FastAPI) -> None:
                                         "本次体验已达到模型调用安全上限，请调整定位后重新体验",
                                     )
                                 model_call_count += 1
-                                conn_bg.execute(
-                                    "UPDATE sample_runs SET attempt_count=? WHERE id=?",
-                                    (model_call_count, run_id),
-                                )
-                                conn_bg.commit()
+                                with conn_bg:
+                                    conn_bg.execute(
+                                        "UPDATE sample_runs SET attempt_count=? WHERE id=?",
+                                        (model_call_count, run_id),
+                                    )
                                 title, body, tags = await asyncio.to_thread(
                                     generate_copy_content,
                                     f"{description}：{angle}",
@@ -2015,24 +2015,23 @@ def _register_routes(app: FastAPI) -> None:
                             "quality_rejected", "样稿多次未通过质量检查：" + "、".join(findings),
                         )
                     results.append((angle, title, body, tags, findings))
-                conn_bg.execute("UPDATE sample_runs SET status='quality_check' WHERE id=?", (run_id,))
-                conn_bg.commit()
                 now_done = business_now(cfg_bg).isoformat(sep=" ", timespec="seconds")
-                for angle, title, body, tags, findings in results:
+                with conn_bg:
+                    conn_bg.execute("UPDATE sample_runs SET status='quality_check' WHERE id=?", (run_id,))
+                    for angle, title, body, tags, findings in results:
+                        conn_bg.execute(
+                            "INSERT INTO sample_contents "
+                            "(id, sample_run_id, tenant_id, platform, angle, title, body, hashtags_json, "
+                            "quality_status, quality_findings_json, created_at, updated_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pass', ?, ?, ?)",
+                            (uuid.uuid4().hex, run_id, tenant_id, platform, angle, title, body,
+                             json.dumps(tags, ensure_ascii=False), json.dumps(findings, ensure_ascii=False),
+                             now_done, now_done),
+                        )
                     conn_bg.execute(
-                        "INSERT INTO sample_contents "
-                        "(id, sample_run_id, tenant_id, platform, angle, title, body, hashtags_json, "
-                        "quality_status, quality_findings_json, created_at, updated_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pass', ?, ?, ?)",
-                        (uuid.uuid4().hex, run_id, tenant_id, platform, angle, title, body,
-                         json.dumps(tags, ensure_ascii=False), json.dumps(findings, ensure_ascii=False),
-                         now_done, now_done),
+                        "UPDATE sample_runs SET status='ready', completed_at=? WHERE id=?",
+                        (now_done, run_id),
                     )
-                conn_bg.execute(
-                    "UPDATE sample_runs SET status='ready', completed_at=? WHERE id=?",
-                    (now_done, run_id),
-                )
-                conn_bg.commit()
                 try:
                     record_sample_event("sample_generation_succeeded", {"sample_count": 3},
                                          f"sample-ready:{run_id}")
@@ -2050,14 +2049,13 @@ def _register_routes(app: FastAPI) -> None:
                     code = "sample_generation_failed"
                     safe_message = "样稿生成失败，请检查模型配置后重试"
                 try:
-                    conn_bg.rollback()
+                    with conn_bg:
+                        conn_bg.execute(
+                            "UPDATE sample_runs SET status='failed', error_code=?, error_message_safe=?, completed_at=? WHERE id=?",
+                            (code, safe_message[:300], business_now(cfg_bg).isoformat(sep=" ", timespec="seconds"), run_id),
+                        )
                 except Exception:
-                    logger.exception("快速体验失败事务回滚异常 run=%s", run_id)
-                conn_bg.execute(
-                    "UPDATE sample_runs SET status='failed', error_code=?, error_message_safe=?, completed_at=? WHERE id=?",
-                    (code, safe_message[:300], business_now(cfg_bg).isoformat(sep=" ", timespec="seconds"), run_id),
-                )
-                conn_bg.commit()
+                    logger.exception("快速体验失败状态收口失败 run=%s", run_id)
                 record_sample_event("sample_generation_failed", {"error_code": code},
                                     f"sample-failed:{run_id}")
         
