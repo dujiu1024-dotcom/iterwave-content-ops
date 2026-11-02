@@ -51,7 +51,8 @@ def _db():
             created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );
         CREATE TABLE spiral_rounds (
-            id INTEGER PRIMARY KEY, round_number INTEGER, status TEXT,
+            id INTEGER PRIMARY KEY, goal_id TEXT, round_number INTEGER, status TEXT,
+            topic_ids TEXT, content_variants TEXT,
             master_plan_version_id INTEGER, sub_plan_id TEXT, sub_plan_version_id INTEGER,
             sub_plan_stage_id INTEGER, sub_plan_snapshot TEXT, sub_plan_stage_snapshot TEXT,
             plan_signature TEXT, plan_attribution_status TEXT
@@ -237,16 +238,19 @@ def test_durable_round_open_lock_is_idempotent_and_rejects_key_reuse():
             sub_plan_version_id=subplan["id"], sub_plan_stage_id=stage_id,
         )
 
-    store.bind_round(
-        1, master_plan_version_id=master["id"],
-        sub_plan_id="sub-xhs", sub_plan_version_id=subplan["id"],
-        sub_plan_stage_id=stage_id,
+    completed = store.create_round_once(
+        "auto:2026-11-02T10:00", goal_id="goal-1",
+        topic_ids=["topic-1"], content_variants=[{"platform": "xhs"}],
     )
-    completed = store.complete_round_open("auto:2026-11-02T10:00", 1)
-    assert completed == {"status": "created", "round_id": 1}
+    assert completed["status"] == "created"
+    assert completed["deduped"] is False
+    assert tuple(conn.execute(
+        "SELECT master_plan_version_id,sub_plan_id,sub_plan_version_id,sub_plan_stage_id "
+        "FROM spiral_rounds WHERE id=?", (completed["round_id"],)
+    ).fetchone()) == (master["id"], "sub-xhs", subplan["id"], stage_id)
     retry = store.reserve_round_open(
         "auto:2026-11-02T10:00", "hash-a",
         master_plan_version_id=master["id"], sub_plan_id="sub-xhs",
         sub_plan_version_id=subplan["id"], sub_plan_stage_id=stage_id,
     )
-    assert retry == {"acquired": False, "status": "created", "round_id": 1}
+    assert retry == {"acquired": False, "status": "created", "round_id": completed["round_id"]}
