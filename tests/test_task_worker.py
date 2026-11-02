@@ -927,6 +927,38 @@ def test_scheduler_exception_audit_uses_safe_message(tmp_path):
     audit_conn.close()
 
 
+def test_worker_content_plan_completion_ignores_late_result_after_plan_cancelled():
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE content_plan_rounds(plan_id INTEGER, round_id INTEGER);
+        CREATE TABLE content_plans(id INTEGER PRIMARY KEY, status TEXT, version INTEGER, updated_at TEXT);
+        CREATE TABLE contents(id INTEGER PRIMARY KEY, round_id INTEGER);
+        CREATE TABLE drafts(id INTEGER PRIMARY KEY, content_id INTEGER);
+        CREATE TABLE content_plan_drafts(
+            plan_id INTEGER, draft_id INTEGER, round_id INTEGER, created_at TEXT,
+            UNIQUE(plan_id, draft_id)
+        );
+        INSERT INTO content_plan_rounds VALUES (7, 11);
+        INSERT INTO content_plans VALUES (7, 'cancelled', 3, NULL);
+        INSERT INTO contents VALUES (21, 11);
+        INSERT INTO drafts VALUES (31, 21);
+    """)
+
+    GlobalTaskWorker._complete_content_plan(
+        conn, 11, {"final_status": "completed"},
+    )
+
+    plan = conn.execute(
+        "SELECT status, version FROM content_plans WHERE id=7"
+    ).fetchone()
+    assert tuple(plan) == ("cancelled", 3)
+    assert conn.execute("SELECT COUNT(*) FROM content_plan_drafts").fetchone()[0] == 0
+    conn.close()
+
+
 def test_interrupted_round_reconciliation_retries_after_transient_context_failure(tmp_path, monkeypatch):
     """一次性上下文/数据库故障不能让进程内缓存永久跳过 interrupted 对账。"""
     queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
