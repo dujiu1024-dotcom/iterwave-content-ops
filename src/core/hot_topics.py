@@ -645,8 +645,10 @@ class HotTopicCollector:
                 window_hours=d.cross_platform_window_hours,
                 length_prefilter_ratio=d.length_prefilter_ratio,
                 cfg=self.cfg),
-            "pruned": prune(self.conn, retention_days=self.hcfg.retention_days,
-                            max_rows=self.hcfg.max_rows),
+            "pruned": prune(
+                self.conn, retention_days=self.hcfg.retention_days,
+                max_rows=self.hcfg.max_rows, cfg=self.cfg,
+            ),
             "rows": self.conn.execute("SELECT COUNT(*) FROM hot_topics").fetchone()[0],
         }
         if report is not None:
