@@ -99,13 +99,9 @@ def test_migration_is_safe_to_reapply_with_column_skipper():
     conn = _legacy_db()
     migration_sql = MIGRATION.read_text(encoding="utf-8")
     first = Database._skip_existing_columns(conn, migration_sql)
-    conn.executescript("BEGIN IMMEDIATE;
-" + first + "
-COMMIT;")
+    conn.executescript("BEGIN IMMEDIATE;\n" + first + "\nCOMMIT;")
     second = Database._skip_existing_columns(conn, migration_sql)
-    conn.executescript("BEGIN IMMEDIATE;
-" + second + "
-COMMIT;")
+    conn.executescript("BEGIN IMMEDIATE;\n" + second + "\nCOMMIT;")
     assert conn.execute("SELECT COUNT(*) FROM master_plan_versions").fetchone()[0] == 2
     assert conn.execute("SELECT COUNT(*) FROM sub_plans").fetchone()[0] == 0
     conn.close()
