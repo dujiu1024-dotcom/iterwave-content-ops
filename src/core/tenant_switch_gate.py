@@ -39,15 +39,19 @@ class TenantSwitchGate:
             self._switching = True
 
         deadline = time.monotonic() + timeout_seconds
-        while True:
-            with self._lock:
-                active = self._active_requests
-            if active == 0:
-                return
-            if time.monotonic() >= deadline:
-                self.end_switch()
-                raise TimeoutError("等待在途请求结束超时，已取消切换")
-            await asyncio.sleep(0.01)
+        try:
+            while True:
+                with self._lock:
+                    active = self._active_requests
+                if active == 0:
+                    return
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("等待在途请求结束超时，已取消切换")
+                await asyncio.sleep(0.01)
+        except BaseException:
+            # Cancellation or shutdown must never leave all business requests blocked.
+            self.end_switch()
+            raise
 
     def end_switch(self) -> None:
         with self._lock:

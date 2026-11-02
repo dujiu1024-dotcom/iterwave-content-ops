@@ -55,3 +55,23 @@ def test_only_one_switch_can_own_gate() -> None:
         gate.end_switch()
 
     asyncio.run(run())
+
+
+def test_switch_cancellation_reopens_gate_without_leaking_state() -> None:
+    gate = TenantSwitchGate()
+    gate.enter_request()
+
+    async def run() -> None:
+        task = asyncio.create_task(gate.begin_switch(timeout_seconds=5))
+        await asyncio.sleep(0)
+        assert gate.switching
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not gate.switching
+        assert gate.active_requests == 1
+        gate.enter_request()
+        gate.leave_request()
+        gate.leave_request()
+
+    asyncio.run(run())
