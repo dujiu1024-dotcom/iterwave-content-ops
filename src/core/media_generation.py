@@ -29,10 +29,20 @@ class ImageGenerationError(RuntimeError):
     pass
 
 
-def validate_image_bytes(raw: bytes, cfg=None) -> tuple[str, str, int, int]:
+def _resolve_config(cfg=None):
+    """Prefer the tenant config bound to the current background task."""
+    if cfg is not None:
+        return cfg
+    from src.core.task_context import current_config
+    cfg = current_config()
     if cfg is None:
         from src.core.config import get_config
         cfg = get_config()
+    return cfg
+
+
+def validate_image_bytes(raw: bytes, cfg=None) -> tuple[str, str, int, int]:
+    cfg = _resolve_config(cfg)
     policy = cfg.media_generation
     try:
         with Image.open(io.BytesIO(raw)) as image:
@@ -61,9 +71,7 @@ def generate_image_bytes(
     cfg=None,
 ) -> tuple[bytes, str, str, int, int]:
     """调用兼容 images/generations 或 images/edits 的 API，返回校验后的图片与元数据。"""
-    if cfg is None:
-        from src.core.config import get_config
-        cfg = get_config()
+    cfg = _resolve_config(cfg)
     policy = cfg.media_generation
     base_url = os.getenv("ITERWAVE_IMAGE_API_BASE_URL", policy.base_url).rstrip("/")
     key_env = os.getenv("ITERWAVE_IMAGE_API_KEY_ENV", "OPENAI_API_KEY").strip()

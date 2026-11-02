@@ -19,6 +19,8 @@ export interface GlobalTaskQueueItem {
   tenant_id: string;
   tenant_name: string;
   aggregate_id: string | null;
+  /** round_run 任务对应的业务轮次编号（spiral_rounds.round_number）；无法解析时为 null */
+  round_number?: number | null;
   status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "interrupted";
   created_at: string;
   available_at: string;
@@ -27,6 +29,13 @@ export interface GlobalTaskQueueItem {
   attempts: number;
   error_code: string | null;
   error_message: string | null;
+  retry_of_task_id?: string | null;
+  retry_confirmed_by?: string | null;
+  retry_confirmation_note?: string | null;
+  resolution_action?: "handled" | "ignored" | null;
+  resolution_actor?: string | null;
+  resolution_note?: string | null;
+  resolution_at?: string | null;
 }
 
 export interface GlobalTaskQueueResponse {
@@ -35,13 +44,34 @@ export interface GlobalTaskQueueResponse {
   page?: number;
   page_size?: number;
   pages?: number;
-  counts?: {
-    total: number;
-    by_status: Record<string, number>;
-    by_tenant: Record<string, Record<string, number>>;
-  };
   status_counts?: { queued?: number; running?: number; failed?: number; interrupted?: number };
   tenant_status_counts?: Record<string, { queued?: number; running?: number; failed?: number; interrupted?: number }>;
+}
+
+export interface GlobalTodoItem {
+  id: string;
+  record_id: number | string;
+  source: "global_queue" | "task_run" | "ops_log" | "circuit_breaker" | "hot_topic_source" | "media_review" | "notification" | "media_generation";
+  source_label: string;
+  tenant_id: string;
+  tenant_name: string;
+  title: string;
+  detail: string;
+  status: string;
+  created_at: string | null;
+  severity: "high" | "medium";
+  target_page: string;
+  target_tab: string | null;
+}
+
+export interface GlobalTodoResponse {
+  items: GlobalTodoItem[];
+  total: number;
+  counts: Record<GlobalTodoItem["source"], number>;
+  page: number;
+  page_size: number;
+  pages: number;
+  capped: boolean;
 }
 
 export interface QueueTaskSubmission {
@@ -56,8 +86,10 @@ export interface QueueTaskSubmission {
 
 export interface SystemStatus {
   enabled_platforms: Platform[];
-  /** 有登录态的平台（R20 ● 判定依据） */
+  /** 兼容旧字段：实际表示本机登录态文件存在，不代表会话有效 */
   logged_in_platforms: Platform[];
+  credential_present_platforms?: Platform[];
+  platform_status?: Partial<Record<Platform, PlatformProgress>>;
   /** 无登录态的平台：真实操作为阻塞状态 */
   platforms_without_login: Platform[];
   circuit_broken_platforms: Platform[];
@@ -151,6 +183,33 @@ export interface SpiralRoundPage {
   page: number;
   page_size: number;
   pages: number;
+}
+
+export interface OnboardingProgress {
+  step_key: string | null;
+  step_index: number | null;
+  updated_at: string | null;
+}
+
+export interface BusinessAnalyticsSummary {
+  window_days: number;
+  since: string;
+  contents_created: number;
+  drafts_created: number;
+  confirmed_published: number;
+  interactions: {
+    sample_count: number;
+    views: number | null;
+    likes: number | null;
+    collects: number | null;
+    comments: number | null;
+    shares: number | null;
+    new_followers: number | null;
+    known_samples: Record<string, number>;
+  };
+  followers_growth_by_platform: Record<string, {
+    growth: number; baseline_at: string; latest_at: string;
+  } | null>;
 }
 
 export interface MetricsResponse {
@@ -399,8 +458,17 @@ export interface GoalSummary {
 
 /** 四平台进度（/api/platform_progress，固定返回 4 个平台） */
 export interface PlatformProgress {
-  /** 与 /api/status.enabled_platforms 同一口径 */
+  /** 与系统配置相同的四平台支持集合 */
+  supported?: boolean;
+  configured?: boolean;
   enabled: boolean;
+  account_registered?: boolean;
+  account_active?: boolean;
+  /** 本机 storage_state 文件存在；不代表平台会话仍有效 */
+  credential_present?: boolean;
+  session_validity?: "not_checked" | string;
+  preflight_ready?: boolean;
+  blockers?: string[];
   total_drafts: number;
   /** { draft_saved: 3, user_published: 1, data_fetching: 2, ... } */
   status_breakdown: Record<string, number>;
@@ -418,6 +486,8 @@ export interface ActionItem {
   source?: string;
   created_at?: string | null;
   actions?: string[];
+  target_page?: string;
+  target_tab?: string | null;
 }
 
 export interface HotSourceStatus {
@@ -500,6 +570,18 @@ export interface ScheduleEvent {
   day: number | null;
 }
 
+export interface BuiltinSkillManifest {
+  group: string;
+  skill_id: string;
+  name: string;
+  capability_status: "normal" | "limited";
+  description: string;
+  installation_state: "built_in";
+  enabled_state: "system_managed";
+  runnable_state: "workflow_managed";
+  execution_mode: "trusted_application_workflow";
+}
+
 export interface TenantSkillManifest {
   skill_id: string;
   name: string;
@@ -513,6 +595,10 @@ export interface TenantSkillManifest {
   manifest_version: number;
   created_at: string;
   updated_at: string;
+  installation_state: "registered";
+  enabled_state: "enabled" | "disabled";
+  runnable_state: "blocked_no_sandbox";
+  execution_mode: "metadata_only";
 }
 
 export interface ContentPlan {
@@ -588,6 +674,14 @@ export interface GlobalMonitorTenant {
   media_usage: number;
   registered_accounts?: number;
   registered_accounts_active?: number;
+  recent_execution?: {
+    task_type: string;
+    status: string;
+    has_error_detail: boolean;
+    started_at: string | null;
+    finished_at: string | null;
+    created_at: string | null;
+  } | null;
   runtime?: {
     available: boolean;
     enabled_platforms: Platform[];
@@ -695,6 +789,9 @@ export interface AssetItem {
   platform: Platform | null;
   created_at: string | null;
   updated_at: string | null;
+  version?: number;
+  /** 后端统一序列化为 bool（数据库存 0/1） */
+  is_active?: boolean;
 }
 
 /** G-13 / G-24 运行时配置（白名单可写字段 + R22 硬锁 + 审计） */
@@ -826,6 +923,8 @@ export interface IndustryPreset {
   key: string;
   is_builtin?: boolean;
   version?: number;
+  is_active?: boolean;
+  archived_at?: string | null;
   name: string;
   description: string;
   positioning: string;
@@ -843,6 +942,13 @@ export interface HotSource {
   platforms?: string[];
   platform?: string;
   enabled?: boolean;
+  last_test?: {
+    status: "success" | "failed" | "empty";
+    item_count: number;
+    sample_titles: string[];
+    message: string;
+    tested_at: string;
+  } | null;
 }
 
 export interface KbInspect {
@@ -985,6 +1091,7 @@ export interface PlanSignatureHistory {
   plan_signature: string;
   plan_snapshot: MasterPlan | string;
   round_id: number | null;
+  round_number: number | null;
   created_at: string;
   author: string | null;
 }
@@ -1075,14 +1182,6 @@ export interface PipelineResponse {
 }
 
 // ===== 账号管理 =====
-export interface RegisteredPlatformAccount {
-  id: number;
-  platform: Platform;
-  account_handle: string;
-  display_name: string;
-  status: "active" | "inactive";
-  notes: string;
-}
 export interface AccountInfo {
   platform: Platform;
   platform_display: string;
@@ -1092,8 +1191,27 @@ export interface AccountInfo {
   login_proc_state?: string;
   login_proc_message?: string;
   has_storage_state: boolean;
+  enabled?: boolean;
+  configured?: boolean;
+  account_registered?: boolean;
+  account_active?: boolean;
+  credential_present?: boolean;
+  circuit_broken?: boolean;
+  preflight_ready?: boolean;
+  blockers?: string[];
   /** 扫码中的 QR（data:image/png;base64,xxx） */
   qr_base64?: string | null;
+}
+
+export interface RegisteredPlatformAccount {
+  id: number;
+  platform: Platform;
+  account_handle: string;
+  display_name: string;
+  status: "active" | "inactive";
+  notes: string;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface LoginStatus {
@@ -1132,6 +1250,7 @@ export interface AiCallRecord {
 export interface UserOverrideRecord {
   id: number;
   round_id?: number | null;
+  round_number?: number | null;
   ai_call_id?: number | null;
   override_field: string | null;
   original_value: string | null;
@@ -1144,6 +1263,7 @@ export interface UserOverrideRecord {
 export interface RedlineRecord {
   id: string;
   round_id: number | null;
+  round_number: number | null;
   platform: Platform;
   title: string;
   guard_outcome: "warn" | "fail" | "error" | string;
@@ -1179,8 +1299,12 @@ export interface OpsLogItem {
   content: string | null;
   schedule_time: string | null;
   executed_at: string | null;
-  status: "success" | "failed" | "skipped" | "circuit_broken";
+  status: "success" | "failed" | "skipped" | "circuit_broken" | "pending_verify";
   error_msg: string | null;
+  resolved_at?: string | null;
+  resolved_by?: string | null;
+  resolution_action?: "sent" | "not_sent" | null;
+  resolution_note?: string | null;
   rhythm_wait_seconds: number | null;
 }
 
@@ -1197,6 +1321,9 @@ export interface TaskRunItem {
   next_run_at: string | null;
   error_msg: string | null;
   created_at: string;
+  resolved_at?: string | null;
+  resolved_by?: string | null;
+  resolution_action?: "sent" | "not_sent" | null;
 }
 
 export interface NotificationItem {
@@ -1208,6 +1335,11 @@ export interface NotificationItem {
   body: string | null;
   channel: string | null;
   sent_at: string;
+  read_at: string | null;
+  target_page?: string;
+  target_tab?: string | null;
+  target_type?: "task_run" | "ops_log" | "round" | "draft" | null;
+  target_id?: number | string | null;
 }
 
 export interface SchedulerJob {
@@ -1298,6 +1430,39 @@ async function ensureTenantContext(): Promise<void> {
   await tenantContextInitialization;
 }
 
+/**
+ * 错误提示透传规则：后端写好的中文业务提示（包括 5xx，如「图片生成服务暂时不可用…」）原样展示；
+ * 仅当 detail 为空，或含堆栈、源码/绝对路径、URL、token/密钥、驱动异常类名等内部特征时，
+ * 才替换为通用提示，避免内部诊断信息泄露到浏览器。
+ */
+const INTERNAL_DETAIL_PATTERNS: RegExp[] = [
+  /\btraceback\b/i,
+  /File ["'][^"']+["'], line \d+/i,
+  /\.(?:py|pyc|db|sqlite3?|ya?ml|env|log|ini|toml)\b(?::\d+)?/i,
+  /(?:^|[\s"'(=:])\/(?:home|root|tmp|var|usr|opt|etc|srv|app|workspace|Users|private|data)\//,
+  /\b[A-Za-z]:\\[^\s]/,
+  /\b(?:https?|wss?|ftp|file|sqlite|postgres(?:ql)?|mysql|redis):\/\/\S+/i,
+  /\b(?:bearer|authorization)\b\s*[:=]?\s*[A-Za-z0-9._~+/-]{8,}/i,
+  /\b(?:api[_-]?key|access[_-]?token|secret|password|passwd|token)\s*[:=]\s*\S+/i,
+  /\b(?:sk|ak|ghp|gho|xox[abp])-[A-Za-z0-9_-]{8,}/,
+  /\b[A-Za-z0-9_]{40,}\b/,
+  /\b[A-Z][A-Z0-9]*_(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|URL)\b/,
+  /\b(?:sqlite3|sqlalchemy|psycopg2?|pymysql)\.|\b(?:OperationalError|ProgrammingError|IntegrityError|KeyError|TypeError|ValueError|AttributeError|RuntimeError|Exception)\b/,
+  /constraint failed|no such (?:table|column)|database is locked/i,
+  /<\/?(?:html|body|head|title)\b/i,
+];
+
+/** 把后端错误 detail 转成可展示给用户的提示（导出以便单测/复用）。 */
+export function clientErrorMessage(status: number, rawDetail: string | null | undefined): string {
+  const detail = (rawDetail ?? "").trim();
+  const generic = status >= 500
+    ? "服务暂时不可用，请稍后重试"
+    : "操作失败，内部诊断信息已记录，请检查配置或联系管理员";
+  if (!detail) return status >= 500 ? generic : "请求失败，请稍后重试";
+  if (INTERNAL_DETAIL_PATTERNS.some((re) => re.test(detail))) return generic;
+  return detail;
+}
+
 async function fetchJson<T>(path: string, options?: RequestInit): Promise<T> {
   const method = (options?.method || "GET").toUpperCase();
   if (method !== "GET" && !path.startsWith("/api/auth/")) {
@@ -1317,22 +1482,28 @@ async function fetchJson<T>(path: string, options?: RequestInit): Promise<T> {
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    let detail = text || res.statusText;
+    let detail = "";
     let errorCode = "";
+    let parsedJson = false;
     try {
       const parsed = JSON.parse(text);
+      parsedJson = true;
       const payload = parsed?.detail ?? parsed;
       if (typeof payload === "string") {
         detail = payload;
         // FastAPI 常见结构：detail 是字符串，业务错误码放在响应顶层。
         errorCode = String(parsed?.code || "");
       } else if (payload && typeof payload === "object") {
-        detail = String(payload.message || payload.detail || detail);
+        detail = String(payload.message || payload.detail || "");
         errorCode = String(payload.code || parsed?.code || "");
       }
     } catch {
-      // 非 JSON 错误体，保留原文
+      // 非 JSON 错误体（如网关 HTML 页、纯文本 Internal Server Error）
     }
+    // 5xx 的非 JSON 响应体来自网关/框架默认页，不是后端业务提示，按“无 detail”处理；
+    // 4xx 的非 JSON 文本保留原文，但仍要过内部特征检查。
+    if (!parsedJson && res.status < 500) detail = text || res.statusText || "";
+    detail = clientErrorMessage(res.status, detail);
     const error = new Error(detail) as Error & { status?: number; code?: string };
     error.status = res.status;
     error.code = errorCode;
@@ -1357,9 +1528,9 @@ export interface ActivationStatus {
   platform_metric_fields: Record<Platform, string[]>;
   activation_limits: {
     account_description_min_chars: number; account_description_max_chars: number;
-    max_runs_per_day: number; sample_max_output_tokens: number;
+    sample_max_output_tokens: number;
     max_model_calls_per_run: number; max_total_output_tokens_per_run: number;
-    daily_runs_used: number; daily_runs_remaining: number;
+    daily_runs_used: number;
   };
   cohort_started_at: string;
 }
@@ -1439,12 +1610,16 @@ export const api = {
     fetchJson<{ updated: Record<string, number | null>; goals: Goal[]; summary: GoalSummary }>(
       "/api/goals/progress/refresh", { method: "POST" },
     ),
-  taskQueue: (params: { scope?: "all" | "active" | "history" | "failed"; page?: number; pageSize?: number; taskType?: string } = {}) => {
+  taskQueue: (params: { scope?: "all" | "active" | "history" | "failed"; page?: number; pageSize?: number; taskType?: string; tenantId?: string; errorKeyword?: string; dateFrom?: string; dateTo?: string } = {}) => {
     const query = new URLSearchParams();
     if (params.scope) query.set("scope", params.scope);
     if (params.page != null) query.set("page", String(params.page));
     if (params.pageSize != null) query.set("page_size", String(params.pageSize));
     if (params.taskType) query.set("task_type", params.taskType);
+    if (params.tenantId) query.set("tenant_id", params.tenantId);
+    if (params.errorKeyword) query.set("error_keyword", params.errorKeyword);
+    if (params.dateFrom) query.set("date_from", params.dateFrom);
+    if (params.dateTo) query.set("date_to", params.dateTo);
     const encoded = query.toString();
     const suffix = encoded ? `?${encoded}` : "";
     return fetchJson<GlobalTaskQueueResponse>(`/api/task-queue${suffix}`);
@@ -1452,6 +1627,25 @@ export const api = {
   cancelTask: (taskId: string) =>
     fetchJson<{ task_id: string; status: string }>(`/api/task-queue/${encodeURIComponent(taskId)}/cancel`, {
       method: "POST",
+    }),
+  resolveTask: (taskId: string, input: { action: "handled" | "ignored"; note: string }) =>
+    fetchJson<{
+      task_id: string; action: "handled" | "ignored"; actor: string;
+      note: string; acted_at: string; created: boolean;
+    }>(`/api/task-queue/${encodeURIComponent(taskId)}/resolve`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  retryTask: (taskId: string, input: { confirmedNotExecuted: boolean; confirmationNote: string }) =>
+    fetchJson<{
+      task_id: string; retry_of_task_id: string; tenant_id: string; task_type: string;
+      status: string; created: boolean; confirmed_by: string; confirmation_note: string;
+    }>(`/api/task-queue/${encodeURIComponent(taskId)}/retry`, {
+      method: "POST",
+      body: JSON.stringify({
+        confirmed_not_executed: input.confirmedNotExecuted,
+        confirmation_note: input.confirmationNote,
+      }),
     }),
   rounds: (status?: string) =>
     fetchJson<SpiralRound[]>(status ? `/api/rounds?status=${status}` : "/api/rounds"),
@@ -1487,6 +1681,11 @@ export const api = {
     if (status) p.set("status", status);
     if (platform) p.set("platform", platform);
     return fetchJson<Draft[]>(`/api/drafts?${p}`);
+  },
+  draftById: async (id: string) => {
+    const p = new URLSearchParams({ draft_id: id });
+    const rows = await fetchJson<Draft[]>(`/api/drafts?${p}`);
+    return rows[0] ?? null;
   },
   draftsPage: (status: string | undefined, platform: Platform | undefined, page: number, pageSize = 20) => {
     const p = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
@@ -1582,6 +1781,16 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  /** 正式运营设置向导进度（按账号组存后端 app_settings） */
+  onboardingProgress: () =>
+    fetchJson<OnboardingProgress>("/api/onboarding/progress"),
+  saveOnboardingProgress: (step_key: string, step_index: number) =>
+    fetchJson<OnboardingProgress>("/api/onboarding/progress", {
+      method: "PUT",
+      body: JSON.stringify({ step_key, step_index }),
+    }),
+  businessAnalyticsSummary: (days = 30) =>
+    fetchJson<BusinessAnalyticsSummary>(`/api/analytics/business-summary?days=${days}`),
   metrics: (platform?: Platform, page?: number, pageSize = 20) => {
     const params = new URLSearchParams();
     if (platform) params.set("platform", platform);
@@ -1619,16 +1828,20 @@ export const api = {
     if (endDate) p.set("end_date", endDate);
     return fetchJson<{ items: ContentPlan[]; total: number }>(`/api/content-plans?${p}`);
   },
-  tenantSkills: (enabled?: boolean) => fetchJson<{ items: TenantSkillManifest[]; total: number; execution_enabled: false }>(`/api/skills${enabled === undefined ? "" : `?enabled=${enabled}`}`),
+  tenantSkills: (enabled?: boolean) => fetchJson<{ items: TenantSkillManifest[]; total: number; builtin_items: BuiltinSkillManifest[]; builtin_total: number; execution_enabled: false; custom_execution_enabled: false }>(`/api/skills${enabled === undefined ? "" : `?enabled=${enabled}`}`),
   registerTenantSkill: (data: Pick<TenantSkillManifest, "skill_id" | "name" | "version" | "description" | "category" | "inputs" | "outputs" | "permissions">) =>
     fetchJson<TenantSkillManifest & { execution_enabled: false }>("/api/skills", { method: "POST", body: JSON.stringify(data) }),
   setTenantSkillEnabled: (skill_id: string, enabled: boolean, manifest_version: number) =>
     fetchJson<{ skill_id: string; enabled: boolean; manifest_version: number; execution_enabled: false }>(
       `/api/skills/${skill_id}`, { method: "PATCH", body: JSON.stringify({ enabled, manifest_version }) },
     ),
+  updateTenantSkill: (skill_id: string, data: Partial<Pick<TenantSkillManifest, "name" | "version" | "description" | "category" | "inputs" | "outputs" | "permissions" | "enabled">> & { manifest_version: number }) =>
+    fetchJson<TenantSkillManifest & { execution_enabled: false }>(
+      `/api/skills/${skill_id}`, { method: "PATCH", body: JSON.stringify(data) },
+    ),
   deleteTenantSkill: (skill_id: string) =>
     fetchJson<{ skill_id: string; deleted: boolean }>(`/api/skills/${skill_id}`, { method: "DELETE" }),
-  contentPlan: (id: string) => fetchJson<ContentPlan & { drafts: Array<{ draft_id: string; platform: Platform; status: string; title: string; round_id: number | null }>; rounds: Array<{ round_id: number; task_id: string | null; created_at: string }> }>(`/api/content-plans/${id}`),
+  contentPlan: (id: string) => fetchJson<ContentPlan & { drafts: Array<{ draft_id: string; platform: Platform; status: string; title: string; round_id: number | null; round_number: number | null }>; rounds: Array<{ round_id: number; round_number: number | null; task_id: string | null; created_at: string }> }>(`/api/content-plans/${id}`),
   linkContentPlanDrafts: (id: string, draft_ids: string[]) =>
     fetchJson<{ plan_id: string; linked_now: string[]; linked_count: number; status: string }>(
       `/api/content-plans/${id}/drafts`, { method: "POST", body: JSON.stringify({ draft_ids }) },
@@ -1639,11 +1852,21 @@ export const api = {
     fetchJson<ContentPlan>(`/api/content-plans/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
   cancelContentPlan: (id: string, version: number) =>
     fetchJson<{ id: string; status: string }>(`/api/content-plans/${id}?version=${version}`, { method: "DELETE" }),
+  archiveContentPlan: (id: string, version: number) =>
+    fetchJson<{ id: string; status: ContentPlan["status"]; version: number }>(`/api/content-plans/${id}/archive?version=${version}`, { method: "POST" }),
+  restoreContentPlan: (id: string, version: number) =>
+    fetchJson<{ id: string; status: ContentPlan["status"]; version: number }>(`/api/content-plans/${id}/restore?version=${version}`, { method: "POST" }),
   startContentPlan: (id: string) =>
     fetchJson<{ plan_id: string; round_id: number; task_id: string; status: string; queued: boolean }>(
       `/api/content-plans/${id}/start`, { method: "POST" },
     ),
   globalOperationsSummary: (days = 30) => fetchJson<GlobalMonitorResponse>(`/api/global-monitor?days=${days}`),
+  todos: (page = 1, pageSize = 20, tenantId?: string, source?: GlobalTodoItem["source"]) => {
+    const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    if (tenantId) params.set("tenant_id", tenantId);
+    if (source) params.set("source", source);
+    return fetchJson<GlobalTodoResponse>(`/api/todos?${params.toString()}`);
+  },
   // === 账号组隔离 ===
   tenants: async () => {
     const result = await fetchJson<TenantListResponse>("/api/tenants");
@@ -1697,6 +1920,12 @@ export const api = {
     fetchJson<MediaAsset>("/api/media", { method: "POST", body: JSON.stringify(data) }),
   archiveMediaAsset: (id: number) =>
     fetchJson<{ id: number; status: string; already_archived: boolean }>(`/api/media/${id}/archive`, { method: "POST" }),
+  restoreMediaAsset: (id: number) =>
+    fetchJson<{ id: number; status: string; restored?: boolean; already_active?: boolean }>(`/api/media/${id}/restore`, { method: "POST" }),
+  renameMediaAsset: (id: number, title: string) =>
+    fetchJson<{ id: number; title: string }>(`/api/media/${id}`, { method: "PATCH", body: JSON.stringify({ title }) }),
+  deleteMediaAsset: (id: number) =>
+    fetchJson<{ id: number; deleted: boolean; file_removed: boolean }>(`/api/media/${id}`, { method: "DELETE" }),
   mediaUsageTargets: () => fetchJson<{ items: MediaUsageTarget[] }>("/api/media/targets"),
   recommendMediaAssets: (content_id: string, usage_role: "cover" | "illustration" | "background" = "cover") =>
     fetchJson<{ content_id: string; usage_role: string; method: "keyword_match" | "vision_model"; automatic_assignment: false; items: MediaRecommendation[]; message: string }>(
@@ -1720,15 +1949,23 @@ export const api = {
       `/api/media/${id}/review`, { method: "POST", body: JSON.stringify({ decision, note }) },
     ),
   // === G-13 内容资产 / 字段映射 ===
-  assets: (asset_type?: AssetType, page = 1, pageSize = 20) => {
-    const query = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
-    if (asset_type) query.set("asset_type", asset_type);
-    return fetchJson<AssetPage>(`/api/assets?${query.toString()}`);
+  assets: (asset_type?: AssetType) =>
+    fetchJson<{ items: AssetItem[]; total: number }>(
+      `/api/assets${asset_type ? `?asset_type=${asset_type}` : ""}`,
+    ),
+  assetsPage: (asset_type: AssetType, page: number, pageSize = 20, includeInactive = false) => {
+    const params = new URLSearchParams({ asset_type, page: String(page), page_size: String(pageSize) });
+    if (includeInactive) params.set("include_inactive", "true");
+    return fetchJson<AssetPage>(`/api/assets?${params.toString()}`);
   },
   createAsset: (data: { asset_type: AssetType; title: string; body?: string; source_url?: string; platform?: Platform }) =>
     fetchJson<AssetItem>("/api/assets", { method: "POST", body: JSON.stringify(data) }),
   updateAsset: (id: number, data: { asset_type: AssetType; title: string; body?: string; source_url?: string; platform?: Platform }) =>
     fetchJson<AssetItem>(`/api/assets/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  assetVersions: (id: number) => fetchJson<{ items: Array<{ version: number; title: string; body: string | null; created_at: string | null }> }>(`/api/assets/${id}/versions`),
+  restoreAssetVersion: (id: number, version: number) => fetchJson<AssetItem>(`/api/assets/${id}/versions/${version}/restore`, { method: "POST" }),
+  archiveAsset: (id: number) => fetchJson<{ id: number; is_active: boolean }>(`/api/assets/${id}/archive`, { method: "POST" }),
+  restoreAsset: (id: number) => fetchJson<{ id: number; is_active: boolean }>(`/api/assets/${id}/restore`, { method: "POST" }),
   kbInspect: () => fetchJson<KbInspect>("/api/kb/inspect"),
   // === 访问保护 ===
   authStatus: () => fetchJson<AuthStatus>("/api/auth/status"),
@@ -1762,6 +1999,12 @@ export const api = {
   presets: () => fetchJson<{ items: IndustryPreset[] }>("/api/presets"),
   savePreset: (key: string, data: Omit<IndustryPreset, "key" | "is_builtin" | "version">) =>
     fetchJson<IndustryPreset>(`/api/presets/${encodeURIComponent(key)}`, { method: "PUT", body: JSON.stringify(data) }),
+  deletePreset: (key: string) =>
+    fetchJson<{ key: string; deleted: boolean }>(`/api/presets/${encodeURIComponent(key)}`, { method: "DELETE" }),
+  restorePreset: (key: string) =>
+    fetchJson<IndustryPreset>(`/api/presets/${encodeURIComponent(key)}/restore`, { method: "POST" }),
+  presetVersions: (key: string) =>
+    fetchJson<{ items: { version: number; snapshot: IndustryPreset; created_at: string }[] }>(`/api/presets/${encodeURIComponent(key)}/versions`),
   applyPreset: (key: string) =>
     fetchJson<{ key: string; message: string; dimensions: string[]; platform_notes: Record<string, string> }>(
       `/api/presets/${key}/apply`, { method: "POST" },
@@ -1769,6 +2012,10 @@ export const api = {
   hotSources: () => fetchJson<{ items: HotSource[] }>("/api/hot_topics/sources"),
   saveHotSources: (items: HotSource[]) =>
     fetchJson<{ items: HotSource[] }>("/api/hot_topics/sources", { method: "PUT", body: JSON.stringify({ items }) }),
+  testHotSource: (index: number) =>
+    fetchJson<{ ok: boolean; status: "success" | "failed" | "empty"; source: string; item_count: number; sample_titles: string[]; message: string }>(
+      `/api/hot_topics/sources/${index}/test`, { method: "POST" },
+    ),
   saveWebhook: (channel: "wecom" | "feishu", url: string) =>
     fetchJson<{ ok: boolean; channel: string; enabled: boolean; has_webhook_url: boolean }>(
       "/api/notify/webhook", { method: "POST", body: JSON.stringify({ channel, url }) },
@@ -1829,30 +2076,57 @@ export const api = {
     fetchJson<{ results: Record<string, "ok" | "failed" | "disabled"> }>("/api/notify/test", {
       method: "POST",
     }),
-  opsLogs: (platform?: Platform, action_type?: string, status?: string, limit = 100, offset = 0) => {
-    const p = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  opsLogs: (platform?: Platform, action_type?: string, status?: string, limit = 100) => {
+    const p = new URLSearchParams({ limit: String(limit) });
     if (platform) p.set("platform", platform);
     if (action_type) p.set("action_type", action_type);
     if (status) p.set("status", status);
     return fetchJson<{ items: OpsLogItem[]; total: number }>(`/api/ops_logs?${p}`);
   },
-  opsLogsPage: (page: number, pageSize = 20) =>
-    fetchJson<PageResult<OpsLogItem>>(`/api/ops_logs?page=${page}&page_size=${pageSize}`),
-  taskRuns: (taskType?: string, status?: string, limit = 100, offset = 0) => {
-    const p = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  resolveOpsLog: (id: number, action: "sent" | "not_sent") =>
+    fetchJson<{ id: number; status: string; resolved_at?: string; already_resolved: boolean }>(
+      `/api/ops_logs/${id}/resolve`, { method: "POST", body: JSON.stringify({ action }) },
+    ),
+  opsLogsPage: (page: number, pageSize = 20, filters: { platform?: Platform; actionType?: string; status?: string; dateFrom?: string; dateTo?: string; recordId?: number } = {}) => {
+    const p = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    if (filters.recordId) p.set("record_id", String(filters.recordId));
+    if (filters.platform) p.set("platform", filters.platform);
+    if (filters.actionType) p.set("action_type", filters.actionType);
+    if (filters.status) p.set("status", filters.status);
+    if (filters.dateFrom) p.set("date_from", filters.dateFrom);
+    if (filters.dateTo) p.set("date_to", filters.dateTo);
+    return fetchJson<PageResult<OpsLogItem>>(`/api/ops_logs?${p.toString()}`);
+  },
+  taskRuns: (taskType?: string, status?: string, limit = 100) => {
+    const p = new URLSearchParams({ limit: String(limit) });
     if (taskType) p.set("task_type", taskType);
     if (status) p.set("status", status);
     return fetchJson<TaskRunItem[]>(`/api/task_runs?${p}`);
   },
-  taskRunsPage: (page: number, pageSize = 20) =>
-    fetchJson<PageResult<TaskRunItem>>(`/api/task_runs?page=${page}&page_size=${pageSize}`),
-  notifications: (level?: string, limit = 50, offset = 0) => {
-    const p = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  taskRunsPage: (page: number, pageSize = 20, filters: { taskType?: string; status?: string; platform?: Platform; dateFrom?: string; dateTo?: string; recordId?: number; roundId?: number } = {}) => {
+    const p = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    if (filters.recordId) p.set("record_id", String(filters.recordId));
+    if (filters.roundId) p.set("round_id", String(filters.roundId));
+    if (filters.taskType) p.set("task_type", filters.taskType);
+    if (filters.status) p.set("status", filters.status);
+    if (filters.platform) p.set("platform", filters.platform);
+    if (filters.dateFrom) p.set("date_from", filters.dateFrom);
+    if (filters.dateTo) p.set("date_to", filters.dateTo);
+    return fetchJson<PageResult<TaskRunItem>>(`/api/task_runs?${p.toString()}`);
+  },
+  notifications: (level?: string, limit = 50) => {
+    const p = new URLSearchParams({ limit: String(limit) });
     if (level) p.set("level", level);
     return fetchJson<NotificationItem[]>(`/api/notifications?${p}`);
   },
-  notificationsPage: (page: number, pageSize = 20) =>
-    fetchJson<PageResult<NotificationItem>>(`/api/notifications?page=${page}&page_size=${pageSize}`),
+  notificationsPage: (page: number, pageSize = 20, readStatus: "all" | "unread" | "read" = "all") =>
+    fetchJson<PageResult<NotificationItem> & { unread_total: number }>(
+      `/api/notifications?page=${page}&page_size=${pageSize}&read_status=${readStatus}`,
+    ),
+  markNotificationRead: (id: number) =>
+    fetchJson<{ id: number; read_at: string }>(`/api/notifications/${id}/read`, { method: "POST" }),
+  markAllNotificationsRead: () =>
+    fetchJson<{ updated: number }>("/api/notifications/read-all", { method: "POST" }),
   schedulerJobs: () => fetchJson<{ jobs: SchedulerJob[]; count: number; running: boolean }>("/api/scheduler/jobs"),
   /** R17：pending_verify 人工核实收口（sent=已发出 / not_sent=未发出） */
   resolveTaskRun: (id: number, action: "sent" | "not_sent") =>

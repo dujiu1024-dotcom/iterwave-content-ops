@@ -824,14 +824,7 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 .calendar-agenda-event[draggable="true"], .calendar-event[draggable="true"] { cursor: grab; }
 .calendar-agenda-event[draggable="true"]:active, .calendar-event[draggable="true"]:active { cursor: grabbing; }
 .skill-desc { white-space: pre-line; }
-.sidebar {
-  display: flex; flex-direction: column;
-  position: sticky; top: 0; height: 100vh; height: 100dvh; max-height: 100dvh;
-  min-height: 0; align-self: flex-start; overflow: hidden; overscroll-behavior: contain;
-}
-.sidebar-nav { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-gutter: stable; padding-bottom: 8px; }
-.side-bottom { flex: 0 0 auto; max-height: min(220px, 30vh); overflow-y: auto; overscroll-behavior: contain; border-top: 1px solid #ffffff16; padding-top: 10px; }
-.sidebar-nav, .side-bottom { scrollbar-width: thin; }
+.sidebar { min-height: 100vh; height: 100vh; max-height: 100vh; align-self: flex-start; position: sticky; top: 0; overflow-x: hidden; overflow-y: auto; }
 @media (max-width: 1100px) {
   .calendar-week-grid { grid-template-columns: repeat(7, minmax(0, 1fr)); }
   .calendar-toolbar { flex-wrap: wrap; justify-content: flex-start; }
@@ -843,7 +836,9 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
   .calendar-date-picker { width: 100%; }
 }
 
+.analytics-business-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 @media (max-width: 760px) {
+  .analytics-business-kpis,
   .analytics-activation-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
   .production-run-alert { max-width: 100%; min-width: 0; overflow-wrap: anywhere; }
   .production-run-alert > * { max-width: 100%; }
@@ -855,86 +850,16 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 .production-run-alert span { white-space: normal !important; overflow-wrap: anywhere; }
 
 
-/* ===== UX audit: independent fixed-height workspace scrolling ===== */
+/* Sidebar navigation scrolls independently from the main page. */
 .app { height: 100vh; min-height: 0; overflow: hidden; align-items: stretch; }
-.sidebar {
-  position: sticky;
-  top: 0;
-  height: 100vh;
-  height: 100dvh;
-  min-height: 0;
-  flex: 0 0 242px;
-  overflow: hidden;
-  overscroll-behavior: contain;
-  align-self: flex-start;
-}
-.sidebar-nav, .side-bottom { scrollbar-width: thin; }
-.sidebar-nav {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
-  padding-bottom: 8px;
-}
-.sidebar-nav > div { min-width: 0; }
-.side-bottom {
-  flex: 0 0 auto;
-  max-height: min(220px, 30vh);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  border-top: 1px solid #ffffff16;
-  padding-top: 10px;
-}
+.sidebar { height: 100vh; min-height: 0; overflow: hidden; position: relative; top: auto; }
+.sidebar-nav { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.side-bottom { flex: 0 0 auto; max-height: min(220px, 30vh); overflow-y: auto; }
 .main { height: 100vh; min-height: 0; overflow: hidden; }
-.topbar { flex: 0 0 auto; position: relative; top: auto; }
-.content {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
-}
-.pagination-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 14px;
-  padding-top: 12px;
-  border-top: 1px solid var(--line);
-}
-.pagination-summary { color: var(--muted); font-size: 11px; }
-.pagination-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-@media (max-width: 620px) {
-  .sidebar { flex-basis: 48px; width: 48px; }
-  .side-bottom { max-height: 24vh; }
-}
+.content { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
 
 
-/* Account identity and editable industry preset forms */
-.account-profile-editor, .industry-preset-editor {
-  display: grid;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--surface-2);
-}
-.account-profile-editor .form-label,
-.industry-preset-editor label {
-  display: grid;
-  gap: 5px;
-  min-width: 0;
-  font-size: 11px;
-  color: var(--muted);
-}
-.industry-preset-editor textarea { resize: vertical; }
-
-
-/* UX follow-up: clearer template management and isolated Skill contract tests */
+/* Guided content-template onboarding and read-only Skill contract tests */
 .template-howto { margin-bottom: 14px; }
 .template-howto-steps {
   display: grid;
@@ -963,22 +888,6 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
   background: var(--blue-weak);
   color: var(--blue);
 }
-.industry-preset-list { display: grid; gap: 8px; margin-top: 12px; }
-.industry-preset-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-width: 0;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  background: var(--surface);
-}
-.industry-preset-copy { display: grid; gap: 3px; min-width: 0; }
-.industry-preset-copy strong { font-size: 12px; }
-.industry-preset-copy span { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
-.industry-preset-copy small { color: var(--subtle); font-size: 10px; }
 .skill-contract-tester { margin-top: 14px; border-color: var(--blue); }
 .skill-contract-results { display: grid; gap: 5px; margin-top: 10px; font-size: 11px; }
 .skill-contract-results .pass { color: var(--green); }
@@ -988,6 +897,4 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 }
 @media (max-width: 620px) {
   .template-howto-steps { grid-template-columns: 1fr; }
-  .industry-preset-item { align-items: flex-start; flex-direction: column; }
 }
-

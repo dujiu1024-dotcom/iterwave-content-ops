@@ -38,7 +38,8 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.date import DateTrigger
 from zoneinfo import ZoneInfo
-from ..timezone import business_now, business_timestamp, business_zone
+from ..timezone import business_now
+from ..task_context import bind_task_context, business_timestamp, business_zone
 
 logger = logging.getLogger(__name__)
 
@@ -158,12 +159,69 @@ class SchedulerEngine:
                 _ENGINES.pop(self.engine_key, None)
 
     async def _run_tracked(self, method_name: str, *args) -> None:
-        """跟踪后台任务生命周期；热切换等待这些任务退出后才释放连接。"""
+        """跟踪后台任务生命周期，并把审计关联传递到通知与运营日志。"""
         self._active_job_count += 1
+        task_types = {
+            "_job_publish_polling": "publish_polling",
+            "_job_data_fetch": "data_fetch",
+            "_job_daily_ops": "daily_ops",
+            "_job_comment_polling": "comment_polling",
+            "_job_cb_recovery": "cb_recovery",
+            "_job_kb_scan": "kb_scan",
+            "_job_kb_sync": "kb_sync",
+            "_job_data_retention_cleanup": "data_retention_cleanup",
+            "_job_round_timeout_sweeper": "round_pipeline",
+            "_job_round_review": "round_pipeline",
+            "_job_autogrow_next_round": "round_pipeline",
+        }
+        task_run_id = self._start_tracked_task_run(task_types.get(method_name), method_name, args)
         try:
-            await getattr(self, method_name)(*args)
+            with bind_task_context(task_run_id):
+                try:
+                    await getattr(self, method_name)(*args)
+                except Exception:
+                    logger.exception("定时任务执行失败 method=%s", method_name)
+                    self._finish_tracked_task_run(
+                        task_run_id, "failed", "定时任务执行失败，请检查服务端运行日志",
+                    )
+                    raise
+                else:
+                    self._finish_tracked_task_run(task_run_id, "success", None)
         finally:
             self._active_job_count -= 1
+
+    def _start_tracked_task_run(
+        self, task_type: Optional[str], method_name: str, args: tuple,
+    ) -> Optional[int]:
+        if self.conn is None or task_type is None:
+            return None
+        try:
+            now = business_now(self.cfg).isoformat()
+            identity = json.dumps(args, ensure_ascii=False, default=str)[:300]
+            cur = self.conn.execute(
+                "INSERT INTO task_runs (task_type, biz_id, status, attempt, started_at, created_at) "
+                "VALUES (?, ?, 'running', 1, ?, ?)",
+                (task_type, f"scheduler:{method_name}:{identity}", now, now),
+            )
+            self.conn.commit()
+            return int(cur.lastrowid)
+        except Exception:  # noqa: BLE001 — audit failure must not prevent scheduler work
+            logger.exception("[APS] task_runs 起始留痕失败 method=%s", method_name)
+            return None
+
+    def _finish_tracked_task_run(
+        self, task_run_id: Optional[int], status: str, error_msg: Optional[str],
+    ) -> None:
+        if self.conn is None or task_run_id is None:
+            return
+        try:
+            self.conn.execute(
+                "UPDATE task_runs SET status = ?, finished_at = ?, error_msg = ? WHERE id = ?",
+                (status, business_now(self.cfg).isoformat(), error_msg, task_run_id),
+            )
+            self.conn.commit()
+        except Exception:  # noqa: BLE001 — do not mask scheduler outcome
+            logger.exception("[APS] task_runs 收尾留痕失败 id=%s", task_run_id)
 
     async def quiesce(self, timeout_seconds: float = 30.0) -> bool:
         """暂停新调度并等待已启动任务结束；超时则恢复调度并返回 False。"""
@@ -245,12 +303,16 @@ class SchedulerEngine:
         if self.conn is None or self.sm_draft is None:
             return False
         now = confirmed_at or business_now(self.cfg)
-        ok = self.sm_draft.transition(
-            draft_id, "user_published", reason=via,
-            extra_updates={"user_confirmed_at": now.isoformat()},
+        # 原子条件更新：并发的手动确认与平台轮询只能有一个调用赢得状态迁移，
+        # 只有赢家才注册一次性采集任务，避免两个请求都读到 draft_saved 后重复排程。
+        cur = self.conn.execute(
+            "UPDATE drafts SET status='user_published', user_confirmed_at=? "
+            "WHERE id=? AND status IN ('draft_saved', 'draft_pending')",
+            (now.isoformat(), draft_id),
         )
-        if not ok:
+        if cur.rowcount != 1:
             return False
+        self.conn.commit()
         if note_url:
             self.conn.execute(
                 "UPDATE drafts SET platform_note_url = COALESCE(platform_note_url, ?) WHERE id = ?",
@@ -364,8 +426,8 @@ class SchedulerEngine:
     # 7 类任务实现（全部 stub，Phase 5-6 补真实逻辑）
     # ------------------------------------------------------------------
 
-    async def _job_publish_polling(self) -> None:
-        """每 30min 只读检查平台侧是否已发布（R1：只读，绝不碰表单）。
+    async def _job_publish_polling(self) -> dict:
+        """每 30min 只读检查平台侧是否已发布；采集失败不能伪装成“尚未发布”（R1）。
 
         命中平台作品列表 → 视为用户已手动发布 → draft_saved → user_published，
         并按 metrics_initial_delay_hours 注册一次性 data_fetch。
@@ -377,8 +439,9 @@ class SchedulerEngine:
 
         if self.conn is None:
             logger.warning("[APS] publish_polling 跳过：依赖未注入")
-            return
+            return {"final_status": "failed", "errors": ["发布确认轮询数据库连接未注入"]}
 
+        errors: list[str] = []
         rows = self.conn.execute(
             "SELECT d.id, d.platform, d.draft_id, d.saved_at, d.saved_content_hash, "
             "c.round_id AS round_id, COALESCE(d.saved_platform_title, c.title) AS poll_title, "
@@ -391,13 +454,18 @@ class SchedulerEngine:
         # 每次轮询顺带补登记丢失的数据采集任务
         try:
             self.backfill_data_fetch()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 — 补登记失败必须反馈给队列
             logger.exception("[APS] 补登记数据采集失败")
+            errors.append(f"数据采集任务补登记失败（{type(exc).__name__}）")
         if not rows:
-            return
+            return {
+                "final_status": "failed" if errors else "success",
+                "errors": errors, "scanned": 0, "confirmed": 0,
+            }
 
         delay_hours = self.cfg.timeouts.metrics_initial_delay_hours
         confirmed = 0
+        pending = 0
 
         for row in rows:
             try:
@@ -412,8 +480,19 @@ class SchedulerEngine:
                 # 标题匹配要使用成功存稿时的快照，而非可能已经被用户本地修改的标题。
                 snap = await adapter.fetch_metrics(row["draft_id"], row["poll_title"] or "")
 
-            if snap.fetch_status.value not in ("success", "partial"):
-                continue  # 平台侧没看到 → 用户还没发
+            fetch_status = snap.fetch_status.value
+            if fetch_status == "pending":
+                # 作品列表读取成功但暂未匹配到该草稿：用户可能尚未手动发布，这是正常等待状态。
+                pending += 1
+                continue
+            if fetch_status in ("failed", "parse_error"):
+                errors.append(
+                    f"{platform.value} 发布状态读取未完成（{fetch_status}）"
+                )
+                continue
+            if fetch_status not in ("success", "partial"):
+                errors.append(f"{platform.value} 返回未知发布状态")
+                continue
 
             if row["platform"] == "wechat_channels":
                 # 视频号读回拿不到作品标题，按标题匹配会误判；只接受手动确认
@@ -492,12 +571,23 @@ class SchedulerEngine:
                     self.notifier.emit(
                         "publish_confirmed",
                         f"{platform.display_name} 已确认发布：{(row['poll_title'] or '')[:30]}",
-                        platform=platform.value,
+                        platform=platform.value, draft_id=row["id"],
+                        round_id=row["round_id"],
                     )
 
-        logger.info("[APS] publish_polling 完成：扫描 %d 篇，确认发布 %d 篇", len(rows), confirmed)
+        logger.info(
+            "[APS] publish_polling 完成：扫描 %d 篇，确认发布 %d 篇，待发布 %d 篇，失败 %d 项",
+            len(rows), confirmed, pending, len(errors),
+        )
+        return {
+            "final_status": "failed" if errors else "success",
+            "errors": errors,
+            "scanned": len(rows),
+            "confirmed": confirmed,
+            "pending": pending,
+        }
 
-    async def _job_data_fetch(self, draft_id: str, attempt: int = 1) -> None:
+    async def _job_data_fetch(self, draft_id: str, attempt: int = 1) -> dict:
         """发布后 metrics_initial_delay_hours（默认 24h）拉取平台数据。
 
         失败按 timeouts.metrics_retry_attempts / metrics_retry_interval_minutes 配置重试；
@@ -508,17 +598,15 @@ class SchedulerEngine:
         from ...adapters.base import FetchStatus, MetricsSnapshot, Platform
 
         if self.conn is None:
-            logger.warning("[APS] data_fetch 跳过：依赖未注入")
-            return
+            return {"final_status": "failed", "errors": ["数据采集数据库连接未注入"], "attempt": attempt}
 
         row = self.conn.execute(
-            "SELECT d.id, d.platform, d.draft_id, d.status, c.id AS content_id, c.title "
+            "SELECT d.id, d.platform, d.draft_id, d.status, c.id AS content_id, c.round_id AS round_id, c.title "
             "FROM drafts d JOIN contents c ON d.content_id = c.id WHERE d.id = ?",
             (draft_id,),
         ).fetchone()
         if not row:
-            logger.warning("[APS] data_fetch 草稿不存在: %s", draft_id)
-            return
+            return {"final_status": "failed", "errors": ["待采集草稿不存在"], "attempt": attempt}
 
         platform = Platform(row["platform"])
         adapter = self.adapters.get(platform)
@@ -588,7 +676,9 @@ class SchedulerEngine:
             except Exception:  # noqa: BLE001 — 目标刷新失败不能影响采集主流程
                 logger.exception("[APS] 目标进度刷新失败")
 
-        if snap.fetch_status.value in ("success", "partial"):
+        fetch_ok = snap.fetch_status.value in ("success", "partial")
+        retry_scheduled = False
+        if fetch_ok:
             if self.sm_draft:
                 self.sm_draft.transition(
                     draft_id, "published", reason="数据采集完成",
@@ -607,6 +697,7 @@ class SchedulerEngine:
             if attempt < retry_times:
                 next_at = business_now(self.cfg) + timedelta(minutes=interval_min)
                 self.schedule_data_fetch(draft_id, next_at, attempt=attempt + 1)
+                retry_scheduled = True
                 logger.warning(
                     "[APS] data_fetch 将重试：draft=%s 第 %d/%d 次，预计 %s",
                     draft_id, attempt + 1, retry_times, next_at.isoformat(timespec="seconds"),
@@ -624,13 +715,22 @@ class SchedulerEngine:
                         "data_fetch_failed",
                         f"{platform.display_name} 数据拉取未成功（{snap.fetch_status.value}）："
                         f"{(row['title'] or '')[:30]} — {snap.error_msg or ''}",
-                        platform=platform.value,
+                        platform=platform.value, draft_id=draft_id,
+                        round_id=row["round_id"],
                     )
 
         logger.info("[APS] data_fetch draft=%s → %s", draft_id, snap.fetch_status.value)
+        return {
+            "final_status": "success" if fetch_ok else "failed",
+            "errors": [] if fetch_ok else [
+                f"{platform.value} 数据采集失败（{snap.fetch_status.value}）"
+            ],
+            "attempt": attempt,
+            "retry_scheduled": retry_scheduled,
+        }
 
-    async def _job_daily_ops(self) -> None:
-        """每天 8:00 派发主动运营任务（G-03）。
+    async def _job_daily_ops(self) -> dict:
+        """每天 8:00 派发主动运营任务；单条动作失败必须反映到全局队列终态（G-03）。
 
         G-02 之后适配器已是真实 Playwright 实现，这里不再"只统计 + 建议"：
         按 daily_quotas 派发 task_runs，并调用 ops.active_comment() / ops.follow()。
@@ -643,13 +743,15 @@ class SchedulerEngine:
         """
         from ...adapters.base import Platform
 
-        if self.conn is None or self.ops is None:
-            return
+        if self.conn is None:
+            return {"final_status": "failed", "errors": ["主动运营数据库连接未注入"]}
+        if self.ops is None:
+            return {"final_status": "skipped", "reason": "主动运营执行器未启用"}
 
         from ...core.ops.pause import is_ops_paused
         if is_ops_paused(self.conn):
             logger.info("[APS] daily_ops 跳过：运营已全局暂停")
-            return
+            return {"final_status": "skipped", "reason": "运营已全局暂停"}
 
         # 今日已执行的运营动作（ops_logs）
         # R5：SQLite date('now') 是 UTC，必须用本地时区当日 00:00
@@ -676,6 +778,8 @@ class SchedulerEngine:
         targets_map = getattr(self.cfg, "ops_targets", None) or {}
         quotas_map = getattr(self.cfg.rhythm, "daily_quotas", None) or {}
         dispatched = 0
+        dispatched_task_ids: list[int] = []
+        dispatch_errors: list[str] = []
 
         for plat_name, quotas in quotas_map.items():
             platform = next((p for p in Platform if p.value == plat_name), None)
@@ -707,7 +811,13 @@ class SchedulerEngine:
                 for t in targets.active_comments[:self._remaining_quota(
                     platform, "active_comment", quotas.active_comments,
                 )]:
-                    await self._dispatch_action(platform, "active_comment", t.url, content=t.content)
+                    task_run_id = await self._dispatch_action(
+                        platform, "active_comment", t.url, content=t.content,
+                    )
+                    if task_run_id is None:
+                        dispatch_errors.append(f"{plat_name} 主动评论未创建任务审计记录")
+                    else:
+                        dispatched_task_ids.append(task_run_id)
                     dispatched += 1
 
             # ④ 关注
@@ -721,13 +831,37 @@ class SchedulerEngine:
                 for user_id in targets.follows[:self._remaining_quota(
                     platform, "follow", quotas.follows,
                 )]:
-                    await self._dispatch_action(platform, "follow", user_id)
+                    task_run_id = await self._dispatch_action(platform, "follow", user_id)
+                    if task_run_id is None:
+                        dispatch_errors.append(f"{plat_name} 关注动作未创建任务审计记录")
+                    else:
+                        dispatched_task_ids.append(task_run_id)
                     dispatched += 1
 
+        failed_task_ids: list[int] = []
+        if dispatched_task_ids:
+            placeholders = ",".join("?" for _ in dispatched_task_ids)
+            failed_task_ids = [
+                int(row["id"]) for row in self.conn.execute(
+                    f"SELECT id FROM task_runs WHERE id IN ({placeholders}) "
+                    "AND status IN ('failed', 'interrupted') ORDER BY id",
+                    dispatched_task_ids,
+                ).fetchall()
+            ]
+            dispatch_errors.extend(
+                f"主动运营动作执行失败（task_run_id={task_id}）"
+                for task_id in failed_task_ids
+            )
         logger.info(
-            "📋 [APS] daily_ops 完成 — 今日活跃草稿 %d / 今日已执行 %d 条 ops_logs / 本次派发 %d 条",
-            draft_count, sum(sum(v.values()) for v in usage.values()), dispatched,
+            "📋 [APS] daily_ops 完成 — 今日活跃草稿 %d / 今日已执行 %d 条 ops_logs / 本次派发 %d 条 / 失败 %d 条",
+            draft_count, sum(sum(v.values()) for v in usage.values()), dispatched, len(failed_task_ids),
         )
+        return {
+            "final_status": "failed" if dispatch_errors else "success",
+            "dispatched": dispatched,
+            "failed": len(dispatch_errors),
+            "errors": dispatch_errors,
+        }
 
     # ------------------------------------------------------------------
     # G-03 · 主动运营派发辅助
@@ -785,19 +919,26 @@ class SchedulerEngine:
         if task_run_id is None:
             return None
 
-        try:
-            if action_type == "active_comment":
-                await self.ops.active_comment(platform, target, content or "")
-            else:
-                await self.ops.follow(platform, target)
-        except Exception as exc:  # noqa: BLE001 — 单条失败不能中断整轮 daily_ops
-            logger.warning("❌ [APS] daily_ops %s %s 异常: %s",
-                           platform.value, action_type, exc)
-            self._finish_task_run(task_run_id, "failed", str(exc)[:500])
-            return task_run_id
+        with bind_task_context(task_run_id):
+            try:
+                if action_type == "active_comment":
+                    await self.ops.active_comment(platform, target, content or "")
+                else:
+                    await self.ops.follow(platform, target)
+            except Exception:  # noqa: BLE001 — 单条失败不能中断整轮 daily_ops
+                logger.exception(
+                    "daily_ops 单条动作异常 platform=%s action=%s",
+                    platform.value, action_type,
+                )
+                self._finish_task_run(
+                    task_run_id, "failed", "运营动作执行失败，请检查服务端运行日志",
+                )
+                return task_run_id
 
-        status, error_msg = self._last_op_outcome(platform, action_type, target)
-        self._finish_task_run(task_run_id, status, error_msg)
+            status, error_msg = self._last_op_outcome(
+                platform, action_type, target, task_run_id=task_run_id,
+            )
+            self._finish_task_run(task_run_id, status, error_msg)
         return task_run_id
 
     def _record_task_run(
@@ -828,14 +969,24 @@ class SchedulerEngine:
         )
         self.conn.commit()
 
-    def _last_op_outcome(self, platform, action_type: str, target: str) -> tuple[str, Optional[str]]:
-        """从 ops_logs 读回本次动作终态 → 映射 task_runs.status（R17 保留 pending_verify）。"""
+    def _last_op_outcome(
+        self, platform, action_type: str, target: str, *, task_run_id: Optional[int] = None,
+    ) -> tuple[str, Optional[str]]:
+        """从本 task_run 关联的 ops_logs 读回终态，避免同平台并发动作串线。"""
         column = "target_url" if action_type == "active_comment" else "target_author"
-        row = self.conn.execute(
-            f"SELECT status, error_msg FROM ops_logs WHERE platform = ? AND action_type = ? "
-            f"AND {column} = ? ORDER BY id DESC LIMIT 1",
-            (platform.value, action_type, target),
-        ).fetchone()
+        if task_run_id is not None:
+            row = self.conn.execute(
+                f"SELECT status, error_msg FROM ops_logs WHERE task_run_id = ? "
+                f"AND platform = ? AND action_type = ? AND {column} = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (task_run_id, platform.value, action_type, target),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                f"SELECT status, error_msg FROM ops_logs WHERE platform = ? AND action_type = ? "
+                f"AND {column} = ? ORDER BY id DESC LIMIT 1",
+                (platform.value, action_type, target),
+            ).fetchone()
         if not row:
             return "failed", "未在 ops_logs 找到执行记录（适配器未落日志）"
         mapping = {
@@ -847,19 +998,21 @@ class SchedulerEngine:
         }
         return mapping.get(row["status"], "failed"), row["error_msg"]
 
-    async def _job_comment_polling(self) -> None:
-        """被动运营：每 30min 拉已 user_published / published 的草稿，尝试回复新评论。"""
+    async def _job_comment_polling(self) -> dict:
+        """被动运营：拉取新评论；部分平台读取失败必须反馈给任务队列，不能伪装全成功。"""
         from datetime import datetime
         from ...adapters.base import Platform
         from ...core.login_manager import has_login_state
 
-        if self.conn is None or self.ops is None:
-            return
+        if self.conn is None:
+            return {"final_status": "failed", "errors": ["评论轮询数据库连接未注入"]}
+        if self.ops is None:
+            return {"final_status": "skipped", "reason": "被动运营执行器未启用"}
 
         from ...core.ops.pause import is_ops_paused
         if is_ops_paused(self.conn):
             logger.info("[APS] comment_polling 跳过：运营已全局暂停")
-            return
+            return {"final_status": "skipped", "reason": "运营已全局暂停"}
 
         # platform_note_url：发布确认时用户补填的笔记链接。没有它就无法定位评论区
         # （内部 draft id 拼 https://.../explore/draft-xxx 只会 404），直接跳过。
@@ -872,9 +1025,11 @@ class SchedulerEngine:
             "ORDER BY COALESCE(d.user_confirmed_at, d.saved_at) DESC LIMIT 20"
         ).fetchall()
         if not drafts:
-            return
+            return {"final_status": "skipped", "reason": "没有待轮询的已发布作品"}
 
         total_replied = 0
+        checked_drafts = 0
+        errors: list[str] = []
         for row in drafts:
             try:
                 platform = Platform(row["platform"])
@@ -896,9 +1051,11 @@ class SchedulerEngine:
             async with self.platform_locks[platform]:
                 try:
                     comments = await adapter.fetch_new_comments(note_url)
+                    checked_drafts += 1
                 except Exception as exc:
                     logger.warning("[APS] comment_polling %s fetch_new_comments 异常: %s",
                                    platform.value, exc)
+                    errors.append(f"{platform.value} 评论读取失败（{type(exc).__name__}）")
                     continue
 
                 for comment in comments or []:
@@ -927,6 +1084,12 @@ class SchedulerEngine:
             logger.info("💬 [APS] comment_polling 本轮回复 %d 条", total_replied)
         else:
             logger.info("[APS] comment_polling 本轮无新评论")
+        return {
+            "final_status": "failed" if errors else "success",
+            "errors": errors,
+            "checked_drafts": checked_drafts,
+            "replied": total_replied,
+        }
 
     def _reply_template(self, hook: str) -> str:
         """被动回复模板（底层 adapter 是 stub 时也至少有可读回复语料）。"""
@@ -936,37 +1099,53 @@ class SchedulerEngine:
         )
 
     async def _job_hot_topics_refresh(self) -> dict:
-        """触发独立热点服务；采集线程持有当前账号组配置与独立数据库连接。"""
-        from ..hot_topic_service import trigger_background
+        """在全局队列消费者内等待热点采集与匹配结束，避免后台线程脱离 FIFO 生命周期。"""
+        from ..hot_topic_service import run_once
 
-        return trigger_background(
-            self.cfg, trigger="scheduler", tenant_id=self.tenant_id,
+        state = await asyncio.to_thread(
+            run_once, self.cfg, trigger="scheduler", tenant_id=self.tenant_id,
         )
+        errors: list[str] = []
+        if state.get("skipped") or state.get("running"):
+            errors.append("已有热点后台任务运行，本次调度任务未执行")
+        if state.get("error"):
+            errors.append("热点采集执行失败")
+        source_report = state.get("report") if isinstance(state.get("report"), dict) else {}
+        failed_sources = [key for key, value in source_report.items() if value == "failed"]
+        if failed_sources:
+            errors.append(f"有 {len(failed_sources)} 个热点来源采集失败")
+        match = state.get("match") if isinstance(state.get("match"), dict) else {}
+        if match.get("status") in {"failed", "partial"}:
+            errors.append("热点标签匹配未完整完成")
+        return {
+            "final_status": "failed" if errors else "success",
+            "errors": errors,
+            "sources_total": sum(1 for value in source_report.values() if value in {"collected", "failed"}),
+            "sources_failed": len(failed_sources),
+            "match_status": match.get("status"),
+            "remaining_pending": match.get("remaining_pending"),
+        }
 
-    async def _job_kb_scan(self) -> None:
-        """每天 6:00 扫描选题库增量 — 对比 topic_index 插入新选题。"""
+    async def _job_kb_scan(self) -> dict:
+        """每天 6:00 扫描选题库增量；读取失败必须反馈给全局队列。"""
         if self.conn is None:
-            return
+            return {"final_status": "failed", "errors": ["选题库扫描数据库连接未注入"]}
 
-        # 1. 统计当前 topic_index 数量
         before = self.conn.execute("SELECT COUNT(*) FROM topic_index").fetchone()[0]
-
-        # 2. 读取选题库：优先人工注入的 reader（测试 / 定制），否则读全部来源
         if self.kb_reader is not None:
             try:
-                items, _ = self.kb_reader.read()
+                items, source_report = self.kb_reader.read()
             except Exception as exc:
-                logger.warning("[APS] kb_scan 读题库异常: %s", exc)
-                return
+                logger.exception("[APS] kb_scan 读题库异常")
+                return {"final_status": "failed", "errors": [f"选题库读取失败：{type(exc).__name__}"]}
         else:
             try:
                 from ..kb_sources import read_all
-                items, _ = read_all(self.cfg)
+                items, source_report = read_all(self.cfg)
             except Exception as exc:
-                logger.warning("[APS] kb_scan 读题库异常: %s", exc)
-                return
+                logger.exception("[APS] kb_scan 读题库异常")
+                return {"final_status": "failed", "errors": [f"选题库读取失败：{type(exc).__name__}"]}
 
-        # 3. 插入不存在的新选题
         inserted = 0
         for it in items:
             exists = self.conn.execute(
@@ -974,7 +1153,6 @@ class SchedulerEngine:
             ).fetchone()
             if exists:
                 continue
-            # 列集合严格对齐设计方案 §topic_index（无 tags / summary 列）
             self.conn.execute(
                 "INSERT INTO topic_index (id, title, dimension, source, date, first_seen_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
@@ -991,72 +1169,95 @@ class SchedulerEngine:
         logger.info(
             "📚 [APS] kb_scan — 选题库 %d → %d，新增 %d 条", before, after, inserted,
         )
+        source_errors = int(source_report.get("errors") or 0) if isinstance(source_report, dict) else 0
+        errors = []
+        if source_errors:
+            errors.append(f"有 {source_errors} 个选题库来源读取失败")
+        return {
+            "final_status": "failed" if errors else "success",
+            "errors": errors,
+            "inserted": inserted,
+            "total": after,
+        }
 
-    async def _job_kb_sync(self) -> None:
-        """每天 7:00 同步远程选题库（CSV / JSON / RSS），再补一次增量扫描。"""
+    async def _job_kb_sync(self) -> dict:
+        """远程来源同步失败时将队列任务如实标记 failed。"""
         from ..kb_sources import sync_all_remote
 
         results = await asyncio.to_thread(sync_all_remote, self.cfg)
-        failed = [k for k, v in results.items() if v != "ok"]
+        failed = [str(key) for key, value in results.items() if value != "ok"]
         logger.info("📥 [APS] kb_sync — 远程来源 %d 个，失败 %d 个", len(results), len(failed))
-        await self._job_kb_scan()
+        scan_report = await self._job_kb_scan()
+        errors = []
+        if failed:
+            errors.append("远程选题库来源同步失败：" + "、".join(failed[:20]))
+        if isinstance(scan_report, dict) and scan_report.get("final_status") == "failed":
+            errors.extend(str(item) for item in scan_report.get("errors", []))
+        return {
+            "final_status": "failed" if errors else "success",
+            "errors": errors,
+            "remote_sources": len(results),
+            "remote_failed": len(failed),
+            "scan": scan_report,
+        }
 
-    async def _job_data_retention_cleanup(self) -> None:
-        """R23 数据保留清理（每天 6:00）。
-
-        期限（config.data_retention）：
-        - 截图           → screenshot_days（默认 30）
-        - 平台原始响应   → raw_response_days（默认 90）
-        - ops_logs       → ops_logs_days（默认 365）
-        - ai_calls 明细  → ai_calls_days（默认 180）
-        - 热点           → hot_topics.retention_days / max_rows（热点采集关闭时也照常清理）
-        """
-        if self.conn is not None:
-            try:
-                from ..hot_topic_dedup import prune
-                prune(self.conn, retention_days=self.cfg.hot_topics.retention_days,
-                      max_rows=self.cfg.hot_topics.max_rows)
-            except Exception:  # noqa: BLE001 — 热点清理失败不影响其它保留清理
-                logger.exception("[APS] 热点保留清理失败")
-        import shutil
-        from pathlib import Path as P
-        from datetime import datetime, timedelta
-        import json
-
+    async def _job_data_retention_cleanup(self) -> dict:
+        """R23 数据保留清理；单个清理子步骤失败也必须反馈给全局队列。"""
         if self.conn is None:
-            return
-        cfg = self.cfg.data_retention
+            return {"final_status": "failed", "errors": ["数据保留清理数据库连接未注入"]}
 
+        from pathlib import Path as P
+        from datetime import timedelta
+
+        errors: list[str] = []
+        cleaned_raw = cleaned_ops = cleaned_ai = deleted_files = 0
+        try:
+            from ..hot_topic_dedup import prune
+            prune(
+                self.conn,
+                retention_days=self.cfg.hot_topics.retention_days,
+                max_rows=self.cfg.hot_topics.max_rows,
+            )
+        except Exception as exc:  # noqa: BLE001 — 继续执行其它保留清理，但不能把部分失败记为成功
+            try:
+                self.conn.rollback()
+            except Exception:
+                logger.exception("[APS] 热点保留清理回滚失败")
+            logger.exception("[APS] 热点保留清理失败")
+            errors.append(f"热点保留清理失败（{type(exc).__name__}）")
+
+        cfg = self.cfg.data_retention
         logger.info("🧹 [APS] data_retention_cleanup 启动")
 
-        # 1. 截图清理（已有）
         screenshots_dir = P(self.cfg.resolve_path(self.cfg.paths.screenshot_dir))
-        deleted_files = 0
         if screenshots_dir.exists():
             now = business_timestamp(self.cfg)
             cutoff = cfg.screenshot_days * 86_400
-            for f in screenshots_dir.iterdir():
-                if f.is_file() and (now - f.stat().st_mtime) > cutoff:
-                    f.unlink()
+            for file_path in screenshots_dir.iterdir():
+                if file_path.is_file() and (now - file_path.stat().st_mtime) > cutoff:
+                    file_path.unlink()
                     deleted_files += 1
 
-        # 2. metrics.raw_response（默认 90 天）
-        cutoff_raw = (business_now(self.cfg) - timedelta(days=cfg.raw_response_days)).isoformat(timespec="seconds")
+        cutoff_raw = (
+            business_now(self.cfg) - timedelta(days=cfg.raw_response_days)
+        ).isoformat(timespec="seconds")
         cur = self.conn.execute(
             "UPDATE metrics SET raw_response = NULL WHERE fetched_at < ? AND raw_response IS NOT NULL",
             (cutoff_raw,),
         )
         cleaned_raw = cur.rowcount
 
-        # 3. ops_logs（默认 365 天）
-        cutoff_ops = (business_now(self.cfg) - timedelta(days=cfg.ops_logs_days)).isoformat(timespec="seconds")
+        cutoff_ops = (
+            business_now(self.cfg) - timedelta(days=cfg.ops_logs_days)
+        ).isoformat(timespec="seconds")
         cur = self.conn.execute(
             "DELETE FROM ops_logs WHERE executed_at < ?", (cutoff_ops,)
         )
         cleaned_ops = cur.rowcount
 
-        # 4. ai_calls（默认 180 天）
-        cutoff_ai = (business_now(self.cfg) - timedelta(days=cfg.ai_calls_detail_days)).isoformat(timespec="seconds")
+        cutoff_ai = (
+            business_now(self.cfg) - timedelta(days=cfg.ai_calls_detail_days)
+        ).isoformat(timespec="seconds")
         cur = self.conn.execute(
             "DELETE FROM ai_calls WHERE called_at < ?", (cutoff_ai,)
         )
@@ -1067,6 +1268,14 @@ class SchedulerEngine:
             "🧹 [APS] data_retention_cleanup 完成 — 截图 %d / raw_response %d / ops_logs %d / ai_calls %d",
             deleted_files, cleaned_raw, cleaned_ops, cleaned_ai,
         )
+        return {
+            "final_status": "failed" if errors else "success",
+            "errors": errors,
+            "deleted_screenshots": deleted_files,
+            "cleared_raw_responses": cleaned_raw,
+            "deleted_ops_logs": cleaned_ops,
+            "deleted_ai_call_details": cleaned_ai,
+        }
 
     # ------------------------------------------------------------------
     # R8 · 轮次阶段超时扫描（每小时）
@@ -1105,7 +1314,7 @@ class SchedulerEngine:
                     return dt
         return None
 
-    async def _job_round_timeout_sweeper(self) -> None:
+    async def _job_round_timeout_sweeper(self) -> dict:
         """R8：三个阶段各自独立计时，超时后迁移状态并通知。
 
         - producing           → round_timeout_hours（默认 48h）→ failed
@@ -1113,21 +1322,20 @@ class SchedulerEngine:
         - collecting_metrics  → collecting_metrics_timeout_hours（默认 72h）→ analyzing
           （数据未齐的篇目标记 failed，便于 R10 走 partial_completed 路径）
         """
-        if self.conn is None or self.sm_round is None:
-            logger.warning("[APS] round_timeout_sweeper 跳过：依赖未注入")
-            return
+        if self.conn is None or self.sm_round is None or self.sm_draft is None:
+            return {"final_status": "failed", "errors": ["轮次超时检查依赖未注入"]}
 
         t = self.cfg.timeouts
         now = business_now(self.cfg)
 
         # R8/R9：单篇发布确认超时独立计时（timeout + grace），与轮次状态无关
-        if self.sm_draft is not None:
-            for draft_id in self.sm_draft.check_expired_drafts(
-                now=now,
-                timeout_hours=t.publish_confirm_timeout_hours,
-                grace_hours=t.publish_confirm_grace_hours,
-            ):
-                logger.warning("⏰ [APS] 草稿 %s 发布确认超时 → expired", draft_id)
+        expired_drafts = self.sm_draft.check_expired_drafts(
+            now=now,
+            timeout_hours=t.publish_confirm_timeout_hours,
+            grace_hours=t.publish_confirm_grace_hours,
+        )
+        for draft_id in expired_drafts:
+            logger.warning("⏰ [APS] 草稿 %s 发布确认超时 → expired", draft_id)
 
         rows = self.conn.execute(
             "SELECT id, status, producing_started_at, collecting_metrics_started_at, "
@@ -1135,8 +1343,13 @@ class SchedulerEngine:
             "WHERE status IN ('producing','awaiting_publish','collecting_metrics')"
         ).fetchall()
         if not rows:
-            return
+            return {
+                "final_status": "success", "errors": [],
+                "drafts_expired": len(expired_drafts), "rounds_checked": 0,
+                "rounds_transitioned": 0,
+            }
 
+        errors: list[str] = []
         limits = {
             "producing": (t.round_timeout_hours, "failed"),
             # 120h 内用户始终未确认发布 → 轮次视为放弃（状态机允许的唯一非收集出口是 cancelled）
@@ -1156,6 +1369,7 @@ class SchedulerEngine:
                     "[APS] round_timeout_sweeper 轮次 %s 在 %s 缺阶段起点，跳过",
                     row["id"], status,
                 )
+                errors.append(f"轮次 {row['id']} 在 {status} 缺少阶段起点")
                 continue
             elapsed = now - start
             if elapsed <= timedelta(hours=limit_hours):
@@ -1205,10 +1419,20 @@ class SchedulerEngine:
                     self.notifier.emit(
                         "round_timeout",
                         f"轮次 {row['id']} {reason}，已迁移为 {target}",
+                        round_id=row["id"],
                     )
+            else:
+                errors.append(f"轮次 {row['id']} 超时后无法迁移到 {target}")
 
         if handled:
             logger.info("⏰ [APS] round_timeout_sweeper 本轮迁移 %d 个轮次", handled)
+        return {
+            "final_status": "failed" if errors else "success",
+            "errors": errors,
+            "drafts_expired": len(expired_drafts),
+            "rounds_checked": len(rows),
+            "rounds_transitioned": handled,
+        }
 
     def _fail_uncollected_drafts(self, round_id: int, reason: str) -> None:
         """collecting_metrics 超时：仍无成功采集的篇目 → failed（R10 走 partial_completed）。"""
@@ -1227,14 +1451,14 @@ class SchedulerEngine:
                 extra_updates={"error_msg": reason},
             )
 
-    async def _job_round_review(self) -> None:
-        """复盘收口（R10）：collecting_metrics → analyzing → 终态，并跑螺旋复盘发通知。
-
-        R9：只处理"已发布篇目"，不冻结、不改动仍在 draft_saved 等用户确认的草稿。
-        """
+    async def _job_round_review(self) -> dict:
+        """复盘收口（R10）；状态流转不中断，但分析失败必须反馈到全局队列。"""
         if self.conn is None or self.sm_round is None:
-            logger.warning("[APS] round_review 跳过：依赖未注入")
-            return
+            return {"final_status": "failed", "errors": ["轮次复盘依赖未注入"]}
+
+        errors: list[str] = []
+        transitioned = 0
+        analyzed = 0
 
         # 1) collecting_metrics：所有 user_published / data_fetching 都已落定 → analyzing
         rows = self.conn.execute(
@@ -1242,8 +1466,6 @@ class SchedulerEngine:
         ).fetchall()
         for row in rows:
             round_id = row["id"]
-            # 只要还有 draft_saved，用户仍可发布它；必须等待单篇发布确认超时任务
-            # 将其转为 expired 后再收口，不能靠一段较短的轮次宽限期提前终态化。
             waiting = self.conn.execute(
                 "SELECT COUNT(*) FROM drafts d JOIN contents c ON d.content_id = c.id "
                 "WHERE c.round_id = ? AND d.status = 'draft_saved'",
@@ -1264,12 +1486,14 @@ class SchedulerEngine:
                 (round_id,),
             ).fetchone()[0]
             if published == 0:
-                # 没有成功发布的篇目：交给 round_timeout_sweeper 判 R8 超时，不在这里提前 failed
                 continue
-            self.sm_round.transition(
+            if self.sm_round.transition(
                 round_id, "analyzing", reason="已发布篇目数据采集完成（R10 进入复盘）",
-            )
-            logger.info("📊 [APS] round_review 轮次 %s → analyzing", round_id)
+            ):
+                transitioned += 1
+                logger.info("📊 [APS] round_review 轮次 %s → analyzing", round_id)
+            else:
+                errors.append(f"轮次 {round_id} 无法进入 analyzing 状态")
 
         # 2) analyzing → 三条退出路径之一（R10），并执行螺旋复盘
         rows = self.conn.execute(
@@ -1281,49 +1505,66 @@ class SchedulerEngine:
 
             gaps: list = []
             suggestions = 0
-            if self.spiral is not None:
+            analysis_failed = False
+            if self.spiral is None:
+                analysis_failed = True
+                errors.append(f"轮次 {round_id} 螺旋复盘引擎未注入")
+            else:
                 try:
                     analysis = self.spiral.analyze_round(round_id)
                     gaps = getattr(analysis, "gaps", []) or []
                     suggestions = len(getattr(analysis, "strategy_adjustments", []) or [])
-                except Exception:  # noqa: BLE001 — 复盘失败不能卡住状态流转，但必须留日志
+                except Exception as exc:  # noqa: BLE001 — 状态流转继续，但队列必须记录分析失败
+                    analysis_failed = True
+                    errors.append(f"轮次 {round_id} 螺旋复盘失败（{type(exc).__name__}）")
                     logger.exception("[APS] 轮次 %s 螺旋复盘失败", round_id)
 
-            self.sm_round.transition(
+            if not self.sm_round.transition(
                 round_id, target, reason=f"R10 复盘结论：{target}",
-            )
+            ):
+                errors.append(f"轮次 {round_id} 无法完成复盘状态迁移")
+                continue
+            analyzed += 1
             logger.info("🧭 [APS] round_review 轮次 %s → %s（缺口 %d）",
                         round_id, target, len(gaps))
 
             if getattr(self, "notifier", None):
+                suffix = "；复盘分析失败，需人工检查" if analysis_failed else ""
                 self.notifier.emit(
                     "round_completed",
                     f"第 {round_number} 轮复盘完成 → {target}；"
-                    f"缺口建议 {len(gaps)} 条、策略调整 {suggestions} 条",
+                    f"缺口建议 {len(gaps)} 条、策略调整 {suggestions} 条{suffix}",
+                    round_id=round_id,
                 )
 
-    async def _job_autogrow_next_round(self) -> None:
+        return {
+            "final_status": "failed" if errors else "success",
+            "errors": errors,
+            "rounds_transitioned_to_analyzing": transitioned,
+            "rounds_analyzed": analyzed,
+        }
+
+    async def _job_autogrow_next_round(self) -> dict:
         """自动闭环：满足条件时开下一轮并生成草稿（发布仍需用户确认）。"""
         if self.autogrow is None:
-            logger.warning("[APS] autogrow_next_round 跳过：依赖未注入")
-            return
+            return {"final_status": "skipped", "reason": "自动闭环控制器未启用"}
         await self.autogrow.tick()
 
-    async def _job_cb_recovery(self) -> None:
+    async def _job_cb_recovery(self) -> dict:
         """熔断恢复 3 步验证（冷却到期 + test_login + test_lightweight_action，R6）。"""
         from ...adapters.base import Platform
         from ...core.login_manager import has_login_state
 
         if self.conn is None or self.cb is None:
-            logger.warning("[APS] cb_recovery 跳过：依赖未注入")
-            return
+            return {"final_status": "failed", "errors": ["熔断恢复依赖未注入"]}
 
         rows = self.conn.execute(
             "SELECT DISTINCT platform FROM circuit_breaker_events WHERE resolved_at IS NULL"
         ).fetchall()
         if not rows:
-            return
+            return {"final_status": "success", "errors": [], "platforms_checked": 0}
 
+        checked = 0
         for row in rows:
             try:
                 platform = Platform(row["platform"])
@@ -1333,6 +1574,7 @@ class SchedulerEngine:
                 logger.info("[APS] cb_recovery %s 跳过：无登录态", platform.value)
                 continue
 
+            checked += 1
             async with self.platform_locks[platform]:
                 result = await self.cb.try_recover(platform)
 
@@ -1346,6 +1588,8 @@ class SchedulerEngine:
                     )
             else:
                 logger.info("[APS] %s 恢复未通过：%s", platform.value, result.get("reason"))
+
+        return {"final_status": "success", "errors": [], "platforms_checked": checked}
 
 
 # =====================================================================
@@ -1370,7 +1614,7 @@ async def _invoke(engine, method_name: str, *args) -> None:
     queued_methods = {
         "_job_publish_polling", "_job_data_fetch", "_job_daily_ops",
         "_job_comment_polling", "_job_cb_recovery", "_job_kb_scan",
-        "_job_kb_sync", "_job_data_retention_cleanup",
+        "_job_kb_sync", "_job_hot_topics_refresh", "_job_data_retention_cleanup",
         "_job_round_timeout_sweeper", "_job_round_review", "_job_autogrow_next_round",
     }
     if queue is not None and tenant_id and method_name in queued_methods:

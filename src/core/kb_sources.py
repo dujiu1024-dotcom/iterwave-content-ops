@@ -591,6 +591,17 @@ def _rows_to_rss(columns: list[str], rows: list[dict]) -> str:
     return f"<?xml version=\"1.0\" encoding=\"utf-8\"?><rss version=\"2.0\"><channel><title>cache</title>{items}</channel></rss>"
 
 
+def _safe_source_error(exc: Exception, *, remote: bool) -> str:
+    """错误可能含服务器绝对路径、远程 URL 或鉴权参数；只返回稳定诊断。"""
+    if isinstance(exc, FileNotFoundError):
+        return "来源文件不存在或不可访问"
+    if isinstance(exc, PermissionError):
+        return "来源文件没有读取权限"
+    if remote:
+        return f"远程来源请求失败（{type(exc).__name__}）"
+    return f"来源读取失败（{type(exc).__name__}）"
+
+
 def sync_all_remote(cfg) -> dict:
     """同步全部启用的远程来源，返回逐源结果（失败不抛出）。"""
     results: dict[str, str] = {}
@@ -603,7 +614,7 @@ def sync_all_remote(cfg) -> dict:
             source.update({k: v for k, v in info.items() if k != "cache_path"})
             results[source["id"]] = "ok"
         except Exception as exc:  # noqa: BLE001 — 单源失败不影响其它来源
-            safe_error = redact(str(exc)[:200])
+            safe_error = _safe_source_error(exc, remote=True)
             source["last_error"] = safe_error
             source["last_sync_at"] = datetime.now().isoformat(timespec="seconds")
             results[source["id"]] = "failed"
@@ -683,7 +694,7 @@ def read_source(cfg, source: dict) -> dict:
             base["status"] = "empty"
         return base
     except Exception as exc:  # noqa: BLE001 — 单源失败不影响其它来源
-        safe_error = redact(str(exc)[:240])
+        safe_error = _safe_source_error(exc, remote=is_remote)
         base.update(status="error", error=safe_error)
         logger.warning("选题库来源读取失败 %s: %s", redact(str(source.get("name") or "")), safe_error)
         return base

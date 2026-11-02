@@ -24,8 +24,9 @@ export default function Calendar() {
 
   const [events, setEvents] = useState<ScheduleEvent[]>([]);
   const [plans, setPlans] = useState<ContentPlan[]>([]);
-  const [planDetail, setPlanDetail] = useState<(ContentPlan & { drafts: Array<{ draft_id: string; platform: Platform; status: string; title: string; round_id: number | null }>; rounds: Array<{ round_id: number; task_id: string | null; created_at: string }> }) | null>(null);
+  const [planDetail, setPlanDetail] = useState<(ContentPlan & { drafts: Array<{ draft_id: string; platform: Platform; status: string; title: string; round_id: number | null; round_number: number | null }>; rounds: Array<{ round_id: number; round_number: number | null; task_id: string | null; created_at: string }> }) | null>(null);
   const [planDetailLoading, setPlanDetailLoading] = useState(false);
+  const [showArchivedPlans, setShowArchivedPlans] = useState(false);
   const [planTitle, setPlanTitle] = useState("");
   const [planTopic, setPlanTopic] = useState("");
   const [planDate, setPlanDate] = useState(_fmt(today));
@@ -33,12 +34,42 @@ export default function Calendar() {
   const [planPlatforms, setPlanPlatforms] = useState<Platform[]>([]);
   const [planNotes, setPlanNotes] = useState("");
   const [planFormOpen, setPlanFormOpen] = useState(false);
+  const [editingPlanId, setEditingPlanId] = useState<string | null>(null);
+  const [editingPlanVersion, setEditingPlanVersion] = useState<number | null>(null);
   const [unscheduled, setUnscheduled] = useState<UnscheduledDraft[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // 行内排期编辑：selected 为草稿 id，draftTime 为 datetime-local 值
   const [selected, setSelected] = useState<{ id: string; title: string } | null>(null);
+  const [targetDraftId, setTargetDraftId] = useState<string | null>(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("target_type") === "draft" ? params.get("target_id") : null;
+  });
   const [draftTime, setDraftTime] = useState("");
+  useEffect(() => {
+    const syncTarget = () => {
+      const params = new URLSearchParams(window.location.search);
+      setTargetDraftId(params.get("target_type") === "draft" ? params.get("target_id") : null);
+    };
+    window.addEventListener("popstate", syncTarget);
+    return () => window.removeEventListener("popstate", syncTarget);
+  }, []);
+  useEffect(() => {
+    if (!targetDraftId) return;
+    let active = true;
+    void api.draftById(targetDraftId).then((draft) => {
+      if (!active || !draft) return;
+      const targetDate = draft.scheduled_publish_at || draft.saved_at || draft.created_at;
+      const parsed = targetDate ? new Date(targetDate) : null;
+      if (parsed && !Number.isNaN(parsed.getTime())) {
+        setCursorDate(new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate()));
+        setViewMode("day");
+      }
+    }).catch((error) => {
+      if (active) showToast("加载通知关联草稿失败，请刷新页面重试", "error");
+    });
+    return () => { active = false; };
+  }, [targetDraftId]);
   const [pendingDraft, setPendingDraft] = useState<Record<string, string>>({});
   const scheduleDrawerRef = useRef<HTMLElement | null>(null);
   const planDrawerRef = useRef<HTMLElement | null>(null);
@@ -76,10 +107,10 @@ export default function Calendar() {
     for (let d = new Date(visibleStart); d < visibleEndExclusive; d.setDate(d.getDate() + 1)) {
       const date = new Date(d);
       const key = _fmt(date);
-      result.push({ date, key, events: events.filter((event) => _eventDate(event) === key), plans: plans.filter((plan) => plan.scheduled_date === key && plan.status !== "cancelled" && plan.status !== "archived"), inMonth: date.getMonth() === month });
+      result.push({ date, key, events: events.filter((event) => _eventDate(event) === key), plans: plans.filter((plan) => plan.scheduled_date === key && (showArchivedPlans || (plan.status !== "cancelled" && plan.status !== "archived"))), inMonth: date.getMonth() === month });
     }
     return result;
-  }, [visibleStart, visibleEndExclusive, events, plans, month]);
+  }, [visibleStart, visibleEndExclusive, events, plans, month, showArchivedPlans]);
 
   const openPlanDetails = async (planId: string) => {
     setPlanDetailLoading(true);
@@ -88,11 +119,24 @@ export default function Calendar() {
     finally { setPlanDetailLoading(false); }
   };
 
+  const beginEditPlan = (plan: ContentPlan) => {
+    setEditingPlanId(plan.id);
+    setEditingPlanVersion(plan.version);
+    setPlanTitle(plan.title);
+    setPlanTopic(plan.topic ?? "");
+    setPlanDate(plan.scheduled_date);
+    setPlanCount(String(plan.planned_count));
+    setPlanPlatforms(plan.platforms ?? []);
+    setPlanNotes(plan.notes ?? "");
+    setPlanDetail(null);
+    setPlanFormOpen(true);
+  };
+
   const startPlan = async (plan: ContentPlan) => {
     try {
       const result = await withPending(`content-plan:start:${plan.id}`, () => api.startContentPlan(plan.id));
       if (!result) return;
-      showToast(`已加入全局 FIFO 队列：第 ${result.round_id} 轮`, "success");
+      showToast("已加入全局 FIFO 队列", "success");
       await load();
     } catch (e: any) { showToast(`启动计划失败：${e?.message ?? e}`, "error"); }
   };
@@ -103,6 +147,27 @@ export default function Calendar() {
       showToast("计划已取消", "success");
       await load();
     } catch (e: any) { showToast(`取消失败：${e?.message ?? e}`, "error"); }
+  };
+
+  const archivePlan = async (plan: ContentPlan) => {
+    if (!window.confirm(`归档计划「${plan.title}」？生产轮次和关联草稿都会保留，可随时恢复。`)) return;
+    try {
+      const result = await withPending(`content-plan:archive:${plan.id}`, () => api.archiveContentPlan(plan.id, plan.version));
+      if (!result) return;
+      showToast("计划已归档", "success");
+      setPlanDetail(null);
+      await load();
+    } catch (e: any) { showToast(`归档失败：${e?.message ?? e}`, "error"); }
+  };
+
+  const restorePlan = async (plan: ContentPlan) => {
+    try {
+      const result = await withPending(`content-plan:restore:${plan.id}`, () => api.restoreContentPlan(plan.id, plan.version));
+      if (!result) return;
+      showToast(`计划已恢复为「${PLAN_STATUS_LABEL[result.status]}」`, "success");
+      setPlanDetail(null);
+      await load();
+    } catch (e: any) { showToast(`恢复失败：${e?.message ?? e}`, "error"); }
   };
 
   const load = async () => {
@@ -179,7 +244,7 @@ export default function Calendar() {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        if (selected) { setSelected(null); setDraftTime(""); } else setPlanFormOpen(false);
+        if (selected) { setSelected(null); setDraftTime(""); } else { setPlanFormOpen(false); setEditingPlanId(null); setEditingPlanVersion(null); }
         return;
       }
       if (event.key !== "Tab") return;
@@ -219,6 +284,9 @@ export default function Calendar() {
           <button className="btn sm" onClick={() => setCursorDate((d) => shiftCalendarDate(d, viewMode, 1))}>下一{viewMode === "month" ? "月" : viewMode === "week" ? "周" : "日"}</button>
           <input aria-label="选择日历日期" className="field calendar-date-picker" type="date" value={_fmt(cursorDate)} onChange={(e) => { if (e.target.value) { const [y, m, d] = e.target.value.split("-").map(Number); setCursorDate(new Date(y, m - 1, d)); } }} />
           <button className="btn sm primary" onClick={() => { setPlanDate(_fmt(cursorDate)); setPlanFormOpen(true); }}>＋ 新建计划</button>
+          <label className="calendar-plan-check" title="在日历中同时显示已归档和已取消的计划">
+            <input type="checkbox" checked={showArchivedPlans} onChange={(e) => setShowArchivedPlans(e.target.checked)} />显示已归档
+          </label>
           <button className="btn sm" onClick={load} disabled={loading}>↻ 刷新</button>
         </div>
       </div>
@@ -273,7 +341,7 @@ export default function Calendar() {
                           title={editable ? `${e.title} · 点击改排期` : `${e.title} · ${statusLabel[e.status] ?? e.status}（不可改排期）`}
                           disabled={!editable}
                           onClick={() => { setSelected({ id: e.id, title: e.title }); setDraftTime(_toLocalInput(e.scheduled || e.saved_at)); }}
-                          style={{ borderLeft: `3px solid ${platformColors[e.platform] || "#666"}`, outline: selected?.id === e.id ? "2px solid var(--blue)" : "none" }}>
+                          style={{ borderLeft: `3px solid ${platformColors[e.platform] || "#666"}`, outline: selected?.id === e.id || targetDraftId === e.id ? "2px solid var(--blue)" : "none" }}>
                           <span className="calendar-event-title">{e.title}</span>
                           <span className="calendar-event-meta">{e.scheduled ? e.scheduled.slice(11, 16) : "未排期"}{statusLabel[e.status] ? ` · ${statusLabel[e.status]}` : ""}</span>
                         </button>
@@ -379,13 +447,26 @@ export default function Calendar() {
           <section className="panel" onClick={(e) => e.stopPropagation()}>
             <div className="panel-head">
               <div><div className="panel-title">{planDetail.title}</div><div className="panel-sub">{planDetail.scheduled_date} · {planDetail.planned_count} 篇/平台 · {PLAN_STATUS_LABEL[planDetail.status]}</div></div>
-              <button className="btn sm" onClick={() => setPlanDetail(null)}>关闭</button>
+              <div style={{ display: "flex", gap: 8 }}>
+                {(planDetail.status === "planned" || planDetail.status === "failed") && <button className="btn sm primary" onClick={() => beginEditPlan(planDetail)}>编辑计划</button>}
+                {(["generated", "reviewed", "failed", "cancelled"] as ContentPlan["status"][]).includes(planDetail.status) && (
+                  <button className="btn sm" disabled={isPending(`content-plan:archive:${planDetail.id}`)} onClick={() => void archivePlan(planDetail)}>
+                    {isPending(`content-plan:archive:${planDetail.id}`) ? "归档中…" : "归档"}
+                  </button>
+                )}
+                {(planDetail.status === "archived" || planDetail.status === "cancelled") && (
+                  <button className="btn sm" disabled={isPending(`content-plan:restore:${planDetail.id}`)} onClick={() => void restorePlan(planDetail)}>
+                    {isPending(`content-plan:restore:${planDetail.id}`) ? "恢复中…" : "恢复"}
+                  </button>
+                )}
+                <button className="btn sm" onClick={() => setPlanDetail(null)}>关闭</button>
+              </div>
             </div>
             {planDetail.topic && <div className="note">{planDetail.topic}</div>}
             {planDetail.notes && <div className="note">备注：{planDetail.notes}</div>}
             <div className="calendar-plan-detail-grid">
               <div><strong>生产轮次（{planDetail.rounds.length}）</strong>
-                {planDetail.rounds.length ? planDetail.rounds.map((round) => <div className="calendar-plan-detail-row" key={round.round_id}>第 {round.round_id} 轮 · {round.task_id ? `任务 ${round.task_id.slice(0, 8)}` : "尚未入队"}</div>) : <div className="note">尚未启动生产</div>}
+                {planDetail.rounds.length ? planDetail.rounds.map((round) => <div className="calendar-plan-detail-row" key={round.round_id}>{round.round_number != null ? `第 ${round.round_number} 轮` : "轮次信息不可用"} · {round.task_id ? `任务 ${round.task_id.slice(0, 8)}` : "尚未入队"}</div>) : <div className="note">尚未启动生产</div>}
               </div>
               <div><strong>关联草稿（{planDetail.drafts.length}）</strong>
                 {planDetail.drafts.length ? planDetail.drafts.map((draft) => <div className="calendar-plan-detail-row" key={draft.draft_id}>{draft.title || draft.draft_id} · {platformMeta(draft.platform).label} · {draft.status}</div>) : <div className="note">生产完成后自动回写草稿</div>}
@@ -396,11 +477,11 @@ export default function Calendar() {
         </div>
       )}
 
-      {planFormOpen && <div className="calendar-drawer-backdrop" role="presentation" onClick={() => setPlanFormOpen(false)}>
-      <section ref={planDrawerRef} tabIndex={-1} className="panel calendar-side-drawer calendar-plan-create" role="dialog" aria-modal="true" aria-label="新建内容计划" onClick={(e) => e.stopPropagation()}>
+      {planFormOpen && <div className="calendar-drawer-backdrop" role="presentation" onClick={() => { setPlanFormOpen(false); setEditingPlanId(null); setEditingPlanVersion(null); }}>
+      <section ref={planDrawerRef} tabIndex={-1} className="panel calendar-side-drawer calendar-plan-create" role="dialog" aria-modal="true" aria-label={editingPlanId ? "编辑内容计划" : "新建内容计划"} onClick={(e) => e.stopPropagation()}>
         <div className="panel-head">
-          <div><div className="panel-title">新建内容计划</div><div className="panel-sub">创建计划不会自动开始生产；加入全局队列后才会生成，发布仍需人工确认。</div></div>
-          <button className="btn sm" onClick={() => setPlanFormOpen(false)}>关闭</button>
+          <div><div className="panel-title">{editingPlanId ? "编辑内容计划" : "新建内容计划"}</div><div className="panel-sub">{editingPlanId ? "编辑仅影响后续执行，不会回写已经生成的历史草稿。" : "创建计划不会自动开始生产；加入全局队列后才会生成，发布仍需人工确认。"}</div></div>
+          <button className="btn sm" onClick={() => { setPlanFormOpen(false); setEditingPlanId(null); setEditingPlanVersion(null); }}>关闭</button>
         </div>
         <div className="calendar-plan-form">
           <label>计划名称<input className="field" value={planTitle} maxLength={160} onChange={(e) => setPlanTitle(e.target.value)} placeholder="例如：本周产品功能系列" /></label>
@@ -413,15 +494,22 @@ export default function Calendar() {
             ))}</span>
           </label>
           <label className="calendar-plan-notes">备注<textarea className="field" rows={2} value={planNotes} maxLength={4000} onChange={(e) => setPlanNotes(e.target.value)} placeholder="可选" /></label>
-          <button className="btn primary" disabled={!planTitle.trim() || !planDate || Number(planCount) < 1 || Number(planCount) > 50 || isPending("content-plan:create")} onClick={async () => {
+          <button className="btn primary" disabled={!planTitle.trim() || !planDate || Number(planCount) < 1 || Number(planCount) > 100 || isPending(editingPlanId ? `content-plan:update:${editingPlanId}` : "content-plan:create")} onClick={async () => {
+            const payload = { title: planTitle.trim(), topic: planTopic.trim(), platforms: planPlatforms, planned_count: Number(planCount), scheduled_date: planDate, notes: planNotes.trim() };
             try {
-              await withPending("content-plan:create", () => api.createContentPlan({ title: planTitle.trim(), topic: planTopic.trim(), platforms: planPlatforms, planned_count: Number(planCount), scheduled_date: planDate, notes: planNotes.trim() }));
-              showToast("内容计划已创建", "success");
-              setPlanTitle(""); setPlanTopic(""); setPlanCount("1"); setPlanPlatforms([]); setPlanNotes(""); setPlanFormOpen(false);
+              if (editingPlanId && editingPlanVersion != null) {
+                await withPending(`content-plan:update:${editingPlanId}`, () => api.updateContentPlan(editingPlanId, { ...payload, version: editingPlanVersion }));
+                showToast("内容计划已更新", "success");
+              } else {
+                await withPending("content-plan:create", () => api.createContentPlan(payload));
+                showToast("内容计划已创建", "success");
+              }
+              setPlanTitle(""); setPlanTopic(""); setPlanCount("1"); setPlanPlatforms([]); setPlanNotes("");
+              setPlanFormOpen(false); setEditingPlanId(null); setEditingPlanVersion(null);
               setCursorDate(new Date(`${planDate}T12:00:00`));
               await load();
-            } catch (e: any) { showToast(`创建计划失败：${e?.message ?? e}`, "error"); }
-          }}>{isPending("content-plan:create") ? "创建中…" : "创建计划"}</button>
+            } catch (e: any) { showToast(`${editingPlanId ? "更新" : "创建"}计划失败：${e?.message ?? e}`, "error"); }
+          }}>{isPending(editingPlanId ? `content-plan:update:${editingPlanId}` : "content-plan:create") ? "保存中…" : editingPlanId ? "保存修改" : "创建计划"}</button>
         </div>
       </section></div>}
 
@@ -443,7 +531,7 @@ export default function Calendar() {
               </thead>
               <tbody>
                 {unscheduled.map((d) => (
-                  <tr key={d.id}>
+                  <tr key={d.id} style={targetDraftId === d.id ? { background: "var(--surface-2)", outline: "2px solid var(--blue)" } : undefined}>
                     <td style={{ fontSize: 11, color: "var(--subtle)" }}>草稿</td>
                     <td>{d.title ?? <span style={{ color: "var(--subtle)" }}>—</span>}</td>
                     <td>

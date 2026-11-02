@@ -63,6 +63,28 @@ function groupOf(t: OpsTab): OpsGroup {
 export default function Operations() {
   const { showToast, withPending } = useApp();
   const [rawTab, setTab] = useUrlTab<OpsTab>(ALL_OPS_TABS, "kpi");
+  const [recordTarget, setRecordTarget] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    const type = params.get("target_type");
+    const rawId = params.get("target_id");
+    const id = rawId && /^\d+$/.test(rawId) ? Number(rawId) : null;
+    return { type, id };
+  });
+  useEffect(() => {
+    const syncTarget = () => {
+      const params = new URLSearchParams(window.location.search);
+      const type = params.get("target_type");
+      const rawId = params.get("target_id");
+      const id = rawId && /^\d+$/.test(rawId) ? Number(rawId) : null;
+      setRecordTarget({ type, id });
+      if (id) {
+        if (type === "task_run") setTab("tasks");
+        if (type === "ops_log") setTab("logs");
+      }
+    };
+    window.addEventListener("popstate", syncTarget);
+    return () => window.removeEventListener("popstate", syncTarget);
+  }, [setTab]);
   const tab = groupOf(rawTab);
   const show = (p: OpsPane) => (TABS.find((g) => g.key === tab)?.panes ?? []).includes(p);
 
@@ -77,6 +99,15 @@ export default function Operations() {
   const [tasksPage, setTasksPage] = useState(1);
   const [tasksTotal, setTasksTotal] = useState(0);
   const [tasksPages, setTasksPages] = useState(1);
+  const [logsPlatform, setLogsPlatform] = useState<Platform | "">("");
+  const [logsStatus, setLogsStatus] = useState("");
+  const [logsDateFrom, setLogsDateFrom] = useState("");
+  const [logsDateTo, setLogsDateTo] = useState("");
+  const [tasksPlatform, setTasksPlatform] = useState<Platform | "">("");
+  const [tasksStatus, setTasksStatus] = useState("");
+  const [tasksType, setTasksType] = useState("");
+  const [tasksDateFrom, setTasksDateFrom] = useState("");
+  const [tasksDateTo, setTasksDateTo] = useState("");
   const [notifsPage, setNotifsPage] = useState(1);
   const [notifsTotal, setNotifsTotal] = useState(0);
   const [notifsPages, setNotifsPages] = useState(1);
@@ -97,8 +128,8 @@ export default function Operations() {
     try {
       const results = await Promise.allSettled([
         show("kpi") || show("logs") ? api.opsKpi(kpiDays) : Promise.resolve(null),
-        show("logs") ? api.opsLogsPage(logsPage, historyPageSize) : Promise.resolve(null),
-        show("tasks") ? api.taskRunsPage(tasksPage, historyPageSize) : Promise.resolve(null),
+        show("logs") ? api.opsLogsPage(logsPage, historyPageSize, { platform: logsPlatform || undefined, status: logsStatus || undefined, dateFrom: logsDateFrom || undefined, dateTo: logsDateTo || undefined, recordId: recordTarget.type === "ops_log" ? recordTarget.id ?? undefined : undefined }) : Promise.resolve(null),
+        show("tasks") ? api.taskRunsPage(tasksPage, historyPageSize, { platform: tasksPlatform || undefined, status: tasksStatus || undefined, taskType: tasksType || undefined, dateFrom: tasksDateFrom || undefined, dateTo: tasksDateTo || undefined, recordId: recordTarget.type === "task_run" ? recordTarget.id ?? undefined : undefined, roundId: recordTarget.type === "round" ? recordTarget.id ?? undefined : undefined }) : Promise.resolve(null),
         show("notifications") ? api.notificationsPage(notifsPage, historyPageSize) : Promise.resolve(null),
         show("notifications") ? api.notifyRules() : Promise.resolve(null),
         show("scheduler") ? api.schedulerJobs() : Promise.resolve(null),
@@ -137,7 +168,7 @@ export default function Operations() {
     }
   };
 
-  useEffect(() => { refresh(); }, [tab, kpiDays, logsPage, tasksPage, notifsPage]);
+  useEffect(() => { refresh(); }, [tab, kpiDays, logsPage, tasksPage, notifsPage, logsPlatform, logsStatus, logsDateFrom, logsDateTo, tasksPlatform, tasksStatus, tasksType, tasksDateFrom, tasksDateTo, recordTarget.type, recordTarget.id]);
 
   const testNotify = async () => {
     setNotifBusy(true);
@@ -207,7 +238,7 @@ export default function Operations() {
       {show("kpi") && <KpiPane kpi={kpi} days={kpiDays} onDaysChange={setKpiDays} />}
 
       {/* === 2. 评论日志 === */}
-      {show("logs") && <LogsPane logs={logs} total={logsTotal} page={logsPage} pages={logsPages} onPageChange={setLogsPage} />}
+      {show("logs") && <LogsPane logs={logs} total={logsTotal} page={logsPage} pages={logsPages} onPageChange={setLogsPage} onResolved={refresh} targetId={recordTarget.type === "ops_log" ? recordTarget.id : null} platform={logsPlatform} status={logsStatus} dateFrom={logsDateFrom} dateTo={logsDateTo} onFiltersChange={(v) => { setLogsPage(1); setLogsPlatform(v.platform); setLogsStatus(v.status); setLogsDateFrom(v.dateFrom); setLogsDateTo(v.dateTo); }} />}
 
       {/* === 3. 发布确认 === */}
       {show("publish") && <PublishPane />}
@@ -231,7 +262,7 @@ export default function Operations() {
       )}
 
       {/* === 5. 任务追踪 === */}
-      {show("tasks") && <TasksPane tasks={tasks} total={tasksTotal} page={tasksPage} pages={tasksPages} onPageChange={setTasksPage} onResolved={refresh} />}
+      {show("tasks") && <TasksPane tasks={tasks} total={tasksTotal} page={tasksPage} pages={tasksPages} onPageChange={setTasksPage} onResolved={refresh} targetId={recordTarget.type === "task_run" || recordTarget.type === "round" ? recordTarget.id : null} targetType={recordTarget.type} platform={tasksPlatform} status={tasksStatus} taskType={tasksType} dateFrom={tasksDateFrom} dateTo={tasksDateTo} onFiltersChange={(v) => { setTasksPage(1); setTasksPlatform(v.platform); setTasksStatus(v.status); setTasksType(v.taskType); setTasksDateFrom(v.dateFrom); setTasksDateTo(v.dateTo); }} />}
 
       {/* === 6. 定时任务 === */}
       {show("scheduler") && <SchedulerPane jobs={jobs} onTriggered={refresh} />}
@@ -385,30 +416,62 @@ function KpiCard({ label, value, hint, color }: { label: string; value: number; 
   );
 }
 
-function LogsPane({ logs, total, page, pages, onPageChange }: {
+function LogsPane({ logs, total, page, pages, onPageChange, onResolved, targetId, platform, status, dateFrom, dateTo, onFiltersChange }: {
   logs: OpsLogItem[]; total: number; page: number; pages: number; onPageChange: (page: number) => void;
+  targetId?: number | null;
+  onResolved?: () => void;
+  platform: Platform | ""; status: string; dateFrom: string; dateTo: string;
+  onFiltersChange: (value: { platform: Platform | ""; status: string; dateFrom: string; dateTo: string }) => void;
 }) {
+  const { showToast } = useApp();
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [resolveError, setResolveError] = useState<string | null>(null);
+  const resolve = async (id: number, action: "sent" | "not_sent") => {
+    setBusyId(id);
+    setResolveError(null);
+    try {
+      const result = await api.resolveOpsLog(id, action);
+      showToast(result.already_resolved ? "该日志已核实" : "运营日志已核实并记录审计", "success");
+      onResolved?.();
+    } catch (error) {
+      setResolveError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusyId(null);
+    }
+  };
   return (
     <div className="panel">
       <div className="panel-head">
         <div>
           <div className="panel-title"><span className="icon">≋</span>运营日志</div>
-          <div className="panel-sub">共 {total} 条 — 被动回复 / 主动评论 / 关注</div>
+          <div className="panel-sub">共 {total} 条 — 被动回复 / 主动评论 / 关注；待核实日志可逐条收口并留存审计。</div>
         </div>
+      </div>
+      {resolveError && <div className="panel-sub" style={{ padding: "0 16px 8px", color: "var(--red)" }}>{resolveError}</div>}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "0 16px 12px" }}>
+        <select aria-label="运营日志平台" value={platform} onChange={(e) => onFiltersChange({ platform: e.target.value as Platform | "", status, dateFrom, dateTo })}>
+          <option value="">全部平台</option><option value="xhs">小红书</option><option value="douyin">抖音</option><option value="kuaishou">快手</option><option value="wechat_channels">视频号</option>
+        </select>
+        <select aria-label="运营日志状态" value={status} onChange={(e) => onFiltersChange({ platform, status: e.target.value, dateFrom, dateTo })}>
+          <option value="">全部状态</option><option value="success">成功</option><option value="failed">失败</option><option value="pending_verify">待核实</option><option value="skipped">跳过</option><option value="circuit_broken">熔断拦截</option>
+        </select>
+        <input aria-label="运营日志开始日期" type="date" value={dateFrom} onChange={(e) => onFiltersChange({ platform, status, dateFrom: e.target.value, dateTo })} />
+        <input aria-label="运营日志结束日期" type="date" value={dateTo} onChange={(e) => onFiltersChange({ platform, status, dateFrom, dateTo: e.target.value })} />
+        <button className="btn sm ghost" onClick={() => onFiltersChange({ platform: "", status: "", dateFrom: "", dateTo: "" })}>清空筛选</button>
       </div>
       <div className="table-wrap">
         <table>
           <thead>
-            <tr><th>时间</th><th>平台</th><th>动作</th><th>内容摘要</th><th>状态</th></tr>
+            <tr><th>时间</th><th>平台</th><th>动作</th><th>内容摘要</th><th>状态</th><th>核实操作</th></tr>
           </thead>
           <tbody>
             {logs.length === 0 && (
-              <tr><td colSpan={5}>
+              <tr><td colSpan={6}>
                 <EmptyHint className="" next="到「发布确认与轮询」确认已发布，或等 30min 评论轮询产生日志">暂无运营日志</EmptyHint>
               </td></tr>
             )}
             {logs.map((l) => (
-              <tr key={l.id}>
+              <tr key={l.id} style={targetId === l.id ? { background: "var(--surface-2)", outline: "2px solid var(--primary)" } : undefined}>
                 <td style={{ fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>
                   {l.executed_at ? new Date(l.executed_at).toLocaleString("zh-CN") : l.schedule_time ? "待执行" : "-"}
                 </td>
@@ -418,6 +481,10 @@ function LogsPane({ logs, total, page, pages, onPageChange }: {
                   {l.content ?? l.target_author ?? "-"}
                 </td>
                 <td><span className={`demo-status ${STATUS_CLS[l.status] ?? ""}`}>{STATUS_LABEL[l.status] ?? l.status}</span></td>
+                <td>{l.status === "pending_verify" ? <div style={{ display: "flex", gap: 6 }}>
+                  <button className="btn sm" disabled={busyId === l.id} onClick={() => void resolve(l.id, "sent")}>已发出</button>
+                  <button className="btn sm ghost" disabled={busyId === l.id} onClick={() => void resolve(l.id, "not_sent")}>未发出</button>
+                </div> : l.resolution_action ? <span className="muted" title={l.resolution_note ?? ""}>已核实 · {l.resolved_at ? new Date(l.resolved_at).toLocaleString("zh-CN") : ""}</span> : "—"}</td>
               </tr>
             ))}
           </tbody>
@@ -668,13 +735,15 @@ function PublishPane() {
           ))}
         </div>
       )}
-      {drafts.length > pageSize && <div className="pagination-bar">
-        <span className="pagination-summary">共 {drafts.length} 条 · 第 {page}/{pageCount} 页</span>
-        <div className="pagination-actions">
-          <button className="btn sm" disabled={page <= 1} onClick={() => setPage((v) => v - 1)}>上一页</button>
-          <button className="btn sm" disabled={page >= pageCount} onClick={() => setPage((v) => v + 1)}>下一页</button>
+      {drafts.length > pageSize && (
+        <div className="pagination-bar">
+          <span className="pagination-summary">共 {drafts.length} 条 · 第 {page}/{pageCount} 页</span>
+          <div className="pagination-actions">
+            <button className="btn sm" disabled={page <= 1} onClick={() => setPage((v) => v - 1)}>上一页</button>
+            <button className="btn sm" disabled={page >= pageCount} onClick={() => setPage((v) => v + 1)}>下一页</button>
+          </div>
         </div>
-      </div>}
+      )}
     </div>
   );
 }
@@ -743,10 +812,13 @@ function BreakerPane({
   );
 }
 
-function TasksPane({ tasks, total, page, pages, onPageChange, onResolved }: {
+function TasksPane({ tasks, total, page, pages, onPageChange, onResolved, targetId, targetType, platform, status, taskType, dateFrom, dateTo, onFiltersChange }: {
   tasks: TaskRunItem[];
   total: number; page: number; pages: number; onPageChange: (page: number) => void;
+  targetId?: number | null; targetType?: string | null;
   onResolved?: () => void;
+  platform: Platform | ""; status: string; taskType: string; dateFrom: string; dateTo: string;
+  onFiltersChange: (value: { platform: Platform | ""; status: string; taskType: string; dateFrom: string; dateTo: string }) => void;
 }) {
   const TYPE_LABEL: Record<string, string> = {
     publish_polling: "发布轮询", data_fetch: "数据采集", daily_ops: "每日运营",
@@ -777,6 +849,20 @@ function TasksPane({ tasks, total, page, pages, onPageChange, onResolved }: {
         </div>
       </div>
       {err && <div className="panel-sub" style={{ padding: "0 16px 8px", color: "var(--red)" }}>{err}</div>}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "0 16px 12px" }}>
+        <select aria-label="任务平台筛选" value={platform} onChange={(e) => onFiltersChange({ platform: e.target.value as Platform | "", status, taskType, dateFrom, dateTo })}>
+          <option value="">全部平台</option><option value="xhs">小红书</option><option value="douyin">抖音</option><option value="kuaishou">快手</option><option value="wechat_channels">视频号</option>
+        </select>
+        <select aria-label="任务状态筛选" value={status} onChange={(e) => onFiltersChange({ platform, status: e.target.value, taskType, dateFrom, dateTo })}>
+          <option value="">全部状态</option><option value="pending">待执行</option><option value="running">执行中</option><option value="interrupted">中断</option><option value="pending_verify">待核实</option><option value="success">成功</option><option value="failed">失败</option><option value="skipped">跳过</option>
+        </select>
+        <select aria-label="任务类型筛选" value={taskType} onChange={(e) => onFiltersChange({ platform, status, taskType: e.target.value, dateFrom, dateTo })}>
+          <option value="">全部任务类型</option><option value="publish_polling">发布轮询</option><option value="data_fetch">数据采集</option><option value="daily_ops">每日运营</option><option value="comment_polling">评论轮询</option><option value="cb_recovery">熔断恢复</option><option value="kb_scan">题库扫描</option><option value="draft_save">存草稿</option><option value="round_pipeline">轮次主流程</option><option value="data_retention_cleanup">数据清理</option>
+        </select>
+        <input aria-label="任务开始日期" type="date" value={dateFrom} onChange={(e) => onFiltersChange({ platform, status, taskType, dateFrom: e.target.value, dateTo })} />
+        <input aria-label="任务结束日期" type="date" value={dateTo} onChange={(e) => onFiltersChange({ platform, status, taskType, dateFrom, dateTo: e.target.value })} />
+        <button className="btn sm ghost" onClick={() => onFiltersChange({ platform: "", status: "", taskType: "", dateFrom: "", dateTo: "" })}>清空筛选</button>
+      </div>
       <div className="table-wrap">
         <table>
           <thead><tr><th>ID</th><th>类型</th><th>平台</th><th>状态</th><th>尝试</th><th>开始</th><th>结束</th><th>错误</th><th>操作</th></tr></thead>
@@ -787,7 +873,7 @@ function TasksPane({ tasks, total, page, pages, onPageChange, onResolved }: {
               </td></tr>
             )}
             {tasks.map((t) => (
-              <tr key={t.id}>
+              <tr key={t.id} style={(targetType === "round" ? t.task_type === "round_pipeline" && t.biz_id === String(targetId) : targetId === t.id) ? { background: "var(--surface-2)", outline: "2px solid var(--primary)" } : undefined}>
                 <td style={{ fontSize: 12, fontFamily: "monospace" }}>#{t.id}</td>
                 <td>{TYPE_LABEL[t.task_type] ?? t.task_type}</td>
                 <td>{t.platform ? PLATFORM_NAME[t.platform] : "-"}</td>
@@ -1202,7 +1288,7 @@ function NotificationsPane({ items, rules, total, page, pages, onPageChange, onC
       <div className="panel">
         <div className="panel-head">
           <div>
-            <div className="panel-title"><span className="icon">⚙</span>通知规则（notify_rules 表）</div>
+            <div className="panel-title"><span className="icon">⚙</span>通知规则</div>
             <div className="panel-sub">
               某场景一旦有规则，就只按规则限定的通道/级别发送；没有规则 → 走 config 默认
             </div>

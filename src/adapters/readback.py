@@ -18,6 +18,8 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
+from src.core.redact import safe_error_summary
+
 from .base import Platform, FetchStatus, MetricsSnapshot
 from ..vendor.easel import VENDOR_DIR, ensure_vendor_path
 
@@ -326,18 +328,41 @@ def _as_int(value: Any) -> Optional[int]:
 
 
 def match_work(works: list[dict], title: str, platform_draft_id: Optional[str] = None) -> Optional[dict]:
-    """按平台草稿 ID 优先、标题前缀兜底匹配。"""
+    """按平台作品 ID 优先；标题只接受唯一精确匹配或唯一的 20 字符前缀匹配。"""
     if platform_draft_id:
-        for w in works:
-            if w.get("content_id") and w["content_id"] == platform_draft_id:
-                return w
-    key = (title or "").strip().replace("\n", " ")[:20]
+        id_matches = [
+            work for work in works
+            if work.get("content_id") and str(work["content_id"]) == str(platform_draft_id)
+        ]
+        if len(id_matches) == 1:
+            return id_matches[0]
+        if len(id_matches) > 1:
+            return None
+
+    import unicodedata
+
+    def normalize(value: str) -> str:
+        return " ".join(unicodedata.normalize("NFKC", str(value or "")).split()).casefold()
+
+    key = normalize(title)
     if not key:
         return None
-    for w in works:
-        if key in (w.get("title") or ""):
-            return w
-    return None
+    normalized = [(work, normalize(work.get("title") or "")) for work in works]
+    exact = [work for work, candidate in normalized if candidate and candidate == key]
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        return None
+
+    # 标题有平台侧轻微截断/追加时只接受至少 20 字符的开头一致，
+    # 且必须唯一；不再用“任意子串”命中，避免把相似标题的另一篇作品误确认为已发布。
+    prefix_matches = []
+    for work, candidate in normalized:
+        shorter = key if len(key) <= len(candidate) else candidate
+        longer = candidate if len(key) <= len(candidate) else key
+        if len(shorter) >= 20 and longer.startswith(shorter):
+            prefix_matches.append(work)
+    return prefix_matches[0] if len(prefix_matches) == 1 else None
 
 
 def snapshot_from_work(platform: Platform, work: dict, raw: str) -> MetricsSnapshot:
@@ -390,9 +415,18 @@ def snapshot_from_work(platform: Platform, work: dict, raw: str) -> MetricsSnaps
     )
 
 
+def pending_snapshot(platform: Platform, reason: str) -> MetricsSnapshot:
+    """A successful readback found no matching published work yet; this is not an execution failure."""
+    return MetricsSnapshot(
+        platform=platform,
+        fetch_status=FetchStatus.PENDING,
+        error_msg=safe_error_summary(reason, "平台数据读取失败，请检查登录状态后重试"),
+    )
+
+
 def failed_snapshot(platform: Platform, reason: str) -> MetricsSnapshot:
     return MetricsSnapshot(
         platform=platform,
         fetch_status=FetchStatus.FAILED,
-        error_msg=reason,
+        error_msg=safe_error_summary(reason, "平台数据读取失败，请检查登录状态后重试"),
     )
