@@ -15,7 +15,7 @@ import hashlib
 import logging
 import re
 import unicodedata
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 logger = logging.getLogger(__name__)
 
