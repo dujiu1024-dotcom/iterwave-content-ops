@@ -5799,10 +5799,50 @@ def _register_routes(app: FastAPI) -> None:
         except Exception:  # noqa: BLE001 — 维度只是装饰，取不到不影响出图
             dimension = ""
 
-        from ..core.content_pipeline import make_card_set, card_footer
+        from ..core.content_pipeline import (
+            body_page_prompt, card_footer, cover_prompt, make_card_set, plan_body_pages,
+            render_ai_background,
+        )
         output_dir = cfg.resolve_path(cfg.paths.output_dir)
+        # 重出图同样给正文页配 AI 底图（与轮次生产保持一致），单页失败退回渐变
+        settings = None
+        try:
+            mg_row = conn.execute(
+                "SELECT enabled, prompt_prefix, model, size FROM media_generation_settings WHERE id = 1"
+            ).fetchone()
+            if mg_row and mg_row["enabled"]:
+                settings = {
+                    "prefix": (mg_row["prompt_prefix"] or "").strip(),
+                    "model": (mg_row["model"] or "").strip() or "gpt-image-1",
+                    "size": (mg_row["size"] or "").strip() or "1024x1536",
+                }
+        except Exception:  # noqa: BLE001 — 旧库无此表时退回纯模板
+            settings = None
+        # 出图要调外部服务（数十秒），先结束读事务释放 SQLite 锁，避免长时间持锁把其它写入卡死
+        conn.commit()
+        pages = plan_body_pages(body)
+        body_images = []
+        cover_image = None
+        if settings:
+            cover_text = cover_prompt(title, dimension or "知识卡片")
+            if settings["prefix"]:
+                cover_text = f"{settings['prefix']}\n\n{cover_text}"
+            cover_image = render_ai_background(
+                cover_text, model=settings["model"], size=settings["size"],
+                cfg=cfg, platform=platform, kind="cover",
+            )
+            for lines in pages:
+                prompt = body_page_prompt(title, dimension or "知识卡片", lines)
+                if settings["prefix"]:
+                    prompt = f"{settings['prefix']}\n\n{prompt}"
+                body_images.append(render_ai_background(
+                    prompt, model=settings["model"], size=settings["size"],
+                    cfg=cfg, platform=platform,
+                ))
         paths = make_card_set(title, dimension or "知识卡片", body, output_dir,
-                              platform, card_footer(cfg, platform))
+                              platform, card_footer(cfg, platform),
+                              cover_image=cover_image,
+                              body_images=body_images, pages=pages)
         old = []
         try:
             old = json.loads(row["image_paths"] or "[]")

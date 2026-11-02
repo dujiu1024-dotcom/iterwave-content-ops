@@ -743,8 +743,10 @@ def _fit_text_width(draw, text: str, font, max_width: int) -> str:
     return (text + ellipsis) if text else ""
 
 
-def _card_background(width: int, height: int, top_color, bottom_color, cover_image=None):
-    """封面背景：有 AI 底图则居中裁切到画布比例并暗化（保证白字可读），否则渐变。"""
+def _card_background(
+    width: int, height: int, top_color, bottom_color, cover_image=None, dark: float = 0.42,
+):
+    """卡片背景：有 AI 底图则居中裁切到画布比例并暗化（保证白字可读），否则渐变。"""
     from PIL import Image, ImageDraw
 
     if cover_image is not None:
@@ -762,7 +764,7 @@ def _card_background(width: int, height: int, top_color, bottom_color, cover_ima
                 y0 = (ch - new_h) // 2
                 cover = cover.crop((0, y0, cw, y0 + new_h))
             base = cover.resize((width, height), Image.LANCZOS)
-            return Image.blend(base, Image.new("RGB", (width, height), (10, 10, 16)), 0.42)
+            return Image.blend(base, Image.new("RGB", (width, height), (10, 10, 16)), dark)
         except Exception:  # noqa: BLE001 — 底图不可用不阻断，退回渐变
             logger.warning("封面底图不可用，退回渐变背景: %s", cover_image)
     img = Image.new("RGB", (width, height))
@@ -789,7 +791,7 @@ def make_card(
 
     纯 Pillow 实现，无外部字体下载依赖。R6.5：Pillow 已有，无需自造图像引擎。
     """
-    from PIL import ImageDraw
+    from PIL import Image, ImageDraw
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -824,6 +826,9 @@ def make_card(
     area_top, area_bottom = 360, 1180
     y_cursor = area_top + max(0, (area_bottom - area_top - block_height) // 2)
     for line in title_lines:
+        # AI 底图明暗不定时，给标题加一层暗色投影，保证白字可读（模板渐变背景不需要）
+        if cover_image is not None:
+            draw.text((margin + 4, y_cursor + 4), line, fill=(12, 14, 20), font=title_font)
         draw.text((margin, y_cursor), line, fill=(255, 255, 255), font=title_font)
         y_cursor += line_height
 
@@ -832,6 +837,15 @@ def make_card(
         [(margin, y_cursor + 40), (margin + 160, y_cursor + 40)],
         fill=(255, 255, 255), width=6,
     )
+
+    # AI 底图底部明暗不定时，给页脚垫一层半透明深色底，保证白字可读
+    if cover_image is not None:
+        overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        ImageDraw.Draw(overlay).rectangle(
+            [(0, height - margin - 110), (width, height)], fill=(8, 10, 16, 150)
+        )
+        img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+        draw = ImageDraw.Draw(img)
 
     # 页脚（留空则不绘制，避免把某个垂类的品牌语写死进所有账号；按像素宽截断防裁切）
     if footer.strip():
@@ -858,30 +872,48 @@ def make_card(
 
 def _render_body_page(
     lines: list[str], output_dir: Path, platform: Platform, footer: str, page_text: str,
+    background: "Path | None" = None,
 ) -> Path:
-    """正文分页卡：同色系渐变背景 + 大字号正文 + 页脚 + 页码（1080×1440）。"""
+    """正文分页卡：AI 底图（或渐变）+ 大字号正文 + 页脚 + 页码（1080×1440）。"""
     from PIL import Image, ImageDraw
 
     output_path = output_dir / f"card_{platform.value}_{uuid.uuid4().hex[:8]}.png"
     width, height = CARD_SIZE
     top_color, bottom_color = _PLATFORM_PALETTE.get(platform, _PLATFORM_PALETTE[Platform.XHS])
-    img = Image.new("RGB", (width, height))
-    draw = ImageDraw.Draw(img)
-    for y in range(height):
-        ratio = y / (height - 1)
-        color = tuple(
-            int(top_color[i] + (bottom_color[i] - top_color[i]) * ratio) for i in range(3)
-        )
-        draw.line([(0, y), (width, y)], fill=color)
+    # 正文页文字铺满全页，AI 底图要比封面压得更暗，保证白字可读
+    img = _card_background(width, height, top_color, bottom_color, background, dark=0.62)
 
     margin = 96
     body_font = _load_font(52)
     # 内容少时垂直居中，避免整页文字堆在顶部、下半页空白
     block_height = len(lines) * 82
     y_cursor = max(margin + 40, (height - block_height) // 2 - 60)
+
+    # AI 底图画面对文字干扰大，再垫一层半透明深色面板，保证正文可读
+    if background is not None:
+        overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        od = ImageDraw.Draw(overlay)
+        panel_top = max(0, y_cursor - 48)
+        panel_bottom = min(height, y_cursor + block_height + 48)
+        od.rounded_rectangle(
+            [(margin - 44, panel_top), (width - margin + 44, panel_bottom)],
+            radius=36, fill=(8, 10, 16, 168),
+        )
+        img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+    draw = ImageDraw.Draw(img)
+
     for line in lines:
         draw.text((margin, y_cursor), line, fill=(255, 255, 255), font=body_font)
         y_cursor += 82
+
+    # AI 底图底部明暗不定时，给页脚垫一层半透明深色底，保证白字可读
+    if background is not None:
+        overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        ImageDraw.Draw(overlay).rectangle(
+            [(0, height - margin - 110), (width, height)], fill=(8, 10, 16, 190)
+        )
+        img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+        draw = ImageDraw.Draw(img)
 
     if footer.strip():
         footer_font = _load_font(36)
@@ -916,6 +948,76 @@ def card_footer(cfg, platform: Platform) -> str:
     return text[:30]
 
 
+def plan_body_pages(body: str, per_page: int = 9, max_pages: int = 9) -> list[list[str]]:
+    """按句子边界给正文分页：先按句/换行切开再装箱，避免一句话被截断到两页。"""
+    body_font = _load_font(52)
+    max_width = CARD_SIZE[0] - 192
+    text = _strip_emoji(body or "").strip()
+    if not text:
+        return [[]]
+    pieces = [p for p in re.split(r"(?<=[。！？!?；;\n])", text) if p.strip()]
+    pages: list[list[str]] = []
+    current: list[str] = []
+    for piece in pieces:
+        wrapped = _wrap_cjk(piece.strip(), body_font, max_width)[:per_page]
+        if current and len(current) + len(wrapped) > per_page:
+            pages.append(current)
+            current = []
+        current.extend(wrapped)
+    if current:
+        pages.append(current)
+    if not pages:
+        pages = [[]]
+    if len(pages) > max_pages - 1:
+        pages = pages[:max_pages - 1]
+        pages[-1] = pages[-1][-11:] + ["…（更多内容见正文）"]
+    return pages
+
+
+def cover_prompt(title: str, dimension: str) -> str:
+    """封面底图提示词：深色调、下半部纯色留白给白色标题。"""
+    return (
+        f"知识类图文封面背景插画，主题：{title}（{dimension}）。"
+        "整体为深色调扁平插画风格，主体位于画面上半部；"
+        "画面下方三分之一为纯净的深色背景（不要画成灰色地面、桌面或大面积浅色块），便于叠加白色标题；"
+        "画面中不出现任何文字、字母、数字、水印。"
+    )
+
+
+def body_page_prompt(title: str, dimension: str, page_lines: list[str]) -> str:
+    """正文页配图提示词：按本页要点出图，风格要求与封面一致。"""
+    summary = _strip_emoji("".join(page_lines)).strip()[:90]
+    return (
+        f"知识类图文正文配图插画，主题：{title}（{dimension}）。本页要点：{summary}。"
+        "风格与封面插画保持一致，画面中不出现任何文字、字母、数字、水印；"
+        "主体集中在画面中部，四周保持简洁留白。"
+    )
+
+
+def render_ai_background(
+    prompt: str, *, model: str, size: str, cfg, platform: Platform, kind: str = "body",
+) -> "Path | None":
+    """调用文生图生成底图并落盘；失败返回 None（该图退回渐变，不阻断出图）。"""
+    from .media_generation import generate_image_bytes
+
+    out_dir = Path(cfg.resolve_path(cfg.paths.output_dir))
+    try:
+        raw, _mime, suffix, _w, _h = generate_image_bytes(
+            prompt, model=model, size=size, cfg=cfg,
+        )
+    except Exception as exc:  # noqa: BLE001 — 单页配图失败不阻断整组卡片
+        logger.warning("正文配图生成失败，该页退回渐变：%s", exc)
+        return None
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{kind}_{platform.value}_{uuid.uuid4().hex[:8]}{suffix}"
+    path.write_bytes(raw)
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    return path
+
+
 def make_card_set(
     title: str,
     subtitle: str,
@@ -925,24 +1027,26 @@ def make_card_set(
     footer: str = "",
     max_pages: int = 9,
     cover_image: "Path | None" = None,
+    body_images: "list[Path | None] | None" = None,
+    pages: "list[list[str]] | None" = None,
 ) -> list[Path]:
     """生成一组图文卡片：1 张封面 + N 张正文分页（首页图 + 内容图，最多 max_pages 张）。
 
-    之前每篇只出 1 张标题封面，正文全在文案里，发出来是「只有文没有图」的观感。
+    封面与正文页都可用 AI 底图（body_images 与 pages 一一对应，缺省退回渐变）。
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    body_font = _load_font(52)
-    lines = _wrap_cjk(_strip_emoji(body), body_font, CARD_SIZE[0] - 192)
-    per_page = 12
-    pages = [lines[i:i + per_page] for i in range(0, len(lines), per_page)] or [[]]
-    if len(pages) > max_pages - 1:
-        pages = pages[:max_pages - 1]
-        pages[-1] = pages[-1][-11:] + ["…（更多内容见正文）"]
+    if pages is None:
+        pages = plan_body_pages(body, per_page=9, max_pages=max_pages)
 
     total = len(pages) + 1
     paths = [make_card(title, subtitle, output_dir, platform, footer, page_text=f"1/{total}",
                        cover_image=cover_image)]
     for idx, page_lines in enumerate(pages, start=2):
-        paths.append(_render_body_page(page_lines, output_dir, platform, footer, f"{idx}/{total}"))
+        background = None
+        if body_images and idx - 2 < len(body_images):
+            background = body_images[idx - 2]
+        paths.append(_render_body_page(
+            page_lines, output_dir, platform, footer, f"{idx}/{total}", background=background,
+        ))
     return paths
