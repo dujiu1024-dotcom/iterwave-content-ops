@@ -1,0 +1,74 @@
+from pathlib import Path
+
+import pytest
+
+from src.core.visual_renderer import _document, _pages, _split_paragraphs, _validate_theme_contrast
+
+
+def test_long_paragraph_is_split_without_losing_text():
+    source = "中文内容，" * 100
+    chunks = _split_paragraphs(source, limit=40)
+    assert "".join(chunks) == source
+    assert all(len(chunk) <= 40 for chunk in chunks)
+
+
+def test_page_limit_fails_instead_of_silently_truncating():
+    with pytest.raises(ValueError, match="不允许静默截断"):
+        _pages("\n".join(f"段落{i}" for i in range(40)), max_pages=2, capacity=2)
+
+
+def test_page_planner_preserves_all_paragraphs():
+    source = "\n".join(f"段落{i}" for i in range(11))
+    pages = _pages(source, max_pages=5, capacity=3)
+    assert [item for page in pages for item in page] == [f"段落{i}" for i in range(11)]
+
+
+def test_html_escapes_user_content_and_renders_subtitle_separately():
+    document = _document(
+        title="<script>alert(1)</script>",
+        subtitle="真实副标题",
+        paragraphs=["正文内容"],
+        footer="",
+        page_text="2/2",
+        theme="editorial_magazine",
+        cover=True,
+        width=1080,
+        height=1440,
+    )
+    assert "<script>" not in document
+    assert "&lt;script&gt;" in document
+    assert "真实副标题" in document
+    assert "正文内容" not in document
+
+
+def test_unknown_theme_uses_safe_default():
+    document = _document(
+        title="标题", subtitle="", paragraphs=["正文"], footer="", page_text="1/2",
+        theme="untrusted-theme", cover=False, width=1080, height=1440,
+    )
+    assert "#F3F5F7" in document
+
+
+
+def test_document_embeds_optional_background_data_uri():
+    document = _document(
+        title="标题", subtitle="副标题", paragraphs=["正文"], footer="", page_text="1/2",
+        theme="knowledge_infographic", cover=False, width=1080, height=1440,
+        background_data_uri="data:image/png;base64,ZmFrZQ==",
+    )
+    assert "data:image/png;base64,ZmFrZQ==" in document
+    assert "background-size:cover" in document
+
+
+def test_all_builtin_themes_pass_contrast_hard_gate():
+    for theme in ("knowledge_infographic", "editorial_magazine", "business_poster", "lifestyle"):
+        assert _validate_theme_contrast(theme, False) >= 4.5
+        assert _validate_theme_contrast(theme, True) >= 4.5
+
+
+def test_page_planner_respects_text_budget_even_when_paragraph_count_fits():
+    source = "\n".join("内容" * 100 for _ in range(8))
+    chunks = _split_paragraphs(source)
+    pages = _pages(source, max_pages=6, capacity=5, max_page_chars=320)
+    assert [block for page in pages for block in page] == chunks
+    assert all(sum(len(block) for block in page) <= 320 for page in pages)
