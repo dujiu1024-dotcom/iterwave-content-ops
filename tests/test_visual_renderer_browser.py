@@ -6,7 +6,14 @@ from src.adapters.base import Platform
 from src.core.visual_renderer import render_card_set
 
 
-def test_chromium_renderer_produces_cover_and_body_pages(tmp_path: Path):
+def test_chromium_renderer_produces_cover_and_body_pages(tmp_path: Path, monkeypatch):
+    # Chromium output/layout is tested here; OCR policy is tested independently in
+    # test_visual_ocr.py so this integration test does not depend on runner OCR accuracy.
+    from src.core import visual_ocr
+    monkeypatch.setattr(
+        visual_ocr, "validate_rendered_pages",
+        lambda images, expected, report: {"status": "passed", "pages": len(images)},
+    )
     paths = render_card_set(
         title="内容生产升级",
         subtitle="真实副标题",
