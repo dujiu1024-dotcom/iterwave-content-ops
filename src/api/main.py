@@ -373,6 +373,8 @@ def _build_tenant_runtime_context(
             cfg, conn, scoring, guard, adapters, sm_round, sm_draft,
             circuit_breaker=cb, notifier=notifier,
         )
+        # Pin visual profile lookup to this runtime's immutable account-group identity.
+        executor.tenant_id = tenant_id
         goal_progress = GoalProgressUpdater(cfg, conn)
         insights = PlatformInsightsEngine(cfg, conn)
         scheduler.wire(
@@ -5842,6 +5844,355 @@ def _register_routes(app: FastAPI) -> None:
             return FileResponse(str(path), filename=path.name, media_type="image/png")
         return FileResponse(str(path), media_type="image/png")
 
+    @app.get("/api/contents/{content_id}/visual-versions")
+    def list_content_visual_versions(content_id: str):
+        """Return immutable visual design history without exposing server filesystem paths."""
+        conn = _g()["conn"]
+        _content_row(conn, content_id)
+        from src.core.visual_persistence import get_visual_version_history
+        versions = get_visual_version_history(conn, content_id)
+        for version in versions:
+            design = version.get("design") or {}
+            safe_pages = []
+            for page in design.get("pages", []):
+                if not isinstance(page, dict):
+                    continue
+                output_root = Path(_g()["cfg"].resolve_path(_g()["cfg"].paths.output_dir)).resolve()
+                background_path = Path(str(page.get("background_path") or "")).resolve()
+                image_key_env = os.getenv("ITERWAVE_IMAGE_API_KEY_ENV", "OPENAI_API_KEY").strip()
+                ai_revision_ready = (
+                    os.getenv("ITERWAVE_ENABLE_AI_VISUALS", "").strip() == "1"
+                    and bool(image_key_env) and bool(os.getenv(image_key_env))
+                )
+                can_revise = bool(
+                    ai_revision_ready
+                    and isinstance(page.get("page_index"), int)
+                    and output_root in background_path.parents
+                    and background_path.is_file()
+                )
+                safe_pages.append({
+                    "page_index": page.get("page_index"),
+                    "image_url": (
+                        f"/api/contents/{content_id}/visual-versions/{version.get('id')}/pages/{page.get('page_index')}"
+                        if isinstance(page.get("page_index"), int) else None
+                    ),
+                    "can_revise": can_revise,
+                })
+            design["pages"] = safe_pages
+            # 生图背景的本地绝对路径只留在服务端数据库，不向 API 暴露。
+            design.pop("background_path", None)
+            if isinstance(design.get("generation"), list):
+                design["generation"] = [
+                    {key: value for key, value in item.items() if key != "path"}
+                    for item in design["generation"] if isinstance(item, dict)
+                ]
+            version["design"] = design
+        jobs = conn.execute(
+            "SELECT id, visual_version_id, page_index, job_type, status, attempt, "
+            "error_code, error_message, created_at, started_at, completed_at "
+            "FROM visual_jobs WHERE content_id=? ORDER BY created_at DESC, page_index",
+            (content_id,),
+        ).fetchall()
+        return {"content_id": content_id, "versions": versions,
+                "jobs": [dict(item) for item in jobs]}
+
+    @app.get("/api/contents/{content_id}/visual-versions/{version_id}/pages/{page_index}")
+    def get_visual_version_page(content_id: str, version_id: int, page_index: int):
+        """Serve an image belonging to a specific immutable visual version."""
+        conn = _g()["conn"]
+        _content_row(conn, content_id)
+        version = conn.execute(
+            "SELECT design_json FROM visual_design_versions WHERE id=? AND content_id=?",
+            (version_id, content_id),
+        ).fetchone()
+        if not version:
+            raise HTTPException(404, "视觉版本不存在")
+        try:
+            design = json.loads(version["design_json"] or "{}")
+            pages = design.get("pages", [])
+            page = next(
+                item for item in pages
+                if isinstance(item, dict) and item.get("page_index") == page_index
+            )
+        except (TypeError, ValueError, StopIteration):
+            raise HTTPException(404, "视觉版本页面不存在") from None
+        root = _g()["cfg"].resolve_path(_g()["cfg"].paths.output_dir).resolve()
+        image_path = Path(str(page.get("image_path", ""))).resolve()
+        if root not in image_path.parents or not image_path.is_file():
+            raise HTTPException(404, "视觉版本图片不存在")
+        return FileResponse(str(image_path), media_type="image/png")
+
+
+    @app.post("/api/contents/{content_id}/visual-versions/{version_id}/pages/{page_index}/revise")
+    def revise_visual_version_page(content_id: str, version_id: int, page_index: int, req: dict | None = None):
+        """Regenerate one page only; create a new immutable version and preserve all other page files."""
+        ctx = _g()
+        conn, cfg = ctx["conn"], ctx["cfg"]
+        row = _content_row(conn, content_id)
+        _ensure_content_round_idle(row, "重做视觉页面")
+        published = conn.execute(
+            "SELECT 1 FROM drafts WHERE content_id=? AND "
+            "(user_confirmed_at IS NOT NULL OR status IN ('user_published','data_fetching','published')) LIMIT 1",
+            (content_id,),
+        ).fetchone()
+        if published:
+            raise HTTPException(409, "已确认发布的内容不能重做视觉页面")
+        current = conn.execute(
+            "SELECT * FROM visual_design_versions WHERE id=? AND content_id=?",
+            (version_id, content_id),
+        ).fetchone()
+        if not current:
+            raise HTTPException(404, "视觉版本不存在")
+        try:
+            design = json.loads(current["design_json"] or "{}")
+            pages = design.get("pages") or []
+            target_page = next(p for p in pages if p.get("page_index") == page_index)
+            background = Path(str(target_page.get("background_path") or design.get("background_path") or "")).resolve()
+        except (TypeError, ValueError, StopIteration):
+            raise HTTPException(409, "该历史版本缺少可编辑的页面设计数据") from None
+        output_root = Path(cfg.resolve_path(cfg.paths.output_dir)).resolve()
+        if output_root not in background.parents or not background.is_file():
+            raise HTTPException(409, "该页面没有可用的原始背景素材，无法进行单页重做")
+        if os.getenv("ITERWAVE_ENABLE_AI_VISUALS", "").strip() != "1":
+            raise HTTPException(409, "单页 AI 重做未启用；请设置 ITERWAVE_ENABLE_AI_VISUALS=1")
+        instruction = str((req or {}).get("instruction") or "改善本页构图、色彩协调和视觉层次").strip()[:500]
+        if not instruction:
+            raise HTTPException(422, "重做说明不能为空")
+        from src.core.visual_persistence import create_visual_page_job, create_visual_version, transition_visual_job
+        job_id = create_visual_page_job(
+            conn, content_id=content_id, visual_version_id=version_id,
+            page_index=page_index, job_type="revise",
+            input_data={"instruction": instruction, "source_version_id": version_id},
+        )
+        transition_visual_job(conn, job_id=job_id, expected_status="queued", new_status="running")
+        revised_path = None
+        try:
+            from src.core.visual_generation import revise_visual_background
+            result = revise_visual_background(
+                source_path=background, feedback=[instruction], output_dir=output_root, cfg=cfg,
+            )
+            if result.get("status") != "revised" or not result.get("path"):
+                raise HTTPException(503, "AI 背景重做未成功，请检查图像模型配置")
+            revised_background = Path(result["path"]).resolve()
+            if output_root not in revised_background.parents or not revised_background.is_file():
+                raise HTTPException(500, "AI 返回的背景素材路径无效")
+            revised_path, _ = __import__("src.core.visual_renderer", fromlist=["render_single_page"]).render_single_page(
+                title=str(design.get("title") or row["title"]),
+                subtitle=str(design.get("subtitle") or ""),
+                body=str(design.get("body") or row["body"]),
+                page_index=page_index, total_pages=len(pages),
+                output_dir=output_root, platform=Platform(str(design.get("platform") or row["platform"])),
+                footer=str(design.get("footer") or ""),
+                theme=str(design.get("render_options", {}).get("theme") or current["style_key"]),
+                background_path=revised_background,
+                brand_palette=design.get("render_options", {}).get("brand_palette"),
+                font_family=str(design.get("render_options", {}).get("font_family") or "Noto Sans CJK SC"),
+            )
+            new_pages = [dict(item) for item in pages]
+            for item in new_pages:
+                if item.get("page_index") == page_index:
+                    item["image_path"] = str(revised_path)
+                    item["background_path"] = str(revised_background)
+            new_design = {**design, "pages": new_pages}
+            new_design["generation"] = list(new_design.get("generation") or []) + [{
+                "status": "revised", "model": result.get("model"),
+                "elapsed_ms": result.get("elapsed_ms"), "bytes": result.get("bytes"),
+            }]
+            import hashlib
+            content_hash = hashlib.sha256(
+                (str(row["title"]) + "\\0" + str(row["body"])).encode("utf-8")
+            ).hexdigest()
+            with conn:
+                new_version_id = create_visual_version(
+                    conn, content_id=content_id, content_hash=content_hash,
+                    renderer=current["renderer"], style_key=current["style_key"],
+                    design=new_design, created_by="manual_page_revision",
+                )
+                conn.execute(
+                    "UPDATE visual_design_versions SET status='review_required' WHERE id=?",
+                    (new_version_id,),
+                )
+                transition_visual_job(
+                    conn, job_id=job_id, expected_status="running", new_status="succeeded",
+                    output_data={
+                        "new_version_id": new_version_id, "image_path": str(revised_path),
+                        "model": result.get("model"), "bytes": result.get("bytes"),
+                        "elapsed_ms": result.get("elapsed_ms"),
+                    },
+                )
+                conn.execute(
+                    "UPDATE contents SET image_paths=? WHERE id=?",
+                    (json.dumps([item["image_path"] for item in new_pages], ensure_ascii=False), content_id),
+                )
+            return {"content_id": content_id, "job_id": job_id, "version_id": new_version_id,
+                    "page_index": page_index, "image_url":
+                    f"/api/contents/{content_id}/visual-versions/{new_version_id}/pages/{page_index}",
+                    "status": "review_required"}
+        except HTTPException:
+            with conn:
+                transition_visual_job(
+                    conn, job_id=job_id, expected_status="running", new_status="failed",
+                    error_code="visual_revision_failed", error_message="单页重做失败",
+                )
+            raise
+        except Exception as exc:
+            logger.exception("单页视觉重做失败 content=%s page=%s", content_id, page_index)
+            with conn:
+                transition_visual_job(
+                    conn, job_id=job_id, expected_status="running", new_status="failed",
+                    error_code="visual_revision_failed", error_message=type(exc).__name__,
+                )
+            raise HTTPException(500, "单页视觉重做失败，请查看服务端日志") from exc
+
+    _VISUAL_STYLE_KEYS = {
+        "knowledge_infographic", "editorial_magazine", "business_poster", "lifestyle",
+    }
+
+    def _visual_brand_profile(conn, tenant_id: str) -> dict:
+        row = conn.execute(
+            "SELECT profile_json, updated_at FROM visual_brand_profiles WHERE tenant_id=?",
+            (tenant_id,),
+        ).fetchone()
+        if not row:
+            return {"tenant_id": tenant_id, "profile": {}, "updated_at": None}
+        try:
+            profile = json.loads(row["profile_json"])
+        except (TypeError, ValueError):
+            profile = {}
+        return {"tenant_id": tenant_id, "profile": profile, "updated_at": row["updated_at"]}
+
+    @app.get("/api/visual/usage")
+    def get_visual_usage(limit: int = Query(200, ge=1, le=1000)):
+        """Aggregate visual generation usage from persisted tenant-local round reports."""
+        conn = _g()["conn"]
+        rows = conn.execute(
+            "SELECT id, round_number, run_report FROM spiral_rounds "
+            "WHERE run_report IS NOT NULL ORDER BY id DESC LIMIT ?", (limit,),
+        ).fetchall()
+        totals = {"generation_count": 0, "bytes": 0, "elapsed_ms": 0, "items": 0}
+        by_platform: dict[str, dict] = {}
+        recent = []
+        for row in rows:
+            try:
+                report = json.loads(row["run_report"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(report, dict):
+                continue
+            for item in report.get("visual_usage", []):
+                if not isinstance(item, dict):
+                    continue
+                platform = str(item.get("platform") or "unknown")
+                count = int(item.get("generation_count") or 0)
+                size = int(item.get("bytes") or 0)
+                elapsed = int(item.get("elapsed_ms") or 0)
+                totals["generation_count"] += count
+                totals["bytes"] += size
+                totals["elapsed_ms"] += elapsed
+                totals["items"] += 1
+                bucket = by_platform.setdefault(platform, {
+                    "platform": platform, "generation_count": 0, "bytes": 0,
+                    "elapsed_ms": 0, "items": 0,
+                })
+                bucket["generation_count"] += count
+                bucket["bytes"] += size
+                bucket["elapsed_ms"] += elapsed
+                bucket["items"] += 1
+                recent.append({
+                    "round_id": row["id"], "round_number": row["round_number"],
+                    "topic_id": item.get("topic_id"), "platform": platform,
+                    "generation_count": count, "bytes": size, "elapsed_ms": elapsed,
+                    "ocr_status": item.get("ocr_status"),
+                    "review_status": item.get("review_status"),
+                    "review_score": item.get("review_score"),
+                })
+        revision_jobs = conn.execute(
+            "SELECT id, content_id, page_index, output_json FROM visual_jobs "
+            "WHERE job_type='revise' AND status='succeeded' ORDER BY created_at DESC LIMIT 500",
+        ).fetchall()
+        for job in revision_jobs:
+            try:
+                output = json.loads(job["output_json"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            size = int(output.get("bytes") or 0)
+            elapsed = int(output.get("elapsed_ms") or 0)
+            totals["generation_count"] += 1
+            totals["bytes"] += size
+            totals["elapsed_ms"] += elapsed
+            totals["items"] += 1
+            bucket = by_platform.setdefault("single_page_revision", {
+                "platform": "single_page_revision", "generation_count": 0,
+                "bytes": 0, "elapsed_ms": 0, "items": 0,
+            })
+            bucket["generation_count"] += 1
+            bucket["bytes"] += size
+            bucket["elapsed_ms"] += elapsed
+            bucket["items"] += 1
+            recent.append({
+                "round_id": None, "round_number": None,
+                "topic_id": job["content_id"], "platform": "single_page_revision",
+                "generation_count": 1, "bytes": size, "elapsed_ms": elapsed,
+                "ocr_status": "review_required", "review_status": "manual_review",
+                "review_score": None,
+            })
+        return {
+            "scanned_rounds": len(rows), "totals": totals,
+            "by_platform": list(by_platform.values()), "recent": recent[:100],
+        }
+
+    @app.get("/api/visual/brand-profile")
+    def get_visual_brand_profile():
+        ctx = _g()
+        tenant_id = str(ctx.get("runtime_tenant_id") or "default")
+        return _visual_brand_profile(ctx["conn"], tenant_id)
+
+    @app.put("/api/visual/brand-profile")
+    def put_visual_brand_profile(req: dict):
+        """Update only the active tenant's visual brand defaults."""
+        ctx = _g()
+        tenant_id = str(ctx.get("runtime_tenant_id") or "default")
+        allowed = {"style_key", "brand_name", "primary_color", "secondary_color",
+                   "font_family", "footer", "forbidden_styles"}
+        unknown = set(req) - allowed
+        if unknown:
+            raise HTTPException(422, f"不支持的品牌配置字段：{', '.join(sorted(unknown))}")
+        profile = _visual_brand_profile(ctx["conn"], tenant_id)["profile"]
+        merged = {**profile, **req}
+        style_key = merged.get("style_key", "knowledge_infographic")
+        if style_key not in _VISUAL_STYLE_KEYS:
+            raise HTTPException(422, "未知视觉风格")
+        for key in ("primary_color", "secondary_color"):
+            value = merged.get(key)
+            if value is not None and (
+                not isinstance(value, str) or
+                not __import__("re").fullmatch(r"#[0-9A-Fa-f]{6}", value)
+            ):
+                raise HTTPException(422, f"{key} 必须是 #RRGGBB 格式")
+        for key in ("brand_name", "font_family", "footer"):
+            value = merged.get(key)
+            if value is not None and (not isinstance(value, str) or len(value) > 120):
+                raise HTTPException(422, f"{key} 必须是 120 字以内文本")
+        forbidden = merged.get("forbidden_styles", [])
+        if not isinstance(forbidden, list) or len(forbidden) > 20 or any(
+            not isinstance(item, str) or item not in _VISUAL_STYLE_KEYS for item in forbidden
+        ):
+            raise HTTPException(422, "forbidden_styles 必须是最多 20 个有效风格键")
+        if style_key in forbidden:
+            raise HTTPException(422, "默认风格不能同时列入禁用风格")
+        allowed_fonts = {"Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", "Arial"}
+        if merged.get("font_family") not in (None, "", *allowed_fonts):
+            raise HTTPException(422, "字体必须选择系统支持的字体族")
+        # LockedConnection 的 __enter__ 持有事务级 RLock，避免语句锁之间被其他线程插入。
+        with ctx["conn"]:
+            ctx["conn"].execute(
+                "INSERT INTO visual_brand_profiles(tenant_id, profile_json, updated_at) "
+                "VALUES(?, ?, CURRENT_TIMESTAMP) ON CONFLICT(tenant_id) DO UPDATE SET "
+                "profile_json=excluded.profile_json, updated_at=CURRENT_TIMESTAMP",
+                (tenant_id, json.dumps(merged, ensure_ascii=False, sort_keys=True)),
+            )
+        return _visual_brand_profile(ctx["conn"], tenant_id)
+
     @app.patch("/api/contents/{content_id}")
     def update_content(content_id: str, req: UpdateContentRequest):
         """人工编辑未发布文案 → 写 user_override 留痕；已发布内容保持不可变。"""
@@ -5925,25 +6276,75 @@ def _register_routes(app: FastAPI) -> None:
             dimension = ""
 
         from ..core.content_pipeline import make_card_set, card_footer
-        output_dir = cfg.resolve_path(cfg.paths.output_dir)
-        paths = make_card_set(title, dimension or "知识卡片", body, output_dir,
-                              platform, card_footer(cfg, platform))
-        old = []
-        try:
-            old = json.loads(row["image_paths"] or "[]")
-        except (TypeError, ValueError):
-            old = []
-        conn.execute(
-            "UPDATE contents SET image_paths = ? WHERE id = ?",
-            (json.dumps([str(p) for p in paths], ensure_ascii=False), content_id),
+        tenant_id = _tenant_id()
+        profile = _visual_brand_profile(conn, tenant_id)["profile"]
+        styles = {"knowledge_infographic", "editorial_magazine", "business_poster", "lifestyle"}
+        forbidden = set(profile.get("forbidden_styles") or [])
+        theme = profile.get("style_key", "knowledge_infographic")
+        if theme not in styles or theme in forbidden:
+            theme = "knowledge_infographic"
+        colors = {}
+        for key, source in (("accent", "primary_color"), ("muted", "secondary_color")):
+            value = profile.get(source)
+            if isinstance(value, str) and __import__("re").fullmatch(r"#[0-9A-Fa-f]{6}", value):
+                colors[key] = value
+        allowed_fonts = {"Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", "Arial"}
+        font = profile.get("font_family")
+        if font not in allowed_fonts:
+            font = "Noto Sans CJK SC"
+        brand_footer = " · ".join(
+            str(profile.get(key) or "").strip() for key in ("brand_name", "footer")
+            if str(profile.get(key) or "").strip()
         )
-        conn.commit()
-        # 旧图（旧版单封面）顺手清掉，避免 output 目录里堆孤儿文件
-        for p in old:
-            try:
-                Path(str(p)).unlink()
-            except OSError:
-                pass
+        footer = " · ".join(item for item in (card_footer(cfg, platform), brand_footer) if item)
+        output_dir = cfg.resolve_path(cfg.paths.output_dir)
+        paths = make_card_set(
+            title, dimension or "知识卡片", body, output_dir, platform, footer,
+            theme=theme, brand_palette=colors, font_family=font,
+        )
+        from src.core.visual_ocr import load_ocr_report
+        from src.core.visual_persistence import (
+            create_visual_page_job, create_visual_version, transition_visual_job,
+        )
+        ocr_report = load_ocr_report(paths)
+        import hashlib
+        content_hash = hashlib.sha256((title + "\\0" + body).encode("utf-8")).hexdigest()
+        with conn:
+            version_id = create_visual_version(
+                conn, content_id=content_id, content_hash=content_hash,
+                renderer="chromium_v2", style_key=theme,
+                design={
+                    "platform": platform.value, "title": title,
+                    "subtitle": dimension or "知识卡片", "body": body,
+                    "footer": footer,
+                    "render_options": {"theme": theme, "brand_palette": colors, "font_family": font},
+                    "pages": [
+                        {"page_index": index, "image_path": str(path)}
+                        for index, path in enumerate(paths)
+                    ],
+                    "ocr": ocr_report,
+                },
+            )
+            conn.execute(
+                "UPDATE visual_design_versions SET status=? WHERE id=?",
+                ("rendered" if ocr_report.get("status") == "passed" else "review_required", version_id),
+            )
+            for index, path in enumerate(paths):
+                job_id = create_visual_page_job(
+                    conn, content_id=content_id, visual_version_id=version_id,
+                    page_index=index, job_type="rerender",
+                    input_data={"source": "manual_full_regeneration"},
+                )
+                transition_visual_job(conn, job_id=job_id, expected_status="queued", new_status="running")
+                transition_visual_job(
+                    conn, job_id=job_id, expected_status="running", new_status="succeeded",
+                    output_data={"image_path": str(path)},
+                )
+            conn.execute(
+                "UPDATE contents SET image_paths = ? WHERE id = ?",
+                (json.dumps([str(path) for path in paths], ensure_ascii=False), content_id),
+            )
+        # 历史版本图片保留，版本接口继续可读取；不做破坏性清理。
         return {"id": content_id, "image_count": len(paths),
                 "image_paths": [p.name for p in paths]}
 
