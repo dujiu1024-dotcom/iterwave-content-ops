@@ -1131,3 +1131,56 @@ def test_scheduler_task_run_audit_writes_use_connection_transaction_context():
     assert saved["finished_at"]
     assert conn.transaction_entries == 2
     conn.close()
+
+
+def test_multiple_workers_execute_different_tenants_concurrently(tmp_path):
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    for tenant_id, round_id in (("tenant-a", 31), ("tenant-b", 32)):
+        queue.enqueue(
+            task_type="round_run", tenant_id=tenant_id, aggregate_id=str(round_id),
+            payload={"round_id": round_id, "operation": "run"},
+        )
+
+    async def scenario():
+        stop = asyncio.Event()
+        both_started = asyncio.Event()
+        started = set()
+        completed = set()
+
+        class FakeExecutor:
+            async def run(self, round_id, **kwargs):
+                started.add(round_id)
+                if len(started) == 2:
+                    both_started.set()
+                await asyncio.wait_for(both_started.wait(), timeout=2)
+                completed.add(round_id)
+                if len(completed) == 2:
+                    stop.set()
+                return {"round_id": round_id, "final_status": "completed"}
+
+        def build_context(tenant_id):
+            return {
+                "cfg": SimpleNamespace(
+                    paths=SimpleNamespace(data_dir=str(tmp_path / tenant_id / "data")),
+                    resolve_path=lambda value: value,
+                ),
+                "executor": FakeExecutor(),
+                "scheduler": SimpleNamespace(shutdown=lambda: None),
+                "conn": SimpleNamespace(close=lambda: None),
+            }
+
+        workers = [
+            GlobalTaskWorker(queue, build_context, poll_interval_seconds=0.01,
+                             lease_seconds=30, heartbeat_seconds=1),
+            GlobalTaskWorker(queue, build_context, poll_interval_seconds=0.01,
+                             lease_seconds=30, heartbeat_seconds=1),
+        ]
+        await asyncio.wait_for(
+            asyncio.gather(*(worker.run(stop) for worker in workers)),
+            timeout=5,
+        )
+        assert started == {31, 32}
+        assert completed == {31, 32}
+
+    asyncio.run(scenario())
