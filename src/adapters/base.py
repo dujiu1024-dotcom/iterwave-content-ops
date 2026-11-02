@@ -196,7 +196,11 @@ class MetricsSnapshot:
     ):
         self.platform = platform
         self.fetch_status = fetch_status
-        self.fetched_at = fetched_at or datetime.now()
+        if fetched_at is None:
+            from src.core.task_context import current_config
+            from src.core.timezone import business_now
+            fetched_at = business_now(current_config())
+        self.fetched_at = fetched_at
         self.likes = likes
         self.collects = collects
         self.comments = comments
