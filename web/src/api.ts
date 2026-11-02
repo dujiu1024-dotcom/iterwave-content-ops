@@ -1589,6 +1589,28 @@ export interface WeeklyReport {
   data_conflicts?: { platform: Platform; content_id: string; metrics: string[]; selected_sources: Record<string, string> }[];
 }
 
+export interface VisualBrandProfile {
+  style_key?: "knowledge_infographic" | "editorial_magazine" | "business_poster" | "lifestyle";
+  brand_name?: string;
+  primary_color?: string;
+  secondary_color?: string;
+  font_family?: string;
+  footer?: string;
+  forbidden_styles?: string[];
+}
+export interface VisualUsageSummary {
+  scanned_rounds: number;
+  totals: { generation_count: number; bytes: number; elapsed_ms: number; items: number };
+  by_platform: Array<{ platform: string; generation_count: number; bytes: number; elapsed_ms: number; items: number }>;
+  recent: Array<{ round_id: number | null; round_number: number | null; topic_id: string; platform: string;
+    generation_count: number; bytes: number; elapsed_ms: number; ocr_status: string;
+    review_status: string; review_score: number | null }>;
+}
+export interface VisualVersionHistory {
+  id: number; version: number; content_hash: string; renderer: string;
+  style_key: string; status: string; created_at: string;
+  design: { pages?: Array<{ page_index: number; image_url: string | null; can_revise?: boolean }> };
+}
 export const api = {
   status: () => fetchJson<SystemStatus>("/api/status"),
   goals: () => fetchJson<Goal[]>("/api/goals"),
@@ -2304,4 +2326,20 @@ export const api = {
       "/api/reports/weekly/actions", { method: "POST", body: JSON.stringify(data) },
     ),
   activationMetrics: () => fetchJson<ActivationMetrics>("/api/activation/metrics"),
+
+  visualUsage: () => fetchJson<VisualUsageSummary>("/api/visual/usage?limit=500"),
+  visualBrandProfile: () => fetchJson<{ tenant_id: string; profile: VisualBrandProfile; updated_at: string | null }>("/api/visual/brand-profile"),
+  saveVisualBrandProfile: (profile: VisualBrandProfile) =>
+    fetchJson<{ tenant_id: string; profile: VisualBrandProfile; updated_at: string }>("/api/visual/brand-profile", {
+      method: "PUT", body: JSON.stringify(profile),
+    }),
+  visualVersions: (contentId: string) =>
+    fetchJson<{ content_id: string; versions: VisualVersionHistory[]; jobs: Array<Record<string, unknown>> }>(
+      `/api/contents/${encodeURIComponent(contentId)}/visual-versions`,
+    ),
+  reviseVisualPage: (contentId: string, versionId: number, pageIndex: number, instruction: string) =>
+    fetchJson<{ content_id: string; job_id: string; version_id: number; page_index: number; image_url: string; status: string }>(
+      `/api/contents/${encodeURIComponent(contentId)}/visual-versions/${versionId}/pages/${pageIndex}/revise`,
+      { method: "POST", body: JSON.stringify({ instruction }) },
+    ),
 };
