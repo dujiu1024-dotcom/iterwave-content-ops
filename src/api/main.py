@@ -47,7 +47,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Optional
+from typing import Callable, Literal, Optional
 
 import httpx
 from pathlib import Path
@@ -1264,6 +1264,8 @@ class LlmKeyRequest(BaseModel):
     """R23：Key 只写 .env（chmod 600），永不回传、不落库、不写日志。空串 = 删除。"""
 
     api_key: str = Field(default="")
+    # primary = 主模型密钥；fallback = 兜底模型密钥（可与主模型不同供应商）
+    target: Literal["primary", "fallback"] = "primary"
 
 
 class CreateRoundRequest(BaseModel):
@@ -7741,13 +7743,19 @@ def _register_routes(app: FastAPI) -> None:
 
     @app.post("/api/config/llm_key")
     def save_llm_api_key(req: LlmKeyRequest):
-        """把 API Key 写入 config/.env（chmod 600），立即生效；永不回传明文。"""
+        """把主模型/兜底模型 API Key 写入 config/.env（chmod 600），立即生效；永不回传明文。"""
         cfg = _g()["cfg"]
-        key_name = cfg.llm.api_key_env
+        key_name = (
+            cfg.llm.fallback_api_key_env if req.target == "fallback" else cfg.llm.api_key_env
+        )
         value = req.api_key.strip()
         write_env(key_name, value)
         # R23：只回报状态，绝不回报 Key 本身
-        return {"ok": True, "has_key": bool(os.environ.get(key_name))}
+        return {
+            "ok": True,
+            "target": req.target,
+            "has_key": bool(os.environ.get(key_name)),
+        }
 
     # --- 内容资产（G-13：外部参考 / 个人观点 / 内容模板）---
     def _asset_out(row) -> dict:

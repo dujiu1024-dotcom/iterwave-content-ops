@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -612,7 +612,7 @@ class DataRetentionConfig(BaseModel):
 # =====================================================================
 
 class LlmConfig(BaseModel):
-    """文案生成用 LLM（Agent Plan / 方舟）；模型失败时 fail closed。"""
+    """文案生成用 LLM：主模型 + 兜底模型，均为 OpenAI 兼容 Chat Completions；全失败时 fail closed。"""
     enabled: bool = False
     provider: str = "ark"
     # ⚠️ 通道选择（重要，关乎计费与可用性，R23 安全）：
@@ -621,8 +621,14 @@ class LlmConfig(BaseModel):
     # 「系统设置 → 主模型与备用」可在线切换，最终以 config.yaml 初始值与账号组 SQLite 运行时配置为准。
     base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     model: str = "doubao-seed-2.1-lite"
-    fallback_model: str = "doubao-seed-2.0-mini"   # 主模型失败时的兜底模型；空串 = 不启用
     api_key_env: str = "ARK_API_KEY"          # R23：只从 .env 读，不落库不落日志
+    # 部分供应商（如商汤 SenseNova）默认开启思考模式，与 JSON 输出不兼容；
+    # 仅主模型请求体发送该字段，空串 = 不发送（兼容火山方舟等不认识该字段的通道）。
+    thinking: Literal["", "enabled", "disabled"] = ""
+    fallback_provider: str = "ark"
+    fallback_base_url: str = "https://ark.cn-beijing.volces.com/api/plan/v3"
+    fallback_model: str = "doubao-seed-2.0-mini"   # 主模型失败时的兜底模型；空串 = 不启用
+    fallback_api_key_env: str = "ARK_API_KEY"       # 兜底通道密钥（可与主模型不同供应商）
     temperature: float = 0.7
     timeout_seconds: int = Field(60, ge=1, le=600)
     retry_attempts: int = Field(2, ge=0, le=5)

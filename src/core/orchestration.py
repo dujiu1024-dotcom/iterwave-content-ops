@@ -252,28 +252,43 @@ def diagnose(cfg, conn, *, cb=None, live_llm: bool = False) -> dict:
     else:
         items.append(_item(3, "平台登录态有效", "pass", f"{len(enabled)} 个平台已登录"))
 
-    # 4 LLM
+    # 4 LLM（主模型 + 兜底模型任一可用即可；实测时按顺序尝试）
+    from .llm_endpoints import llm_endpoints
+
     llm = cfg.llm
+    endpoints = llm_endpoints(cfg)
     if not llm.enabled:
         items.append(_item(4, "大模型服务检查", "warn", "LLM 未启用：文案走模板降级，复盘要点不会进文案",
                            "settings", "model"))
-    elif not os.getenv(llm.api_key_env):
+    elif not endpoints:
         items.append(_item(4, "大模型服务检查", "block", "缺少 LLM 服务密钥，请检查服务端部署环境中的密钥配置", "settings", "model"))
     elif live_llm:
-        try:
-            import httpx
-            r = httpx.post(
-                f"{llm.base_url.rstrip('/')}/chat/completions",
-                headers={"Authorization": f"Bearer {os.getenv(llm.api_key_env)}"},
-                json={"model": llm.model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1},
-                timeout=min(15, llm.timeout_seconds),
-            )
-            r.raise_for_status()
-            items.append(_item(4, "大模型服务检查", "pass", f"{llm.model} 调用成功"))
-        except Exception as exc:  # noqa: BLE001
-            items.append(_item(4, "大模型服务检查", "block", f"调用失败：{str(exc)[:120]}", "settings", "model"))
+        import httpx
+        failures: list[str] = []
+        used = None
+        for endpoint in endpoints:
+            try:
+                r = httpx.post(
+                    f"{endpoint.base_url.rstrip('/')}/chat/completions",
+                    headers={"Authorization": f"Bearer {endpoint.api_key}"},
+                    json={"model": endpoint.model,
+                          "messages": [{"role": "user", "content": "ping"}],
+                          "max_tokens": 1},
+                    timeout=min(15, llm.timeout_seconds),
+                )
+                r.raise_for_status()
+                used = endpoint
+                break
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"{endpoint.model}: {str(exc)[:80]}")
+        if used is not None:
+            extra = "（已自动切换到兜底模型）" if used.label == "fallback" else ""
+            items.append(_item(4, "大模型服务检查", "pass", f"{used.model} 调用成功{extra}"))
+        else:
+            items.append(_item(4, "大模型服务检查", "block", f"调用失败：{'；'.join(failures)[:200]}", "settings", "model"))
     else:
-        items.append(_item(4, "大模型服务检查", "pass", f"已配置 {llm.model}（勾选「实测 LLM」可真调一次）"))
+        names = " / ".join(endpoint.model for endpoint in endpoints)
+        items.append(_item(4, "大模型服务检查", "pass", f"已配置 {names}（勾选「实测 LLM」可真调一次）"))
 
     # 5 熔断
     broken = []
