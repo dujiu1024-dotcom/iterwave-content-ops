@@ -628,46 +628,47 @@ class SchedulerEngine:
 
         # 落库 metrics（R3：解析不到的字段保持 NULL，绝不补 0）
         # R16 幂等：draft_id + platform + 采集日期当天只覆盖一次（当天已有记录 → UPDATE 而非 INSERT）
-        today = business_now(self.cfg).strftime("%Y-%m-%d")
-        prev = self.conn.execute(
-            "SELECT id, attempt FROM metrics WHERE draft_id = ? AND platform = ? "
-            "AND substr(COALESCE(fetched_at, ''), 1, 10) = ?",
-            (draft_id, platform.value, today),
-        ).fetchone()
-        if prev:
-            # 注意：这里的 metrics_attempt 是「当天第几次采集」，与作业重试 attempt 无关
-            metrics_attempt = int(prev["attempt"] or 0) + 1
-            self.conn.execute(
-                "UPDATE metrics SET fetch_status = ?, fetched_at = ?, attempt = ?, "
-                "raw_response = ?, error_msg = ?, likes = ?, collects = ?, comments = ?, shares = ?, "
-                "views = ?, new_followers = ?, like_rate = ?, collect_rate = ?, "
-                "interaction_rate = ?, follower_efficiency = ? WHERE id = ?",
-                (
-                    snap.fetch_status.value, business_now(self.cfg).isoformat(), metrics_attempt,
-                    snap.raw_response, snap.error_msg, snap.likes, snap.collects, snap.comments,
-                    snap.shares, snap.views, snap.new_followers,
-                    snap.like_rate, snap.collect_rate, snap.interaction_rate,
-                    snap.follower_efficiency, prev["id"],
-                ),
-            )
-            logger.info("[APS] data_fetch 当天重复采集 → 覆盖 metrics id=%s（第 %d 次）",
-                        prev["id"], metrics_attempt)
-        else:
-            self.conn.execute(
-                "INSERT INTO metrics (draft_id, content_id, platform, fetch_status, fetched_at, "
-                "attempt, raw_response, error_msg, likes, collects, comments, shares, views, new_followers, "
-                "like_rate, collect_rate, interaction_rate, follower_efficiency) "
-                "VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    draft_id, row["content_id"], platform.value, snap.fetch_status.value,
-                    business_now(self.cfg).isoformat(), snap.raw_response, snap.error_msg,
-                    snap.likes, snap.collects, snap.comments, snap.shares, snap.views,
-                    snap.new_followers,
-                    snap.like_rate, snap.collect_rate, snap.interaction_rate,
-                    snap.follower_efficiency,
-                ),
-            )
-        self.conn.commit()
+        with self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            today = business_now(self.cfg).strftime("%Y-%m-%d")
+            prev = self.conn.execute(
+                "SELECT id, attempt FROM metrics WHERE draft_id = ? AND platform = ? "
+                "AND substr(COALESCE(fetched_at, ''), 1, 10) = ?",
+                (draft_id, platform.value, today),
+            ).fetchone()
+            if prev:
+                # 注意：这里的 metrics_attempt 是「当天第几次采集」，与作业重试 attempt 无关
+                metrics_attempt = int(prev["attempt"] or 0) + 1
+                self.conn.execute(
+                    "UPDATE metrics SET fetch_status = ?, fetched_at = ?, attempt = ?, "
+                    "raw_response = ?, error_msg = ?, likes = ?, collects = ?, comments = ?, shares = ?, "
+                    "views = ?, new_followers = ?, like_rate = ?, collect_rate = ?, "
+                    "interaction_rate = ?, follower_efficiency = ? WHERE id = ?",
+                    (
+                        snap.fetch_status.value, business_now(self.cfg).isoformat(), metrics_attempt,
+                        snap.raw_response, snap.error_msg, snap.likes, snap.collects, snap.comments,
+                        snap.shares, snap.views, snap.new_followers,
+                        snap.like_rate, snap.collect_rate, snap.interaction_rate,
+                        snap.follower_efficiency, prev["id"],
+                    ),
+                )
+                logger.info("[APS] data_fetch 当天重复采集 → 覆盖 metrics id=%s（第 %d 次）",
+                            prev["id"], metrics_attempt)
+            else:
+                self.conn.execute(
+                    "INSERT INTO metrics (draft_id, content_id, platform, fetch_status, fetched_at, "
+                    "attempt, raw_response, error_msg, likes, collects, comments, shares, views, new_followers, "
+                    "like_rate, collect_rate, interaction_rate, follower_efficiency) "
+                    "VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        draft_id, row["content_id"], platform.value, snap.fetch_status.value,
+                        business_now(self.cfg).isoformat(), snap.raw_response, snap.error_msg,
+                        snap.likes, snap.collects, snap.comments, snap.shares, snap.views,
+                        snap.new_followers,
+                        snap.like_rate, snap.collect_rate, snap.interaction_rate,
+                        snap.follower_efficiency,
+                    ),
+                )
 
         # R21：采集成功后刷新关联目标进度（任一指标 NULL 时保持 NULL）
         if self.goal_progress is not None:
@@ -687,11 +688,11 @@ class SchedulerEngine:
         else:
             logger.warning("[APS] data_fetch 采集未成功 draft=%s status=%s err=%s (attempt=%d)",
                            draft_id, snap.fetch_status.value, snap.error_msg, attempt)
-            self.conn.execute(
-                "UPDATE drafts SET error_msg = ? WHERE id = ?",
-                (snap.error_msg, draft_id),
-            )
-            self.conn.commit()
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE drafts SET error_msg = ? WHERE id = ?",
+                    (snap.error_msg, draft_id),
+                )
 
             retry_times, interval_min = self._metrics_retry_params()
             if attempt < retry_times:
