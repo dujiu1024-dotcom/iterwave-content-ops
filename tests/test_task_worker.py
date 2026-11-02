@@ -988,7 +988,7 @@ def test_worker_content_plan_completion_is_atomic_on_late_failure():
     ).fetchone()[0] == 0
     assert conn.execute(
         "SELECT status, version FROM content_plans WHERE id='plan-7'"
-    ).fetchone() == ("generating", 1)
+    ).fetchone()[:] == ("generating", 1)
     conn.close()
 
 
@@ -1019,8 +1019,8 @@ def test_worker_content_plan_completion_commits_links_and_status_together():
 
     assert conn.execute(
         "SELECT plan_id, draft_id, round_id FROM content_plan_drafts"
-    ).fetchone() == ("plan-8", "draft-8", 8)
+    ).fetchone()[:] == ("plan-8", "draft-8", 8)
     assert conn.execute(
         "SELECT status, version FROM content_plans WHERE id='plan-8'"
-    ).fetchone() == ("generated", 4)
+    ).fetchone()[:] == ("generated", 4)
     conn.close()
