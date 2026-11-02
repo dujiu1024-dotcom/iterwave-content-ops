@@ -381,7 +381,7 @@ def _generate_via_llm(
         data = resp.json()
     except httpx.TimeoutException as exc:
         _log_ai_call(
-            conn, platform, llm.model, topic_id, round_id,
+            cfg, conn, platform, llm.model, topic_id, round_id,
             latency_ms=int((time.monotonic() - started) * 1000),
             tokens_in=None, tokens_out=None, success=False, output_valid=False,
         )
@@ -390,7 +390,7 @@ def _generate_via_llm(
         ) from exc
     except httpx.HTTPStatusError as exc:
         _log_ai_call(
-            conn, platform, llm.model, topic_id, round_id,
+            cfg, conn, platform, llm.model, topic_id, round_id,
             latency_ms=int((time.monotonic() - started) * 1000),
             tokens_in=None, tokens_out=None, success=False, output_valid=False,
         )
@@ -427,7 +427,7 @@ def _generate_via_llm(
         ) from exc
     except httpx.RequestError as exc:
         _log_ai_call(
-            conn, platform, llm.model, topic_id, round_id,
+            cfg, conn, platform, llm.model, topic_id, round_id,
             latency_ms=int((time.monotonic() - started) * 1000),
             tokens_in=None, tokens_out=None, success=False, output_valid=False,
         )
@@ -437,7 +437,7 @@ def _generate_via_llm(
         ) from exc
     except Exception as exc:
         _log_ai_call(
-            conn, platform, llm.model, topic_id, round_id,
+            cfg, conn, platform, llm.model, topic_id, round_id,
             latency_ms=int((time.monotonic() - started) * 1000),
             tokens_in=None, tokens_out=None, success=False, output_valid=False,
         )
@@ -454,7 +454,7 @@ def _generate_via_llm(
         content = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError):
         _log_ai_call(
-            conn, platform, llm.model, topic_id, round_id,
+            cfg, conn, platform, llm.model, topic_id, round_id,
             latency_ms=latency_ms, tokens_in=None, tokens_out=None,
             success=False, output_valid=False,
         )
@@ -469,7 +469,7 @@ def _generate_via_llm(
         parsed = json.loads(content)
     except (TypeError, ValueError):
         _log_ai_call(
-            conn, platform, llm.model, topic_id, round_id,
+            cfg, conn, platform, llm.model, topic_id, round_id,
             latency_ms=latency_ms, tokens_in=tokens_in, tokens_out=tokens_out,
             success=False, output_valid=False,
         )
@@ -479,7 +479,7 @@ def _generate_via_llm(
 
     if not isinstance(parsed, dict):
         _log_ai_call(
-            conn, platform, llm.model, topic_id, round_id,
+            cfg, conn, platform, llm.model, topic_id, round_id,
             latency_ms=latency_ms, tokens_in=tokens_in, tokens_out=tokens_out,
             success=False, output_valid=False,
         )
@@ -493,7 +493,7 @@ def _generate_via_llm(
     body = body.strip() if isinstance(body, str) else ""
     output_valid = bool(title and body)
     _log_ai_call(
-        conn, platform, llm.model, topic_id, round_id,
+        cfg, conn, platform, llm.model, topic_id, round_id,
         latency_ms=latency_ms, tokens_in=tokens_in, tokens_out=tokens_out,
         success=output_valid, output_valid=output_valid,
     )
@@ -520,13 +520,14 @@ def _generate_via_llm(
 
 
 def _log_ai_call(
-    conn, platform: Platform, model: str, topic_id: Optional[str],
+    cfg, conn, platform: Platform, model: str, topic_id: Optional[str],
     round_id: Optional[int], *, latency_ms: int, tokens_in: Optional[int],
     tokens_out: Optional[int], success: bool, output_valid: bool,
 ) -> None:
     """写 ai_calls 审计（R14 统一字段；失败不影响主流程）。"""
     if conn is None:
         return
+    from src.core.timezone import business_now
     try:
         conn.execute(
             "INSERT INTO ai_calls (step, module, model, prompt_version, input_digest, "
@@ -537,7 +538,7 @@ def _log_ai_call(
                 f"round={round_id};topic={topic_id};platform={platform.value}",
                 tokens_in, tokens_out, latency_ms, latency_ms,
                 1 if output_valid else 0, 1 if success else 0,
-                time.strftime("%Y-%m-%d %H:%M:%S"),
+                business_now(cfg).strftime("%Y-%m-%d %H:%M:%S"),
             ),
         )
         conn.commit()
