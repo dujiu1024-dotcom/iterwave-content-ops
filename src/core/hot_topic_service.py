@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime
+from .timezone import business_now
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ def run_once(
                 return {"skipped": True, **_STATE}
             _STATE.update(
                 running=True, tenant_id=tenant_id, trigger=trigger, error=None, progress=None,
-                started_at=datetime.now().isoformat(timespec="seconds"),
+                started_at=business_now(cfg).isoformat(timespec="seconds"),
             )
     own_conn = conn is None
 
@@ -73,7 +73,7 @@ def run_once(
             prog = dict(_STATE.get("progress") or {})
             prog.update(update)
             prog["sources"] = update.get("sources") or prog.get("sources") or []
-            prog["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            prog["updated_at"] = business_now(cfg).isoformat(timespec="seconds")
             _STATE["progress"] = prog
 
     report, match, error = None, None, None
@@ -140,10 +140,10 @@ def run_once(
                 ),
             })
             prog["sources"] = prog.get("sources") or []
-            prog["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            prog["updated_at"] = business_now(cfg).isoformat(timespec="seconds")
             _STATE.update(
                 running=False, report=report, match=match, error=error,
-                progress=prog, finished_at=datetime.now().isoformat(timespec="seconds"),
+                progress=prog, finished_at=business_now(cfg).isoformat(timespec="seconds"),
             )
     return status()
 
@@ -155,7 +155,7 @@ def trigger_background(cfg, *, trigger: str = "manual", tenant_id: str | None = 
             return {"started": False, "reason": "热点后台任务正在执行", **busy}
         _STATE.update(
             running=True, tenant_id=tenant_id, trigger=trigger, error=None, progress=None,
-            started_at=datetime.now().isoformat(timespec="seconds"),
+            started_at=business_now(cfg).isoformat(timespec="seconds"),
         )
         snapshot = dict(_STATE)
     thread = threading.Thread(
@@ -169,7 +169,7 @@ def trigger_background(cfg, *, trigger: str = "manual", tenant_id: str | None = 
         from .redact import redact, safe_error_summary
         with _LOCK:
             _STATE.update(running=False, error=safe_error_summary(exc, "后台采集任务启动失败"),
-                          finished_at=datetime.now().isoformat(timespec="seconds"))
+                          finished_at=business_now(cfg).isoformat(timespec="seconds"))
         raise
     return {"started": True, **snapshot}
 
@@ -185,7 +185,7 @@ def run_research(
                 return {"skipped": True, "reason": "热点后台任务正在执行，稍后再试", **busy}
             _RESEARCH_STATE.update(
                 running=True, tenant_id=tenant_id, error=None, report=None,
-                started_at=datetime.now().isoformat(timespec="seconds"),
+                started_at=business_now(cfg).isoformat(timespec="seconds"),
             )
     own_conn = conn is None
     report, error = None, None
@@ -214,7 +214,7 @@ def run_research(
         with _LOCK:
             _RESEARCH_STATE.update(
                 running=False, report=report, error=error,
-                finished_at=datetime.now().isoformat(timespec="seconds"),
+                finished_at=business_now(cfg).isoformat(timespec="seconds"),
             )
     return research_status()
 
@@ -227,7 +227,7 @@ def trigger_research(cfg, *, tenant_id: str | None = None) -> dict:
             return {"started": False, "reason": "热点后台任务正在执行，稍后再试", **busy}
         _RESEARCH_STATE.update(
             running=True, tenant_id=tenant_id, error=None, report=None,
-            started_at=datetime.now().isoformat(timespec="seconds"),
+            started_at=business_now(cfg).isoformat(timespec="seconds"),
         )
         snapshot = dict(_RESEARCH_STATE)
     thread = threading.Thread(
@@ -242,7 +242,7 @@ def trigger_research(cfg, *, tenant_id: str | None = None) -> dict:
         with _LOCK:
             _RESEARCH_STATE.update(
                 running=False, error=safe_error_summary(exc, "后台研判任务启动失败"),
-                finished_at=datetime.now().isoformat(timespec="seconds"),
+                finished_at=business_now(cfg).isoformat(timespec="seconds"),
             )
         raise
     return {"started": True, **snapshot}
