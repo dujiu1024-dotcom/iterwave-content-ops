@@ -473,7 +473,20 @@ class LockedConnection:
         retain_current = False
         release_retained = False
         try:
-            return operation()
+            try:
+                return operation()
+            except BaseException:
+                # SQL 语句失败后即使业务层捕获异常，也不能让此前的半截写入被提交。
+                if self._context_owner == owner and self._context_depth > 0:
+                    object.__setattr__(self, "_rollback_only", True)
+                elif self._transaction_owner == owner:
+                    try:
+                        self._conn.rollback()
+                    finally:
+                        if not self._conn.in_transaction:
+                            object.__setattr__(self, "_transaction_owner", None)
+                            release_retained = True
+                raise
         finally:
             # 发生 SQL 异常时也必须依据真实连接状态决定是否继续持锁。
             try:
