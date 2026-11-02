@@ -14,6 +14,7 @@ import sqlite3
 import tempfile
 import zipfile
 from datetime import datetime
+from src.core.timezone import business_now
 from pathlib import Path, PurePosixPath
 
 MAX_BACKUP_BYTES = 2 * 1024 * 1024 * 1024
@@ -48,7 +49,7 @@ def create_backup(db_path: Path | str, data_dir: Path | str,
     if not db_path.is_file():
         raise BackupError("数据库文件不存在，无法创建快照")
     backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = business_now(cfg).strftime("%Y%m%d_%H%M%S")
     destination = backup_dir / f"iterwave_{tenant_id}_{ts}.zip"
     media_dir = data_dir / "media"
     overrides = data_dir / "config_overrides.json"
@@ -135,7 +136,7 @@ def create_backup(db_path: Path | str, data_dir: Path | str,
         manifest = {
             "version": 1,
             "tenant_id": tenant_id,
-            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "created_at": business_now(cfg).isoformat(timespec="seconds"),
             "database_sha256": _sha256(snapshot_db),
             "media_files": media_files,
             "output_files": output_files,
@@ -185,7 +186,7 @@ def restore_backup(backup_path: Path | str, db_path: Path | str, data_dir: Path 
     )
     if not backup_path.is_relative_to(backup_dir) or not backup_path.is_file():
         raise BackupError("只能恢复当前账号组备份目录中的文件")
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = business_now(cfg).strftime("%Y%m%d_%H%M%S")
     media_dir = data_dir / "media"
     data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
