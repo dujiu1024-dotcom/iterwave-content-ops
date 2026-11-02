@@ -18,7 +18,7 @@ const CONFIDENCE_LABEL: Record<string, string> = {
   medium: "中",
   low: "低",
 };
-/** 只有覆盖缺口（audience=user）可由用户采纳进母计划；验证缺口由 Agent 内部安排试验 */
+/** 只有覆盖缺口（audience=user）可由用户采纳为子计划修订草稿；验证缺口由 Agent 内部安排试验 */
 const isAdoptable = (g: GapSuggestion) => g.audience === "user" && g.gap_type === "coverage_gap";
 
 /** R3：NULL 显示灰色「—」，不显示 0 */
@@ -74,7 +74,7 @@ export default function Gaps() {
     setAdoptMsg(null);
     try {
       const r = await api.adoptGaps(dims);
-      const msg = `已把「${dims.join("」「")}」写回母计划（影响 ${(r.stale_rounds ?? []).length} 个活跃轮次）`;
+      const msg = `已为 ${r.drafts.length} 个平台子计划生成「${dims.join("」「")}」修订草稿；需在计划管理中逐项审核后生效`;
       setAdoptMsg(msg);
       showToast(msg, "success");
       await load();
@@ -187,7 +187,7 @@ export default function Gaps() {
                     disabled={selected.size === 0 || adopting !== null}
                     onClick={() => adopt(Array.from(selected))}
                   >
-                    {adopting && adopting.length > 1 ? "批量采纳中…" : `批量采纳到母计划（${selected.size}）`}
+                    {adopting && adopting.length > 1 ? "批量采纳中…" : `批量生成子计划修订草稿（${selected.size}）`}
                   </button>
                 </div>
               );

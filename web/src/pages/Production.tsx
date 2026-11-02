@@ -3,7 +3,7 @@ import { useApp } from "../AppContext";
 import { navigate, useUrlTab } from "../nav";
 import {
   api, RunRoundReport, SpiralRound, Draft, Platform, AssetItem,
-  PlanResponse, ContentItem, PipelineResponse, RecheckResult, Goal,
+  PlanResponse, ContentItem, PipelineResponse, RecheckResult, Goal, AutogrowStatus,
 } from "../api";
 import DemoBadge from "../components/DemoBadge";
 import EmptyHint from "../components/EmptyHint";
@@ -70,6 +70,7 @@ export default function Production() {
 
   const [rounds, setRounds] = useState<SpiralRound[]>([]);
   const [roundsPage, setRoundsPage] = useState(1);
+  const [roundStatusFilter, setRoundStatusFilter] = useState("");
   const [roundsTotal, setRoundsTotal] = useState(0);
   const [roundsPages, setRoundsPages] = useState(1);
   const roundsPageSize = 20;
@@ -128,11 +129,12 @@ export default function Production() {
   const [noLogin, setNoLogin] = useState<Platform[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [availableTopicCount, setAvailableTopicCount] = useState<number | null>(null);
+  const [autogrowStatus, setAutogrowStatus] = useState<AutogrowStatus | null>(null);
 
   // ---------------------------------------------------------------- 数据加载
   const refresh = async () => {
     try {
-      const pageResult = await api.roundsPage(roundsPage, roundsPageSize);
+      const pageResult = await api.roundsPage(roundsPage, roundsPageSize, roundStatusFilter || undefined);
       const r = pageResult.items;
       setRounds(r);
       setRoundsTotal(pageResult.total);
@@ -197,6 +199,7 @@ export default function Production() {
 
   useEffect(() => {
     loadPlan();
+    api.autogrow().then(setAutogrowStatus).catch(() => setAutogrowStatus(null));
     api.assets("template").then((r) => setTemplates(r.items)).catch(() => setTemplates([]));
     api.goals().then((g) => setGoals(g.filter((x) => x.status === "active"))).catch(() => {});
     api.status()
@@ -208,7 +211,7 @@ export default function Production() {
   }, []);
   useEffect(() => {
     refresh().catch((e) => showToast(`加载轮次失败: ${e.message}`, "error"));
-  }, [roundsPage]);
+  }, [roundsPage, roundStatusFilter]);
 
   useEffect(() => {
     if (currentRoundId) loadRoundData(currentRoundId);
@@ -585,6 +588,13 @@ export default function Production() {
         </div>
       </div>
 
+      {autogrowStatus && (
+        <div className="panel" style={{ marginBottom: 14 }}>
+          <div className="panel-head"><div><div className="panel-title">自动开轮条件</div><div className="panel-sub">自动闭环是否允许开启下一轮，以及当前阻塞原因。</div></div><span className={`tag ${autogrowStatus.verdict.can_start ? "green" : "orange"}`}>{autogrowStatus.verdict.can_start ? "允许开轮" : "暂不可开轮"}</span></div>
+          <div className="note">{autogrowStatus.verdict.reason || (autogrowStatus.verdict.can_start ? "当前满足自动开轮条件。" : "当前不满足自动开轮条件，请检查运行配置。")}</div>
+          {autogrowStatus.verdict.next_eligible_at && <div className="tiny" style={{ marginTop: 6 }}>预计下次可开轮：{autogrowStatus.verdict.next_eligible_at}</div>}
+        </div>
+      )}
       <div className="tabs" style={{ marginBottom: 14 }}>
         {TABS.map((t) => (
           <button key={t.key} className={`tab ${tab === t.key ? "active" : ""}`} onClick={() => setTab(t.key)}>
@@ -1371,8 +1381,16 @@ export default function Production() {
             <div className="panel-head">
               <div>
                 <div className="panel-title"><span className="icon">≡</span>轮次列表</div>
-                <div className="panel-sub">Round 1 · Round 2 · ...</div>
+                <div className="panel-sub">历史生产轮次 · 支持按执行状态筛选</div>
               </div>
+            </div>
+            <div className="toolbar" style={{ marginBottom: 10, flexWrap: "wrap" }}>
+              <label className="tiny" htmlFor="round-status-filter">轮次状态</label>
+              <select id="round-status-filter" className="field" value={roundStatusFilter} onChange={(e) => { setRoundStatusFilter(e.target.value); setRoundsPage(1); setCurrentRoundId(null); setRoundDetail(null); }} style={{ maxWidth: 180 }}>
+                <option value="">全部状态</option>
+                {Object.entries(ROUND_STATUS_LABEL).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+              <select className="field" aria-label="按平台筛选轮次" disabled title="等待轮次平台关联 API"><option>全部平台（待接 API）</option></select><select className="field" aria-label="按主计划筛选轮次" disabled title="等待主计划关联 API"><option>全部主计划（待接 API）</option></select><select className="field" aria-label="按阶段筛选轮次" disabled title="等待阶段关联 API"><option>全部阶段（待接 API）</option></select>
             </div>
             <div className="list">
               {rounds.length === 0 && (
