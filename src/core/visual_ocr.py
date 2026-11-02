@@ -146,7 +146,17 @@ def validate_rendered_pages(images: list[Path], expected_texts: list[str], repor
     }
     Path(report_path).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     if status == "failed":
-        raise ValueError("OCR 文字校验失败，视觉结果未通过硬门")
+        failed_pages = [
+            {
+                "image": item["image"],
+                "recall": item.get("recall"),
+                "sequence_similarity": item.get("sequence_similarity"),
+                "missing_numbers": item.get("missing_numbers", []),
+            }
+            for item in results if item["status"] == "failed"
+        ]
+        detail = json.dumps(failed_pages, ensure_ascii=False, separators=(",", ":"))
+        raise ValueError(f"OCR 文字校验失败，视觉结果未通过硬门；识别指标={detail}")
     return report
 
 

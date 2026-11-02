@@ -85,7 +85,13 @@ export default function VisualBrandPane() {
             </select>
           </label>
           <label className="field-label">字体名称
-            <input className="field" maxLength={120} value={profile.font_family ?? ""} onChange={(e) => update("font_family", e.target.value)} placeholder="留空使用系统默认字体" />
+            <select className="field" value={profile.font_family ?? ""} onChange={(e) => update("font_family", e.target.value || undefined)}>
+              <option value="">系统默认字体（Noto Sans CJK SC）</option>
+              <option value="Noto Sans CJK SC">Noto Sans CJK SC</option>
+              <option value="Source Han Sans SC">Source Han Sans SC</option>
+              <option value="Microsoft YaHei">Microsoft YaHei</option>
+              <option value="Arial">Arial</option>
+            </select>
           </label>
           <label className="field-label">页脚落款
             <input className="field" maxLength={120} value={profile.footer ?? ""} onChange={(e) => update("footer", e.target.value)} placeholder="可留空" />

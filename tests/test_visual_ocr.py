@@ -1,3 +1,6 @@
+import pytest
+
+from src.core import visual_ocr
 from src.core.visual_ocr import compare_expected_text, normalize_ocr_text, load_ocr_report
 
 
@@ -61,3 +64,18 @@ def test_ocr_gate_tolerates_small_character_recognition_loss():
     result = compare_expected_text("ABCDEFGHIJ", "ABCDEFGHI")
     assert result["recall"] == 0.9
     assert result["passed"] is True
+
+
+
+def test_ocr_hard_gate_reports_quality_metrics(tmp_path, monkeypatch):
+    image = tmp_path / "card.png"
+    image.write_bytes(b"image")
+    monkeypatch.setattr(
+        visual_ocr,
+        "run_ocr",
+        lambda *_args, **_kwargs: {"status": "available", "text": "完全不同"},
+    )
+    with pytest.raises(ValueError, match="识别指标=.*recall"):
+        visual_ocr.validate_rendered_pages(
+            [image], ["需要完整呈现的正文2026"], tmp_path / "report.json",
+        )
