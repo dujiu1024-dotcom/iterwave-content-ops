@@ -431,8 +431,17 @@ vision_ranking:
   temperature: 0
   max_tokens: 600
 
+# 图片创作通道（独立于 llm 对话模型）：商汤主模型 + 火山兜底，顺序调用。
 media_generation:
-  base_url: "https://api.openai.com/v1"
+  provider: "sensenova"
+  base_url: "https://token.sensenova.cn/v1"
+  model: "sensenova-u1.5-fast"
+  api_key_env: "SENSENOVA_API_KEY"
+  watermark: false            # 商汤默认 true，业务图必须关闭
+  fallback_provider: "ark"
+  fallback_base_url: "https://ark.cn-beijing.volces.com/api/plan/v3"
+  fallback_model: "doubao-seedream-5-0-pro"
+  fallback_api_key_env: "ARK_API_KEY"
   timeout_seconds: 150
   connect_timeout_seconds: 15
   max_response_bytes: 20971520

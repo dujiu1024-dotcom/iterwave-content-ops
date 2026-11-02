@@ -721,6 +721,8 @@ export interface MediaGenerationSettings {
   updated_at: string | null;
   used_this_month: number;
   provider_configured: boolean;
+  /** 图片兜底模型（火山方舟），仅用于展示；地址与密钥保存在服务端 */
+  fallback_model?: string;
 }
 export interface MediaUsageTarget {
   id: string;
