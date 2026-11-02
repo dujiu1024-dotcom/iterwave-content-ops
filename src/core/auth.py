@@ -111,7 +111,8 @@ REVOCATION_FILE_NAME = ".session_revocations.json"
 _revoked: dict[str, float] = {}
 _revoked_mtime: float = -1.0
 _failures: dict[str, list[float]] = {}
-_failures_lock = threading.RLock()
+_failure_lock = threading.RLock()
+_FAILURE_IP_LIMIT = 4096
 
 
 # ----------------------------------------------------------------------
@@ -331,38 +332,49 @@ def audit_actor(request) -> str:
 # ----------------------------------------------------------------------
 
 def _recent_failures(ip: str) -> list[float]:
-    with _failures_lock:
-        now = time.time()
+    now = time.monotonic()
+    with _failure_lock:
         keep = [t for t in _failures.get(ip, []) if now - t < LOGIN_WINDOW_SECONDS]
-        _failures[ip] = keep
-        return keep
+        if keep:
+            _failures[ip] = keep
+        else:
+            _failures.pop(ip, None)
+        return list(keep)
 
 
 def is_rate_limited(ip: str) -> bool:
-    with _failures_lock:
+    with _failure_lock:
         return len(_recent_failures(ip)) >= LOGIN_MAX_FAILURES
 
 
 def record_failure(ip: str) -> None:
-    with _failures_lock:
-        _failures.setdefault(ip, []).append(time.time())
+    now = time.monotonic()
+    with _failure_lock:
+        failures = _failures.setdefault(ip, [])
+        failures.append(now)
         _recent_failures(ip)
+        # 未认证来源可任意伪造/轮换 IP；限制状态表大小，避免限速器本身被打成内存耗尽点。
+        if len(_failures) > _FAILURE_IP_LIMIT:
+            oldest_ip = min(
+                _failures,
+                key=lambda key: _failures[key][-1] if _failures[key] else float("-inf"),
+            )
+            _failures.pop(oldest_ip, None)
 
 
 def clear_failures(ip: str) -> None:
-    with _failures_lock:
+    with _failure_lock:
         _failures.pop(ip, None)
 
 
 def login(password: str, ip: str) -> str:
-    """校验口令并签发会话 token；达到失败阈值后先限速，再执行昂贵的 PBKDF2。"""
-    # 限速必须发生在口令校验之前，否则达到阈值后仍可用正确口令登录，
-    # 同时攻击者仍可持续触发 PBKDF2 消耗 CPU。
-    if is_rate_limited(ip):
-        raise PermissionError("尝试次数过多，请 10 分钟后再试")
+    """校验口令并签发会话 token；失败抛 ValueError / 限速抛 PermissionError。"""
+    # 先验证正确口令：共享出口 IP 下其他人的错误尝试，不应锁住合法用户。
     if verify_password(password):
         clear_failures(ip)
         return _new_session()
+    if is_rate_limited(ip):
+        raise PermissionError("尝试次数过多，请 10 分钟后再试")
     record_failure(ip)
     raise ValueError("访问口令不正确")
 
@@ -394,12 +406,12 @@ def is_authenticated(cookie_token: Optional[str], headers, ip: Optional[str] = N
     if not candidate:
         return False
     client_ip = ip or "unknown"
-    # 限速检查必须先于 PBKDF2；否则无效令牌可绕过限速持续占用 CPU。
-    if is_rate_limited(client_ip):
-        return False
+    # 正确的脚本口令不应被同一出口 IP 的其他错误登录锁住。
     if verify_password(candidate):
         clear_failures(client_ip)
         return True
+    if is_rate_limited(client_ip):
+        return False
     record_failure(client_ip)
     return False
 
