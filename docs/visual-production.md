@@ -4,33 +4,46 @@
 
 `src/core/visual_specs.py` 是唯一平台画布规格入口。当前四个平台统一使用 1080×1440 PNG（3:4）作为保守通用基线，最多 9 页；平台实测或官方规格确认后，只更新该配置和对应测试，不在渲染器内散落尺寸常量。该基线不是对平台上传限制的保证。
 
+## 风格 / 字体 / 组件样式：单一来源
+
+- `src/core/visual_catalog.json` 是可选风格（含调色板）、字体、组件样式的唯一数据来源。
+- 渲染器、轮次生产、手动重出图、品牌配置校验都通过 `src/core/visual_catalog.py` 读取；前端 `VisualBrandPane` 通过 `GET /api/visual/catalog` 获取选项（含本机字体是否安装），前端不写死任何选项。
+- 新增风格只改 JSON（并跑 `tests/test_visual_*`），不改代码。
+
 ## 字体与授权
 
 - 生产渲染默认使用 Noto Sans CJK SC。
 - CI 安装 Debian/Ubuntu `fonts-noto-cjk` 包；生产 Linux 主机可运行 `bash scripts/install_visual_fonts.sh`。
 - Noto CJK 字体按 SIL Open Font License 1.1 发布；商业使用需保留字体包自带的 OFL 与版权声明。不得把字体文件从不明来源复制进仓库。
-- 可选字体仅允许 `Noto Sans CJK SC`、`Source Han Sans SC`、`Microsoft YaHei`、`Arial`。其中后两者依赖部署操作系统合法提供，不随项目分发。
-- 当前仓库不重新分发字体二进制；容器镜像或主机必须安装 Noto CJK 字体包。缺少字体时 Chromium 可能回退到系统字体，部署验收应检查 `fc-match "Noto Sans CJK SC"`。
+- 可选字体见 catalog：`Noto Sans CJK SC`、`Source Han Sans SC`、`Microsoft YaHei`（后者依赖部署操作系统合法提供，不随项目分发）。中文卡片不再提供纯西文字体。
+- **缺字体直接报错，不静默回退**：渲染前用 fontconfig（`fc-match`）确认实际匹配到所请求字体，渲染时再在浏览器内探测字体度量；任一失败都抛错。未安装的字体在配置页不可选。
+
+## 排版与硬门（确定性）
+
+- 分页：在 Chromium 中逐段实测高度做贪心分页，单段过长时按句切分；超过页数上限直接报错（「不允许静默截断」），并校验分页后的文字与正文逐字一致。
+- 版式硬门：溢出、越界、元素重叠任一出现即阻止输出。
+- 网络隔离：渲染使用独立无持久化的浏览器上下文，拦截一切非 `data:`/`about:` 请求；页面若尝试外联即报错。
+- OCR 硬门：按 DOM 文本区域（标题、步骤标签、每个信息组件段落）分区识别——按 DOM 报告的文字颜色二值化（浅色字自动变为白底黑字）、缩放到目标字高后再识别；每个数字 token 单独框选、白名单识别，数字必须逐位一致。阈值：字符召回 ≥0.86、顺序相似度 ≥0.72、数字零缺失。OCR 不可用时状态为 `unavailable`，绝不视为通过。
+- AI 审美分只作参考（软门），不替代硬门。
+
+## AI 配图（与主干统一）
+
+- 配置唯一来源：`media_generation_settings`（图片素材库设置：启用开关、模型、尺寸、风格前缀），读取函数 `content_pipeline.image_generation_settings`。不再使用 `ITERWAVE_ENABLE_AI_VISUALS` 等环境变量开关。
+- 轮次生产：封面底图 + 按实测分页逐页生成正文底图，失败的页退回主题底色；文字始终由 Chromium 排版叠加。
+- `contents.visual_status` 沿用 `generated`（含 AI 底图）/ `degraded`（纯排版叠字）/ `media_asset`，不新增取值。
+- 调用外部图像服务前必须结束 SQLite 写事务（手动重出图先 `commit`；单页重做先单独提交任务登记再调模型）。
 
 ## 单页重做
 
-- 仅支持保留了原始 AI 背景素材的视觉版本。
-- 必须启用 `ITERWAVE_ENABLE_AI_VISUALS=1`，并正确配置图像模型 API Key。
+- 仅支持该页保留了原始 AI 底图的视觉版本，且图片素材库设置已启用 AI 配图。
 - 单页重做只替换指定页，其他页沿用原文件；创建新视觉版本并保留历史版本。
 - 新版本状态为 `review_required`，仍需人工审核，不会自动发布。
 
+## 租户品牌配置与信息图组件
 
-## Tenant design tokens and infographic components
+账号组品牌配置可以覆盖风格预设的主色/辅助色/背景色/正文色、字体与组件样式（`card`/`minimal`/`editorial`）。渲染器在不改写原文的前提下把段落映射为语义组件：
 
-The tenant-scoped brand profile can override the theme preset with:
-- primary/accent, secondary/muted, background, and text colors;
-- one of the supported font families;
-- a component layout variant: `card`, `minimal`, or `editorial`.
-
-The renderer maps source paragraphs to semantic components without rewriting copy:
-- ordered process headings become step cards;
-- short numeric statements receive inline stat emphasis;
-- quoted statements become quote panels;
-- other paragraphs remain text blocks.
-
-OCR compares the rendered output against the original source text. A configured font that is unavailable fails rendering with an actionable installation message instead of silently falling back.
+- 「第一步 / 第三件事」等序号标题与 `1.`、`2、` 有序列表 → 步骤卡（序号徽标 + 首个指标数字放大）；
+- 含数字的短句 → 指标强调；
+- 引号开头 → 引用面板；
+- 其余 → 文本块。

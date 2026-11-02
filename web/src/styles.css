@@ -898,3 +898,37 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 @media (max-width: 620px) {
   .template-howto-steps { grid-template-columns: 1fr; }
 }
+
+
+/* 计划中心：主计划 → 平台子计划 → 阶段 */
+.plan-center-page { min-width: 0; }
+.plan-hierarchy { display:flex; align-items:center; gap:10px; padding:12px 14px; margin:0 0 14px; border:1px solid var(--line); border-radius:12px; background:var(--surface); overflow-x:auto; }
+.plan-hierarchy-node { display:flex; flex-direction:column; gap:3px; min-width:130px; padding:10px 12px; border:1px solid var(--line); border-radius:9px; background:var(--surface-2); }
+.plan-hierarchy-node.active { border-color:var(--blue); background:var(--blue-weak); }
+.plan-hierarchy-node b { font-size:13px; }
+.plan-hierarchy-node small { color:var(--muted); font-size:11px; white-space:nowrap; }
+.plan-summary-card,.plan-child-card,.plan-stage-card { min-width:0; padding:14px; border:1px solid var(--line); border-radius:10px; background:var(--surface); }
+.plan-signature { margin:8px 0; overflow-wrap:anywhere; font:12px ui-monospace,monospace; }
+.plan-platform-toggles { display:flex; flex-wrap:wrap; gap:8px; }
+.plan-platform-toggle { display:flex; align-items:center; gap:6px; padding:7px 10px; border:1px solid var(--line); border-radius:8px; font-size:12px; }
+.plan-dimension-row { display:flex; align-items:center; gap:8px; margin:6px 0; }
+.plan-dimension-row span { flex:1; min-width:0; overflow-wrap:anywhere; font-size:12px; }
+.plan-dimension-row input { width:90px; }
+.plan-form-actions { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-top:14px; }
+.plan-version-detail,.plan-stage-editor { margin-top:14px; padding:14px; border:1px solid var(--line); border-radius:10px; background:var(--surface-2); }
+.plan-version-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; font-size:12px; }
+.plan-child-card h3 { margin:10px 0 6px; font-size:15px; }
+.plan-child-card p,.plan-stage-card p { color:var(--muted); font-size:12px; line-height:1.6; overflow-wrap:anywhere; }
+.plan-stage-list { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin-top:14px; }
+.plan-stage-metrics { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin:12px 0; }
+.plan-stage-metrics > div { min-width:0; padding:10px; border-radius:8px; background:var(--surface-2); }
+.plan-stage-metrics b,.plan-stage-metrics small { display:block; }
+.plan-stage-metrics b { font-size:20px; }
+.plan-stage-metrics small { margin-top:3px; color:var(--muted); font-size:10px; }
+@media (max-width:760px) {
+  .plan-hierarchy { gap:6px; }
+  .plan-hierarchy-node { min-width:112px; padding:8px; }
+  .plan-stage-list,.plan-version-grid { grid-template-columns:minmax(0,1fr); }
+  .plan-stage-metrics { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .plan-center-page .page-head { gap:10px; }
+}

@@ -1,7 +1,7 @@
 """全局任务队列消费者。
 
 消费者独立于前台活动账号组。每个任务按自身 tenant_id 构造运行时，并在异步上下文中
-绑定对应登录态目录。生产轮次与账号组定时作业统一由全局单消费者执行。
+绑定对应登录态目录。生产轮次与账号组定时作业由多个消费者跨账号组并行执行，同一账号组保持串行。
 """
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import logging
 import os
 import threading
 import uuid
-from datetime import datetime
+from contextlib import nullcontext
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -40,6 +40,7 @@ class GlobalTaskWorker:
         lease_seconds: int = 90,
         heartbeat_seconds: float = 20,
         shutdown_grace_seconds: float | None = None,
+        reconcile_terminal_rounds: bool = True,
     ):
         self.queue = queue
         self.build_tenant_context = build_tenant_context
@@ -52,17 +53,21 @@ class GlobalTaskWorker:
             except (TypeError, ValueError):
                 shutdown_grace_seconds = 30.0
         self.shutdown_grace_seconds = max(0.0, min(float(shutdown_grace_seconds), 300.0))
+        self.reconcile_terminal_rounds = bool(reconcile_terminal_rounds)
         self.owner = uuid.uuid4().hex
         self._reconciled_interrupted_task_ids: set[str] = set()
 
     async def run(self, stop_event: asyncio.Event) -> None:
         logger.info("全局任务消费者启动 worker=%s", self.owner[:8])
-        self._sync_terminal_rounds()
+        if self.reconcile_terminal_rounds:
+            self._sync_terminal_rounds()
         try:
             while not stop_event.is_set():
                 try:
-                    self.queue.recover_expired()
-                    self._sync_terminal_rounds()
+                    recovered = self.queue.recover_expired()
+                    # 哪个 worker 回收了过期任务，哪个 worker 就负责对账。
+                    if recovered.get("interrupted", 0):
+                        self._sync_terminal_rounds()
                     task = self.queue.claim_next(self.owner, lease_seconds=self.lease_seconds)
                 except Exception:
                     logger.exception("全局任务队列读取失败")
@@ -177,12 +182,12 @@ class GlobalTaskWorker:
                                 template_data=task.payload.get("template_snapshot"),
                             )
                         except asyncio.CancelledError:
-                            self._mark_content_plan_failed(context["conn"], round_id)
+                            self._mark_content_plan_failed(context["conn"], round_id, cfg=context["cfg"])
                             raise
                         except Exception:
-                            self._mark_content_plan_failed(context["conn"], round_id)
+                            self._mark_content_plan_failed(context["conn"], round_id, cfg=context["cfg"])
                             raise
-                        self._complete_content_plan(context["conn"], round_id, report)
+                        self._complete_content_plan(context["conn"], round_id, report, cfg=context["cfg"])
                         return report
                     raise ValueError(f"不支持的轮次任务操作：{operation}")
 
@@ -255,12 +260,12 @@ class GlobalTaskWorker:
         try:
             now = business_now(cfg).isoformat(timespec="seconds")
             identity = json.dumps(args, ensure_ascii=False, default=str)[:300]
-            cur = conn.execute(
-                "INSERT INTO task_runs (task_type, biz_id, status, attempt, started_at, created_at) "
-                "VALUES (?, ?, 'running', 1, ?, ?)",
-                (task_type, f"scheduler:{method}:{identity}", now, now),
-            )
-            conn.commit()
+            with conn:
+                cur = conn.execute(
+                    "INSERT INTO task_runs (task_type, biz_id, status, attempt, started_at, created_at) "
+                    "VALUES (?, ?, 'running', 1, ?, ?)",
+                    (task_type, f"scheduler:{method}:{identity}", now, now),
+                )
             return int(cur.lastrowid)
         except Exception:
             logger.exception("创建定时任务审计记录失败 method=%s", method)
@@ -272,29 +277,31 @@ class GlobalTaskWorker:
             return
         from src.core.timezone import business_now
         try:
-            conn.execute(
-                "UPDATE task_runs SET status=?, finished_at=?, error_msg=? WHERE id=? AND status='running'",
-                (status, business_now(cfg).isoformat(timespec="seconds"), error_msg, task_run_id),
-            )
-            conn.commit()
+            with conn:
+                conn.execute(
+                    "UPDATE task_runs SET status=?, finished_at=?, error_msg=? WHERE id=? AND status='running'",
+                    (status, business_now(cfg).isoformat(timespec="seconds"), error_msg, task_run_id),
+                )
         except Exception:
             logger.exception("结束定时任务审计记录失败 task_run_id=%s", task_run_id)
 
     @staticmethod
-    def _mark_round_failed(conn, round_id: int, reason: str) -> bool:
+    def _mark_round_failed(conn, round_id: int, reason: str, cfg=None) -> bool:
         """兜底收口 Worker 捕获到的执行器外异常，避免轮次永久停在 producing。"""
         if conn is None or not callable(getattr(conn, "execute", None)):
             return False
         from src.core.state_machine import RoundStateMachine
 
-        row = conn.execute(
-            "SELECT status FROM spiral_rounds WHERE id=?", (round_id,),
-        ).fetchone()
-        if row is None or row["status"] not in {"producing", "analyzing"}:
-            return False
-        return RoundStateMachine(conn).transition(
-            round_id, "failed", f"Worker 异常兜底收口：{str(reason)[:300]}",
-        )
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT status FROM spiral_rounds WHERE id=?", (round_id,),
+            ).fetchone()
+            if row is None or row["status"] not in {"producing", "analyzing"}:
+                return False
+            return RoundStateMachine(conn, cfg=cfg).transition(
+                round_id, "failed", f"Worker 异常兜底收口：{str(reason)[:300]}",
+            )
 
     def _reconcile_round_failure(self, task: QueuedTask, reason: str) -> bool:
         """重新构建任务所属账号组上下文，对账轮次和内容计划状态。
@@ -315,8 +322,8 @@ class GlobalTaskWorker:
         reconciled = False
         try:
             conn = context.get("conn")
-            self._mark_round_failed(conn, round_id, reason)
-            self._mark_content_plan_failed(conn, round_id)
+            self._mark_round_failed(conn, round_id, reason, cfg=context.get("cfg"))
+            self._mark_content_plan_failed(conn, round_id, cfg=context.get("cfg"))
             reconciled = True
         except Exception:
             logger.exception(
@@ -339,51 +346,65 @@ class GlobalTaskWorker:
         return reconciled
 
     @staticmethod
-    def _mark_content_plan_failed(conn, round_id: int) -> None:
-        """生产异常时将关联计划标记失败，允许用户修复后重试。"""
+    def _mark_content_plan_failed(conn, round_id: int, cfg=None) -> None:
+        """原子标记关联计划失败；拒绝覆盖已取消、已完成等终态计划。"""
         if conn is None or not callable(getattr(conn, "execute", None)):
             return
-        relation = conn.execute(
-            "SELECT plan_id FROM content_plan_rounds WHERE round_id=?", (round_id,),
-        ).fetchone()
-        if relation is None:
-            return
-        conn.execute(
-            "UPDATE content_plans SET status='failed',version=version+1,updated_at=? "
-            "WHERE id=? AND status='generating'",
-            (datetime.now().astimezone().isoformat(timespec="seconds"), relation["plan_id"]),
-        )
-        conn.commit()
+        from src.core.timezone import business_now
+        now = business_now(cfg).isoformat(timespec="seconds")
+        transaction = conn if callable(getattr(conn, "__enter__", None)) else nullcontext()
+        with transaction:
+            conn.execute("BEGIN IMMEDIATE")
+            relation = conn.execute(
+                "SELECT r.plan_id FROM content_plan_rounds r "
+                "JOIN content_plans p ON p.id=r.plan_id "
+                "WHERE r.round_id=? AND p.status='generating'",
+                (round_id,),
+            ).fetchone()
+            if relation is None:
+                return
+            conn.execute(
+                "UPDATE content_plans SET status='failed',version=version+1,updated_at=? "
+                "WHERE id=? AND status='generating'",
+                (now, relation["plan_id"]),
+            )
 
     @staticmethod
-    def _complete_content_plan(conn, round_id: int, report: Any) -> None:
-        """生产完成后把轮次产出的草稿关联回计划，并推进计划状态。"""
+    def _complete_content_plan(conn, round_id: int, report: Any, cfg=None) -> None:
+        """原子关联轮次草稿并推进计划；迟到结果不得覆盖已终止计划。"""
         if conn is None or not callable(getattr(conn, "execute", None)):
             return
-        relation = conn.execute(
-            "SELECT plan_id FROM content_plan_rounds WHERE round_id=?", (round_id,),
-        ).fetchone()
-        if relation is None:
-            return
-        plan_id = relation["plan_id"]
-        now = datetime.now().astimezone().isoformat(timespec="seconds")
-        drafts = conn.execute(
-            "SELECT d.id FROM drafts d JOIN contents c ON c.id=d.content_id WHERE c.round_id=?",
-            (round_id,),
-        ).fetchall()
-        for draft in drafts:
+        from src.core.timezone import business_now
+        now = business_now(cfg).isoformat(timespec="seconds")
+        transaction = conn if callable(getattr(conn, "__enter__", None)) else nullcontext()
+        with transaction:
+            conn.execute("BEGIN IMMEDIATE")
+            relation = conn.execute(
+                "SELECT r.plan_id FROM content_plan_rounds r "
+                "JOIN content_plans p ON p.id=r.plan_id "
+                "WHERE r.round_id=? AND p.status='generating'",
+                (round_id,),
+            ).fetchone()
+            # 计划已取消/失败/完成时，迟到的 Worker 结果不得再挂接草稿或改写计划。
+            if relation is None:
+                return
+            plan_id = relation["plan_id"]
+            drafts = conn.execute(
+                "SELECT d.id FROM drafts d JOIN contents c ON c.id=d.content_id WHERE c.round_id=?",
+                (round_id,),
+            ).fetchall()
+            for draft in drafts:
+                conn.execute(
+                    "INSERT OR IGNORE INTO content_plan_drafts(plan_id,draft_id,round_id,created_at) VALUES(?,?,?,?)",
+                    (plan_id, draft["id"], round_id, now),
+                )
+            failed = isinstance(report, dict) and report.get("final_status") == "failed"
+            status = "failed" if failed else "generated"
             conn.execute(
-                "INSERT OR IGNORE INTO content_plan_drafts(plan_id,draft_id,round_id,created_at) VALUES(?,?,?,?)",
-                (plan_id, draft["id"], round_id, now),
+                "UPDATE content_plans SET status=?,version=version+1,updated_at=? "
+                "WHERE id=? AND status='generating'",
+                (status, now, plan_id),
             )
-        failed = isinstance(report, dict) and report.get("final_status") == "failed"
-        status = "failed" if failed else "generated"
-        conn.execute(
-            "UPDATE content_plans SET status=?,version=version+1,updated_at=? "
-            "WHERE id=? AND status='generating'",
-            (status, now, plan_id),
-        )
-        conn.commit()
 
     async def _execute(
         self, task: QueuedTask, *, stop_event: asyncio.Event | None = None,

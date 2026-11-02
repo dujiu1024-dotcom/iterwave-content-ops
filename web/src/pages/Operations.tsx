@@ -9,7 +9,7 @@ import { NotifyChannelsEditor } from "../components/ConfigEditors";
 import {
   api, Platform, CircuitBreakerEvent, Draft,
   OpsKpiResponse, OpsLogItem, TaskRunItem, NotificationItem,
-  SchedulerJob, RhythmConfig, NotifyRule, SystemConfigView,
+  SchedulerJob, RhythmConfig, NotifyRule, SystemConfigView, OpsTargetsView,
 } from "../api";
 
 const PLATFORM_NAME: Record<Platform, string> = {
@@ -30,7 +30,7 @@ const STATUS_LABEL: Record<string, string> = {
 };
 
 const DRAFT_STATUS_LABEL: Record<string, string> = {
-  draft_pending: "待存草稿", draft_saved: "已存草稿", draft_failed: "存草稿失败", published: "已发布",
+  draft_pending: "待存草稿", pending_verify: "待核实平台保存", draft_saved: "已存草稿", draft_failed: "存草稿失败", published: "已发布",
   collecting: "数据采集中", collected: "已采集", expired: "已过期", cancelled: "已取消", failed: "失败",
 };
 
@@ -43,17 +43,18 @@ const LEVEL_CLS: Record<string, string> = {
   info: "", warning: "orange", error: "red", critical: "red",
 };
 
-type OpsPane = "kpi" | "logs" | "publish" | "breaker" | "tasks" | "scheduler" | "rhythm" | "notifications";
-type OpsGroup = "kpi" | "publish" | "guard" | "jobs" | "inbox";
+type OpsPane = "kpi" | "logs" | "publish" | "breaker" | "tasks" | "scheduler" | "rhythm" | "notifications" | "targets";
+type OpsGroup = "kpi" | "publish" | "guard" | "jobs" | "inbox" | "targets";
 type OpsTab = OpsGroup | OpsPane;
 
-/** 8 个子面板合并为 5 个页签；旧链接（?tab=scheduler 等）自动落到所属页签 */
+/** 主动运营目标单独管理；旧链接（?tab=scheduler 等）自动落到所属页签 */
 const TABS: { key: OpsGroup; label: string; panes: OpsPane[] }[] = [
   { key: "kpi", label: "运营总控", panes: ["kpi"] },
   { key: "publish", label: "发布确认", panes: ["publish"] },
   { key: "guard", label: "熔断与节奏", panes: ["breaker", "rhythm"] },
   { key: "jobs", label: "任务与定时", panes: ["tasks", "scheduler"] },
   { key: "inbox", label: "日志与通知", panes: ["logs", "notifications"] },
+  { key: "targets", label: "主动运营目标", panes: ["targets"] },
 ];
 const ALL_OPS_TABS: OpsTab[] = [...TABS.map((t) => t.key), "logs", "breaker", "tasks", "scheduler", "rhythm", "notifications"];
 function groupOf(t: OpsTab): OpsGroup {
@@ -260,6 +261,9 @@ export default function Operations() {
           await refresh();
         }} />
       )}
+
+      {/* 主动运营目标：关注对象支持一行一个目标 */}
+      {show("targets") && <OpsTargetsEditor />}
 
       {/* === 5. 任务追踪 === */}
       {show("tasks") && <TasksPane tasks={tasks} total={tasksTotal} page={tasksPage} pages={tasksPages} onPageChange={setTasksPage} onResolved={refresh} targetId={recordTarget.type === "task_run" || recordTarget.type === "round" ? recordTarget.id : null} targetType={recordTarget.type} platform={tasksPlatform} status={tasksStatus} taskType={tasksType} dateFrom={tasksDateFrom} dateTo={tasksDateTo} onFiltersChange={(v) => { setTasksPage(1); setTasksPlatform(v.platform); setTasksStatus(v.status); setTasksType(v.taskType); setTasksDateFrom(v.dateFrom); setTasksDateTo(v.dateTo); }} />}
@@ -514,7 +518,7 @@ function PublishPane() {
       const all = await api.draftsAll();
       // draft_pending 代表仅保存在本地的干跑/待存内容；用户可以复制到平台手动发布后在这里登记。
       setDrafts(all.filter((d) =>
-        d.status === "draft_pending" || d.status === "draft_saved" ||
+        d.status === "draft_pending" || d.status === "pending_verify" || d.status === "draft_saved" ||
         d.status === "user_published" || d.status === "data_fetching" || d.status === "published"
       ));
       setPage(1);
@@ -624,6 +628,12 @@ function PublishPane() {
                     ? " · 仅保存在 IterWave，本内容尚未存入平台"
                     : d.saved_at ? ` · 存草稿 ${new Date(d.saved_at).toLocaleString("zh-CN")}` : ""}
                 </div>
+                {d.status === "pending_verify" && (
+                  <div className="note" style={{ marginTop: 6, color: "var(--orange)" }}>
+                    平台保存结果不确定，系统不会自动重试，以免生成重复草稿。请进入「内容生产」对应轮次，
+                    在平台草稿箱核实后选择「平台已存」或「平台未存」。
+                  </div>
+                )}
                 {d.status === "draft_pending" && (
                   <div className="note" style={{ marginTop: 6 }}>
                     这是干跑/待存内容。请在「内容生产 → 内容编辑与审核」复制文案，手动发布到平台后再回来登记；系统不会自动发布。

@@ -236,12 +236,20 @@ class PlanVersionStore:
                 raise PlanVersionError("关联的主计划版本不存在")
             if master["status"] != "effective":
                 raise PlanVersionError("新子计划版本必须关联当前生效的主计划版本")
+            base_stage_keys: set[str] = set()
             if based_on_version_id is not None:
                 base = self.conn.execute(
                     "SELECT sub_plan_id FROM sub_plan_versions WHERE id=?", (based_on_version_id,)
                 ).fetchone()
                 if base is None or base["sub_plan_id"] != sub_plan_id:
                     raise PlanVersionError("基准版本不属于当前子计划")
+                base_stage_keys = {
+                    str(row["stage_key"])
+                    for row in self.conn.execute(
+                        "SELECT stage_key FROM sub_plan_stages WHERE sub_plan_version_id=?",
+                        (based_on_version_id,),
+                    ).fetchall()
+                }
 
             version_no = int(self.conn.execute(
                 "SELECT COALESCE(MAX(version_no),0)+1 FROM sub_plan_versions WHERE sub_plan_id=?",
@@ -261,7 +269,10 @@ class PlanVersionStore:
             for index, stage in enumerate(stages, start=1):
                 if not isinstance(stage, dict):
                     raise PlanVersionError("阶段条目必须是对象")
-                stage_key = str(stage.get("stage_key") or uuid.uuid4().hex).strip()
+                supplied_stage_key = stage.get("stage_key")
+                if supplied_stage_key and str(supplied_stage_key) not in base_stage_keys:
+                    raise PlanVersionError("阶段稳定标识必须继承自当前子计划的基准版本")
+                stage_key = str(supplied_stage_key or uuid.uuid4().hex).strip()
                 if not stage_key or len(stage_key) > 100 or stage_key in seen_stage_keys:
                     raise PlanVersionError("阶段稳定标识无效或重复")
                 seen_stage_keys.add(stage_key)

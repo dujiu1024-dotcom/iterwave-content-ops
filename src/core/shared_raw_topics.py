@@ -131,7 +131,7 @@ def import_to_tenant(conn) -> dict[str, int]:
 
 
 def shared_snapshot_fresh(max_age_minutes: int) -> bool:
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     shared = _connect()
     try:
@@ -148,4 +148,6 @@ def shared_snapshot_fresh(max_age_minutes: int) -> bool:
         captured = datetime.fromisoformat(value)
     except (TypeError, ValueError):
         return False
-    return datetime.now() - captured < timedelta(minutes=max(1, max_age_minutes))
+    # Shared raw feed timestamps are UTC-naive by contract; compare in UTC, not host local time.
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    return now_utc - captured < timedelta(minutes=max(1, max_age_minutes))

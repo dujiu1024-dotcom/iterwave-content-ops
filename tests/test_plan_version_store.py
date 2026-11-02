@@ -518,3 +518,27 @@ def test_stage_identity_and_publish_progress_survive_subplan_revision():
         "SELECT status FROM sub_plan_stages WHERE id=?", (second_stage_id,)
     ).fetchone()[0] == "in_progress"
     assert store.get_stage_publish_stats(second_stage_id)["confirmed_published_count"] == 1
+
+
+def test_stage_key_cannot_be_reused_from_another_subplan():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    master = _active_master(store)
+    first, first_stage_id = _active_subplan(store, master)
+    first_stage_key = conn.execute(
+        "SELECT stage_key FROM sub_plan_stages WHERE id=?", (first_stage_id,)
+    ).fetchone()[0]
+    store.create_subplan(
+        "sub-douyin", master_plan_version_id=master["id"],
+        platform="douyin", title="抖音子计划",
+    )
+    second = store.create_subplan_version(
+        "sub-douyin", {"title": "抖音子计划"}, master_plan_version_id=master["id"],
+        stages=[{"title": "第一阶段", "target_count": 3}],
+    )
+    with pytest.raises(PlanVersionError, match="必须继承"):
+        store.create_subplan_version(
+            "sub-douyin", {"title": "抖音子计划"}, master_plan_version_id=master["id"],
+            based_on_version_id=second["id"],
+            stages=[{"stage_key": first_stage_key, "title": "伪造阶段", "target_count": 3}],
+        )

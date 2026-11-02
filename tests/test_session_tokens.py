@@ -11,10 +11,8 @@ def isolate_auth_environment(monkeypatch, tmp_path):
     monkeypatch.delenv(auth.PASSWORD_ENV, raising=False)
     monkeypatch.delenv(auth.SESSION_SECRET_ENV, raising=False)
     auth._reset_revocations()
-    auth._failures.clear()
     yield
     auth._reset_revocations()
-    auth._failures.clear()
 
 
 def _simulate_restart():

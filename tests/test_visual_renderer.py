@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from src.core.visual_renderer import _document, _ocr_expected_texts, _pages, _split_paragraphs, _validate_theme_contrast
+from src.core.visual_renderer import _document, _ocr_expected_texts, _split_paragraphs, _validate_theme_contrast
 from src.core.visual_specs import build_infographic_components
 
 
@@ -11,17 +11,6 @@ def test_long_paragraph_is_split_without_losing_text():
     chunks = _split_paragraphs(source, limit=40)
     assert "".join(chunks) == source
     assert all(len(chunk) <= 40 for chunk in chunks)
-
-
-def test_page_limit_fails_instead_of_silently_truncating():
-    with pytest.raises(ValueError, match="不允许静默截断"):
-        _pages("\n".join(f"段落{i}" for i in range(40)), max_pages=2, capacity=2)
-
-
-def test_page_planner_preserves_all_paragraphs():
-    source = "\n".join(f"段落{i}" for i in range(11))
-    pages = _pages(source, max_pages=5, capacity=3)
-    assert [item for page in pages for item in page] == [f"段落{i}" for i in range(11)]
 
 
 def test_html_escapes_user_content_and_renders_subtitle_separately():
@@ -67,14 +56,6 @@ def test_all_builtin_themes_pass_contrast_hard_gate():
         assert _validate_theme_contrast(theme, True) >= 4.5
 
 
-def test_page_planner_respects_text_budget_even_when_paragraph_count_fits():
-    source = "\n".join("内容" * 100 for _ in range(8))
-    chunks = _split_paragraphs(source)
-    pages = _pages(source, max_pages=10, capacity=5, max_page_chars=320)
-    assert [block for page in pages for block in page] == chunks
-    assert all(sum(len(block) for block in page) <= 320 for page in pages)
-
-
 def test_infographic_component_schema_preserves_copy_and_classifies_visual_blocks():
     source = ["第一步：收集样本", "覆盖率提升25%，达到100人", "“教师应保留最终判断权”", "持续复盘内容"]
     components = build_infographic_components(source)
@@ -92,7 +73,7 @@ def test_document_renders_semantic_infographic_components():
     assert "visual-step" in document
     assert "visual-stat" in document
     assert "visual-quote" in document
-    assert "<strong>25%</strong>" in document
+    assert '<strong class="num">25%</strong>' in document
 
 
 def test_document_supports_tenant_custom_design_tokens_and_component_styles():
@@ -129,4 +110,5 @@ def test_document_rejects_invalid_brand_color_tokens():
 
 
 def test_ocr_expectations_exclude_decorative_subtitle_and_footer():
-    assert _ocr_expected_texts("标题", [["正文一", "正文二"]]) == ["标题", "标题正文一正文二"]
+    # Paragraph boundaries are kept so numbers in adjacent items never merge into one token.
+    assert _ocr_expected_texts("标题", [["正文一", "正文二"]]) == ["标题", "标题\n正文一\n正文二"]

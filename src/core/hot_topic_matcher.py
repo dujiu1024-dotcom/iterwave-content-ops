@@ -28,7 +28,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from .timezone import business_now
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -93,30 +93,43 @@ def load_persona(cfg, conn) -> Persona:
 
 def default_llm_fn(cfg) -> Optional[LlmFn]:
     """config.llm 可用时返回调用函数，否则 None（自动降级为关键词匹配）。"""
-    llm = getattr(cfg, "llm", None)
-    if not llm or not getattr(llm, "enabled", False):
-        return None
-    api_key = os.getenv(getattr(llm, "api_key_env", "ARK_API_KEY"))
-    if not api_key:
+    from .llm_endpoints import llm_endpoints
+
+    endpoints = llm_endpoints(cfg)
+    if not endpoints:
         return None
 
     def _call(system_prompt: str, user_prompt: str) -> tuple[str, dict]:
         import httpx
-        with httpx.Client(timeout=llm.timeout_seconds) as client:
-            resp = client.post(
-                f"{llm.base_url.rstrip('/')}/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={
-                    "model": llm.model,
-                    "messages": [{"role": "system", "content": system_prompt},
-                                 {"role": "user", "content": user_prompt}],
-                    "temperature": cfg.hot_topic_matcher.llm_temperature,
-                    "response_format": {"type": "json_object"},
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        return data["choices"][0]["message"]["content"], data.get("usage") or {}
+        last_exc: Optional[Exception] = None
+        for index, endpoint in enumerate(endpoints):
+            payload: dict = {
+                "model": endpoint.model,
+                "messages": [{"role": "system", "content": system_prompt},
+                             {"role": "user", "content": user_prompt}],
+                "temperature": cfg.hot_topic_matcher.llm_temperature,
+                "response_format": {"type": "json_object"},
+            }
+            if endpoint.thinking:
+                # 商汤/火山都要求 thinking 为对象；字符串会被判为 invalid arguments
+                payload["thinking"] = {"type": endpoint.thinking}
+            if index > 0:
+                logger.warning("热点研判主模型失败，切换兜底模型 %s：%s",
+                               endpoint.model, last_exc)
+            try:
+                with httpx.Client(timeout=getattr(cfg.llm, "timeout_seconds", 60)) as client:
+                    resp = client.post(
+                        f"{endpoint.base_url.rstrip('/')}/chat/completions",
+                        headers={"Authorization": f"Bearer {endpoint.api_key}",
+                                 "Content-Type": "application/json"},
+                        json=payload,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                return data["choices"][0]["message"]["content"], data.get("usage") or {}
+            except Exception as exc:  # noqa: BLE001 — 主模型失败就换兜底
+                last_exc = exc
+        raise last_exc if last_exc is not None else RuntimeError("模型调用失败")
 
     return _call
 
@@ -245,7 +258,7 @@ class HotTopicMatcher:
             "match_method=?, match_version=?, matched_at=?, forbidden_hit=? WHERE id=?",
             (res.get("score"), res.get("dimension") or None, res.get("angle") or None,
              res.get("reason") or None, method, self.version,
-             datetime.now().isoformat(timespec="seconds"),
+             business_now(self.cfg).isoformat(timespec="seconds"),
              1 if res.get("forbidden") else 0, row["id"]),
         )
 

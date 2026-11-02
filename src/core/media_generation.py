@@ -108,7 +108,11 @@ def generate_image_bytes(
                 }
                 response = client.post(endpoint, headers=headers, data=data, files=files)
             else:
-                response = client.post(endpoint, headers=headers, json={**data, "n": 1})
+                # 显式要求 base64 响应（Doubao/Seedream 默认返回 URL，本适配器只接受 b64_json）
+                response = client.post(
+                    endpoint, headers=headers,
+                    json={**data, "n": 1, "response_format": "b64_json"},
+                )
         if response.status_code >= 400:
             message = ""
             try:

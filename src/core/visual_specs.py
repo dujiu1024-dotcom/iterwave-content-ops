@@ -47,8 +47,14 @@ class VisualComponent:
     label: str = ""
 
 
-_STEP_PREFIX = re.compile(r"^(第[一二三四五六七八九十0-9]+(?:步|阶段|点))\s*[：:、-]?\s*(.*)$")
-_NUMBER_TOKEN = re.compile(r"(?<![0-9])([0-9]+(?:\.[0-9]+)?%?)(?![0-9])")
+_STEP_PREFIX = re.compile(
+    r"^(第[一二三四五六七八九十0-9]+(?:步|阶段|点|件事|条|个))\s*[：:、-]?\s*(.*)$"
+)
+# "1. xxx" / "2、xxx" / "3）xxx" ordered list items (ordinal kept as the step label).
+_ORDINAL_PREFIX = re.compile(r"^([0-9]{1,2})\s*[\.、．)）]\s*(\S.*)$")
+NUMBER_TOKEN = re.compile(
+    r"(?<![0-9,.])([+-]?(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?%?)(?![0-9])"
+)
 
 
 def build_infographic_components(paragraphs: list[str]) -> list[VisualComponent]:
@@ -63,16 +69,19 @@ def build_infographic_components(paragraphs: list[str]) -> list[VisualComponent]
         text = str(paragraph or "").strip()
         if not text:
             continue
-        step = _STEP_PREFIX.match(text)
+        step = _STEP_PREFIX.match(text) or _ORDINAL_PREFIX.match(text)
         if step:
+            rest = step.group(2)
+            metric = NUMBER_TOKEN.search(rest) if len(text) <= 120 else None
             components.append(VisualComponent(
                 kind="step", text=text, label=step.group(1),
+                value=metric.group(1) if metric else "",
             ))
             continue
         if text.startswith(("“", "「", "『", '"', "‘")):
             components.append(VisualComponent(kind="quote", text=text))
             continue
-        number = _NUMBER_TOKEN.search(text)
+        number = NUMBER_TOKEN.search(text)
         if number and len(text) <= 120:
             components.append(VisualComponent(
                 kind="stat", text=text, value=number.group(1),

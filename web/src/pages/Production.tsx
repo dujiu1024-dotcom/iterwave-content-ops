@@ -3,7 +3,7 @@ import { useApp } from "../AppContext";
 import { navigate, useUrlTab } from "../nav";
 import {
   api, RunRoundReport, SpiralRound, Draft, Platform, AssetItem,
-  PlanResponse, ContentItem, PipelineResponse, RecheckResult, Goal,
+  PlanResponse, ContentItem, PipelineResponse, RecheckResult, Goal, AutogrowStatus,
 } from "../api";
 import DemoBadge from "../components/DemoBadge";
 import EmptyHint from "../components/EmptyHint";
@@ -21,7 +21,7 @@ const STATUS_CLS: Record<string, string> = {
   created: "gray", producing: "orange", awaiting_publish: "blue",
   collecting_metrics: "purple", analyzing: "teal",
   completed: "green", partial_completed: "orange", failed: "red", cancelled: "gray",
-  draft_pending: "gray", draft_saved: "blue", user_published: "purple",
+  draft_pending: "gray", pending_verify: "orange", draft_saved: "blue", user_published: "purple",
   data_fetching: "orange", published: "green", expired: "gray",
 };
 
@@ -70,6 +70,7 @@ export default function Production() {
 
   const [rounds, setRounds] = useState<SpiralRound[]>([]);
   const [roundsPage, setRoundsPage] = useState(1);
+  const [roundStatusFilter, setRoundStatusFilter] = useState("");
   const [roundsTotal, setRoundsTotal] = useState(0);
   const [roundsPages, setRoundsPages] = useState(1);
   const roundsPageSize = 20;
@@ -128,11 +129,12 @@ export default function Production() {
   const [noLogin, setNoLogin] = useState<Platform[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [availableTopicCount, setAvailableTopicCount] = useState<number | null>(null);
+  const [autogrowStatus, setAutogrowStatus] = useState<AutogrowStatus | null>(null);
 
   // ---------------------------------------------------------------- 数据加载
   const refresh = async () => {
     try {
-      const pageResult = await api.roundsPage(roundsPage, roundsPageSize);
+      const pageResult = await api.roundsPage(roundsPage, roundsPageSize, roundStatusFilter || undefined);
       const r = pageResult.items;
       setRounds(r);
       setRoundsTotal(pageResult.total);
@@ -197,6 +199,7 @@ export default function Production() {
 
   useEffect(() => {
     loadPlan();
+    api.autogrow().then(setAutogrowStatus).catch(() => setAutogrowStatus(null));
     api.assets("template").then((r) => setTemplates(r.items)).catch(() => setTemplates([]));
     api.goals().then((g) => setGoals(g.filter((x) => x.status === "active"))).catch(() => {});
     api.status()
@@ -208,7 +211,7 @@ export default function Production() {
   }, []);
   useEffect(() => {
     refresh().catch((e) => showToast(`加载轮次失败: ${e.message}`, "error"));
-  }, [roundsPage]);
+  }, [roundsPage, roundStatusFilter]);
 
   useEffect(() => {
     if (currentRoundId) loadRoundData(currentRoundId);
@@ -327,6 +330,26 @@ export default function Production() {
       await refresh();
       if (currentRoundId) await loadRoundData(currentRoundId);
     } catch (e: any) { showToast(`确认失败: ${e.message}`, "error"); }
+  };
+
+  const verifyDraftSave = async (draftId: string, saved: boolean) => {
+    const promptText = saved
+      ? "请先打开对应平台的草稿箱，确认这篇内容确实存在。请填写核实说明："
+      : "请先检查对应平台草稿箱，确认这篇内容不存在。确认后填写核实说明，系统才会恢复为待存状态：";
+    const note = window.prompt(promptText, "");
+    if (note === null) return;
+    if (note.trim().length < 3) {
+      showToast("核实说明至少需要 3 个字符", "error");
+      return;
+    }
+    try {
+      await api.verifyDraftSave(draftId, saved, note);
+      showToast(saved ? "已确认平台草稿存在" : "已恢复为待存草稿，可重新执行存草稿");
+      await refresh();
+      if (currentRoundId) await loadRoundData(currentRoundId);
+    } catch (e: any) {
+      showToast(`核实失败: ${e.message}`, "error");
+    }
   };
 
   /** 「✕ 不发了」：draft_pending / draft_saved → cancelled（R9：不冻结未发布草稿） */
@@ -542,6 +565,7 @@ export default function Production() {
     const matchesState = reviewState === "all"
       || (reviewState === "needs_review" && (item.guard_outcome !== "pass" || item.review_rejected))
       || (reviewState === "not_saved" && status === "draft_pending")
+      || (reviewState === "pending_verify" && status === "pending_verify")
       || (reviewState === "saved" && status === "draft_saved")
       || (reviewState === "rejected" && !!item.review_rejected);
     return matchesQuery && matchesPlatform && matchesState;
@@ -564,6 +588,13 @@ export default function Production() {
         </div>
       </div>
 
+      {autogrowStatus && (
+        <div className="panel" style={{ marginBottom: 14 }}>
+          <div className="panel-head"><div><div className="panel-title">自动开轮条件</div><div className="panel-sub">自动闭环是否允许开启下一轮，以及当前阻塞原因。</div></div><span className={`tag ${autogrowStatus.verdict.can_start ? "green" : "orange"}`}>{autogrowStatus.verdict.can_start ? "允许开轮" : "暂不可开轮"}</span></div>
+          <div className="note">{autogrowStatus.verdict.reason || (autogrowStatus.verdict.can_start ? "当前满足自动开轮条件。" : "当前不满足自动开轮条件，请检查运行配置。")}</div>
+          {autogrowStatus.verdict.next_eligible_at && <div className="tiny" style={{ marginTop: 6 }}>预计下次可开轮：{autogrowStatus.verdict.next_eligible_at}</div>}
+        </div>
+      )}
       <div className="tabs" style={{ marginBottom: 14 }}>
         {TABS.map((t) => (
           <button key={t.key} className={`tab ${tab === t.key ? "active" : ""}`} onClick={() => setTab(t.key)}>
@@ -1095,7 +1126,8 @@ export default function Production() {
               </select>
               <select aria-label="按状态筛选" value={reviewState} onChange={(event) => setReviewState(event.target.value)}>
                 <option value="all">全部状态</option><option value="needs_review">需要复核</option>
-                <option value="not_saved">待存草稿</option><option value="saved">已存草稿</option><option value="rejected">已驳回</option>
+                <option value="not_saved">待存草稿</option><option value="pending_verify">待核实平台保存</option>
+                <option value="saved">已存草稿</option><option value="rejected">已驳回</option>
               </select>
             </div>
             <div className="list review-content-list">
@@ -1349,8 +1381,16 @@ export default function Production() {
             <div className="panel-head">
               <div>
                 <div className="panel-title"><span className="icon">≡</span>轮次列表</div>
-                <div className="panel-sub">Round 1 · Round 2 · ...</div>
+                <div className="panel-sub">历史生产轮次 · 支持按执行状态筛选</div>
               </div>
+            </div>
+            <div className="toolbar" style={{ marginBottom: 10, flexWrap: "wrap" }}>
+              <label className="tiny" htmlFor="round-status-filter">轮次状态</label>
+              <select id="round-status-filter" className="field" value={roundStatusFilter} onChange={(e) => { setRoundStatusFilter(e.target.value); setRoundsPage(1); setCurrentRoundId(null); setRoundDetail(null); }} style={{ maxWidth: 180 }}>
+                <option value="">全部状态</option>
+                {Object.entries(ROUND_STATUS_LABEL).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+              <select className="field" aria-label="按平台筛选轮次" disabled title="等待轮次平台关联 API"><option>全部平台（待接 API）</option></select><select className="field" aria-label="按主计划筛选轮次" disabled title="等待主计划关联 API"><option>全部主计划（待接 API）</option></select><select className="field" aria-label="按阶段筛选轮次" disabled title="等待阶段关联 API"><option>全部阶段（待接 API）</option></select>
             </div>
             <div className="list">
               {rounds.length === 0 && (
@@ -1454,15 +1494,21 @@ export default function Production() {
                           <tr key={d.id}>
                             <td style={{ fontFamily: "monospace", fontSize: 11 }}>{d.id.slice(0, 16)}...</td>
                             <td>{PLATFORM_NAME[d.platform] ?? d.platform}</td>
-                            <td><span className={`tag ${STATUS_CLS[d.status] || "gray"}`}>{d.status}</span></td>
+                            <td><span className={`tag ${STATUS_CLS[d.status] || "gray"}`}>{d.status === "pending_verify" ? "待核实平台保存" : d.status}</span></td>
                             <td>
                               {d.status === "draft_saved" && (
                                 <button className="btn sm primary" onClick={() => confirmPublish(d.id)}>✓ 我已发布</button>
                               )}
+                              {d.status === "pending_verify" && (
+                                <>
+                                  <button className="btn sm primary" onClick={() => verifyDraftSave(d.id, true)}>✓ 平台已存</button>
+                                  <button className="btn sm ghost" style={{ marginLeft: 6 }} onClick={() => verifyDraftSave(d.id, false)}>↻ 平台未存</button>
+                                </>
+                              )}
                               {(d.status === "draft_saved" || d.status === "draft_pending") && (
                                 <button className="btn sm ghost" style={{ marginLeft: 6 }} onClick={() => cancelDraft(d.id)}>✕ 不发了</button>
                               )}
-                              {d.status !== "draft_saved" && d.status !== "draft_pending" && <span style={{ color: "var(--subtle)" }}>—</span>}
+                              {d.status !== "draft_saved" && d.status !== "draft_pending" && d.status !== "pending_verify" && <span style={{ color: "var(--subtle)" }}>—</span>}
                             </td>
                           </tr>
                         ))}

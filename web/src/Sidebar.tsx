@@ -19,14 +19,13 @@ export const NAV_ITEMS: NavItem[] = [
   { page: "goals",      label: "目标与策略", icon: "◎", section: "指挥与发现" },
 
   { page: "production", label: "内容生产",   icon: "▤", section: "内容作战" },
+  { page: "plan-center", label: "计划管理", icon: "▧", section: "内容作战" },
   { page: "calendar",   label: "内容日历",   icon: "▦", section: "内容作战" },
   { page: "assets",     label: "内容资产",   icon: "▣", section: "内容作战" },
 
   { page: "operations", label: "运营控制台", icon: "⌁", section: "运营与归因" },
   { page: "analytics",  label: "数据复盘",   icon: "⌁", section: "运营与归因" },
   { page: "gaps",       label: "缺口与实验", icon: "◇", section: "运营与归因" },
-
-  { page: "accounts",   label: "账号与登录", icon: "◎", section: "账号管理" },
 
   { page: "agent",      label: "Agent 编排与诊断", icon: "⎇", section: "Agent 中枢" },
   { page: "task-queue", label: "全局任务队列", icon: "⇅", section: "Agent 中枢", hidden: true },
@@ -54,13 +53,17 @@ export default function Sidebar({ current, onChange, brokenPlatforms, loggedIn, 
     if (page === "operations" && brokenPlatforms.length) return brokenPlatforms.length;
     if (page === "production" && activeRounds) return activeRounds;
     if (page === "accounts") {
-      const missing = enabled.filter((p) => !loggedIn.includes(p)).length;
+      // 角标口径与账号页一致：账号页固定展示四个平台卡片，
+      // 因此这里也按四个平台统计未登录数（不再只算已启用平台，否则会出现「4 个账号只提示 2 个未登录」）。
+      const missing = ALL_PLATFORMS.filter((p) => !loggedIn.includes(p)).length;
       return missing ? missing : null;
     }
     return null;
   };
 
-  const platforms = enabled.length ? enabled : ALL_PLATFORMS;
+  // 底部平台状态始终列出四个受支持平台：账号页也是四张卡，
+  // 若这里只显示「已启用」平台，未启用的平台会整行消失，导致「四个账号只提示三个未登录」的误读。
+  const platforms = ALL_PLATFORMS;
 
   return (
     <aside className="sidebar" aria-label="主导航">
@@ -90,7 +93,7 @@ export default function Sidebar({ current, onChange, brokenPlatforms, loggedIn, 
                 >
                   <span className="ni" aria-hidden="true">{item.icon}</span>
                   <span className="label">{item.label}</span>
-                  {count != null && <span className="count" title={item.page === "accounts" ? `${count} 个已启用平台尚未登录` : undefined}>{item.page === "accounts" ? `${count} 未登录` : count}</span>}
+                  {count != null && <span className="count" title={item.page === "accounts" ? `${count} 个平台尚未登录` : undefined}>{item.page === "accounts" ? `${count} 未登录` : count}</span>}
                 </button>
               );
             })}
@@ -102,10 +105,21 @@ export default function Sidebar({ current, onChange, brokenPlatforms, loggedIn, 
         <div className="health-title">平台账号状态</div>
         {platforms.map((p) => {
           const m = platformMeta(p);
+          const isEnabled = enabled.includes(p);
           const isBroken = brokenPlatforms.includes(p);
           const isLogged = loggedIn.includes(p);
-          const dot = statusLoading ? "warn" : isBroken ? "warn" : isLogged ? "" : "bad";
-          const label = statusLoading ? "检测中" : isBroken ? "熔断冷却" : isLogged ? "已登录" : "未登录";
+          // 「未登录」优先展示：角标按四个平台统计未登录数，这里同步显示，
+          // 避免角标 3 而列表只有 2 行「未登录」的矛盾；已登录但未启用的平台仍标「未启用」。
+          const dot = statusLoading || !isLogged ? "bad" : !isEnabled || isBroken ? "warn" : "";
+          const label = statusLoading
+            ? "检测中"
+            : !isLogged
+              ? "未登录"
+              : !isEnabled
+                ? "未启用"
+                : isBroken
+                  ? "熔断冷却"
+                  : "已登录";
           return (
             <button
               type="button"

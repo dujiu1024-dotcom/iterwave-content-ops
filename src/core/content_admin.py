@@ -6,6 +6,7 @@
   删了会让复盘、目标进度、评分历史失真。需要隐藏请改用驳回/取消。
 - draft_saved：平台创作者中心里还留着这份草稿，系统不会去平台删（R1 只存草稿、不做平台写删除），
   返回 platform_drafts_left 提醒用户自己去平台清理。
+- pending_verify：平台保存结果尚未核实，禁止删除本地记录，必须先完成人工核实。
 - 删除内容时一并删本地卡片图片文件（只删项目 output 目录下的文件）。
 - 轮次只有在没有任何不可删内容时才能整轮删除；进行中的 producing 轮次不能删。
 """
@@ -59,20 +60,29 @@ def delete_contents(cfg, conn, ids: list[str]) -> dict:
         drafts = conn.execute(
             "SELECT id, status, user_confirmed_at FROM drafts WHERE content_id = ?", (cid,)
         ).fetchall()
-        if any(
+        pending_verification = conn.execute(
+            "SELECT 1 FROM draft_save_verifications v JOIN drafts d ON d.id=v.draft_id "
+            "WHERE d.content_id=? AND v.status='pending_verify' LIMIT 1",
+            (cid,),
+        ).fetchone()
+        if pending_verification or any(
             d["status"] in LOCKED_DRAFT_STATUSES or d["user_confirmed_at"] is not None
             for d in drafts
         ):
             blocked.append({
                 "id": cid,
-                "reason": "该内容已确认发布或已有发布历史，不能删除；可在内容资产里归档查看",
+                "reason": "该内容的草稿保存结果尚待核实，或已有发布历史，不能删除；请先完成核实/归档",
             })
             continue
         platform_left += sum(1 for d in drafts if d[1] == "draft_saved")
         draft_ids = [d[0] for d in drafts]
         if draft_ids:
             marks = ",".join("?" * len(draft_ids))
+            # 通知/快照/指标都外键引用 drafts，必须先清理，否则删轮次会 FK 失败
+            conn.execute(f"DELETE FROM notifications WHERE draft_id IN ({marks})", draft_ids)
+            conn.execute(f"DELETE FROM metric_snapshots WHERE draft_id IN ({marks})", draft_ids)
             conn.execute(f"DELETE FROM metrics WHERE draft_id IN ({marks})", draft_ids)
+        conn.execute("DELETE FROM metric_snapshots WHERE content_id = ?", (cid,))
         conn.execute("DELETE FROM metrics WHERE content_id = ?", (cid,))
         conn.execute("DELETE FROM drafts WHERE content_id = ?", (cid,))
         conn.execute("DELETE FROM contents WHERE id = ?", (cid,))
@@ -99,7 +109,7 @@ def delete_round(cfg, conn, round_id: int) -> dict:
         raise DeleteBlocked(f"第 {row[1]} 轮有 {locked} 篇已发布或存在发布历史的内容，不能整轮删除")
     cids = [r[0] for r in conn.execute("SELECT id FROM contents WHERE round_id = ?", (round_id,))]
     res = delete_contents(cfg, conn, cids) if cids else {"deleted": [], "platform_drafts_left": 0, "files_removed": 0}
-    for table in ("ops_logs", "platform_insights", "user_override", "autogrow_runs"):
+    for table in ("ops_logs", "platform_insights", "user_override", "autogrow_runs", "notifications"):
         try:
             conn.execute(f"UPDATE {table} SET round_id = NULL WHERE round_id = ?", (round_id,))
         except Exception:  # noqa: BLE001 — 旧库缺表 / 列
