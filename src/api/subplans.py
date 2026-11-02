@@ -542,7 +542,8 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         ).fetchone()
         if broken:
             raise HTTPException(409, "子计划所属平台处于熔断状态，不能开轮")
-        requested_count = int(req.get("topic_count") or runtime["cfg"].autogrow.topic_count)
+        raw_count = req.get("topic_count")
+        requested_count = int(raw_count if raw_count is not None else runtime["cfg"].autogrow.topic_count)
         if requested_count < 1 or requested_count > 50:
             raise HTTPException(422, "topic_count 必须在 1-50 之间")
         topic_count = max(1, min(requested_count, remaining, 50))
