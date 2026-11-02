@@ -260,7 +260,7 @@ def build_asset_context_block(
             title = str(item.get("title") or "个人观点")[:160]
             body = str(item.get("body") or "").strip()[:900]
             lines.append(f"{index}. {title}：{body}")
-        blocks.append("\\n".join(lines))
+        blocks.append("\n".join(lines))
 
     return "\n\n".join(blocks)
 
