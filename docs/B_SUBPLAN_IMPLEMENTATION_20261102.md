@@ -12,7 +12,7 @@
 - AI 结果只写入 draft；人工审核通过才构成自动生产授权。
 - 阶段完成唯一依据是 `sub_plan_stage_publish_stats.confirmed_published_count`，其来源是 `drafts.user_confirmed_at IS NOT NULL`。
 - 新生产轮次在数据库中绑定 `master_plan_version_id / sub_plan_id / sub_plan_version_id / sub_plan_stage_id` 和两个快照；排队任务只携带快照摘要，不把任意用户快照明文复制到任务 payload。
-- 已绑定轮次执行时读取创建时的母计划/子计划/阶段快照。母计划后续发布新版本不会改写已审核轮次；明确暂停子计划、暂停生产、阶段完成/取消、阶段窗口过期或平台熔断会在 Worker 启动前 fail closed。
+- 已绑定轮次执行时读取创建时的母计划/子计划/阶段快照，历史归属不会被后续版本改写。A 的母计划新版本激活会暂停旧母计划下的子计划，因此旧版本的未执行队列任务会 fail closed；暂停生产、暂停子计划、阶段完成/取消、阶段窗口过期或平台熔断也会在 Worker 启动前拦截。
 
 ## 2. API
 
@@ -72,7 +72,7 @@
 - 旧 `POST /api/rounds/{id}/run` 不允许无子计划绑定的轮次绕过新授权；绑定轮次还需校验平台、阶段剩余目标和执行日期。
 - 旧 `POST /api/content-plans/{id}/start` 经由旧 create_round 入口，因此同样被新规则拦截。
 - 旧的 `ops_paused` 仍只控制评论/关注等运营动作；内容生产使用独立 `production_paused`，避免错误复用。
-- 母计划签名变化时，旧的子计划绑定轮次不再被 legacy stale-plan 逻辑误标为过期；非绑定旧轮次仍保留原有失效提示。
+- 母计划签名变化时，旧的子计划绑定轮次不被 legacy stale-plan 逻辑误标；A 会暂停旧母计划下的子计划，未执行任务由授权校验拦截，历史轮次仍保留原始版本快照。
 
 ## 5. 自动化测试
 
