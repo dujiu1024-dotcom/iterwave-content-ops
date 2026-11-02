@@ -6151,6 +6151,7 @@ def _register_routes(app: FastAPI) -> None:
         ctx = _g()
         tenant_id = str(ctx.get("runtime_tenant_id") or "default")
         allowed = {"style_key", "brand_name", "primary_color", "secondary_color",
+                   "background_color", "text_color", "component_style",
                    "font_family", "footer", "forbidden_styles"}
         unknown = set(req) - allowed
         if unknown:
@@ -6160,7 +6161,7 @@ def _register_routes(app: FastAPI) -> None:
         style_key = merged.get("style_key", "knowledge_infographic")
         if style_key not in _VISUAL_STYLE_KEYS:
             raise HTTPException(422, "未知视觉风格")
-        for key in ("primary_color", "secondary_color"):
+        for key in ("primary_color", "secondary_color", "background_color", "text_color"):
             value = merged.get(key)
             if value is not None and (
                 not isinstance(value, str) or
@@ -6171,6 +6172,9 @@ def _register_routes(app: FastAPI) -> None:
             value = merged.get(key)
             if value is not None and (not isinstance(value, str) or len(value) > 120):
                 raise HTTPException(422, f"{key} 必须是 120 字以内文本")
+        component_style = merged.get("component_style", "card")
+        if component_style not in {"card", "minimal", "editorial"}:
+            raise HTTPException(422, "component_style 必须为 card、minimal 或 editorial")
         forbidden = merged.get("forbidden_styles", [])
         if not isinstance(forbidden, list) or len(forbidden) > 20 or any(
             not isinstance(item, str) or item not in _VISUAL_STYLE_KEYS for item in forbidden
