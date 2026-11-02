@@ -41,7 +41,8 @@ from .persona import effective_persona
 from .hot_topics import _sensitive_topic_hits
 from .orchestration import Orchestration, step_status_from_report
 from .content_pipeline import (
-    ContentGenerationError, generate_copy_content, make_card_set, _llm_available,
+    ContentGenerationError, body_page_prompt, cover_prompt, generate_copy_content,
+    make_card_set, plan_body_pages, render_ai_background, _llm_available,
 )
 from .plan_version import PlanVersionManager
 from .guard.ultimate_goal_checker import CheckOutcome, CheckResult
@@ -743,14 +744,8 @@ class RoundExecutor:
         from .content_pipeline import card_footer
         return card_footer(self.cfg, platform)
 
-    async def _maybe_generate_cover(
-        self, title: str, dimension: str, platform: Platform,
-    ) -> tuple[Optional[str], str]:
-        """文生图封面底图：media_generation_settings 启用时调用图片模型。
-
-        配置（模型/尺寸/风格前缀）来自平台设置，不写死；任何失败都返回 (None, 原因)，
-        由调用方退回本地模板，不阻断轮次。
-        """
+    def _image_settings(self) -> tuple[Optional[dict], str]:
+        """读取图片素材库设置；返回 (settings, 不可用原因)。"""
         try:
             row = self.conn.execute(
                 "SELECT enabled, prompt_prefix, model, size FROM media_generation_settings WHERE id = 1"
@@ -759,31 +754,77 @@ class RoundExecutor:
             return None, "media_generation_settings 未就绪"
         if not row or not row["enabled"]:
             return None, "AI 配图未在图片素材库设置中启用"
-        prompt_prefix = (row["prompt_prefix"] or "").strip()
-        scene = (
-            f"知识类图文封面背景插画，主题：{title}（{dimension}）。"
-            "画面下方三分之一保持简洁留白，便于叠加标题；画面中不出现任何文字、字母、数字、水印。"
-        )
-        prompt = f"{prompt_prefix}\n\n{scene}" if prompt_prefix else scene
-        model = (row["model"] or "").strip() or os.getenv("ITERWAVE_IMAGE_MODEL", "gpt-image-1")
-        size = (row["size"] or "").strip() or "1024x1536"
-        try:
-            from .media_generation import generate_image_bytes
-            raw, _mime, suffix, _w, _h = await asyncio.to_thread(
-                generate_image_bytes, prompt, model=model, size=size, cfg=self.cfg,
-            )
-        except Exception as exc:  # noqa: BLE001 — 失败必须降级而不是阻断轮次
-            logger.warning("文生图封面失败，退回模板：%s", exc)
-            return None, str(exc)
+        return {
+            "prefix": (row["prompt_prefix"] or "").strip(),
+            "model": (row["model"] or "").strip() or os.getenv("ITERWAVE_IMAGE_MODEL", "gpt-image-1"),
+            "size": (row["size"] or "").strip() or "1024x1536",
+        }, ""
+
+    def _persist_image(self, raw: bytes, suffix: str, platform: Platform, kind: str) -> str:
         out_dir = Path(self.cfg.resolve_path(self.cfg.paths.output_dir))
         out_dir.mkdir(parents=True, exist_ok=True)
-        path = out_dir / f"cover_{platform.value}_{uuid.uuid4().hex[:8]}{suffix}"
+        path = out_dir / f"{kind}_{platform.value}_{uuid.uuid4().hex[:8]}{suffix}"
         path.write_bytes(raw)
         try:
             path.chmod(0o600)
         except OSError:
             pass
-        return str(path), "ok"
+        return str(path)
+
+    async def _maybe_generate_cover(
+        self, title: str, dimension: str, platform: Platform,
+    ) -> tuple[Optional[str], str]:
+        """文生图封面底图：media_generation_settings 启用时调用图片模型。
+
+        配置（模型/尺寸/风格前缀）来自平台设置，不写死；任何失败都返回 (None, 原因)，
+        由调用方退回本地模板，不阻断轮次。
+        """
+        settings, reason = self._image_settings()
+        if settings is None:
+            return None, reason
+        scene = cover_prompt(title, dimension)
+        prompt = f"{settings['prefix']}\n\n{scene}" if settings["prefix"] else scene
+        try:
+            from .media_generation import generate_image_bytes
+            raw, _mime, suffix, _w, _h = await asyncio.to_thread(
+                generate_image_bytes, prompt,
+                model=settings["model"], size=settings["size"], cfg=self.cfg,
+            )
+        except Exception as exc:  # noqa: BLE001 — 失败必须降级而不是阻断轮次
+            logger.warning("文生图封面失败，退回模板：%s", exc)
+            return None, str(exc)
+        return self._persist_image(raw, suffix, platform, "cover"), "ok"
+
+    async def _generate_body_backgrounds(
+        self, title: str, dimension: str, platform: Platform, pages: list[list[str]],
+    ) -> list:
+        """正文每页配一张 AI 底图（并发请求）；单页失败返回 None，该页退回渐变。"""
+        settings, reason = self._image_settings()
+        if settings is None:
+            logger.info("正文配图跳过：%s", reason)
+            return []
+        prompts = []
+        for lines in pages:
+            prompt = body_page_prompt(title, dimension, lines)
+            if settings["prefix"]:
+                prompt = f"{settings['prefix']}\n\n{prompt}"
+            prompts.append(prompt)
+        results = await asyncio.gather(*(
+            asyncio.to_thread(
+                render_ai_background, prompt,
+                model=settings["model"], size=settings["size"], cfg=self.cfg,
+                platform=platform,
+            )
+            for prompt in prompts
+        ), return_exceptions=True)
+        images: list = []
+        for result in results:
+            if isinstance(result, Exception):
+                logger.warning("正文配图异常，该页退回渐变：%s", result)
+                images.append(None)
+            else:
+                images.append(result)
+        return images
 
     async def _produce_contents(
         self, round_id: int, scored: list, platforms: list[Platform], report: dict,
@@ -916,31 +957,45 @@ class RoundExecutor:
 
                 cover_path = None
                 cover_reason = "出图在质量门之前（编排模式），使用模板卡片"
+                body_ai_count = 0
+                body_page_count = 0
                 # ⑤ 图片卡片（编排可关闭；可调到质量门之前——此时被拦重写的版本也会出图）
                 if not card_first:
                     image_paths = []
                     if make_cards:
-                        # 优先文生图封面底图（media_generation_settings 启用时），失败退回模板
+                        # 封面与正文页都优先用文生图底图（media_generation_settings 启用时），失败逐页退回模板
                         cover_path, cover_reason = await self._maybe_generate_cover(
                             title, topic.dimension, platform,
                         )
+                        pages = await asyncio.to_thread(plan_body_pages, body)
+                        body_page_count = len(pages)
+                        body_images = await self._generate_body_backgrounds(
+                            title, topic.dimension, platform, pages,
+                        )
+                        body_ai_count = sum(1 for p in body_images if p)
                         image_paths = await asyncio.to_thread(
                             make_card_set, title, topic.dimension, body, output_dir, platform,
                             self._card_footer(platform),
                             cover_image=Path(cover_path) if cover_path else None,
+                            body_images=body_images,
+                            pages=pages,
                         )
-                        if cover_path:
-                            report.setdefault("model_visuals", 0)
-                            report["model_visuals"] += 1
-                        else:
-                            report["degraded_visuals"] += 1
+                        report.setdefault("model_visuals", 0)
+                        report["model_visuals"] += (1 if cover_path else 0) + body_ai_count
+                        report["degraded_visuals"] += (0 if cover_path else 1) + (
+                            body_page_count - body_ai_count
+                        )
 
                 # ⑥ 写 contents（DB CHECK 只允许 degraded/media_asset/generated）
-                visual_status = "generated" if cover_path else "degraded"
-                visual_reason = (
-                    "封面底图由文生图模型生成，标题文字由本地模板叠加"
-                    if cover_path else f"仅使用本地模板卡片（{cover_reason}）"
-                )
+                has_ai = bool(cover_path) or body_ai_count > 0
+                visual_status = "generated" if has_ai else "degraded"
+                if has_ai:
+                    visual_reason = (
+                        f"封面底图 + {body_ai_count}/{body_page_count} 张正文配图由文生图模型生成，"
+                        "文字由本地模板叠加"
+                    )
+                else:
+                    visual_reason = f"仅使用本地模板卡片（{cover_reason}）"
                 content_id = f"content-{uuid.uuid4().hex[:12]}"
                 self.conn.execute(
                     "INSERT INTO contents (id, round_id, topic_id, platform, title, body, "
