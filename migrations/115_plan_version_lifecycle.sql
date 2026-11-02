@@ -1,6 +1,5 @@
--- 115: immutable master-plan versions, subplan snapshots/stages, and round attribution.
--- Existing content_plans remains the subplan/calendar aggregate; no parallel production tables.
--- All backfills are additive. Legacy rounds without evidence remain explicitly unattributed.
+-- 115: immutable master/sub-plan versions, stages, round attribution and durable opening locks.
+-- Legacy content_plans remains a calendar/content-plan aggregate and is not repurposed.
 
 CREATE TABLE IF NOT EXISTS master_plan_versions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -28,7 +27,8 @@ CREATE INDEX IF NOT EXISTS idx_master_plan_signature
 CREATE INDEX IF NOT EXISTS idx_master_plan_created
     ON master_plan_versions(created_at DESC, version_no DESC);
 
--- Restore every historical signature event, not merely unique signatures.
+-- Restore each signature_history event independently; same signatures may represent
+-- distinct historical events and must not be deduplicated.
 INSERT OR IGNORE INTO master_plan_versions(
     version_no, plan_signature, plan_snapshot, status, source,
     legacy_history_id, created_at, created_by, change_note
@@ -41,7 +41,7 @@ FROM signature_history h
 WHERE h.plan_signature IS NOT NULL AND h.plan_snapshot IS NOT NULL
 ORDER BY h.id;
 
--- A plan_settings row may predate signature_history or have lost its matching event.
+-- A plan_settings row may predate signature_history or have no matching event.
 INSERT INTO master_plan_versions(
     version_no, plan_signature, plan_snapshot, status, source,
     created_at, created_by, change_note
@@ -60,19 +60,14 @@ WHERE ps.id=1
         AND v.plan_snapshot=ps.plan_snapshot
   );
 
--- Only the newest matching historical event is the current effective version.
 UPDATE master_plan_versions
-SET status='effective',
-    effective_at=COALESCE(effective_at,created_at)
+SET status='effective', effective_at=COALESCE(effective_at,created_at)
 WHERE id=(
-    SELECT v.id
-    FROM master_plan_versions v
+    SELECT v.id FROM master_plan_versions v
     JOIN plan_settings ps ON ps.id=1 AND ps.plan_signature=v.plan_signature
-    ORDER BY v.version_no DESC
-    LIMIT 1
+    ORDER BY v.version_no DESC LIMIT 1
 );
 
--- Keep one effective version if no plan_settings row exists but history does.
 UPDATE master_plan_versions
 SET status='effective', effective_at=COALESCE(effective_at,created_at)
 WHERE id=(SELECT MAX(id) FROM master_plan_versions)
@@ -82,18 +77,20 @@ ALTER TABLE plan_settings ADD COLUMN active_version_id INTEGER;
 UPDATE plan_settings
 SET active_version_id=(
     SELECT id FROM master_plan_versions
-    WHERE status='effective'
-    ORDER BY version_no DESC LIMIT 1
+    WHERE status='effective' ORDER BY version_no DESC LIMIT 1
 )
 WHERE id=1;
 
 ALTER TABLE spiral_rounds ADD COLUMN master_plan_version_id INTEGER;
-ALTER TABLE spiral_rounds ADD COLUMN content_plan_version_id INTEGER;
-ALTER TABLE spiral_rounds ADD COLUMN content_plan_stage_id INTEGER;
+ALTER TABLE spiral_rounds ADD COLUMN sub_plan_id TEXT;
+ALTER TABLE spiral_rounds ADD COLUMN sub_plan_version_id INTEGER;
+ALTER TABLE spiral_rounds ADD COLUMN sub_plan_stage_id INTEGER;
+ALTER TABLE spiral_rounds ADD COLUMN sub_plan_snapshot TEXT;
+ALTER TABLE spiral_rounds ADD COLUMN sub_plan_stage_snapshot TEXT;
 ALTER TABLE spiral_rounds ADD COLUMN plan_attribution_status TEXT NOT NULL DEFAULT 'pending'
     CHECK(plan_attribution_status IN ('pending','resolved','manual_review'));
 
--- First use the exact round-to-history event, then fall back to the exact signature.
+-- Exact round-history event takes precedence over signature-only fallback.
 UPDATE spiral_rounds
 SET master_plan_version_id=(
         SELECT v.id
@@ -125,94 +122,98 @@ WHERE plan_signature IS NOT NULL
       WHERE v.plan_signature=spiral_rounds.plan_signature
   );
 
--- Non-empty but unresolvable signatures are not silently guessed.
+-- A non-empty signature with no matching snapshot needs human attribution.
 UPDATE spiral_rounds
 SET plan_attribution_status='manual_review'
 WHERE plan_signature IS NOT NULL AND master_plan_version_id IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_round_master_plan_version
     ON spiral_rounds(master_plan_version_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_round_subplan_version
-    ON spiral_rounds(content_plan_version_id, content_plan_stage_id);
+CREATE INDEX IF NOT EXISTS idx_round_sub_plan_version
+    ON spiral_rounds(sub_plan_id, sub_plan_version_id, sub_plan_stage_id);
 CREATE INDEX IF NOT EXISTS idx_round_plan_attribution
     ON spiral_rounds(plan_attribution_status, id);
 
--- Existing content_plans is retained and extended as the subplan/calendar aggregate.
-ALTER TABLE content_plans ADD COLUMN platform TEXT;
-ALTER TABLE content_plans ADD COLUMN master_plan_version_id INTEGER;
-CREATE INDEX IF NOT EXISTS idx_content_plans_master_version
-    ON content_plans(master_plan_version_id, scheduled_date);
-
-CREATE TABLE IF NOT EXISTS content_plan_versions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    plan_id TEXT NOT NULL REFERENCES content_plans(id) ON DELETE CASCADE,
-    version_no INTEGER NOT NULL,
-    master_plan_version_id INTEGER REFERENCES master_plan_versions(id),
-    snapshot_json TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'effective'
-        CHECK(status IN ('draft','effective','archived')),
+-- New first-class platform subplans; legacy content_plans remains untouched.
+CREATE TABLE IF NOT EXISTS sub_plans (
+    id TEXT PRIMARY KEY,
+    master_plan_version_id INTEGER NOT NULL
+        REFERENCES master_plan_versions(id),
+    platform TEXT NOT NULL
+        CHECK(platform IN ('xhs','douyin','kuaishou','wechat_channels')),
+    title TEXT NOT NULL CHECK(length(trim(title)) BETWEEN 1 AND 160),
+    status TEXT NOT NULL DEFAULT 'draft'
+        CHECK(status IN ('draft','active','paused','completed','archived','cancelled')),
+    current_version_id INTEGER,
     created_at TEXT NOT NULL,
-    created_by TEXT NOT NULL DEFAULT 'system',
-    effective_at TEXT,
-    change_note TEXT,
-    UNIQUE(plan_id, version_no)
+    updated_at TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT 'user',
+    archived_at TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_content_plan_versions_plan
-    ON content_plan_versions(plan_id, version_no DESC);
-CREATE INDEX IF NOT EXISTS idx_content_plan_versions_master
-    ON content_plan_versions(master_plan_version_id);
+CREATE INDEX IF NOT EXISTS idx_sub_plans_master_platform
+    ON sub_plans(master_plan_version_id, platform, status);
+CREATE INDEX IF NOT EXISTS idx_sub_plans_status
+    ON sub_plans(status, updated_at DESC);
 
--- Preserve the current legacy subplan state as its initial immutable snapshot.
-INSERT OR IGNORE INTO content_plan_versions(
-    plan_id, version_no, master_plan_version_id, snapshot_json,
-    status, created_at, created_by, effective_at, change_note
-)
-SELECT
-    cp.id, cp.version, cp.master_plan_version_id,
-    json_object(
-        'id',cp.id,'title',cp.title,'topic',cp.topic,
-        'platforms',json(COALESCE(cp.platforms_json,'[]')),
-        'platform',cp.platform,'planned_count',cp.planned_count,
-        'scheduled_date',cp.scheduled_date,'status',cp.status,'notes',cp.notes,
-        'version',cp.version
-    ),
-    CASE WHEN cp.status IN ('archived','cancelled') THEN 'archived' ELSE 'effective' END,
-    COALESCE(cp.updated_at,cp.created_at,CURRENT_TIMESTAMP),
-    'legacy_recovery',
-    COALESCE(cp.updated_at,cp.created_at,CURRENT_TIMESTAMP),
-    '由现有 content_plans 当前记录补建；旧版未保留的中间编辑历史不伪造'
-FROM content_plans cp;
-
-CREATE TABLE IF NOT EXISTS content_plan_stages (
+CREATE TABLE IF NOT EXISTS sub_plan_versions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    content_plan_version_id INTEGER NOT NULL
-        REFERENCES content_plan_versions(id) ON DELETE CASCADE,
+    sub_plan_id TEXT NOT NULL REFERENCES sub_plans(id) ON DELETE RESTRICT,
+    version_no INTEGER NOT NULL,
+    master_plan_version_id INTEGER NOT NULL
+        REFERENCES master_plan_versions(id),
+    snapshot_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'draft'
+        CHECK(status IN ('draft','effective','archived','rejected')),
+    based_on_version_id INTEGER REFERENCES sub_plan_versions(id),
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT 'user',
+    reviewed_at TEXT,
+    reviewed_by TEXT,
+    review_note TEXT,
+    effective_at TEXT,
+    superseded_at TEXT,
+    change_note TEXT,
+    UNIQUE(sub_plan_id, version_no)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sub_plan_one_effective_version
+    ON sub_plan_versions(sub_plan_id) WHERE status='effective';
+CREATE INDEX IF NOT EXISTS idx_sub_plan_versions_master
+    ON sub_plan_versions(master_plan_version_id, status);
+CREATE INDEX IF NOT EXISTS idx_sub_plan_versions_created
+    ON sub_plan_versions(sub_plan_id, version_no DESC);
+
+CREATE TABLE IF NOT EXISTS sub_plan_stages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sub_plan_version_id INTEGER NOT NULL
+        REFERENCES sub_plan_versions(id) ON DELETE RESTRICT,
     stage_order INTEGER NOT NULL CHECK(stage_order >= 1),
     title TEXT NOT NULL CHECK(length(trim(title)) BETWEEN 1 AND 160),
+    direction TEXT NOT NULL DEFAULT '',
     target_count INTEGER NOT NULL DEFAULT 1 CHECK(target_count BETWEEN 1 AND 10000),
     start_date TEXT,
     end_date TEXT,
+    completion_condition TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'pending'
         CHECK(status IN ('pending','in_progress','completed','paused','cancelled')),
     notes TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    UNIQUE(content_plan_version_id, stage_order),
+    UNIQUE(sub_plan_version_id, stage_order),
     CHECK(start_date IS NULL OR end_date IS NULL OR end_date >= start_date)
 );
-CREATE INDEX IF NOT EXISTS idx_content_plan_stages_version
-    ON content_plan_stages(content_plan_version_id, stage_order);
-CREATE INDEX IF NOT EXISTS idx_content_plan_stages_status
-    ON content_plan_stages(status, start_date, end_date);
-
--- Cross-version stage consistency is enforced by PlanVersionStore.bind_round()
--- and independently audited by PlanVersionStore.validate_integrity().
+CREATE INDEX IF NOT EXISTS idx_sub_plan_stages_version
+    ON sub_plan_stages(sub_plan_version_id, stage_order);
+CREATE INDEX IF NOT EXISTS idx_sub_plan_stages_status
+    ON sub_plan_stages(status, start_date, end_date);
 
 -- Durable cross-process idempotency for scheduler/automatic round opening.
 CREATE TABLE IF NOT EXISTS round_open_idempotency (
     idempotency_key TEXT PRIMARY KEY,
     request_hash TEXT NOT NULL,
-    master_plan_version_id INTEGER NOT NULL,
+    master_plan_version_id INTEGER NOT NULL REFERENCES master_plan_versions(id),
+    sub_plan_id TEXT NOT NULL REFERENCES sub_plans(id),
+    sub_plan_version_id INTEGER NOT NULL REFERENCES sub_plan_versions(id),
+    sub_plan_stage_id INTEGER NOT NULL REFERENCES sub_plan_stages(id),
     status TEXT NOT NULL DEFAULT 'reserved'
         CHECK(status IN ('reserved','created','failed')),
     round_id INTEGER UNIQUE,
@@ -223,17 +224,20 @@ CREATE TABLE IF NOT EXISTS round_open_idempotency (
 );
 CREATE INDEX IF NOT EXISTS idx_round_open_idempotency_status
     ON round_open_idempotency(status, lease_until);
+CREATE INDEX IF NOT EXISTS idx_round_open_idempotency_stage
+    ON round_open_idempotency(sub_plan_id, sub_plan_version_id, sub_plan_stage_id);
 
-CREATE VIEW IF NOT EXISTS content_plan_stage_publish_stats AS
+-- Count only explicit user-confirmed publish events, never generated/saved drafts.
+CREATE VIEW IF NOT EXISTS sub_plan_stage_publish_stats AS
 SELECT
     s.id AS stage_id,
-    s.content_plan_version_id,
+    s.sub_plan_version_id,
     COUNT(DISTINCT d.id) AS confirmed_published_count
-FROM content_plan_stages s
+FROM sub_plan_stages s
 LEFT JOIN spiral_rounds r
-    ON r.content_plan_stage_id=s.id
-   AND r.content_plan_version_id=s.content_plan_version_id
+    ON r.sub_plan_stage_id=s.id
+   AND r.sub_plan_version_id=s.sub_plan_version_id
 LEFT JOIN contents c ON c.round_id=r.id
 LEFT JOIN drafts d ON d.content_id=c.id
     AND d.user_confirmed_at IS NOT NULL
-GROUP BY s.id, s.content_plan_version_id;
+GROUP BY s.id, s.sub_plan_version_id;
