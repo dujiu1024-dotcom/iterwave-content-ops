@@ -5119,6 +5119,8 @@ def _register_routes(app: FastAPI) -> None:
             if saved and row["status"] == "draft_saved" and row["verification_status"] == "verified_saved":
                 return {"draft_id": draft_id, "status": "draft_saved", "already_verified": True}
             raise HTTPException(409, f"草稿核实状态为 {row['verification_status'] or 'none'}，不是待核实状态")
+        if row["status"] != "draft_pending":
+            raise HTTPException(409, f"待核实草稿的本地状态异常：{row['status']}")
 
         if saved:
             from src.core.content_version import content_version_hash, parse_json_list
