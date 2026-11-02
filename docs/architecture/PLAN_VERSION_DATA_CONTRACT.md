@@ -111,7 +111,7 @@
 - 失败或租约过期后允许重新取得租约。
 - 调用 `complete_round_open()` 前，轮次必须已绑定租约指定的主计划版本、子计划、子计划版本和阶段。
 
-B 负责在自动开轮 Worker 中接入 reserve → create/bind → complete 的顺序，并在异常路径调用 `fail_round_open()`。人工 force 入口也必须走同一授权和幂等校验。
+B 负责在自动开轮 Worker 中接入 reserve → `create_round_once()`。该方法在一个 SQLite 写事务内创建轮次、固化主/子计划及阶段快照，并把幂等记录标记为 created；事务提交前崩溃不会留下半套轮次，提交后重试返回原 round_id。仅使用分离的 create/bind/complete 步骤不满足崩溃一致性要求。人工 force 入口也必须走同一授权和幂等校验。
 
 ## 6. 发布统计
 
