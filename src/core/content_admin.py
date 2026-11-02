@@ -117,18 +117,34 @@ def _delete_contents_in_transaction(conn, ids: list[str]) -> tuple[dict, list]:
     return result, file_manifests
 
 
-def delete_contents(cfg, conn, ids: list[str]) -> dict:
+def _cleanup_files(cfg, file_manifests: list, after_commit) -> int:
+    """数据库提交成功后再清理文件。
+
+    after_commit 不为空时（请求级事务尚未提交），只登记清理动作，由调用方在外层事务
+    提交成功后执行（如 FastAPI BackgroundTasks）；返回值此时为 0。
+    """
+    if not file_manifests:
+        return 0
+    if after_commit is not None:
+        manifests = list(file_manifests)
+        after_commit(lambda: sum(_remove_files(cfg, raw) for raw in manifests))
+        return 0
+    return sum(_remove_files(cfg, raw) for raw in file_manifests)
+
+
+def delete_contents(cfg, conn, ids: list[str], *, after_commit=None) -> dict:
     ids = [i for i in dict.fromkeys(str(x).strip() for x in ids) if i]
     if not ids:
         raise ValueError("ids 不能为空")
     # 文件系统不在 SQLite 事务内：先提交数据库，再做幂等文件清理。
     with connection_transaction(conn, immediate=True):
         result, file_manifests = _delete_contents_in_transaction(conn, ids)
-    result["files_removed"] = sum(_remove_files(cfg, raw) for raw in file_manifests)
+    result["files_removed"] = _cleanup_files(cfg, file_manifests, after_commit)
+    result["files_cleanup_deferred"] = bool(after_commit is not None and file_manifests)
     return result
 
 
-def delete_round(cfg, conn, round_id: int) -> dict:
+def delete_round(cfg, conn, round_id: int, *, after_commit=None) -> dict:
     with connection_transaction(conn, immediate=True):
         row = conn.execute(
             "SELECT id, round_number, status FROM spiral_rounds WHERE id = ?", (round_id,)
@@ -165,7 +181,8 @@ def delete_round(cfg, conn, round_id: int) -> dict:
             (str(round_id),),
         )
         conn.execute("DELETE FROM spiral_rounds WHERE id = ?", (round_id,))
-    files_removed = sum(_remove_files(cfg, raw) for raw in file_manifests)
+    files_removed = _cleanup_files(cfg, file_manifests, after_commit)
     return {"round_id": round_id, "round_number": row["round_number"],
             "contents_deleted": len(result["deleted"]),
-            "platform_drafts_left": result["platform_drafts_left"], "files_removed": files_removed}
+            "platform_drafts_left": result["platform_drafts_left"], "files_removed": files_removed,
+            "files_cleanup_deferred": bool(after_commit is not None and file_manifests)}
