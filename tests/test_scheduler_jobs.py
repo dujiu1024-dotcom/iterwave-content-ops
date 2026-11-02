@@ -703,3 +703,24 @@ def test_publish_confirmation_rolls_back_status_when_note_url_write_fails(cfg, c
     assert row["user_confirmed_at"] is None
     assert row["platform_note_url"] is None
     assert scheduled == []
+
+
+
+def test_kb_scan_rolls_back_all_topic_inserts_when_one_insert_fails(conn: sqlite3.Connection, cfg) -> None:
+    eng = _engine(cfg, conn)
+    conn.execute("""
+        CREATE TRIGGER reject_second_kb_topic
+        BEFORE INSERT ON topic_index
+        WHEN NEW.id = 'kt2'
+        BEGIN SELECT RAISE(ABORT, 'injected topic insert failure'); END
+    """)
+    conn.commit()
+
+    try:
+        asyncio.run(eng._job_kb_scan())
+    except sqlite3.IntegrityError as exc:
+        assert "injected topic insert failure" in str(exc)
+    else:
+        raise AssertionError("expected topic insert failure")
+
+    assert conn.execute("SELECT COUNT(*) FROM topic_index").fetchone()[0] == 0
