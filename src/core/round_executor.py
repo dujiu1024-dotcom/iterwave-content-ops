@@ -1270,12 +1270,12 @@ class RoundExecutor:
 
                 # 写 drafts（幂等：同 content 不会重复，UNIQUE(content_id, platform)）
                 draft_id = f"draft-{uuid.uuid4().hex[:12]}"
-                self.conn.execute(
-                    "INSERT INTO drafts (id, content_id, platform, status) "
-                    "VALUES (?, ?, ?, 'draft_pending')",
-                    (draft_id, content_id, platform.value),
-                )
-                self.conn.commit()
+                with self.conn:
+                    self.conn.execute(
+                        "INSERT INTO drafts (id, content_id, platform, status) "
+                        "VALUES (?, ?, ?, 'draft_pending')",
+                        (draft_id, content_id, platform.value),
+                    )
 
                 rows.append({
                     "content_id": content_id,
