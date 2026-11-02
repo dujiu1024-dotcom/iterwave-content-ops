@@ -5935,14 +5935,20 @@ def _register_routes(app: FastAPI) -> None:
             platform = Platform(row["platform"])
         except (KeyError, ValueError) as exc:
             raise HTTPException(400, f"内容平台非法：{content_id}") from exc
+        # 维度只是装饰：先确认表存在再查询。选题库为文件型来源时没有 topics 表，
+        # 直接查询会抛 OperationalError；请求级事务会把「捕获过的 SQL 异常」标记为
+        # 只能回滚（见 LockedConnection._run_locked），导致后面的 image_paths 写回被丢弃。
+        tables = {
+            item[0] for item in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
         dimension = ""
-        try:
+        if "topics" in tables:
             topic = conn.execute(
                 "SELECT dimension FROM topics WHERE id = ?", (row["topic_id"],)
             ).fetchone()
             dimension = (topic["dimension"] if topic else "") or ""
-        except Exception:  # noqa: BLE001 — 维度只是装饰，取不到不影响出图
-            dimension = ""
 
         from ..core.content_pipeline import (
             body_page_prompt, card_footer, cover_prompt, make_card_set, plan_body_pages,
@@ -5951,7 +5957,7 @@ def _register_routes(app: FastAPI) -> None:
         output_dir = cfg.resolve_path(cfg.paths.output_dir)
         # 重出图同样给正文页配 AI 底图（与轮次生产保持一致），单页失败退回渐变
         settings = None
-        try:
+        if "media_generation_settings" in tables:
             mg_row = conn.execute(
                 "SELECT enabled, prompt_prefix, model, size FROM media_generation_settings WHERE id = 1"
             ).fetchone()
@@ -5961,8 +5967,6 @@ def _register_routes(app: FastAPI) -> None:
                     "model": (mg_row["model"] or "").strip() or "gpt-image-1",
                     "size": (mg_row["size"] or "").strip() or "1024x1536",
                 }
-        except Exception:  # noqa: BLE001 — 旧库无此表时退回纯模板
-            settings = None
         # 出图要调外部服务（数十秒），先结束读事务释放 SQLite 锁，避免长时间持锁把其它写入卡死
         conn.commit()
         pages = plan_body_pages(body)
