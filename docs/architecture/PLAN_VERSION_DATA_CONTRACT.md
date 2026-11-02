@@ -41,7 +41,7 @@
 1. 用户编辑或复盘采纳：调用 `PlanVersionStore.create_master_draft()`；复盘采纳的来源必须是 `review_adoption`，不得直接写入 `plan_settings`。
 2. 历史恢复：调用 `create_master_draft_from_version()`，只能创建新草稿，不得直接改写旧版本状态。
 3. 人工审核通过：调用 `activate_master_version()`。
-4. 生效时在一个 SQLite 写事务内归档旧生效版本、激活新版本、更新 `plan_settings.active_version_id` 和兼容快照，并追加 `signature_history`。
+4. 生效时在一个 SQLite 写事务内暂停仍依附旧主计划版本的 active 子计划、归档旧生效版本、激活新版本、更新 `plan_settings.active_version_id` 和兼容快照，并追加 `signature_history`。旧轮次及子计划快照不变；子计划需创建基于新主计划版本的新草稿并审核后恢复 active。
 5. 任何轮次都不得因为主计划新版本生效而改绑到新版本。
 
 ## 3. 平台子计划与阶段
