@@ -506,23 +506,23 @@ class SchedulerEngine:
                     # 审核驳回不能抹掉平台已经发生的真实发布；记录为观察到的例外，
                     # 继续采集数据，同时让后续复盘能追溯到驳回原因。
                     try:
-                        self.conn.execute(
-                            "INSERT INTO user_override (round_id, override_field, original_value, "
-                            "override_value, reason, overridden_by, overridden_at) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                            (
-                                row["round_id"], "publish_review_rejection_observed",
-                                json.dumps({
-                                    "review_rejected": True,
-                                    "review_rejection_reason": row["review_rejection_reason"],
-                                }, ensure_ascii=False)[:500],
-                                json.dumps({"status": "user_published", "via": "platform_polling"}, ensure_ascii=False),
-                                "系统在平台侧检测到已发布作品，为保留真实运营数据继续采集",
-                                "publish-polling",
-                                business_now(self.cfg).strftime("%Y-%m-%d %H:%M:%S"),
-                            ),
-                        )
-                        self.conn.commit()
+                        with self.conn:
+                            self.conn.execute(
+                                "INSERT INTO user_override (round_id, override_field, original_value, "
+                                "override_value, reason, overridden_by, overridden_at) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                (
+                                    row["round_id"], "publish_review_rejection_observed",
+                                    json.dumps({
+                                        "review_rejected": True,
+                                        "review_rejection_reason": row["review_rejection_reason"],
+                                    }, ensure_ascii=False)[:500],
+                                    json.dumps({"status": "user_published", "via": "platform_polling"}, ensure_ascii=False),
+                                    "系统在平台侧检测到已发布作品，为保留真实运营数据继续采集",
+                                    "publish-polling",
+                                    business_now(self.cfg).strftime("%Y-%m-%d %H:%M:%S"),
+                                ),
+                            )
                     except Exception:  # noqa: BLE001 — 实际发布已发生，审计失败不能中断采集
                         logger.exception("[APS] 发布驳回例外审计写入失败 draft=%s", row["id"])
                 # 即使自动识别到了真实发布，也记录平台实际版本与当前本地版本是否一致。
@@ -541,29 +541,29 @@ class SchedulerEngine:
                         else "stale"
                     )
                     if sync_state != "matched":
-                        self.conn.execute(
-                            "INSERT INTO user_override (round_id, override_field, original_value, "
-                            "override_value, reason, overridden_by, overridden_at) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                            (
-                                row["round_id"], "platform_content_sync_observed",
-                                json.dumps({
-                                    "state": sync_state,
-                                    "saved_content_hash": saved_hash,
-                                    "current_content_hash": current_hash,
-                                    "platform_title": row["poll_title"],
-                                    "local_title": row["local_title"],
-                                }, ensure_ascii=False)[:500],
-                                json.dumps({
-                                    "status": "user_published",
-                                    "via": "platform_polling",
-                                }, ensure_ascii=False),
-                                f"系统已在平台侧确认作品发布；平台内容版本状态为 {sync_state}，保留真实发布并继续采集",
-                                "publish-polling",
-                                business_now(self.cfg).strftime("%Y-%m-%d %H:%M:%S"),
-                            ),
-                        )
-                        self.conn.commit()
+                        with self.conn:
+                            self.conn.execute(
+                                "INSERT INTO user_override (round_id, override_field, original_value, "
+                                "override_value, reason, overridden_by, overridden_at) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                (
+                                    row["round_id"], "platform_content_sync_observed",
+                                    json.dumps({
+                                        "state": sync_state,
+                                        "saved_content_hash": saved_hash,
+                                        "current_content_hash": current_hash,
+                                        "platform_title": row["poll_title"],
+                                        "local_title": row["local_title"],
+                                    }, ensure_ascii=False)[:500],
+                                    json.dumps({
+                                        "status": "user_published",
+                                        "via": "platform_polling",
+                                    }, ensure_ascii=False),
+                                    f"系统已在平台侧确认作品发布；平台内容版本状态为 {sync_state}，保留真实发布并继续采集",
+                                    "publish-polling",
+                                    business_now(self.cfg).strftime("%Y-%m-%d %H:%M:%S"),
+                                ),
+                            )
                 except Exception:  # noqa: BLE001 — 已确认发布不应因审计问题中断采集
                     logger.exception("[APS] 平台版本观察审计写入失败 draft=%s", row["id"])
 
