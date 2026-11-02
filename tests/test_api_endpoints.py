@@ -2829,3 +2829,109 @@ def test_global_task_queue_exposes_business_round_number_not_db_id(client, cfg, 
     assert items[save.task_id]["round_number"] == 7
     assert items[missing.task_id]["round_number"] is None
     assert tc.get(f"/api/task-queue/{run.task_id}").json()["round_number"] == 7
+
+
+
+def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client):
+    from src.core.plan_version_store import PlanVersionStore
+
+    tc, conn, _ = client
+    store = PlanVersionStore(conn)
+    active = conn.execute(
+        "SELECT id,plan_snapshot FROM master_plan_versions WHERE status='effective' ORDER BY version_no DESC LIMIT 1"
+    ).fetchone()
+    if active is None:
+        plan, *_ = PlanVersionManager(api_main._g_ctx["cfg"], conn).load_plan()
+        plan["enabled_platforms"] = list(dict.fromkeys([*(plan.get("enabled_platforms") or []), "xhs"]))
+        draft = store.create_master_draft(plan)
+        active_id = store.activate_master_version(draft["id"], reviewer="test")["id"]
+    else:
+        active_id = int(active["id"])
+        snapshot = json.loads(active["plan_snapshot"])
+        if "xhs" not in (snapshot.get("enabled_platforms") or []):
+            snapshot["enabled_platforms"] = list(dict.fromkeys([*(snapshot.get("enabled_platforms") or []), "xhs"]))
+            draft = store.create_master_draft(snapshot, based_on_version_id=active_id)
+            active_id = store.activate_master_version(draft["id"], reviewer="test")["id"]
+
+    created = tc.post("/api/subplans", json={
+        "master_plan_version_id": active_id,
+        "platform": "xhs",
+        "title": "API 子计划",
+        "snapshot": {"title": "API 子计划", "platform": "xhs"},
+        "stages": [{"title": "第一阶段", "direction": "AI 教育", "target_count": 2}],
+    })
+    assert created.status_code == 201, created.text
+    body = created.json()
+    sub_id = body["subplan"]["id"]
+    version_id = body["draft"]["id"]
+    assert body["draft"]["status"] == "draft"
+
+    invalid_target = tc.post("/api/subplans", json={
+        "master_plan_version_id": active_id, "platform": "xhs",
+        "title": "非法阶段目标", "stages": [{"title": "不允许为零", "target_count": 0}],
+    })
+    assert invalid_target.status_code == 422
+    platform_mutation = tc.patch(f"/api/subplans/{sub_id}", json={
+        "based_on_version_id": version_id,
+        "snapshot": {"title": "错误平台", "platform": "douyin"},
+    })
+    assert platform_mutation.status_code == 422
+
+    before = tc.get(f"/api/subplans/{sub_id}/progress")
+    assert before.status_code == 200
+    assert before.json()["stages"] == []
+
+    reviewed = tc.post(f"/api/subplans/{sub_id}/review", json={
+        "version_id": version_id, "action": "approve",
+    })
+    assert reviewed.status_code == 200, reviewed.text
+    assert reviewed.json()["authorization"] == "active"
+    invalid_reorder = tc.post(f"/api/subplans/{sub_id}/stages/reorder", json={
+        "based_on_version_id": version_id, "stage_ids": [True],
+    })
+    assert invalid_reorder.status_code == 422
+
+    progress = tc.get(f"/api/subplans/{sub_id}/progress")
+    assert progress.status_code == 200
+    assert progress.json()["stages"][0]["target_count"] == 2
+    assert progress.json()["stages"][0]["confirmed_published_count"] == 0
+
+    master_before = conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective'"
+    ).fetchone()[0]
+    adopted = tc.post("/api/plan_adjustments/adopt", json={"dimensions": ["AI教育"]})
+    assert adopted.status_code == 200, adopted.text
+    assert adopted.json()["requires_human_review"] is True
+    assert adopted.json()["drafts"][0]["effective"] is False
+    assert conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective'"
+    ).fetchone()[0] == master_before
+    assert conn.execute(
+        "SELECT current_version_id FROM sub_plans WHERE id=?", (sub_id,)
+    ).fetchone()[0] == version_id
+
+    invalid_round_count = tc.post(f"/api/subplans/{sub_id}/rounds", json={"topic_count": 0})
+    assert invalid_round_count.status_code == 422
+    round_response = tc.post(f"/api/subplans/{sub_id}/rounds", json={
+        "request_id": "api-first-round", "topic_count": 1,
+    })
+    assert round_response.status_code == 201, round_response.text
+    round_id = round_response.json()["round_id"]
+    row = conn.execute(
+        "SELECT sub_plan_id,sub_plan_version_id,sub_plan_stage_id,plan_attribution_status "
+        "FROM spiral_rounds WHERE id=?", (round_id,),
+    ).fetchone()
+    assert row["sub_plan_id"] == sub_id
+    assert row["sub_plan_version_id"] == version_id
+    assert row["sub_plan_stage_id"] == progress.json()["stages"][0]["id"]
+    assert row["plan_attribution_status"] == "resolved"
+
+
+def test_production_pause_is_separate_from_operations_pause(client):
+    tc, conn, _ = client
+    paused = tc.post("/api/production/pause", json={"paused": True})
+    assert paused.status_code == 200
+    assert paused.json()["paused"] is True
+    assert tc.get("/api/production/pause").json()["paused"] is True
+    ops = conn.execute("SELECT value FROM app_settings WHERE key='ops_paused'").fetchone()
+    assert ops is None or str(ops[0]).lower() not in ("1", "true", "yes", "on")
