@@ -176,6 +176,7 @@ def test_round_cannot_bind_stage_from_another_subplan_version():
         "sub-xhs", {"title": "v2"}, master_plan_version_id=master["id"],
         stages=[{"title": "阶段 B"}], based_on_version_id=first["id"],
     )
+    store.activate_subplan_version(second["id"], reviewer="reviewer")
     with pytest.raises(PlanVersionError, match="不属于"):
         store.bind_round(
             1, master_plan_version_id=master["id"],
