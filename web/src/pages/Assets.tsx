@@ -6,6 +6,7 @@ import KbSourcesPanel from "../components/KbSourcesPanel";
 import IndustryPresetPicker from "../components/IndustryPresetPicker";
 import CreatedContentPane from "../components/CreatedContentPane";
 import MediaLibraryPane from "../components/MediaLibraryPane";
+import VisualBrandPane from "../components/VisualBrandPane";
 import { useApp } from "../AppContext";
 import { PersonaEditor } from "../components/ConfigEditors";
 import { navigate, useUrlTab } from "../nav";
@@ -13,7 +14,7 @@ import {
   api, AssetItem, AssetType, Draft, HotTopicItem, KbInspect, ScoredTopic, SystemConfigView,
 } from "../api";
 
-type Tab = "topics" | "scoring" | "created" | "media" | "sources" | "voice" | "industry" | "templates" | "mapping";
+type Tab = "topics" | "scoring" | "created" | "media" | "visual" | "sources" | "voice" | "industry" | "templates" | "mapping";
 
 const ASSET_PAGE_SIZE = 20;
 
@@ -37,6 +38,7 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "scoring", label: "选题评分" },
   { key: "created", label: "已生产内容" },
   { key: "media", label: "图片素材库" },
+  { key: "visual", label: "视觉规范" },
   { key: "sources", label: "外部参考" },
   { key: "voice", label: "个人观点与画像" },
   { key: "industry", label: "行业预设" },
@@ -271,6 +273,7 @@ export default function Assets() {
 
       {tab === "created" && <CreatedContentPane />}
       {tab === "media" && <MediaLibraryPane />}
+      {tab === "visual" && <VisualBrandPane />}
 
       {tab === "sources" && (
         <>
