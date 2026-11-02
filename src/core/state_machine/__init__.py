@@ -199,17 +199,16 @@ class RoundStateMachine:
 
 
 # =====================================================================
-# 单篇草稿状态机（9 态，含 pending_verify 人工核实态）
+# 单篇草稿状态机（8 态）
 # =====================================================================
 
 DRAFT_STATUSES = (
-    "draft_pending", "pending_verify", "draft_saved", "user_published",
+    "draft_pending", "draft_saved", "user_published",
     "data_fetching", "published", "failed", "cancelled", "expired",
 )
 
 DRAFT_TRANSITIONS: dict[str, set[str]] = {
-    "draft_pending":    {"draft_saved", "pending_verify", "user_published", "failed", "cancelled"},
-    "pending_verify":   {"draft_saved", "draft_pending"},
+    "draft_pending":    {"draft_saved", "user_published", "failed", "cancelled"},
     "draft_saved":      {"user_published", "failed", "cancelled", "expired"},
     "user_published":   {"data_fetching", "failed"},
     "data_fetching":    {"published", "failed"},
