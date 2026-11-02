@@ -130,7 +130,6 @@ def test_auth(monkeypatch, tmp_path):
     monkeypatch.setenv("ITERWAVE_ENV_FILE", str(tmp_path / ".env"))
     monkeypatch.delenv(auth.PASSWORD_ENV, raising=False)
     auth._reset_revocations()
-    auth._failures.clear()
     auth.set_password("Test-access9!")
 
     def authorize(client):
@@ -144,7 +143,6 @@ def test_auth(monkeypatch, tmp_path):
 
     yield authorize
     auth._reset_revocations()
-    auth._failures.clear()
     os.environ.pop(auth.PASSWORD_ENV, None)
 
 

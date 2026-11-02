@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from datetime import datetime, timedelta
 
 import pytest
@@ -53,9 +55,9 @@ def test_auth_middleware_runs_password_verification_off_event_loop(client, monke
     observed = {}
     original_to_thread = asyncio.to_thread
 
-    def fake_is_authenticated(cookie_token, headers, ip=None):
+    def fake_authenticate(cookie_token, headers, ip=None):
         observed["worker_thread"] = threading.get_ident()
-        return True
+        return True, False
 
     async def recording_to_thread(func, *args, **kwargs):
         caller_thread = threading.get_ident()
@@ -65,8 +67,7 @@ def test_auth_middleware_runs_password_verification_off_event_loop(client, monke
 
     monkeypatch.setattr(api_main.auth, "password_configured", lambda: True)
     monkeypatch.setattr(api_main.auth, "is_trusted_local_setup", lambda request: False)
-    monkeypatch.setattr(api_main.auth, "is_rate_limited", lambda ip: False)
-    monkeypatch.setattr(api_main.auth, "is_authenticated", fake_is_authenticated)
+    monkeypatch.setattr(api_main.auth, "authenticate_request", fake_authenticate)
     monkeypatch.setattr(api_main.asyncio, "to_thread", recording_to_thread)
 
     response = tc.get("/api/ops/pause")

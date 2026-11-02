@@ -2,8 +2,11 @@
 
 import sqlite3
 import threading
+from types import SimpleNamespace
 
-from src.core.db import LockedConnection
+import pytest
+
+from src.core.db import Database, LockedConnection
 
 
 def test_unrelated_thread_cannot_commit_another_threads_partial_write():
