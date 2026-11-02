@@ -93,3 +93,26 @@ def test_document_renders_semantic_infographic_components():
     assert "visual-stat" in document
     assert "visual-quote" in document
     assert "<strong>25%</strong>" in document
+
+
+def test_document_supports_tenant_custom_design_tokens_and_component_styles():
+    document = _document(
+        title="自定义品牌", subtitle="", paragraphs=["正文"], footer="", page_text="2/2",
+        theme="knowledge_infographic", cover=False, width=1080, height=1440,
+        palette_override={
+            "bg": "#FAFAFA", "fg": "#121212", "accent": "#006699",
+            "muted": "#555555", "component_style": "minimal",
+        },
+    )
+    assert "background:#FAFAFA" in document
+    assert "color:#121212" in document
+    assert "padding:14px 0;border:0;border-radius:0;background:transparent" in document
+
+
+def test_document_rejects_unknown_component_style():
+    with pytest.raises(ValueError, match="组件样式"):
+        _document(
+            title="标题", subtitle="", paragraphs=["正文"], footer="", page_text="2/2",
+            theme="knowledge_infographic", cover=False, width=1080, height=1440,
+            palette_override={"component_style": "untrusted-css"},
+        )
