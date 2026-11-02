@@ -9,7 +9,7 @@ import { NotifyChannelsEditor } from "../components/ConfigEditors";
 import {
   api, Platform, CircuitBreakerEvent, Draft,
   OpsKpiResponse, OpsLogItem, TaskRunItem, NotificationItem,
-  SchedulerJob, RhythmConfig, NotifyRule, SystemConfigView,
+  SchedulerJob, RhythmConfig, NotifyRule, SystemConfigView, OpsTargetsView,
 } from "../api";
 
 const PLATFORM_NAME: Record<Platform, string> = {
@@ -43,17 +43,18 @@ const LEVEL_CLS: Record<string, string> = {
   info: "", warning: "orange", error: "red", critical: "red",
 };
 
-type OpsPane = "kpi" | "logs" | "publish" | "breaker" | "tasks" | "scheduler" | "rhythm" | "notifications";
-type OpsGroup = "kpi" | "publish" | "guard" | "jobs" | "inbox";
+type OpsPane = "kpi" | "logs" | "publish" | "breaker" | "tasks" | "scheduler" | "rhythm" | "notifications" | "targets";
+type OpsGroup = "kpi" | "publish" | "guard" | "jobs" | "inbox" | "targets";
 type OpsTab = OpsGroup | OpsPane;
 
-/** 8 个子面板合并为 5 个页签；旧链接（?tab=scheduler 等）自动落到所属页签 */
+/** 主动运营目标单独管理；旧链接（?tab=scheduler 等）自动落到所属页签 */
 const TABS: { key: OpsGroup; label: string; panes: OpsPane[] }[] = [
   { key: "kpi", label: "运营总控", panes: ["kpi"] },
   { key: "publish", label: "发布确认", panes: ["publish"] },
   { key: "guard", label: "熔断与节奏", panes: ["breaker", "rhythm"] },
   { key: "jobs", label: "任务与定时", panes: ["tasks", "scheduler"] },
   { key: "inbox", label: "日志与通知", panes: ["logs", "notifications"] },
+  { key: "targets", label: "主动运营目标", panes: ["targets"] },
 ];
 const ALL_OPS_TABS: OpsTab[] = [...TABS.map((t) => t.key), "logs", "breaker", "tasks", "scheduler", "rhythm", "notifications"];
 function groupOf(t: OpsTab): OpsGroup {
@@ -260,6 +261,9 @@ export default function Operations() {
           await refresh();
         }} />
       )}
+
+      {/* 主动运营目标：关注对象支持一行一个目标 */}
+      {show("targets") && <OpsTargetsEditor />}
 
       {/* === 5. 任务追踪 === */}
       {show("tasks") && <TasksPane tasks={tasks} total={tasksTotal} page={tasksPage} pages={tasksPages} onPageChange={setTasksPage} onResolved={refresh} targetId={recordTarget.type === "task_run" || recordTarget.type === "round" ? recordTarget.id : null} targetType={recordTarget.type} platform={tasksPlatform} status={tasksStatus} taskType={tasksType} dateFrom={tasksDateFrom} dateTo={tasksDateTo} onFiltersChange={(v) => { setTasksPage(1); setTasksPlatform(v.platform); setTasksStatus(v.status); setTasksType(v.taskType); setTasksDateFrom(v.dateFrom); setTasksDateTo(v.dateTo); }} />}
