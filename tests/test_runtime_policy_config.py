@@ -239,7 +239,14 @@ def test_topic_kb_path_is_not_runtime_editable_or_exposed(cfg, conn):
     original_path = cfg.topic_kb.path
     assert "topic_kb.path" not in {item["key"] for item in config_metadata_view(cfg)}
     assert current_config_view(cfg, conn)["readonly"]["kb_path"] == "由内容资产中的选题库来源管理"
-    assert "llm_base_url" not in current_config_view(cfg, conn)["readonly"]
+    # 主模型/兜底端点地址由「系统设置 → 主模型与备用」在线编辑，允许展示；密钥永不进入视图
+    import json as _json
+    import os as _os
+    _os.environ[cfg.llm.api_key_env] = "sk-sentinel-should-never-leak"
+    try:
+        assert "sk-sentinel-should-never-leak" not in _json.dumps(current_config_view(cfg, conn), ensure_ascii=False, default=str)
+    finally:
+        _os.environ.pop(cfg.llm.api_key_env, None)
     with pytest.raises(ConfigNotAllowedError):
         patch_config(cfg, conn, {"topic_kb.path": "/tmp/evil_topics.csv"})
     assert apply_overrides(cfg, {"topic_kb.path": "/tmp/evil_topics.csv"}) == []
