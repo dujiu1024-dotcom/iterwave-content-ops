@@ -45,7 +45,7 @@ def _db(path=None):
         );
         CREATE TABLE sub_plan_stages (
             id INTEGER PRIMARY KEY AUTOINCREMENT, sub_plan_version_id INTEGER NOT NULL,
-            stage_order INTEGER NOT NULL, title TEXT NOT NULL, direction TEXT NOT NULL,
+            stage_key TEXT NOT NULL, stage_order INTEGER NOT NULL, title TEXT NOT NULL, direction TEXT NOT NULL,
             target_count INTEGER NOT NULL, start_date TEXT, end_date TEXT,
             completion_condition TEXT NOT NULL, status TEXT NOT NULL, notes TEXT,
             created_at TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -72,14 +72,16 @@ def _db(path=None):
             reason TEXT NOT NULL, overridden_by TEXT NOT NULL, overridden_at TEXT
         );
         CREATE VIEW sub_plan_stage_publish_stats AS
-        SELECT s.id AS stage_id,s.sub_plan_version_id,
+        SELECT current_stage.id AS stage_id,current_stage.sub_plan_version_id,
                COUNT(DISTINCT d.id) AS confirmed_published_count
-        FROM sub_plan_stages s
-        LEFT JOIN spiral_rounds r ON r.sub_plan_stage_id=s.id
-            AND r.sub_plan_version_id=s.sub_plan_version_id
+        FROM sub_plan_stages current_stage
+        LEFT JOIN sub_plan_stages historical_stage
+            ON historical_stage.stage_key=current_stage.stage_key
+        LEFT JOIN spiral_rounds r ON r.sub_plan_stage_id=historical_stage.id
+            AND r.sub_plan_version_id=historical_stage.sub_plan_version_id
         LEFT JOIN contents c ON c.round_id=r.id
         LEFT JOIN drafts d ON d.content_id=c.id AND d.user_confirmed_at IS NOT NULL
-        GROUP BY s.id,s.sub_plan_version_id;
+        GROUP BY current_stage.id,current_stage.sub_plan_version_id;
         INSERT INTO spiral_rounds(id,round_number,status,plan_attribution_status)
         VALUES(1,1,'created','pending');
     """)
@@ -482,3 +484,37 @@ def test_create_round_once_persists_trigger_metadata():
     ).fetchone()
     assert tuple(row) == ("auto", '{"ok":true}')
 
+
+
+def test_stage_identity_and_publish_progress_survive_subplan_revision():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    master = _active_master(store)
+    first, first_stage_id = _active_subplan(store, master)
+    store.bind_round(
+        1, master_plan_version_id=master["id"],
+        sub_plan_id="sub-xhs", sub_plan_version_id=first["id"],
+        sub_plan_stage_id=first_stage_id,
+    )
+    conn.execute("INSERT INTO contents(id,round_id) VALUES('content-revision',1)")
+    conn.execute(
+        "INSERT INTO drafts(id,content_id,user_confirmed_at) VALUES('draft-revision','content-revision','2026-11-02')"
+    )
+    conn.execute("UPDATE sub_plan_stages SET status='in_progress' WHERE id=?", (first_stage_id,))
+    conn.commit()
+    prior_stage = dict(conn.execute("SELECT * FROM sub_plan_stages WHERE id=?", (first_stage_id,)).fetchone())
+    second = store.create_subplan_version(
+        "sub-xhs", {"title": "小红书子计划修订"}, master_plan_version_id=master["id"],
+        stages=[{key: prior_stage[key] for key in (
+            "stage_key", "stage_order", "title", "direction", "target_count",
+            "start_date", "end_date", "completion_condition", "status", "notes",
+        )}],
+        based_on_version_id=first["id"],
+    )
+    second_stage_id = conn.execute(
+        "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=?", (second["id"],)
+    ).fetchone()[0]
+    assert conn.execute(
+        "SELECT status FROM sub_plan_stages WHERE id=?", (second_stage_id,)
+    ).fetchone()[0] == "in_progress"
+    assert store.get_stage_publish_stats(second_stage_id)["confirmed_published_count"] == 1
