@@ -22,7 +22,7 @@ def test_save_pending_drafts_queues_after_running_round_instead_of_deduping(tmp_
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("CREATE TABLE spiral_rounds (id INTEGER PRIMARY KEY, status TEXT NOT NULL, sub_plan_id TEXT, sub_plan_version_id INTEGER, sub_plan_stage_id INTEGER)")
-    conn.execute("INSERT INTO spiral_rounds(id) VALUES(7)")
+    conn.execute("INSERT INTO spiral_rounds(id,status) VALUES(7,'awaiting_publish')")
     monkeypatch.setattr(api_main, "_task_queue", queue)
     monkeypatch.setitem(api_main._g_ctx, "conn", conn)
     monkeypatch.setitem(api_main._g_ctx, "runtime_tenant_id", "tenant-a")
@@ -61,7 +61,7 @@ def test_run_rejects_round_not_in_created_state(tmp_path, monkeypatch):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(
-        "CREATE TABLE spiral_rounds (id INTEGER PRIMARY KEY, status TEXT NOT NULL)"
+        "CREATE TABLE spiral_rounds (id INTEGER PRIMARY KEY, status TEXT NOT NULL, sub_plan_id TEXT, sub_plan_version_id INTEGER, sub_plan_stage_id INTEGER)"
     )
     conn.execute(
         "CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT, updated_by TEXT)"
