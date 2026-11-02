@@ -162,36 +162,63 @@ def test_caught_sql_error_marks_request_transaction_rollback_only():
 
 
 def test_pending_verify_draft_can_be_manually_reconciled(seed, conn):
-    from src.core.state_machine import DraftStateMachine, DRAFT_STATUSES
+    from src.core.state_machine import DraftStateMachine
 
     round_id = seed.round(status="producing")
-    saved_id = seed.draft(round_id, draft_status="pending_verify", fetch_status=None)
-    retry_id = seed.draft(round_id, draft_status="pending_verify", fetch_status=None)
+    saved_id = seed.draft(round_id, draft_status="draft_pending", fetch_status=None)
+    retry_id = seed.draft(round_id, draft_status="draft_pending", fetch_status=None)
     machine = DraftStateMachine(conn)
+    for draft_id in (saved_id, retry_id):
+        conn.execute(
+            "INSERT INTO draft_save_verifications(draft_id,status,attempted_at) "
+            "VALUES (?, 'pending_verify', '2026-11-02 10:00:00')",
+            (draft_id,),
+        )
+    conn.commit()
 
-    assert "pending_verify" in DRAFT_STATUSES
+    # 已在平台找到：推进真实草稿状态并完成核实账本。
     assert machine.transition(
         saved_id, "draft_saved", reason="operator verified platform draft exists",
         extra_updates={"saved_content_hash": "verified-hash", "error_msg": None},
     )
-    assert machine.transition(
-        retry_id, "draft_pending", reason="operator verified platform draft is absent",
-        extra_updates={"draft_id": None, "error_msg": None},
+    conn.execute(
+        "UPDATE draft_save_verifications SET status='verified_saved', verified_at=?, note=? WHERE draft_id=?",
+        ("2026-11-02 10:05:00", "platform draft exists", saved_id),
     )
+    # 平台不存在：保留 draft_pending，解除自动重试保护，允许用户重新存草稿。
+    conn.execute(
+        "UPDATE draft_save_verifications SET status='verified_missing', verified_at=?, note=? WHERE draft_id=?",
+        ("2026-11-02 10:05:00", "platform draft absent", retry_id),
+    )
+    conn.commit()
     statuses = {
         row["id"]: row["status"]
         for row in conn.execute(
             "SELECT id, status FROM drafts WHERE id IN (?, ?)", (saved_id, retry_id),
         ).fetchall()
     }
+    verification = {
+        row["draft_id"]: row["status"]
+        for row in conn.execute(
+            "SELECT draft_id, status FROM draft_save_verifications WHERE draft_id IN (?, ?)",
+            (saved_id, retry_id),
+        ).fetchall()
+    }
     assert statuses == {saved_id: "draft_saved", retry_id: "draft_pending"}
+    assert verification == {saved_id: "verified_saved", retry_id: "verified_missing"}
 
 
 def test_pending_verify_content_cannot_be_deleted(cfg, conn, seed):
     from src.core.content_admin import delete_contents
 
     round_id = seed.round(status="awaiting_publish")
-    draft_id = seed.draft(round_id, draft_status="pending_verify", fetch_status=None)
+    draft_id = seed.draft(round_id, draft_status="draft_pending", fetch_status=None)
+    conn.execute(
+        "INSERT INTO draft_save_verifications(draft_id,status,attempted_at) "
+        "VALUES (?, 'pending_verify', '2026-11-02 10:00:00')",
+        (draft_id,),
+    )
+    conn.commit()
     content_id = conn.execute(
         "SELECT content_id FROM drafts WHERE id=?", (draft_id,),
     ).fetchone()[0]
