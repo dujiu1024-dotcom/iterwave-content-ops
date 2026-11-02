@@ -263,3 +263,61 @@ def test_webhook_allows_official_host_via_safe_transport(monkeypatch) -> None:
     assert notifier._send_webhook("feishu", "TEST_FEISHU_WEBHOOK", "title", "body") is True
     assert len(calls) == 1
     assert calls[0][0].startswith("https://open.feishu.cn/")
+
+def test_auth_failure_rate_limit_state_is_thread_safe_and_bounded(monkeypatch):
+    auth._failures.clear()
+    monkeypatch.setattr(auth, "_FAILURE_IP_LIMIT", 3)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(auth.record_failure, ["198.51.100.1"] * 64))
+    assert len(auth._recent_failures("198.51.100.1")) == 64
+    assert auth.is_rate_limited("198.51.100.1")
+
+    for index in range(20):
+        auth.record_failure(f"203.0.113.{index}")
+    assert len(auth._failures) <= 3
+    auth._failures.clear()
+
+
+
+def test_valid_script_password_can_recover_shared_ip_after_other_failures(tmp_path, monkeypatch):
+    monkeypatch.setenv("ITERWAVE_ENV_FILE", str(tmp_path / ".env"))
+    auth._failures.clear()
+    password = "Strong-Access-Password-2026!"
+    auth.set_password(password)
+    client_ip = "198.51.100.77"
+    for _ in range(auth.LOGIN_MAX_FAILURES):
+        auth.record_failure(client_ip)
+    assert auth.is_rate_limited(client_ip)
+
+    assert auth.is_authenticated(None, {"x-access-token": password}, ip=client_ip)
+    assert not auth.is_rate_limited(client_ip)
+
+
+
+def test_auth_failure_window_expires_on_monotonic_clock(monkeypatch):
+    auth._failures.clear()
+    now = [100.0]
+    monkeypatch.setattr(auth.time, "monotonic", lambda: now[0])
+    auth.record_failure("198.51.100.88")
+    assert auth._recent_failures("198.51.100.88") == [100.0]
+
+    now[0] += auth.LOGIN_WINDOW_SECONDS + 1
+    assert not auth.is_rate_limited("198.51.100.88")
+    assert "198.51.100.88" not in auth._failures
+
+
+
+def test_repeated_invalid_script_tokens_are_counted_once_per_attempt(monkeypatch):
+    auth._failures.clear()
+    monkeypatch.setattr(auth, "password_configured", lambda: True)
+    monkeypatch.setattr(auth, "_session_valid", lambda token: False)
+    monkeypatch.setattr(auth, "verify_password", lambda candidate: False)
+    headers = {"x-access-token": "not-the-access-password"}
+    client_ip = "198.51.100.99"
+
+    for _ in range(auth.LOGIN_MAX_FAILURES + 3):
+        assert not auth.is_authenticated(None, headers, ip=client_ip)
+
+    assert auth.is_rate_limited(client_ip)
+    assert len(auth._failures[client_ip]) == auth.LOGIN_MAX_FAILURES
