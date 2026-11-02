@@ -846,7 +846,7 @@ def add_upload(cfg, *, filename: str, content_b64: str, name: str = "",
         "id": _new_id(), "kind": "file", "name": _validate_name(name or safe),
         "enabled": True, "path": str(dest), "format": fmt,
         "field_mapping": mapping, "headers": {},
-        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "created_at": business_now(cfg).isoformat(timespec="seconds"),
         "last_sync_at": None, "last_error": None, "rows": len(rows),
     }
     sources.append(source)
@@ -872,7 +872,7 @@ def add_server(cfg, *, path: str, name: str = "", fmt: str = "auto",
         "id": _new_id(), "kind": "server", "name": _validate_name(name or target.name),
         "enabled": True, "path": str(target), "format": fmt,
         "field_mapping": mapping, "headers": {},
-        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "created_at": business_now(cfg).isoformat(timespec="seconds"),
         "last_sync_at": None, "last_error": None, "rows": len(rows),
     }
     sources.append(source)
@@ -890,7 +890,7 @@ def add_remote(cfg, *, url: str, name: str = "", fmt: str = "auto",
         "enabled": True, "url": url, "format": detect_format(url, fmt),
         "headers": {str(k): str(v) for k, v in (headers or {}).items() if k and v},
         "field_mapping": dict(field_mapping or {}),
-        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "created_at": business_now(cfg).isoformat(timespec="seconds"),
         "last_sync_at": None, "last_error": None, "rows": None,
     }
     info = sync_remote(cfg, source)
