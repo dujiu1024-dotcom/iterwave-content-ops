@@ -525,8 +525,11 @@ def fetch_remote(source: dict, timeout: int | None = None) -> tuple[list[str], l
     """通过固定到已验证公网 IP 的连接抓取远程来源。"""
     from .safe_http import fetch_public_bytes
     if timeout is None:
-        from .config import get_config
-        timeout = get_config().topic_kb.remote_timeout_seconds
+        from .task_context import current_config
+        cfg = current_config()
+        if cfg is None:
+            raise RuntimeError("fetch_remote 必须显式传入 timeout 或绑定账号组任务配置")
+        timeout = cfg.topic_kb.remote_timeout_seconds
 
     url = (source.get("url") or "").strip()
     headers = {str(k): str(v) for k, v in (source.get("headers") or {}).items() if k and v}
