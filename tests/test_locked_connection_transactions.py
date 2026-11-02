@@ -233,3 +233,114 @@ def test_pending_verify_content_cannot_be_deleted(cfg, conn, seed):
     assert conn.execute(
         "SELECT status FROM draft_save_verifications WHERE draft_id=?", (draft_id,),
     ).fetchone()[0] == "pending_verify"
+
+
+def test_transaction_rolls_back_all_statements_on_exception():
+    raw = sqlite3.connect(":memory:", check_same_thread=False)
+    conn = LockedConnection(raw)
+    conn.execute("CREATE TABLE events (value TEXT NOT NULL)")
+
+    with pytest.raises(RuntimeError, match="audit failed"):
+        with conn.transaction():
+            conn.execute("INSERT INTO events(value) VALUES (?)", ("content",))
+            raise RuntimeError("audit failed")
+
+    assert conn.execute("SELECT value FROM events").fetchall() == []
+
+
+def test_unrelated_thread_cannot_commit_another_threads_partial_transaction():
+    raw = sqlite3.connect(":memory:", check_same_thread=False)
+    conn = LockedConnection(raw)
+    conn.execute("CREATE TABLE events (value TEXT NOT NULL)")
+    transaction_started = threading.Event()
+    allow_rollback = threading.Event()
+    second_attempting = threading.Event()
+    second_finished = threading.Event()
+    errors = []
+
+    def first_request():
+        try:
+            with conn.transaction():
+                conn.execute("INSERT INTO events(value) VALUES ('request-a')")
+                transaction_started.set()
+                assert allow_rollback.wait(timeout=3)
+                raise RuntimeError("force rollback")
+        except RuntimeError:
+            pass
+        except BaseException as exc:  # pragma: no cover - diagnostic path
+            errors.append(exc)
+
+    def second_request():
+        try:
+            assert transaction_started.wait(timeout=3)
+            second_attempting.set()
+            conn.execute("INSERT INTO events(value) VALUES ('request-b')")
+            conn.commit()
+        except BaseException as exc:  # pragma: no cover - diagnostic path
+            errors.append(exc)
+        finally:
+            second_finished.set()
+
+    a = threading.Thread(target=first_request)
+    b = threading.Thread(target=second_request)
+    a.start()
+    b.start()
+    assert transaction_started.wait(timeout=3)
+    assert second_attempting.wait(timeout=3)
+    # B must block on the transaction lock until A rolls back.
+    assert not second_finished.wait(timeout=0.1)
+    allow_rollback.set()
+    a.join(timeout=3)
+    b.join(timeout=3)
+
+    assert not a.is_alive()
+    assert not b.is_alive()
+    assert errors == []
+    values = [row[0] for row in conn.execute("SELECT value FROM events").fetchall()]
+    assert values == ["request-b"]
+
+
+def test_transaction_rejects_implicit_nesting_without_stealing_outer_transaction():
+    raw = sqlite3.connect(":memory:", check_same_thread=False)
+    conn = LockedConnection(raw)
+    conn.execute("CREATE TABLE events (value TEXT NOT NULL)")
+
+    with conn.transaction():
+        conn.execute("INSERT INTO events(value) VALUES ('outer')")
+        with pytest.raises(RuntimeError, match="不支持隐式嵌套"):
+            with conn.transaction():
+                pass
+        conn.execute("INSERT INTO events(value) VALUES ('outer-continues')")
+
+    values = [row[0] for row in conn.execute("SELECT value FROM events ORDER BY rowid")]
+    assert values == ["outer", "outer-continues"]
+
+
+def test_database_connect_uses_thirty_second_sqlite_busy_timeout(tmp_path):
+    cfg = SimpleNamespace(
+        paths=SimpleNamespace(db_file="iterwave.db", backup_dir="backups"),
+        resolve_path=lambda value: tmp_path / value,
+    )
+    conn = Database(cfg).connect()
+    try:
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+    finally:
+        conn.close()
+
+
+
+def test_connection_transaction_supports_raw_sqlite_connection():
+    from src.core.db import connection_transaction
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE events (value TEXT NOT NULL)")
+    with connection_transaction(conn):
+        conn.execute("INSERT INTO events(value) VALUES ('committed')")
+
+    with pytest.raises(RuntimeError, match="rollback"):
+        with connection_transaction(conn):
+            conn.execute("INSERT INTO events(value) VALUES ('rolled-back')")
+            raise RuntimeError("rollback")
+
+    assert conn.execute("SELECT value FROM events").fetchall() == [("committed",)]
+    conn.close()
