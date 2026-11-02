@@ -10,6 +10,8 @@ ALTER TABLE sub_plan_stages ADD COLUMN stage_key TEXT;
 UPDATE sub_plan_stages SET stage_key='legacy:' || id WHERE stage_key IS NULL;
 CREATE INDEX IF NOT EXISTS idx_sub_plan_stages_stage_key
     ON sub_plan_stages(stage_key, sub_plan_version_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_sub_plan_stages_version_key
+    ON sub_plan_stages(sub_plan_version_id, stage_key);
 
 -- A stage's confirmed publish count follows its stable identity across versions,
 -- while each version still gets its own stage row for immutable round attribution.
