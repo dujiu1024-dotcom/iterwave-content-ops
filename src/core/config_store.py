@@ -1200,7 +1200,7 @@ def patch_config(
         from src.core.config_repository import save_settings
         try:
             save_settings(
-                conn, persisted_tenant, audit_rows=tenant_audit_rows,
+                conn, persisted_tenant, cfg=cfg, audit_rows=tenant_audit_rows,
                 remove_keys=remove_keys,
             )
         except (ValueError, sqlite3.Error) as exc:
