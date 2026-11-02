@@ -281,7 +281,7 @@ class GlobalTaskWorker:
             logger.exception("结束定时任务审计记录失败 task_run_id=%s", task_run_id)
 
     @staticmethod
-    def _mark_round_failed(conn, round_id: int, reason: str) -> bool:
+    def _mark_round_failed(conn, round_id: int, reason: str, cfg=None) -> bool:
         """兜底收口 Worker 捕获到的执行器外异常，避免轮次永久停在 producing。"""
         if conn is None or not callable(getattr(conn, "execute", None)):
             return False
@@ -292,7 +292,7 @@ class GlobalTaskWorker:
         ).fetchone()
         if row is None or row["status"] not in {"producing", "analyzing"}:
             return False
-        return RoundStateMachine(conn).transition(
+        return RoundStateMachine(conn, cfg=cfg).transition(
             round_id, "failed", f"Worker 异常兜底收口：{str(reason)[:300]}",
         )
 
@@ -315,7 +315,7 @@ class GlobalTaskWorker:
         reconciled = False
         try:
             conn = context.get("conn")
-            self._mark_round_failed(conn, round_id, reason)
+            self._mark_round_failed(conn, round_id, reason, cfg=context.get("cfg"))
             self._mark_content_plan_failed(conn, round_id)
             reconciled = True
         except Exception:
