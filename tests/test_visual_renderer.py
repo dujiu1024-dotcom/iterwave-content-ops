@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from src.core.visual_renderer import _document, _pages, _split_paragraphs, _validate_theme_contrast
+from src.core.visual_specs import build_infographic_components
 
 
 def test_long_paragraph_is_split_without_losing_text():
@@ -72,3 +73,23 @@ def test_page_planner_respects_text_budget_even_when_paragraph_count_fits():
     pages = _pages(source, max_pages=6, capacity=5, max_page_chars=320)
     assert [block for page in pages for block in page] == chunks
     assert all(sum(len(block) for block in page) <= 320 for page in pages)
+
+
+def test_infographic_component_schema_preserves_copy_and_classifies_visual_blocks():
+    source = ["第一步：收集样本", "覆盖率提升25%，达到100人", "“教师应保留最终判断权”", "持续复盘内容"]
+    components = build_infographic_components(source)
+    assert [item.kind for item in components] == ["step", "stat", "quote", "text"]
+    assert [item.text for item in components] == source
+
+
+def test_document_renders_semantic_infographic_components():
+    document = _document(
+        title="数据复盘", subtitle="知识卡片",
+        paragraphs=["第一步：收集样本", "覆盖率提升25%，达到100人", "“教师应保留最终判断权”"],
+        footer="", page_text="2/2", theme="knowledge_infographic",
+        cover=False, width=1080, height=1440,
+    )
+    assert "visual-step" in document
+    assert "visual-stat" in document
+    assert "visual-quote" in document
+    assert "<strong>25%</strong>" in document
