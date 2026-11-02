@@ -460,6 +460,7 @@ def _build_tenant_runtime_context(
 
 async def _switch_tenant_runtime(tenant_id: str) -> dict:
     """只切换前台运行时引用；所有账号组后台调度器和连接继续常驻。"""
+    global _g_ctx
     registry = _g_ctx.get("tenant_registry")
     if registry is None:
         raise HTTPException(503, "账号组注册表尚未初始化")
@@ -535,10 +536,9 @@ async def _switch_tenant_runtime(tenant_id: str) -> dict:
         # 账号组切换不终止任何租户的扫码登录；登录子进程按租户与平台分别管理。
         selected = registry.select_active(tenant_id)
         set_active_notifier(new_context["notifier"])
-        _g_ctx.clear()
-        _g_ctx.update(new_context)
-        # 活动账号组缓存直接引用前台字典；切走时会先快照，避免配置更新后缓存陈旧。
-        _tenant_runtime_contexts[tenant_id] = _g_ctx
+        # 原子替换前台上下文引用；不就地清空/改写正在被后台读取的共享字典。
+        _g_ctx = new_context
+        _tenant_runtime_contexts[tenant_id] = new_context
         with _dedupe_lock:
             _dedupe_cache.clear()
         logger.info("账号组前台工作空间切换成功 from=%s to=%s", old_tenant_id, tenant_id)
@@ -552,9 +552,8 @@ async def _switch_tenant_runtime(tenant_id: str) -> dict:
         try:
             registry.select_active(old_tenant_id)
             set_active_notifier(old_context["notifier"])
-            _g_ctx.clear()
-            _g_ctx.update(old_context)
-            _tenant_runtime_contexts[old_tenant_id] = _g_ctx
+            _g_ctx = old_context
+            _tenant_runtime_contexts[old_tenant_id] = old_context
         except Exception as rollback_exc:
             logger.exception("账号组前台切换回滚失败")
             raise TenantRuntimeRollbackError(
