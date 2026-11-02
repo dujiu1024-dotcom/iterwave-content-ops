@@ -88,3 +88,52 @@ def test_migration_is_safe_to_reapply_with_column_skipper():
     assert conn.execute("SELECT COUNT(*) FROM master_plan_versions").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM content_plan_versions").fetchone()[0] == 1
     conn.close()
+
+def test_stage_publish_stats_count_only_user_confirmed_drafts():
+    from src.core.plan_version_store import PlanVersionStore
+
+    conn = _legacy_db()
+    db = Database.__new__(Database)
+    db._run_migration(conn, Migration(115, MIGRATION, "plan_version_lifecycle"))
+    conn.execute(
+        "INSERT INTO spiral_rounds(id,round_number,status,plan_signature,created_at) "
+        "VALUES(3,3,'created',NULL,'2026-01-03')"
+    )
+    conn.commit()
+
+    store = PlanVersionStore(conn)
+    master = store.create_master_draft({
+        "topic_count_per_platform": 5, "dimension_allocation": {},
+        "enabled_platforms": ["xhs"], "content_format": "image_text",
+    })
+    store.activate_master_version(master["id"], reviewer="reviewer")
+    subplan = store.create_subplan_version(
+        "cp-1", {"title": "subplan", "platform": "xhs"},
+        master_plan_version_id=master["id"],
+        stages=[{"title": "stage 1", "target_count": 2}],
+    )
+    stage_id = conn.execute(
+        "SELECT id FROM content_plan_stages WHERE content_plan_version_id=?",
+        (subplan["id"],),
+    ).fetchone()[0]
+    store.activate_subplan_version(subplan["id"])
+    store.bind_round(
+        3, master_plan_version_id=master["id"],
+        content_plan_version_id=subplan["id"], content_plan_stage_id=stage_id,
+    )
+    conn.execute("INSERT INTO contents(id,round_id) VALUES('content-1',3)")
+    conn.execute(
+        "INSERT INTO drafts(id,content_id,user_confirmed_at) VALUES('draft-1','content-1',NULL)"
+    )
+    conn.execute(
+        "INSERT INTO drafts(id,content_id,user_confirmed_at) VALUES('draft-2','content-1','2026-01-04')"
+    )
+    conn.commit()
+
+    assert store.get_stage_publish_stats(stage_id)["confirmed_published_count"] == 1
+    store.update_stage_status(stage_id, "in_progress")
+    store.update_stage_status(stage_id, "completed")
+    assert conn.execute(
+        "SELECT status FROM content_plan_stages WHERE id=?", (stage_id,)
+    ).fetchone()[0] == "completed"
+    conn.close()
