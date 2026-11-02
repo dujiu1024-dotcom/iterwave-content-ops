@@ -164,9 +164,10 @@ def test_caught_sql_error_marks_request_transaction_rollback_only():
 def test_pending_verify_draft_can_be_manually_reconciled(seed, conn):
     from src.core.state_machine import DraftStateMachine
 
-    round_id = seed.round(status="producing")
-    saved_id = seed.draft(round_id, draft_status="draft_pending", fetch_status=None)
-    retry_id = seed.draft(round_id, draft_status="draft_pending", fetch_status=None)
+    saved_round_id = seed.round(status="producing")
+    retry_round_id = seed.round(status="producing")
+    saved_id = seed.draft(saved_round_id, draft_status="draft_pending", fetch_status=None)
+    retry_id = seed.draft(retry_round_id, draft_status="draft_pending", fetch_status=None)
     machine = DraftStateMachine(conn)
     for draft_id in (saved_id, retry_id):
         conn.execute(
@@ -228,4 +229,7 @@ def test_pending_verify_content_cannot_be_deleted(cfg, conn, seed):
     assert result["blocked"]
     assert conn.execute(
         "SELECT status FROM drafts WHERE id=?", (draft_id,),
+    ).fetchone()[0] == "draft_pending"
+    assert conn.execute(
+        "SELECT status FROM draft_save_verifications WHERE draft_id=?", (draft_id,),
     ).fetchone()[0] == "pending_verify"
