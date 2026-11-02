@@ -77,10 +77,11 @@ def test_round_transition_happy_path_and_illegal_jump(conn: sqlite3.Connection, 
         == "awaiting_publish"
 
 
-def test_round_transition_writes_local_time_log(conn: sqlite3.Connection, seed) -> None:
+def test_round_transition_writes_local_time_log(conn: sqlite3.Connection, seed, cfg) -> None:
     """R5：流转日志用本地时间，且 producing 起点独立落库（R8）。"""
     r = seed.round()
-    sm = RoundStateMachine(conn)
+    from src.core.timezone import business_now
+    sm = RoundStateMachine(conn, cfg=cfg)
     sm.transition(r, "producing", "测试")
     row = conn.execute(
         "SELECT transition_log, producing_started_at FROM spiral_rounds WHERE id = ?", (r,)
@@ -88,8 +89,8 @@ def test_round_transition_writes_local_time_log(conn: sqlite3.Connection, seed) 
     log, started = row[0], row[1]
     assert log and "producing" in log
     assert started is not None
-    # 本地时间与 now() 的差应远小于 1 天（若是 UTC 会差 8 小时）
-    delta = abs((datetime.now() - datetime.fromisoformat(started)).total_seconds())
+    # 与账号组业务时区的当前时间比较，而不是依赖 CI 主机操作系统时区。
+    delta = abs((business_now(cfg) - datetime.fromisoformat(started)).total_seconds())
     assert delta < 300, f"producing_started_at 疑似 UTC：{started}"
 
 
