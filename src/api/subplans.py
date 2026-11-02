@@ -379,47 +379,92 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         enabled_master_platforms = set(master_snapshot.get("enabled_platforms") or [])
         if not set(platforms).issubset(enabled_master_platforms):
             raise HTTPException(422, "AI 拆解平台必须属于生效主计划启用的平台")
-        api_key = os.getenv(str(cfg.llm.api_key_env or ""))
-        if not api_key:
-            raise HTTPException(
-                503, {"code": "ai_unavailable", "message": "AI 服务未配置 API Key",
-                      "manual_creation_available": True},
-            )
         prompt = (
             "你是内容运营计划拆解器。根据母计划，为每个平台分别生成子计划草稿。"
             "只返回 JSON 对象，格式为 {subplans:[{platform,title,snapshot,stages:["
             "{title,direction,target_count,start_date,end_date,completion_condition,notes}]}]}。"
             "每个子计划至少 1 个阶段；阶段顺序按数组顺序；target_count 是用户最终确认发布篇数，"
             "不是生成草稿数。不得输出审核状态或要求自动生效。"
-            "\n母计划："
+            "\\n母计划："
             + json.dumps(master_snapshot, ensure_ascii=False)
-            + "\n目标平台：" + json.dumps(platforms, ensure_ascii=False)
+            + "\\n目标平台：" + json.dumps(platforms, ensure_ascii=False)
         )
-        url = str(cfg.llm.base_url).rstrip("/") + "/chat/completions"
-        models = [str(cfg.llm.model)]
-        if getattr(cfg.llm, "fallback_model", None):
-            models.append(str(cfg.llm.fallback_model))
-        data = None
-        errors = []
-        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
-            for model in models:
-                try:
+
+        # Use the same independently configured primary/fallback providers as content
+        # generation. The fallback must use its own base URL and API-key environment
+        # variable; reusing the primary URL/key sends cross-provider credentials to
+        # the wrong endpoint and makes the configured fallback ineffective.
+        provider_specs = [
+            {
+                "name": str(getattr(cfg.llm, "provider", "primary") or "primary"),
+                "base_url": str(cfg.llm.base_url or "").strip(),
+                "model": str(cfg.llm.model or "").strip(),
+                "api_key_env": str(cfg.llm.api_key_env or "").strip(),
+                "thinking": str(getattr(cfg.llm, "thinking", "") or "").strip(),
+            },
+        ]
+        fallback_model = str(getattr(cfg.llm, "fallback_model", "") or "").strip()
+        if fallback_model:
+            provider_specs.append({
+                "name": str(getattr(cfg.llm, "fallback_provider", "fallback") or "fallback"),
+                "base_url": str(getattr(cfg.llm, "fallback_base_url", "") or "").strip(),
+                "model": fallback_model,
+                "api_key_env": str(getattr(cfg.llm, "fallback_api_key_env", "") or "").strip(),
+                "thinking": "",
+            })
+
+        attempts = []
+        for spec in provider_specs:
+            if not spec["base_url"] or not spec["model"] or not spec["api_key_env"]:
+                attempts.append({"provider": spec["name"], "error": "provider_configuration_incomplete"})
+                continue
+            api_key = os.getenv(spec["api_key_env"])
+            if not api_key:
+                attempts.append({"provider": spec["name"], "error": "api_key_missing"})
+                continue
+            base_url = spec["base_url"].rstrip("/")
+            request_url = base_url if base_url.endswith("/chat/completions") else base_url + "/chat/completions"
+            request_body = {
+                "model": spec["model"],
+                "temperature": 0.25,
+                "messages": [
+                    {"role": "system", "content": "只输出合法 JSON，不要 Markdown。"},
+                    {"role": "user", "content": prompt},
+                ],
+            }
+            if spec["thinking"] in {"enabled", "disabled"}:
+                request_body["thinking"] = {"type": spec["thinking"]}
+            try:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
                     response = await client.post(
-                        url, headers={"Authorization": f"Bearer {api_key}"},
-                        json={"model": model, "temperature": 0.25,
-                              "messages": [{"role": "system", "content": "只输出合法 JSON，不要 Markdown。"},
-                                           {"role": "user", "content": prompt}]},
+                        request_url,
+                        headers={"Authorization": f"Bearer {api_key}"},
+                        json=request_body,
                     )
                     response.raise_for_status()
                     payload = response.json()
                     raw = payload["choices"][0]["message"]["content"]
-                    match = re.search(r"\{[\s\S]*\}", raw)
+                    match = re.search(r"\\{[\\s\\S]*\\}", raw)
                     if not match:
                         raise ValueError("模型未返回 JSON 对象")
-                    data = json.loads(match.group(0))
+                    candidate = json.loads(match.group(0))
+                    if not isinstance(candidate, dict) or not isinstance(candidate.get("subplans"), list):
+                        raise ValueError("模型返回的 JSON 缺少 subplans 数组")
+                    data = candidate
                     break
-                except Exception as exc:
-                    errors.append(type(exc).__name__)
+            except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+                # Record only provider name and exception class. Never expose keys,
+                # request headers, full URLs, or raw model responses to API clients.
+                attempts.append({"provider": spec["name"], "error": type(exc).__name__})
+                logger.warning(
+                    "AI 子计划拆解通道失败 provider=%s error=%s",
+                    spec["name"], type(exc).__name__,
+                )
+        if not isinstance(data, dict) or not isinstance(data.get("subplans"), list):
+            raise HTTPException(
+                502, {"code": "ai_generation_failed", "message": "AI 拆解失败或返回格式不合法",
+                      "manual_creation_available": True, "attempts": attempts},
+            )
         if not isinstance(data, dict) or not isinstance(data.get("subplans"), list):
             raise HTTPException(
                 502, {"code": "ai_generation_failed", "message": "AI 拆解失败或返回格式不合法",
