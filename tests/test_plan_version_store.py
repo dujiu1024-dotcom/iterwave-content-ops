@@ -6,8 +6,8 @@ import pytest
 from src.core.plan_version_store import PlanVersionError, PlanVersionStore
 
 
-def _db():
-    conn = sqlite3.connect(":memory:")
+def _db(path=None):
+    conn = sqlite3.connect(str(path) if path is not None else ":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript("""
@@ -254,3 +254,21 @@ def test_durable_round_open_lock_is_idempotent_and_rejects_key_reuse():
         sub_plan_version_id=subplan["id"], sub_plan_stage_id=stage_id,
     )
     assert retry == {"acquired": False, "status": "created", "round_id": completed["round_id"]}
+
+
+
+def test_plan_versions_are_isolated_by_tenant_database_file(tmp_path):
+    tenant_a = _db(tmp_path / "tenant-a.db")
+    tenant_b = _db(tmp_path / "tenant-b.db")
+    store_a = PlanVersionStore(tenant_a)
+    store_b = PlanVersionStore(tenant_b)
+
+    a = store_a.create_master_draft(_plan(5), author="tenant-a")
+    b = store_b.create_master_draft(_plan(9), author="tenant-b")
+    assert a["id"] == b["id"]  # local integer IDs may overlap safely
+    assert store_a.list_master_versions()[0]["created_by"] == "tenant-a"
+    assert store_b.list_master_versions()[0]["created_by"] == "tenant-b"
+    assert json.loads(store_a.list_master_versions()[0]["plan_snapshot"])["topic_count_per_platform"] == 5
+    assert json.loads(store_b.list_master_versions()[0]["plan_snapshot"])["topic_count_per_platform"] == 9
+    tenant_a.close()
+    tenant_b.close()
