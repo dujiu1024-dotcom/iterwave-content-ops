@@ -161,7 +161,7 @@ def test_executor_follows_plan(cfg, conn, seed, kb, monkeypatch):
         ),
     )
     monkeypatch.setattr("src.core.round_executor.make_card_set",
-                        lambda title, dim, body, out, platform, footer="": [out / f"{abs(hash(title))}.png"])
+                        lambda title, dim, body, out, platform, footer="", **_kwargs: [out / f"{abs(hash(title))}.png"])
     pvm = PlanVersionManager(cfg, conn)
     pvm.save_plan(pvm.build_plan(
         topic_count_per_platform=3, platforms=["xhs", "douyin"],
@@ -204,7 +204,7 @@ def test_excluded_topic_not_produced(cfg, conn, seed, kb, monkeypatch):
         ),
     )
     monkeypatch.setattr("src.core.round_executor.make_card_set",
-                        lambda title, dim, body, out, platform, footer="": [out / "x.png"])
+                        lambda title, dim, body, out, platform, footer="", **_kwargs: [out / "x.png"])
     all_ids = [i.id for i in load_pool(cfg, conn)[0]]
     exclude_topics(cfg, conn, all_ids[:-1])
     steps = [dict(s, enabled=s["id"] not in ("save_draft", "auto_schedule", "await_publish"))
