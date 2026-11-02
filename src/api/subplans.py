@@ -261,7 +261,7 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         if version["sub_plan_id"] != sub_plan_id:
             raise HTTPException(404, "子计划版本不存在")
         _check_expected_version(version, req.get("expected_version_no"))
-        stages = [{k: v for k, v in s.items() if k not in ("id", "sub_plan_version_id", "created_at", "updated_at", "status")}
+        stages = [{k: v for k, v in s.items() if k not in ("id", "sub_plan_version_id", "created_at", "updated_at")}
                   for s in version["stages"]]
         new_stage = dict(req["stage"])
         new_stage["stage_order"] = len(stages) + 1
@@ -280,7 +280,7 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         if version["sub_plan_id"] != sub_plan_id:
             raise HTTPException(404, "子计划版本不存在")
         _check_expected_version(version, req.get("expected_version_no"))
-        stages = [{k: v for k, v in s.items() if k not in ("id", "sub_plan_version_id", "created_at", "updated_at", "status")}
+        stages = [{k: v for k, v in s.items() if k not in ("id", "sub_plan_version_id", "created_at", "updated_at")}
                   for s in version["stages"]]
         index = next((i for i, s in enumerate(version["stages"]) if int(s["id"]) == stage_id), None)
         if index is None:
@@ -300,7 +300,7 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         if version["sub_plan_id"] != sub_plan_id:
             raise HTTPException(404, "子计划版本不存在")
         _check_expected_version(version, expected_version_no)
-        stages = [{k: v for k, v in s.items() if k not in ("id", "sub_plan_version_id", "created_at", "updated_at", "status")}
+        stages = [{k: v for k, v in s.items() if k not in ("id", "sub_plan_version_id", "created_at", "updated_at")}
                   for s in version["stages"] if int(s["id"]) != stage_id]
         if len(stages) == len(version["stages"]):
             raise HTTPException(404, "阶段不属于指定版本")
@@ -333,7 +333,7 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         stages = []
         for i, sid in enumerate(order, 1):
             stage = {k: v for k, v in by_id[int(sid)].items()
-                     if k not in ("id", "sub_plan_version_id", "created_at", "updated_at", "status")}
+                     if k not in ("id", "sub_plan_version_id", "created_at", "updated_at")}
             stage["stage_order"] = i
             stages.append(stage)
         _validate_stage_inputs(stages)
