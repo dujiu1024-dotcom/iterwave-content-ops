@@ -164,10 +164,13 @@ class PlanVersionStore:
             raise PlanVersionError("子计划平台无效")
         if not title or len(title) > 160:
             raise PlanVersionError("子计划标题必须为 1-160 个字符")
-        if self.conn.execute(
-            "SELECT 1 FROM master_plan_versions WHERE id=?", (master_plan_version_id,)
-        ).fetchone() is None:
+        master = self.conn.execute(
+            "SELECT status FROM master_plan_versions WHERE id=?", (master_plan_version_id,)
+        ).fetchone()
+        if master is None:
             raise PlanVersionError("关联的主计划版本不存在")
+        if master["status"] != "effective":
+            raise PlanVersionError("新子计划必须关联当前生效的主计划版本")
         now = _now()
         self.conn.execute(
             """INSERT INTO sub_plans(
@@ -201,10 +204,15 @@ class PlanVersionStore:
         ).fetchone()
         if identity is None:
             raise PlanVersionError("子计划不存在")
-        if self.conn.execute(
-            "SELECT 1 FROM master_plan_versions WHERE id=?", (master_plan_version_id,)
-        ).fetchone() is None:
+        master = self.conn.execute(
+            "SELECT status FROM master_plan_versions WHERE id=?", (master_plan_version_id,)
+        ).fetchone()
+        if master is None:
             raise PlanVersionError("关联的主计划版本不存在")
+        if master["status"] != "effective":
+            raise PlanVersionError("新子计划版本必须关联当前生效的主计划版本")
+        if int(identity["master_plan_version_id"]) != int(master_plan_version_id):
+            raise PlanVersionError("子计划所属主计划版本不匹配")
         if based_on_version_id is not None:
             base = self.conn.execute(
                 "SELECT sub_plan_id FROM sub_plan_versions WHERE id=?", (based_on_version_id,)
@@ -375,12 +383,15 @@ class PlanVersionStore:
             if not all(value is not None for value in (sub_plan_id, sub_plan_version_id, sub_plan_stage_id)):
                 raise PlanVersionError("子计划 ID、版本 ID 和阶段 ID 必须同时提供")
             version = self.conn.execute(
-                """SELECT * FROM sub_plan_versions
-                   WHERE id=? AND sub_plan_id=? AND master_plan_version_id=?""",
+                """SELECT v.* FROM sub_plan_versions v
+                   JOIN sub_plans p ON p.id=v.sub_plan_id
+                   JOIN master_plan_versions m ON m.id=v.master_plan_version_id
+                   WHERE v.id=? AND v.sub_plan_id=? AND v.master_plan_version_id=?
+                     AND v.status='effective' AND p.status='active' AND m.status='effective'""",
                 (sub_plan_version_id, sub_plan_id, master_plan_version_id),
             ).fetchone()
             if version is None:
-                raise PlanVersionError("子计划版本与子计划/主计划归属不匹配")
+                raise PlanVersionError("子计划版本必须是所属生效主计划下的有效版本")
             stage = self.conn.execute(
                 """SELECT * FROM sub_plan_stages
                    WHERE id=? AND sub_plan_version_id=?""",
@@ -421,8 +432,11 @@ class PlanVersionStore:
         if not key or len(key) > 200 or not digest or len(digest) > 128:
             raise PlanVersionError("自动开轮幂等键或请求摘要无效")
         version = self.conn.execute(
-            """SELECT 1 FROM sub_plan_versions
-               WHERE id=? AND sub_plan_id=? AND master_plan_version_id=? AND status='effective'""",
+            """SELECT 1 FROM sub_plan_versions v
+               JOIN sub_plans p ON p.id=v.sub_plan_id
+               JOIN master_plan_versions m ON m.id=v.master_plan_version_id
+               WHERE v.id=? AND v.sub_plan_id=? AND v.master_plan_version_id=?
+                 AND v.status='effective' AND p.status='active' AND m.status='effective'""",
             (sub_plan_version_id, sub_plan_id, master_plan_version_id),
         ).fetchone()
         stage = self.conn.execute(
