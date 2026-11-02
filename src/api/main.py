@@ -5078,6 +5078,66 @@ def _register_routes(app: FastAPI) -> None:
             "pages": (total + page_size - 1) // page_size,
         }
 
+    @app.post("/api/drafts/{draft_id}/verify_save")
+    def verify_draft_save(draft_id: str, payload: dict):
+        """人工核实平台草稿保存结果；不确定结果不得直接终结为 failed。"""
+        saved = payload.get("saved") if isinstance(payload, dict) else None
+        note = str((payload or {}).get("note") or "").strip() if isinstance(payload, dict) else ""
+        if not isinstance(saved, bool) or len(note) < 3 or len(note) > 500:
+            raise HTTPException(422, "必须提供 saved 布尔值及至少 3 个字符的核实说明")
+
+        conn = _g()["conn"]
+        row = conn.execute(
+            "SELECT d.status, d.platform, d.content_id, c.round_id, c.title, c.body, "
+            "c.tags, c.image_paths FROM drafts d JOIN contents c ON c.id=d.content_id "
+            "WHERE d.id=?",
+            (draft_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, f"草稿 {draft_id} 不存在")
+        if row["status"] != "pending_verify":
+            if saved and row["status"] == "draft_saved":
+                return {"draft_id": draft_id, "status": "draft_saved", "already_verified": True}
+            raise HTTPException(409, f"草稿当前状态为 {row['status']}，不是待核实状态")
+
+        if saved:
+            from src.core.content_version import content_version_hash, parse_json_list
+            stored_images = parse_json_list(row["image_paths"])
+            payload_images = [str(stored_images[0])] if stored_images and stored_images[0] else []
+            saved_hash = content_version_hash(
+                row["title"], row["body"], parse_json_list(row["tags"]), payload_images,
+            )
+            target = "draft_saved"
+            extra_updates = {
+                "saved_content_hash": saved_hash,
+                "saved_platform_title": row["title"],
+                "error_msg": None,
+            }
+        else:
+            target = "draft_pending"
+            extra_updates = {"draft_id": None, "error_msg": None}
+
+        if not _g()["sm_draft"].transition(
+            draft_id, target,
+            reason=f"人工核实平台存草稿结果：{'已保存' if saved else '未保存'}；{note}",
+            extra_updates=extra_updates,
+        ):
+            raise HTTPException(409, "草稿核实状态更新失败，请刷新后重试")
+
+        conn.execute(
+            "INSERT INTO user_override (round_id, override_field, original_value, "
+            "override_value, reason, overridden_by, overridden_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                row["round_id"], "draft_save_verify", "pending_verify", target,
+                note, "web-ui", _now().strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        )
+        return {
+            "draft_id": draft_id, "status": target,
+            "message": "已记录人工核实结果；未保存的草稿已恢复为待存状态" if not saved else "已确认平台草稿存在",
+        }
+
     @app.post("/api/drafts/{draft_id}/publish_confirm")
     def confirm_publish(draft_id: str, req: Optional[PublishConfirmRequest] = None):
         """R1 用户手动点击"✅ 我已发布"触发 user_published。
@@ -5762,6 +5822,14 @@ def _register_routes(app: FastAPI) -> None:
         with conn:
             row = _content_row(conn, content_id)
             _ensure_content_round_idle(row, "编辑内容")
+            pending_verify = conn.execute(
+                "SELECT 1 FROM drafts WHERE content_id = ? AND status = 'pending_verify' LIMIT 1",
+                (content_id,),
+            ).fetchone()
+            if pending_verify:
+                raise HTTPException(
+                    409, "该内容的存草稿结果尚待人工核实，核实前不能修改文案，以免版本指纹失真",
+                )
             published = conn.execute(
                 "SELECT status FROM drafts WHERE content_id = ? "
                 "AND (user_confirmed_at IS NOT NULL "
