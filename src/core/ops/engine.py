@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, date
 from typing import Optional
 
@@ -38,6 +39,12 @@ class OperationsEngine:
         self.adapters = adapters
         self.cb = circuit_breaker
         self.rhythm = rhythm
+
+    def _automated_engagement_enabled(self) -> bool:
+        """评论/关注默认关闭；只有部署者显式设置环境变量才允许自动外部互动。"""
+        return os.getenv("ITERWAVE_ENABLE_AUTOMATED_ENGAGEMENT", "0").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
 
     # ------------------------------------------------------------------
     # 被动运营：自动回复评论
@@ -69,6 +76,13 @@ class OperationsEngine:
         """被动回复评论。幂等检查 + 熔断检查 + 节奏控制。"""
         adapter = self.adapters.get(platform)
         if not adapter:
+            return False
+        if not self._automated_engagement_enabled():
+            self._log_op(
+                platform, "passive_reply", "skipped",
+                target_url=draft_id, target_author=comment_id,
+                error_msg="自动评论默认关闭；需显式启用 ITERWAVE_ENABLE_AUTOMATED_ENGAGEMENT",
+            )
             return False
 
         # 0. 全局软暂停（人工开关，与熔断无关）
@@ -165,6 +179,13 @@ class OperationsEngine:
         adapter = self.adapters.get(platform)
         if not adapter:
             return None
+        if not self._automated_engagement_enabled():
+            self._log_op(
+                platform, "active_comment", "skipped",
+                target_url=target_url,
+                error_msg="自动评论默认关闭；需显式启用 ITERWAVE_ENABLE_AUTOMATED_ENGAGEMENT",
+            )
+            return None
 
         if is_ops_paused(self.db):
             logger.info("⏸️ 运营已全局暂停，跳过主动评论")
@@ -231,6 +252,13 @@ class OperationsEngine:
     async def follow(self, platform: Platform, user_id: str) -> bool:
         adapter = self.adapters.get(platform)
         if not adapter:
+            return False
+        if not self._automated_engagement_enabled():
+            self._log_op(
+                platform, "follow", "skipped",
+                target_author=user_id,
+                error_msg="自动关注默认关闭；需显式启用 ITERWAVE_ENABLE_AUTOMATED_ENGAGEMENT",
+            )
             return False
 
         if is_ops_paused(self.db):
