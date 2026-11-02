@@ -19,7 +19,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-LOCKED_DRAFT_STATUSES = ("pending_verify", "user_published", "data_fetching", "published")
+LOCKED_DRAFT_STATUSES = ("user_published", "data_fetching", "published")
 BUSY_ROUND_STATUSES = ("producing", "collecting_metrics", "analyzing")
 
 
@@ -60,13 +60,18 @@ def delete_contents(cfg, conn, ids: list[str]) -> dict:
         drafts = conn.execute(
             "SELECT id, status, user_confirmed_at FROM drafts WHERE content_id = ?", (cid,)
         ).fetchall()
-        if any(
+        pending_verification = conn.execute(
+            "SELECT 1 FROM draft_save_verifications v JOIN drafts d ON d.id=v.draft_id "
+            "WHERE d.content_id=? AND v.status='pending_verify' LIMIT 1",
+            (cid,),
+        ).fetchone()
+        if pending_verification or any(
             d["status"] in LOCKED_DRAFT_STATUSES or d["user_confirmed_at"] is not None
             for d in drafts
         ):
             blocked.append({
                 "id": cid,
-                "reason": "该内容已确认发布或已有发布历史，不能删除；可在内容资产里归档查看",
+                "reason": "该内容的草稿保存结果尚待核实，或已有发布历史，不能删除；请先完成核实/归档",
             })
             continue
         platform_left += sum(1 for d in drafts if d[1] == "draft_saved")
