@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import datetime
 from typing import Optional
 
 from .kb_sources import read_all
+from .timezone import business_now
 from .scoring.topic_eval import TopicItem
 
 logger = logging.getLogger(__name__)
@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 MANUAL_SOURCE = "manual"
 
 
-def _now() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+def _now(cfg=None) -> str:
+    return business_now(cfg).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def excluded_ids(conn) -> set[str]:
@@ -116,7 +116,7 @@ def list_topics(cfg, conn, *, q: str = "", dimension: str = "", source: str = ""
     return {"items": rows[offset: offset + limit], "total": total, "dimensions": dims, "report": report}
 
 
-def add_manual_topic(conn, *, title: str, dimension: str, summary: str = "", link: str = "") -> dict:
+def add_manual_topic(conn, *, title: str, dimension: str, summary: str = "", link: str = "", cfg=None) -> dict:
     title = (title or "").strip()
     dimension = (dimension or "").strip()
     if len(title) < 4:
@@ -134,7 +134,7 @@ def add_manual_topic(conn, *, title: str, dimension: str, summary: str = "", lin
     conn.execute(
         "INSERT INTO topic_index (id, title, dimension, source, date, summary, link, first_seen_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (topic_id, title, dimension, MANUAL_SOURCE, datetime.now().strftime("%Y-%m-%d"),
+        (topic_id, title, dimension, MANUAL_SOURCE, business_now(cfg).strftime("%Y-%m-%d"),
          summary.strip() or None, link.strip() or None, _now()),
     )
     conn.commit()
@@ -148,7 +148,7 @@ def exclude_topics(cfg, conn, ids: list[str], reason: str = "") -> dict:
         raise ValueError("ids 不能为空")
     pool = {it.id: it for it in load_pool(cfg, conn, include_excluded=True)[0]}
     missing = [i for i in ids if i not in pool]
-    now = _now()
+    now = _now(cfg)
     done = []
     for i in ids:
         if i in missing:

@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
@@ -40,6 +42,7 @@ class PlatformInsight:
     p25_interaction_rate: Optional[float] = None
     p50_interaction_rate: Optional[float] = None
     p75_interaction_rate: Optional[float] = None
+    interaction_rate_ci95: Optional[dict] = None
     top_dimensions: list[dict] = field(default_factory=list)
     best_hours: list[dict] = field(default_factory=list)
     best_title_style: dict = field(default_factory=dict)
@@ -56,6 +59,7 @@ class PlatformInsight:
             "p25_interaction_rate": self.p25_interaction_rate,
             "p50_interaction_rate": self.p50_interaction_rate,
             "p75_interaction_rate": self.p75_interaction_rate,
+            "interaction_rate_ci95": self.interaction_rate_ci95,
             "top_dimensions": self.top_dimensions,
             "best_hours": self.best_hours,
             "best_title_style": self.best_title_style,
@@ -173,6 +177,14 @@ class PlatformInsightsEngine:
             insight.p25_interaction_rate = round(self._percentile(irs, 0.25), 6)
             insight.p50_interaction_rate = round(self._percentile(irs, 0.50), 6)
             insight.p75_interaction_rate = round(self._percentile(irs, 0.75), 6)
+            interval = self._mean_ci95(irs)
+            if interval is not None:
+                insight.interaction_rate_ci95 = {
+                    "lower": round(interval[0], 6),
+                    "upper": round(interval[1], 6),
+                    "confidence": 0.95,
+                    "method": "student_t",
+                }
 
         insight.top_dimensions = self._group_by_dimension(samples)
         insight.best_hours = self._group_by_hour(samples)
@@ -328,6 +340,7 @@ class PlatformInsightsEngine:
                     "p25": insight.p25_interaction_rate,
                     "p50": insight.p50_interaction_rate,
                     "p75": insight.p75_interaction_rate,
+                    "ci95": insight.interaction_rate_ci95,
                 }, ensure_ascii=False),
                 json.dumps(insight.best_hours, ensure_ascii=False),
                 json.dumps(insight.best_title_style, ensure_ascii=False),
@@ -354,6 +367,24 @@ class PlatformInsightsEngine:
     # ------------------------------------------------------------------
     # 工具
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _mean_ci95(values: list[float]) -> Optional[tuple[float, float]]:
+        """均值双侧 95% t 区间；样本少于 2 个时不输出区间。"""
+        if len(values) < 2:
+            return None
+        df = len(values) - 1
+        # Student-t 双侧 95% 临界值（df=1..29）；更大样本使用正态极限值。
+        critical_values = (
+            12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262,
+            2.228, 2.201, 2.179, 2.160, 2.145, 2.131, 2.120, 2.110, 2.101,
+            2.093, 2.086, 2.080, 2.074, 2.069, 2.064, 2.060, 2.056, 2.052,
+            2.048, 2.045,
+        )
+        critical = critical_values[df - 1] if df <= len(critical_values) else 1.96
+        mean = statistics.mean(values)
+        margin = critical * statistics.stdev(values) / math.sqrt(len(values))
+        return mean - margin, mean + margin
 
     @staticmethod
     def _percentile(sorted_values: list[float], q: float) -> float:

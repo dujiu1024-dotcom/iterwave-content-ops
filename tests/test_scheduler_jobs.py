@@ -664,3 +664,63 @@ def test_tracked_scheduler_task_stores_safe_exception_message(cfg, conn, monkeyp
     assert row["error_msg"] == "定时任务执行失败，请检查服务端运行日志"
     assert "internal.example" not in row["error_msg"]
     assert "secret" not in row["error_msg"]
+
+
+
+def test_publish_confirmation_rolls_back_status_when_note_url_write_fails(cfg, conn, seed):
+    from src.core.state_machine import DraftStateMachine
+
+    round_id = seed.round(status="awaiting_publish")
+    draft_id = seed.draft(round_id, draft_status="draft_saved", fetch_status=None)
+    conn.execute("""
+        CREATE TRIGGER reject_publish_note_url
+        BEFORE UPDATE OF platform_note_url ON drafts
+        WHEN NEW.platform_note_url IS NOT NULL
+        BEGIN SELECT RAISE(ABORT, 'injected note url failure'); END
+    """)
+    conn.commit()
+
+    engine = _engine(cfg, conn)
+    engine.wire(conn=conn, adapters={}, sm_draft=DraftStateMachine(conn))
+    scheduled = []
+    engine.schedule_data_fetch = lambda *args, **kwargs: scheduled.append(args)
+
+    try:
+        engine.on_user_published(
+            draft_id, via="platform-polling",
+            note_url="https://platform.example/note/123",
+        )
+    except sqlite3.IntegrityError as exc:
+        assert "injected note url failure" in str(exc)
+    else:
+        raise AssertionError("expected note URL write failure")
+
+    row = conn.execute(
+        "SELECT status, user_confirmed_at, platform_note_url FROM drafts WHERE id=?",
+        (draft_id,),
+    ).fetchone()
+    assert row["status"] == "draft_saved"
+    assert row["user_confirmed_at"] is None
+    assert row["platform_note_url"] is None
+    assert scheduled == []
+
+
+
+def test_kb_scan_rolls_back_all_topic_inserts_when_one_insert_fails(conn: sqlite3.Connection, cfg) -> None:
+    eng = _engine(cfg, conn)
+    conn.execute("""
+        CREATE TRIGGER reject_second_kb_topic
+        BEFORE INSERT ON topic_index
+        WHEN NEW.id = 'kt2'
+        BEGIN SELECT RAISE(ABORT, 'injected topic insert failure'); END
+    """)
+    conn.commit()
+
+    try:
+        asyncio.run(eng._job_kb_scan())
+    except sqlite3.IntegrityError as exc:
+        assert "injected topic insert failure" in str(exc)
+    else:
+        raise AssertionError("expected topic insert failure")
+
+    assert conn.execute("SELECT COUNT(*) FROM topic_index").fetchone()[0] == 0

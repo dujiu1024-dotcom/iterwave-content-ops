@@ -340,6 +340,8 @@ class RoundExecutor:
             "c.review_rejection_reason "
             "FROM drafts d JOIN contents c ON c.id = d.content_id "
             "WHERE c.round_id = ? AND d.status = 'draft_pending' "
+            "AND NOT EXISTS (SELECT 1 FROM draft_save_verifications v "
+            "                WHERE v.draft_id = d.id AND v.status = 'pending_verify') "
             "ORDER BY c.rowid, d.rowid",
             (round_id,),
         ).fetchall()
@@ -1142,6 +1144,16 @@ class RoundExecutor:
                         "saved_platform_title": payload.title,
                     },
                 )
+                from src.core.timezone import business_now
+                self.conn.execute(
+                    "UPDATE draft_save_verifications SET status='verified_saved', verified_at=?, "
+                    "platform_draft_id=?, error_msg=NULL WHERE draft_id=? AND status='verified_missing'",
+                    (
+                        business_now(self.cfg).isoformat(timespec="seconds"),
+                        result.platform_draft_id, row["draft_id"],
+                    ),
+                )
+                self.conn.commit()
                 report["drafts_saved"] += 1
                 saved_draft_ids.append(row["draft_id"])
                 if self.notifier:
@@ -1151,15 +1163,25 @@ class RoundExecutor:
                         draft_id=row["draft_id"], round_id=round_id,
                     )
             elif result.needs_human_verify:
-                # —— R17 / P0-3 新增：按钮点了但无成功证据，需人工核实 ——
-                self.sm_draft.transition(
-                    row["draft_id"], "failed",
-                    reason="needs_human_verify: 存草稿后未检测到平台成功信号",
-                    extra_updates={"error_msg": result.error_msg or "needs_human_verify"},
+                # 不确定保存结果单独记账，drafts.status 保持 draft_pending，
+                # 但待存查询会排除此记录，避免自动重试造成平台重复草稿。
+                from src.core.timezone import business_now
+                self.conn.execute(
+                    "INSERT INTO draft_save_verifications "
+                    "(draft_id, status, attempted_at, platform_draft_id, error_msg) "
+                    "VALUES (?, 'pending_verify', ?, ?, ?) "
+                    "ON CONFLICT(draft_id) DO UPDATE SET "
+                    "status='pending_verify', attempted_at=excluded.attempted_at, "
+                    "verified_at=NULL, platform_draft_id=excluded.platform_draft_id, "
+                    "error_msg=excluded.error_msg, note=NULL",
+                    (
+                        row["draft_id"], business_now(self.cfg).isoformat(timespec="seconds"),
+                        result.platform_draft_id, result.error_msg or "needs_human_verify",
+                    ),
                 )
+                self.conn.commit()
                 report.setdefault("drafts_needs_human_verify", 0)
                 report["drafts_needs_human_verify"] += 1
-                report["drafts_failed"] += 1
                 logger.warning(
                     "存草稿 needs_human_verify platform=%s draft=%s draft_id_missing=%s",
                     platform.value, row["draft_id"], result.platform_draft_id_missing,

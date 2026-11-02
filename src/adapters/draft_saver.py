@@ -416,7 +416,7 @@ class DraftSaver:
             initial_draft_count = await self._draft_count(page)
 
             # 7. ⚠️ 存草稿（只点 save_draft_button，严禁点 _publish_button_audit_only！）
-            save_ok = await self.click_first_visible(page, self.selectors["save_draft_button"])
+            save_ok = await self._click_save_draft_button(page, self.selectors["save_draft_button"])
             if not save_ok:
                 logger.warning("存草稿按钮未找到，尝试兜底 ...")
                 save_ok = await self._fallback_save_draft(page)
@@ -988,6 +988,14 @@ class DraftSaver:
                     const el = document.querySelector('xhs-publish-btn');
                     if (!el || typeof el._onSave !== 'function') return false;
                     if (el.getAttribute('save-disabled') === 'true') return false;
+                    const label = [
+                        el.innerText, el.textContent,
+                        el.getAttribute('aria-label'), el.getAttribute('title')
+                    ].filter(Boolean).join(' ').replace(/\\s+/g, '');
+                    if (!['暂存离开', '存草稿', '保存草稿', '保存到草稿箱', 'Save draft']
+                        .some(token => label.includes(token))) return false;
+                    if (['发布', '发送', '立即发布', 'Publish', 'Send']
+                        .some(token => label.includes(token))) return false;
                     el._onSave();
                     return true;
                 }"""
@@ -999,20 +1007,44 @@ class DraftSaver:
             logger.exception("平台 %s 调用 _onSave 失败", self.platform)
             return False
 
-    async def _fallback_save_draft(self, page: Page) -> bool:
-        """兜底：只从 PLATFORM_SELECTORS[platform]['save_draft_button'] 候选选择器里挑第一个可见的。
-
-        不再用关键词启发式遍历全页按钮——页面改版易误点"发布/发送"类按钮（R1 红线）。
-        """
-        for sel in self.selectors.get("save_draft_button", []):
+    async def _click_save_draft_button(
+        self, page, selectors: list[str], timeout: int = 5000,
+    ) -> bool:
+        """仅点击文案明确表明为「保存草稿」的按钮；无法确认时失败关闭。"""
+        allowed = ("暂存离开", "存草稿", "保存草稿", "保存到草稿箱", "Save draft")
+        forbidden = ("发布", "发送", "立即发布", "Publish", "Send")
+        for selector in selectors:
             try:
-                btn = page.locator(sel).first
-                if await btn.is_visible():
-                    await btn.click()
-                    return True
+                button = page.locator(selector).first
+                if not await button.is_visible(timeout=1500):
+                    continue
+                labels = [
+                    await button.inner_text(timeout=1000),
+                    await button.get_attribute("aria-label"),
+                    await button.get_attribute("title"),
+                ]
+                label = "".join(str(value or "") for value in labels)
+                compact = "".join(label.split())
+                if any(token in compact for token in forbidden):
+                    logger.error("平台 %s 拒绝点击疑似发布按钮 selector=%s", self.platform, selector)
+                    continue
+                if not any(token in compact for token in allowed):
+                    logger.warning(
+                        "平台 %s 保存按钮文案无法确认，按失败关闭 selector=%s",
+                        self.platform, selector,
+                    )
+                    continue
+                await button.click(timeout=timeout)
+                return True
             except Exception:
                 continue
         return False
+
+    async def _fallback_save_draft(self, page: Page) -> bool:
+        """严格兜底：选择器命中后仍必须通过按钮文案白名单检查。"""
+        return await self._click_save_draft_button(
+            page, self.selectors.get("save_draft_button", []),
+        )
 
     async def _count_uploaded_images(self, page: Page) -> int:
         """P0-2：计算实际上传成功的图片预览卡片数量。"""

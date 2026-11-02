@@ -12,6 +12,8 @@ import io
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -27,14 +29,12 @@ from src.core.redact import redact
 
 @pytest.fixture(autouse=True)
 def clean_auth_state(monkeypatch, tmp_path):
-    """每个用例独立 .env + 清空内存会话/失败计数，避免用例互相污染。"""
+    """每个用例使用独立 .env 与共享限流数据库，避免用例互相污染。"""
     monkeypatch.setenv("ITERWAVE_ENV_FILE", str(tmp_path / ".env"))
     monkeypatch.delenv(auth.PASSWORD_ENV, raising=False)
     auth._reset_revocations()
-    auth._failures.clear()
     yield
     auth._reset_revocations()
-    auth._failures.clear()
     os.environ.pop(auth.PASSWORD_ENV, None)
 
 
@@ -118,17 +118,13 @@ def test_public_first_password_setup_requires_bootstrap_token(unconfigured_api_c
 
 
 def test_login_rate_limit_returns_retry_after_header(api_client):
-    auth._failures.clear()
-    try:
-        api_client.cookies.clear()
-        for _ in range(auth.LOGIN_MAX_FAILURES):
-            response = api_client.post("/api/auth/login", json={"password": "wrong"})
-            assert response.status_code == 401
-        blocked = api_client.post("/api/auth/login", json={"password": "wrong"})
-        assert blocked.status_code == 429
-        assert blocked.headers.get("Retry-After") == str(auth.LOGIN_WINDOW_SECONDS)
-    finally:
-        auth._failures.clear()
+    api_client.cookies.clear()
+    for _ in range(auth.LOGIN_MAX_FAILURES):
+        response = api_client.post("/api/auth/login", json={"password": "wrong"})
+        assert response.status_code == 401
+    blocked = api_client.post("/api/auth/login", json={"password": "wrong"})
+    assert blocked.status_code == 429
+    assert blocked.headers.get("Retry-After") == str(auth.LOGIN_WINDOW_SECONDS)
 
 
 def test_bootstrap_token_guesses_are_rate_limited(monkeypatch):
@@ -189,14 +185,56 @@ def test_session_cookie_marks_https_as_secure():
     assert "; Secure;" in https_cookie
 
 
+def test_auth_rate_limit_is_shared_across_processes(monkeypatch, tmp_path):
+    """A failure recorded by a separate interpreter must be visible to this process."""
+    monkeypatch.setenv("ITERWAVE_ENV_FILE", str(tmp_path / ".env"))
+    code = (
+        "from src.core.auth import record_failure; "
+        "[record_failure('203.0.113.77') for _ in range(5)]"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=15)
+    assert auth.is_rate_limited("203.0.113.77") is True
+    auth.clear_failures("203.0.113.77")
+    assert auth.is_rate_limited("203.0.113.77") is False
+
+
+def test_auth_attempt_reservation_is_atomic_across_processes(monkeypatch, tmp_path):
+    """Only one of two concurrent processes may reserve the fifth attempt."""
+    monkeypatch.setenv("ITERWAVE_ENV_FILE", str(tmp_path / ".env"))
+    ip = "203.0.113.78"
+    for _ in range(auth.LOGIN_MAX_FAILURES - 1):
+        auth.record_failure(ip)
+    code = (
+        "from src.core.auth import reserve_auth_attempt; "
+        "print(reserve_auth_attempt('203.0.113.78'))"
+    )
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", code],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        for _ in range(2)
+    ]
+    results = []
+    for process in processes:
+        stdout, stderr = process.communicate(timeout=20)
+        assert process.returncode == 0, stderr
+        results.append(stdout.strip())
+    assert sorted(results) == ["False", "True"]
+    assert auth.is_rate_limited(ip) is True
+
+
 def test_login_rate_limit():
+    auth.clear_failures("1.2.3.4")
+    auth.clear_failures("5.6.7.8")
     auth.set_password("Secret123!")
     for _ in range(auth.LOGIN_MAX_FAILURES):
         with pytest.raises(ValueError):
             auth.login("wrong", "1.2.3.4")
-    # 正确口令优先于失败计数；同一出口 IP 的错误尝试不能锁住合法用户。
-    assert auth.login("Secret123!", "1.2.3.4")
-    assert auth.is_rate_limited("1.2.3.4") is False
+    # 达到阈值后，即使口令正确也先拒绝，避免攻击者持续触发 PBKDF2。
+    with pytest.raises(PermissionError):
+        auth.login("Secret123!", "1.2.3.4")
+    assert auth.is_rate_limited("1.2.3.4") is True
     # 其它 IP 不受影响
     assert auth.login("Secret123!", "5.6.7.8")
 
