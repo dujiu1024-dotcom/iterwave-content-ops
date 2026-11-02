@@ -115,3 +115,25 @@ def test_context_rolls_back_content_when_audit_insert_fails():
     assert conn.execute("SELECT body FROM contents WHERE id=1").fetchone()[0] == "original"
     assert conn.execute("SELECT COUNT(*) FROM audit").fetchone()[0] == 0
     conn.close()
+
+
+def test_nested_transaction_scope_does_not_commit_early():
+    raw = sqlite3.connect(":memory:", check_same_thread=False)
+    conn = LockedConnection(raw)
+    conn.execute("CREATE TABLE events (value TEXT NOT NULL)")
+    conn.commit()
+
+    with conn:
+        conn.execute("INSERT INTO events(value) VALUES ('outer')")
+        try:
+            with conn:
+                conn.execute("INSERT INTO events(value) VALUES ('inner')")
+                conn.commit()  # Must defer to the outermost transaction scope.
+                raise RuntimeError("force nested rollback")
+        except RuntimeError:
+            pass
+        conn.execute("INSERT INTO events(value) VALUES ('after-inner-error')")
+
+    # A failed nested scope marks the complete outer transaction rollback-only.
+    assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0
+    conn.close()
