@@ -38,7 +38,7 @@
 
 ### 生命周期
 
-1. 用户编辑或复盘采纳：调用 `PlanVersionStore.create_master_draft()`，复盘采纳的来源必须是 `review_adoption`。
+1. 用户编辑或复盘采纳：调用 `PlanVersionStore.create_master_draft()`；复盘采纳的来源必须是 `review_adoption`，不得直接写入 `plan_settings`。
 2. 历史恢复：调用 `create_master_draft_from_version()`，只能创建新草稿，不得直接改写旧版本状态。
 3. 人工审核通过：调用 `activate_master_version()`。
 4. 生效时在一个 SQLite 写事务内归档旧生效版本、激活新版本、更新 `plan_settings.active_version_id` 和兼容快照，并追加 `signature_history`。
@@ -49,7 +49,7 @@
 ### 子计划身份：`sub_plans`
 
 - `id`：稳定子计划 ID。
-- `master_plan_version_id`：子计划所属主计划版本。
+- `master_plan_version_id`：当前子计划版本所依附的主计划版本指针；新主计划生效后，旧子计划版本仍保留原关联，新子计划版本审核生效时可将子计划身份切换到新主计划版本。
 - `platform`：单个平台（xhs/douyin/kuaishou/wechat_channels）。
 - `status`：`draft / active / paused / completed / archived / cancelled`。
 - `current_version_id`：当前生效子计划版本。
@@ -59,13 +59,13 @@
 
 - `sub_plan_id`：所属子计划身份。
 - `version_no`：该子计划内递增版本号。
-- `master_plan_version_id`：创建该版本时依据的主计划版本。
+- `master_plan_version_id`：创建该子计划版本时依据的主计划版本；不同子计划版本可以对应不同主计划版本。
 - `snapshot_json`：完整子计划快照。
 - `status`：`draft / effective / archived / rejected`。
 - `based_on_version_id`：修订草稿的来源版本。
 - `reviewed_at/by/review_note`：审核留痕。
 
-同一子计划最多一个生效版本。修改生效版本必须创建新草稿；审核通过后旧版本归档，不能原地覆盖。
+同一子计划最多一个生效版本。修改生效版本必须创建新草稿；审核通过后旧版本归档，不能原地覆盖。新草稿可以基于新的生效主计划版本；审核生效时同步更新子计划身份的当前主计划版本指针，历史子计划版本仍保留旧主计划关联。
 
 ### 阶段：`sub_plan_stages`
 
@@ -131,7 +131,7 @@ B 负责在自动开轮 Worker 中接入 reserve → `create_round_once()`。该
 ### B（业务逻辑/API/Worker）
 - `POST /api/plans` 改为创建主计划草稿，不再直接覆盖 `plan_settings`。
 - 新增审核/生效 API；仅审核通过后调用 `activate_master_version()`。
-- 复盘采纳只创建草稿，来源为 `review_adoption`。
+- 复盘采纳必须创建新的主计划草稿，来源为 `review_adoption`；不能直接覆盖主计划，也不能自动审核生效。
 - 使用 `sub_plans`、`sub_plan_versions`、`sub_plan_stages` 构建平台子计划业务流程；不得复用旧 `content_plans`。
 - 新建轮次时绑定主计划版本、子计划版本和阶段快照。
 - 自动开轮接入持久化幂等租约；所有旧自动入口不得绕过授权、暂停、阶段和幂等校验。
