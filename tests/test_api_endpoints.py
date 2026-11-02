@@ -2873,6 +2873,15 @@ def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client
         "snapshot": {"title": "错误平台", "platform": "douyin"},
     })
     assert platform_mutation.status_code == 422
+    missing_version = tc.post(f"/api/subplans/{sub_id}/stages", json={
+        "based_on_version_id": version_id, "stage": {"title": "缺少并发版本号"},
+    })
+    assert missing_version.status_code == 428
+    stale_version = tc.post(f"/api/subplans/{sub_id}/stages", json={
+        "based_on_version_id": version_id, "expected_version_no": 99,
+        "stage": {"title": "过期版本"},
+    })
+    assert stale_version.status_code == 409
 
     before = tc.get(f"/api/subplans/{sub_id}/progress")
     assert before.status_code == 200
