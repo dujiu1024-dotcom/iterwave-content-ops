@@ -263,3 +263,32 @@ def test_content_template_can_be_updated_without_changing_asset_type(conn, test_
     finally:
         api_main._g_ctx.clear()
         api_main._g_ctx.update(saved)
+
+
+def test_image_fallback_can_be_disabled(monkeypatch):
+    """关闭兜底后只返回主通道，主模型失败不会被静默换成火山。"""
+    from types import SimpleNamespace
+
+    from src.core.media_generation import _endpoints
+
+    policy = SimpleNamespace(
+        provider="sensenova",
+        base_url="https://token.sensenova.cn/v1",
+        model="sensenova-u1.5-fast",
+        api_key_env="SENSENOVA_API_KEY",
+        watermark=False,
+        fallback_provider="ark",
+        fallback_base_url="https://ark.cn-beijing.volces.com/api/plan/v3",
+        fallback_model="doubao-seedream-5-0-pro",
+        fallback_api_key_env="ARK_API_KEY",
+        fallback_enabled=True,
+    )
+    cfg = SimpleNamespace(media_generation=policy)
+    monkeypatch.setenv("SENSENOVA_API_KEY", "sk-test")
+    monkeypatch.setenv("ARK_API_KEY", "ark-test")
+    for name in ("ITERWAVE_IMAGE_API_BASE_URL", "ITERWAVE_IMAGE_API_KEY_ENV", "ITERWAVE_IMAGE_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+
+    assert [e.label for e in _endpoints(cfg, "")] == ["primary", "fallback"]
+    assert [e.label for e in _endpoints(cfg, "", allow_fallback=False)] == ["primary"]
+    assert [e.label for e in _endpoints(cfg, "", allow_fallback=True)] == ["primary", "fallback"]

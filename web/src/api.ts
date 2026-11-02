@@ -723,6 +723,8 @@ export interface MediaGenerationSettings {
   provider_configured: boolean;
   /** 图片兜底模型（火山方舟），仅用于展示；地址与密钥保存在服务端 */
   fallback_model?: string;
+  /** 是否允许主模型失败时切换到兜底模型 */
+  fallback_enabled: boolean;
 }
 export interface MediaUsageTarget {
   id: string;
@@ -1944,7 +1946,7 @@ export const api = {
       `/api/media/${asset_id}/use`, { method: "POST", body: JSON.stringify({ content_id, usage_role }) },
     ),
   mediaGenerationSettings: () => fetchJson<MediaGenerationSettings>("/api/media/generation-settings"),
-  saveMediaGenerationSettings: (data: Pick<MediaGenerationSettings, "enabled" | "monthly_quota" | "prompt_prefix" | "model" | "size">) =>
+  saveMediaGenerationSettings: (data: Pick<MediaGenerationSettings, "enabled" | "monthly_quota" | "prompt_prefix" | "model" | "size" | "fallback_enabled">) =>
     fetchJson<MediaGenerationSettings>("/api/media/generation-settings", { method: "PUT", body: JSON.stringify(data) }),
   generateMediaAsset: (data: { prompt: string; title?: string; alt_text?: string; tags?: string[] }) =>
     fetchJson<MediaAsset>("/api/media/generate", { method: "POST", body: JSON.stringify(data) }),

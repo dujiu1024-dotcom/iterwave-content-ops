@@ -556,6 +556,7 @@ export function ImageModelEditor({ onSaved }: { onSaved?: () => void }) {
       prompt_prefix: settings.prompt_prefix,
       model: settings.model.trim(),
       size: settings.size,
+      fallback_enabled: settings.fallback_enabled,
     }));
     if (!res) return;
     setSettings(res);
@@ -573,7 +574,7 @@ export function ImageModelEditor({ onSaved }: { onSaved?: () => void }) {
           {settings.provider_configured ? "图片服务已接入" : "图片服务未接入"}
         </span>
         <span style={{ fontSize: 12, color: "var(--muted)" }}>
-          与上方对话模型完全独立；主模型失败时自动切换兜底模型，地址与密钥由服务器保管。
+          与上方对话模型完全独立；地址与密钥由服务器保管。
         </span>
       </div>
       <Field label="主模型（商汤 SenseNova U1.5，文生图 / 改图）">
@@ -581,8 +582,17 @@ export function ImageModelEditor({ onSaved }: { onSaved?: () => void }) {
           onChange={(e) => setSettings({ ...settings, model: e.target.value })} placeholder="sensenova-u1.5-fast" />
       </Field>
       <Field label="兜底模型（火山方舟 Seedream，只读）">
-        <input style={{ ...inputStyle, fontFamily: "monospace" }} value={settings.fallback_model || "未配置"} readOnly disabled />
+        <input style={{ ...inputStyle, fontFamily: "monospace", opacity: settings.fallback_enabled ? 1 : 0.5 }}
+          value={settings.fallback_model || "未配置"} readOnly disabled />
       </Field>
+      <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, cursor: "pointer" }}>
+        <input type="checkbox" checked={settings.fallback_enabled}
+          onChange={(e) => setSettings({ ...settings, fallback_enabled: e.target.checked })} />
+        主模型失败时启用兜底模型
+        <span style={{ fontSize: 12, color: "var(--muted)" }}>
+          {settings.fallback_enabled ? "（当前：失败会自动切到火山）" : "（已关闭：只用商汤，失败直接报错）"}
+        </span>
+      </label>
       <Field label="默认尺寸">
         <select className="field" style={{ ...inputStyle }} value={settings.size}
           onChange={(e) => setSettings({ ...settings, size: e.target.value as MediaGenerationSettings["size"] })}>

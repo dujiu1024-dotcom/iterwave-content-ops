@@ -1139,6 +1139,7 @@ class MediaGenerationSettingsRequest(BaseModel):
     prompt_prefix: str = Field(default="", max_length=2000)
     model: str = Field(default="gpt-image-1", min_length=1, max_length=120)
     size: str = Field(default="1024x1024", pattern="^(1024x1024|1024x1536|1536x1024)$")
+    fallback_enabled: bool = True
 
 
 class MediaGenerationRequest(BaseModel):
@@ -2745,13 +2746,13 @@ def _register_routes(app: FastAPI) -> None:
         if registry is None:
             raise HTTPException(503, "账号组注册表尚未初始化")
         settings_row = conn.execute(
-            "SELECT enabled, monthly_quota, prompt_prefix, model, size "
+            "SELECT enabled, monthly_quota, prompt_prefix, model, size, fallback_enabled "
             "FROM media_generation_settings WHERE id = 1"
         ).fetchone()
         settings = dict(settings_row) if settings_row else {
             "enabled": 0, "monthly_quota": 20, "prompt_prefix": "",
             "model": os.getenv("ITERWAVE_IMAGE_MODEL", "gpt-image-1"),
-            "size": "1024x1024",
+            "size": "1024x1024", "fallback_enabled": 1,
         }
         if not settings["enabled"]:
             raise HTTPException(409, "AI 配图功能尚未启用，请先在图片素材库设置中启用")
@@ -2798,6 +2799,7 @@ def _register_routes(app: FastAPI) -> None:
                 raw, mime_type, suffix, width, height = generate_image_bytes(
                     final_prompt, model=model, size=size, source_path=source_path,
                     source_mime_type=source_mime, source_filename=source_filename, cfg=cfg,
+                    allow_fallback=bool(settings.get("fallback_enabled", 1)),
                 )
                 stored_filename = f"{uuid.uuid4().hex}{suffix}"
                 target = (paths.media_dir / stored_filename).resolve()
@@ -2874,15 +2876,16 @@ def _register_routes(app: FastAPI) -> None:
     def get_media_generation_settings():
         conn = _g()["conn"]
         row = conn.execute(
-            "SELECT enabled, monthly_quota, prompt_prefix, model, size, updated_at "
+            "SELECT enabled, monthly_quota, prompt_prefix, model, size, fallback_enabled, updated_at "
             "FROM media_generation_settings WHERE id = 1"
         ).fetchone()
         settings = dict(row) if row else {
             "enabled": False, "monthly_quota": 20, "prompt_prefix": "",
             "model": os.getenv("ITERWAVE_IMAGE_MODEL", "gpt-image-1"),
-            "size": "1024x1024", "updated_at": None,
+            "size": "1024x1024", "updated_at": None, "fallback_enabled": 1,
         }
         settings["enabled"] = bool(settings["enabled"])
+        settings["fallback_enabled"] = bool(settings.get("fallback_enabled", 1))
         month_start = _now().replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
         settings["used_this_month"] = int(conn.execute(
             "SELECT COUNT(*) FROM media_generation_jobs WHERE created_at >= ? AND status = 'succeeded'", (month_start,),
@@ -2902,11 +2905,14 @@ def _register_routes(app: FastAPI) -> None:
     def put_media_generation_settings(req: MediaGenerationSettingsRequest):
         conn = _g()["conn"]
         conn.execute(
-            "INSERT INTO media_generation_settings (id, enabled, monthly_quota, prompt_prefix, model, size, updated_at) "
-            "VALUES (1, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+            "INSERT INTO media_generation_settings "
+            "(id, enabled, monthly_quota, prompt_prefix, model, size, fallback_enabled, updated_at) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
             "ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled, monthly_quota=excluded.monthly_quota, "
-            "prompt_prefix=excluded.prompt_prefix, model=excluded.model, size=excluded.size, updated_at=CURRENT_TIMESTAMP",
-            (int(req.enabled), req.monthly_quota, req.prompt_prefix.strip(), req.model.strip(), req.size),
+            "prompt_prefix=excluded.prompt_prefix, model=excluded.model, size=excluded.size, "
+            "fallback_enabled=excluded.fallback_enabled, updated_at=CURRENT_TIMESTAMP",
+            (int(req.enabled), req.monthly_quota, req.prompt_prefix.strip(), req.model.strip(), req.size,
+             int(req.fallback_enabled)),
         )
         conn.commit()
         return get_media_generation_settings()
@@ -5959,13 +5965,15 @@ def _register_routes(app: FastAPI) -> None:
         settings = None
         if "media_generation_settings" in tables:
             mg_row = conn.execute(
-                "SELECT enabled, prompt_prefix, model, size FROM media_generation_settings WHERE id = 1"
+                "SELECT enabled, prompt_prefix, model, size, fallback_enabled "
+                "FROM media_generation_settings WHERE id = 1"
             ).fetchone()
             if mg_row and mg_row["enabled"]:
                 settings = {
                     "prefix": (mg_row["prompt_prefix"] or "").strip(),
                     "model": (mg_row["model"] or "").strip() or "gpt-image-1",
                     "size": (mg_row["size"] or "").strip() or "1024x1536",
+                    "fallback_enabled": bool(mg_row["fallback_enabled"]),
                 }
         # 出图要调外部服务（数十秒），先结束读事务释放 SQLite 锁，避免长时间持锁把其它写入卡死
         conn.commit()
@@ -5979,6 +5987,7 @@ def _register_routes(app: FastAPI) -> None:
             cover_image = render_ai_background(
                 cover_text, model=settings["model"], size=settings["size"],
                 cfg=cfg, platform=platform, kind="cover",
+                allow_fallback=settings["fallback_enabled"],
             )
             for lines in pages:
                 prompt = body_page_prompt(title, dimension or "知识卡片", lines)
@@ -5987,6 +5996,7 @@ def _register_routes(app: FastAPI) -> None:
                 body_images.append(render_ai_background(
                     prompt, model=settings["model"], size=settings["size"],
                     cfg=cfg, platform=platform,
+                    allow_fallback=settings["fallback_enabled"],
                 ))
         paths = make_card_set(title, dimension or "知识卡片", body, output_dir,
                               platform, card_footer(cfg, platform),
