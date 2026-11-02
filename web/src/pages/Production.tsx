@@ -1476,7 +1476,7 @@ export default function Production() {
                           <tr key={d.id}>
                             <td style={{ fontFamily: "monospace", fontSize: 11 }}>{d.id.slice(0, 16)}...</td>
                             <td>{PLATFORM_NAME[d.platform] ?? d.platform}</td>
-                            <td><span className={`tag ${STATUS_CLS[d.status] || "gray"}`}>{d.status}</span></td>
+                            <td><span className={`tag ${STATUS_CLS[d.status] || "gray"}`}>{d.status === "pending_verify" ? "待核实平台保存" : d.status}</span></td>
                             <td>
                               {d.status === "draft_saved" && (
                                 <button className="btn sm primary" onClick={() => confirmPublish(d.id)}>✓ 我已发布</button>
@@ -1487,7 +1487,7 @@ export default function Production() {
                                   <button className="btn sm ghost" style={{ marginLeft: 6 }} onClick={() => verifyDraftSave(d.id, false)}>↻ 平台未存</button>
                                 </>
                               )}
-                              {(d.status === "draft_saved" || d.status === "draft_pending" || d.status === "pending_verify") && (
+                              {(d.status === "draft_saved" || d.status === "draft_pending") && (
                                 <button className="btn sm ghost" style={{ marginLeft: 6 }} onClick={() => cancelDraft(d.id)}>✕ 不发了</button>
                               )}
                               {d.status !== "draft_saved" && d.status !== "draft_pending" && d.status !== "pending_verify" && <span style={{ color: "var(--subtle)" }}>—</span>}
