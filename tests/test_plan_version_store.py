@@ -66,6 +66,11 @@ def _db(path=None):
         );
         CREATE TABLE contents(id TEXT PRIMARY KEY, round_id INTEGER);
         CREATE TABLE drafts(id TEXT PRIMARY KEY, content_id TEXT, user_confirmed_at TEXT);
+        CREATE TABLE user_override(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, round_id INTEGER,
+            override_field TEXT, original_value TEXT, override_value TEXT,
+            reason TEXT NOT NULL, overridden_by TEXT NOT NULL, overridden_at TEXT
+        );
         CREATE VIEW sub_plan_stage_publish_stats AS
         SELECT s.id AS stage_id,s.sub_plan_version_id,
                COUNT(DISTINCT d.id) AS confirmed_published_count
@@ -75,7 +80,8 @@ def _db(path=None):
         LEFT JOIN contents c ON c.round_id=r.id
         LEFT JOIN drafts d ON d.content_id=c.id AND d.user_confirmed_at IS NOT NULL
         GROUP BY s.id,s.sub_plan_version_id;
-        INSERT INTO spiral_rounds(id,round_number,status) VALUES(1,1,'created');
+        INSERT INTO spiral_rounds(id,round_number,status,plan_attribution_status)
+        VALUES(1,1,'created','pending');
     """)
     return conn
 
@@ -345,3 +351,27 @@ def test_integrity_audit_detects_signature_drift_and_wrong_round_stage_link():
     codes = {item["code"] for item in report["issues"]}
     assert "master_plan_signature_mismatch" in codes
     assert "round_subplan_stage_mismatch" in codes
+
+
+
+def test_legacy_round_manual_attribution_requires_audited_reason_and_cannot_be_overwritten():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    master = _active_master(store)
+
+    resolved = store.attribute_legacy_round(
+        1, master["id"], reviewer="operator", reason="依据旧轮次创建时的人工记录确认版本",
+    )
+    assert resolved["master_plan_version_id"] == master["id"]
+    assert resolved["plan_signature"] == master["plan_signature"]
+    assert resolved["plan_attribution_status"] == "resolved"
+    audit = conn.execute(
+        "SELECT override_field,reason,overridden_by FROM user_override WHERE round_id=1"
+    ).fetchone()
+    assert tuple(audit) == (
+        "legacy_plan_attribution", "依据旧轮次创建时的人工记录确认版本", "operator"
+    )
+    with pytest.raises(PlanVersionError, match="禁止覆盖"):
+        store.attribute_legacy_round(
+            1, master["id"], reviewer="operator", reason="不允许再次改绑",
+        )
