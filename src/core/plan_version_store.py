@@ -681,7 +681,7 @@ class PlanVersionStore:
                       (r.sub_plan_version_id IS NOT NULL OR r.sub_plan_stage_id IS NOT NULL))
                   OR (r.sub_plan_id IS NOT NULL AND
                       (v.id IS NULL OR s.id IS NULL OR r.sub_plan_snapshot IS NULL
-                       OR r.sub_plan_stage_snapshot IS NULL))"""
+                       OR r.sub_plan_stage_snapshot IS NULL OR r.sub_plan_snapshot!=v.snapshot_json))"""
         ).fetchall()
         if bad_subplan_links:
             issues.append({"code": "round_subplan_stage_mismatch",
