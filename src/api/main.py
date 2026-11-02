@@ -6294,6 +6294,9 @@ def _register_routes(app: FastAPI) -> None:
         font = profile.get("font_family")
         if font not in allowed_fonts:
             font = "Noto Sans CJK SC"
+        component_style = profile.get("component_style", "card")
+        if component_style not in {"card", "minimal", "editorial"}:
+            component_style = "card"
         brand_footer = " · ".join(
             str(profile.get(key) or "").strip() for key in ("brand_name", "footer")
             if str(profile.get(key) or "").strip()
@@ -6302,7 +6305,7 @@ def _register_routes(app: FastAPI) -> None:
         output_dir = cfg.resolve_path(cfg.paths.output_dir)
         paths = make_card_set(
             title, dimension or "知识卡片", body, output_dir, platform, footer,
-            theme=theme, brand_palette={**colors, "component_style": profile.get("component_style", "card")}, font_family=font,
+            theme=theme, brand_palette={**colors, "component_style": component_style}, font_family=font,
         )
         from src.core.visual_ocr import load_ocr_report
         from src.core.visual_persistence import (
