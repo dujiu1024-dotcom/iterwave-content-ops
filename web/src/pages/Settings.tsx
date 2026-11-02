@@ -4,7 +4,7 @@ import { useApp } from "../AppContext";
 import EmptyHint from "../components/EmptyHint";
 import TenantManagerPane from "../components/TenantManagerPane";
 import RuntimePolicyEditor from "../components/RuntimePolicyEditor";
-import { AdvancedEditor, KbEditor, LlmEditor, PlatformStyleEditor, PlatformToggles, TimeoutEditor } from "../components/ConfigEditors";
+import { AdvancedEditor, ImageModelEditor, KbEditor, LlmEditor, PlatformStyleEditor, PlatformToggles, TimeoutEditor } from "../components/ConfigEditors";
 import { api, type SystemStatus, type SystemConfigView } from "../api";
 
 const PLATFORM_LABELS: Record<string, string> = {
@@ -381,6 +381,17 @@ export default function Settings() {
           ) : (
             <LlmEditor view={cfgView} onSaved={loadConfig} />
           )}
+        </div>
+
+        {/* 图片创作模型：与对话模型完全独立 */}
+        <div className="panel">
+          <div className="panel-head">
+            <div>
+              <div className="panel-title"><span className="icon">▣</span>图片创作模型（独立通道）</div>
+              <div className="panel-sub">与上方对话模型分开配置：商汤主模型 + 火山兜底</div>
+            </div>
+          </div>
+          <ImageModelEditor onSaved={loadConfig} />
         </div>
 
       </div>

@@ -6,7 +6,7 @@
  * 这里的组件只提交「真正改动」的字段，未改动不提交。
  */
 import { useEffect, useState } from "react";
-import { api, type Platform, type PlatformStyle, type SystemConfigView } from "../api";
+import { api, type MediaGenerationSettings, type Platform, type PlatformStyle, type SystemConfigView } from "../api";
 import { useApp } from "../AppContext";
 import { navigate } from "../nav";
 
@@ -528,6 +528,70 @@ export function LlmEditor({ view, onSaved }: {
         密钥保存在运行服务所在服务器的本机环境配置文件中（.env），不写入应用日志，也不会回显到页面。
         文案生成与热点研判会自动按「主模型 → 兜底模型」顺序切换。
       </div>
+    </div>
+  );
+}
+
+// =====================================================================
+// 图片创作模型（独立于对话模型）
+// =====================================================================
+export function ImageModelEditor({ onSaved }: { onSaved?: () => void }) {
+  const { showToast, withPending, isPending } = useApp();
+  const [settings, setSettings] = useState<MediaGenerationSettings | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const busy = isPending("cfg:image_model");
+
+  useEffect(() => {
+    api.mediaGenerationSettings()
+      .then((data) => { setSettings(data); setErr(null); })
+      .catch((e) => setErr(e instanceof Error ? e.message : String(e)));
+  }, []);
+
+  const save = async () => {
+    if (!settings) return;
+    if (!settings.model.trim()) { showToast("图片主模型不能为空", "error"); return; }
+    const res = await withPending("cfg:image_model", () => api.saveMediaGenerationSettings({
+      enabled: settings.enabled,
+      monthly_quota: settings.monthly_quota,
+      prompt_prefix: settings.prompt_prefix,
+      model: settings.model.trim(),
+      size: settings.size,
+    }));
+    if (!res) return;
+    setSettings(res);
+    showToast("✓ 图片创作模型已保存", "success");
+    onSaved?.();
+  };
+
+  if (err) return <div className="note orange">图片通道配置读取失败：{err}</div>;
+  if (!settings) return <div className="note">加载中…</div>;
+
+  return (
+    <div style={{ display: "grid", gap: 14 }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <span className={settings.provider_configured ? "tag green" : "tag orange"}>
+          {settings.provider_configured ? "图片服务已接入" : "图片服务未接入"}
+        </span>
+        <span style={{ fontSize: 12, color: "var(--muted)" }}>
+          与上方对话模型完全独立；主模型失败时自动切换兜底模型，地址与密钥由服务器保管。
+        </span>
+      </div>
+      <Field label="主模型（商汤 SenseNova U1.5，文生图 / 改图）">
+        <input style={{ ...inputStyle, fontFamily: "monospace" }} value={settings.model} maxLength={120}
+          onChange={(e) => setSettings({ ...settings, model: e.target.value })} placeholder="sensenova-u1.5-fast" />
+      </Field>
+      <Field label="兜底模型（火山方舟 Seedream，只读）">
+        <input style={{ ...inputStyle, fontFamily: "monospace" }} value={settings.fallback_model || "未配置"} readOnly disabled />
+      </Field>
+      <Field label="默认尺寸">
+        <select className="field" style={{ ...inputStyle }} value={settings.size}
+          onChange={(e) => setSettings({ ...settings, size: e.target.value as MediaGenerationSettings["size"] })}>
+          <option value="1024x1024">方图 1024 × 1024</option>
+          <option value="1024x1536">竖图 1024 × 1536</option>
+          <option value="1536x1024">横图 1536 × 1024</option>
+        </select>
+      </Field>
+      <SaveBar onSave={save} busy={busy} />
     </div>
   );
 }

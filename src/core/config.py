@@ -458,7 +458,21 @@ class VisionRankingConfig(BaseModel):
 
 
 class MediaGenerationConfig(BaseModel):
-    base_url: str = "https://api.openai.com/v1"
+    """图片创作通道：与对话模型完全独立，主模型 + 兜底模型可来自不同供应商。
+
+    - provider=primary，商汤 SenseNova U1.5（token.sensenova.cn）
+    - fallback_provider，火山方舟 Seedream（ark.cn-beijing.volces.com）
+    商汤默认 watermark=true，业务图必须配 watermark=false。
+    """
+    provider: str = "sensenova"
+    base_url: str = "https://token.sensenova.cn/v1"
+    model: str = "sensenova-u1.5-fast"
+    api_key_env: str = "SENSENOVA_API_KEY"
+    watermark: bool | None = False
+    fallback_provider: str = "ark"
+    fallback_base_url: str = "https://ark.cn-beijing.volces.com/api/plan/v3"
+    fallback_model: str = "doubao-seedream-5-0-pro"
+    fallback_api_key_env: str = "ARK_API_KEY"
     timeout_seconds: int = Field(150, ge=1, le=300)
     connect_timeout_seconds: int = Field(15, ge=1, le=60)
     max_response_bytes: int = Field(20 * 1024 * 1024, ge=1024, le=20 * 1024 * 1024)
@@ -473,6 +487,18 @@ class MediaGenerationConfig(BaseModel):
         if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
             raise ValueError("media_generation.base_url 必须是无认证信息的 HTTP(S) URL")
         return value.strip().rstrip("/")
+
+    @field_validator("fallback_base_url")
+    @classmethod
+    def _safe_fallback_url(cls, value: str) -> str:
+        cleaned = value.strip().rstrip("/")
+        if not cleaned:
+            return ""
+        from urllib.parse import urlsplit
+        parsed = urlsplit(cleaned)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("media_generation.fallback_base_url 必须是无认证信息的 HTTP(S) URL")
+        return cleaned
 
 
 class MediaQualityConfig(BaseModel):

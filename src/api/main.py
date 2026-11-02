@@ -2889,6 +2889,12 @@ def _register_routes(app: FastAPI) -> None:
         ).fetchone()[0])
         key_env = os.getenv("ITERWAVE_IMAGE_API_KEY_ENV", "OPENAI_API_KEY").strip()
         settings["provider_configured"] = bool(key_env and os.getenv(key_env))
+        # 只回显模型名（部署细节的地址/密钥环境变量名不返回）
+        cfg = _g().get("cfg")
+        fallback_model = str(
+            getattr(getattr(cfg, "media_generation", None), "fallback_model", "") or ""
+        )
+        settings["fallback_model"] = fallback_model
         # 服务端地址与密钥环境变量名属于部署细节，不通过公开设置接口返回。
         return settings
 
