@@ -104,6 +104,17 @@ class PlanVersionStore:
             signature = self._signer.compute_signature(snapshot)
             if signature != row["plan_signature"]:
                 raise PlanVersionError("主计划快照与签名不一致，拒绝生效")
+            previous_effective = self.conn.execute(
+                "SELECT id FROM master_plan_versions WHERE status='effective'"
+            ).fetchone()
+            if previous_effective is not None:
+                # A new mother plan pauses child plans still based on the superseded
+                # version. Existing rounds and child snapshots remain untouched.
+                self.conn.execute(
+                    """UPDATE sub_plans SET status='paused',updated_at=?
+                       WHERE master_plan_version_id=? AND status='active'""",
+                    (now, previous_effective["id"]),
+                )
             self.conn.execute(
                 """UPDATE master_plan_versions
                    SET status='archived',superseded_at=? WHERE status='effective'""", (now,)
