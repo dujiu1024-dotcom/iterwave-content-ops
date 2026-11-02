@@ -119,6 +119,7 @@ IterWave 的部分平台适配器代码基于 [Easel](https://github.com/kaichen
 - 日志中的敏感信息脱敏（保留前 4 位 + `***`）
 - Playwright 永不点击"发布"按钮；默认仅存草稿与只读采集
 - 自动评论（含被动回复）、主动评论和关注默认关闭；只有部署者显式设置 `ITERWAVE_ENABLE_AUTOMATED_ENGAGEMENT=1` 才启用，启用前必须确认平台规则与账号授权；不设置时这些动作只记为 skipped
+- 反向代理限速按真实客户端 IP 统计；仅信任 `ITERWAVE_TRUSTED_PROXY_IPS` 指定的代理网段，默认仅信任 `127.0.0.1,::1`，禁止配置为无边界信任任意转发头
 - 熔断机制：检测到平台异常自动停止所有运营，3 步验证后方可恢复
 
 ## 代码现状（Early Preview）
