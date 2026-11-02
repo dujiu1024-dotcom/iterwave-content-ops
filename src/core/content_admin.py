@@ -6,6 +6,7 @@
   删了会让复盘、目标进度、评分历史失真。需要隐藏请改用驳回/取消。
 - draft_saved：平台创作者中心里还留着这份草稿，系统不会去平台删（R1 只存草稿、不做平台写删除），
   返回 platform_drafts_left 提醒用户自己去平台清理。
+- pending_verify：平台保存结果尚未核实，禁止删除本地记录，必须先完成人工核实。
 - 删除内容时一并删本地卡片图片文件（只删项目 output 目录下的文件）。
 - 轮次只有在没有任何不可删内容时才能整轮删除；进行中的 producing 轮次不能删。
 """
@@ -18,7 +19,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-LOCKED_DRAFT_STATUSES = ("user_published", "data_fetching", "published")
+LOCKED_DRAFT_STATUSES = ("pending_verify", "user_published", "data_fetching", "published")
 BUSY_ROUND_STATUSES = ("producing", "collecting_metrics", "analyzing")
 
 
