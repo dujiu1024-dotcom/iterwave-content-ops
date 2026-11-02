@@ -716,6 +716,15 @@ def connection_transaction(conn, *, immediate: bool = True):
     """兼容 LockedConnection 与原生 sqlite3.Connection 的事务上下文。"""
     transaction = getattr(conn, "transaction", None)
     if callable(transaction):
+        if getattr(conn, "_context_owner", None) == _threading.get_ident():
+            # 已处于同线程的外层事务上下文（例如同步写 API 的 TransactionalAPIRoute 请求级
+            # `with conn`）：加入外层事务，由最外层统一提交/回滚；内层异常会把整体标为回滚。
+            # 外层尚未开始写事务时立刻取得写保留锁，保证读-校验-写不被并发写打断。
+            with conn:
+                if not conn.in_transaction:
+                    conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+                yield conn
+            return
         with transaction(immediate=immediate):
             yield conn
         return

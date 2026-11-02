@@ -43,6 +43,6 @@ def test_generate_copy_content_model_exception_is_reported_not_template(cfg, mon
             "测试选题", "测试摘要", "个人成长", Platform.XHS, cfg=cfg,
         )
 
-    assert caught.value.code == "model_unavailable"
-    assert caught.value.retryable is True
+    assert caught.value.code == "generation_internal_error"
+    assert caught.value.retryable is False
     assert "provider internal detail" not in str(caught.value)

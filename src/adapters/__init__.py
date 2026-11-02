@@ -59,17 +59,22 @@ def new_context_for_platform(platform: Platform):
     from contextlib import asynccontextmanager
     from playwright.async_api import async_playwright
     from ..core.login_manager import background_headless, get_or_create_context
+    from .draft_saver import _install_publish_network_guard
 
     @asynccontextmanager
     async def _ctx():
         async with async_playwright() as p:
             # 后台任务默认无头（不弹窗口）；ITERWAVE_BROWSER_HEADED=1 仅用于调试
             browser = await p.chromium.launch(headless=background_headless())
-            ctx = await get_or_create_context(browser, platform)
+            ctx = None
             try:
+                ctx = await get_or_create_context(browser, platform)
+                # 在创建任何页面之前安装 context 级拦截，覆盖页面、弹窗及新标签页。
+                await _install_publish_network_guard(ctx)
                 yield ctx
             finally:
-                await ctx.close()
+                if ctx is not None:
+                    await ctx.close()
                 await browser.close()
 
     return _ctx()
