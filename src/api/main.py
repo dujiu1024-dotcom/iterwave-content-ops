@@ -464,11 +464,11 @@ async def _switch_tenant_runtime(tenant_id: str) -> dict:
                 try:
                     new_context["scheduler"].shutdown()
                 except Exception:
-                    pass
+                    logger.warning("账号组切换失败后的调度器清理异常", exc_info=True)
                 try:
                     new_context["conn"].close()
                 except Exception:
-                    pass
+                    logger.warning("账号组切换失败后的数据库连接清理异常", exc_info=True)
             raise HTTPException(409, str(exc)) from exc
         except Exception as exc:
             _tenant_runtime_contexts[old_tenant_id] = _g_ctx
@@ -476,11 +476,11 @@ async def _switch_tenant_runtime(tenant_id: str) -> dict:
                 try:
                     new_context["scheduler"].shutdown()
                 except Exception:
-                    pass
+                    logger.warning("账号组初始化失败后的调度器清理异常", exc_info=True)
                 try:
                     new_context["conn"].close()
                 except Exception:
-                    pass
+                    logger.warning("账号组初始化失败后的数据库连接清理异常", exc_info=True)
             logger.exception("目标账号组后台运行时初始化失败 tenant=%s", tenant_id)
             raise HTTPException(
                 500, f"目标账号组初始化失败，当前账号组未变更：{type(exc).__name__}",
@@ -809,11 +809,11 @@ def _build_app() -> FastAPI:
                     try:
                         background_context["scheduler"].shutdown()
                     except Exception:
-                        pass
+                        logger.warning("后台上下文调度器清理异常", exc_info=True)
                     try:
                         background_context["conn"].close()
                     except Exception:
-                        pass
+                        logger.warning("后台上下文数据库连接清理异常", exc_info=True)
 
         # 全局消费者独立于当前活动账号组；每个任务按 tenant_id 构造专属运行时。
         task_worker_stop = asyncio.Event()
