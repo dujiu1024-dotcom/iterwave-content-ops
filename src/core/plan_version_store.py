@@ -596,38 +596,6 @@ class PlanVersionStore:
             self.conn.rollback()
             raise
 
-    def complete_round_open(self, idempotency_key: str, round_id: int) -> dict[str, Any]:
-        """Compatibility completion path. New scheduler code must use create_round_once()."""
-        now = _now()
-        self._begin()
-        try:
-            lock = self.conn.execute(
-                "SELECT * FROM round_open_idempotency WHERE idempotency_key=?",
-                (idempotency_key,),
-            ).fetchone()
-            if lock is None or lock["status"] != "reserved":
-                raise PlanVersionError("自动开轮租约不存在或已失效")
-            round_row = self.conn.execute(
-                """SELECT master_plan_version_id,sub_plan_id,sub_plan_version_id,sub_plan_stage_id
-                   FROM spiral_rounds WHERE id=?""", (round_id,)
-            ).fetchone()
-            expected = (lock["master_plan_version_id"], lock["sub_plan_id"],
-                        lock["sub_plan_version_id"], lock["sub_plan_stage_id"])
-            actual = tuple(round_row) if round_row is not None else None
-            if actual != expected:
-                raise PlanVersionError("轮次绑定与自动开轮租约不一致")
-            self.conn.execute(
-                """UPDATE round_open_idempotency
-                   SET status='created',round_id=?,lease_until=NULL,updated_at=?
-                   WHERE idempotency_key=? AND status='reserved'""",
-                (round_id, now, idempotency_key),
-            )
-            self.conn.commit()
-            return {"status": "created", "round_id": round_id}
-        except Exception:
-            self.conn.rollback()
-            raise
-
     def fail_round_open(self, idempotency_key: str, error_message: str) -> None:
         self.conn.execute(
             """UPDATE round_open_idempotency
