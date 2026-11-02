@@ -69,11 +69,24 @@ def build_execution_snapshot(cfg, conn, *, round_id: int, parameters: dict[str, 
 
     plan, signature, updated_at, source = PlanVersionManager(cfg, conn).load_plan()
     round_row = conn.execute(
-        "SELECT plan_signature FROM spiral_rounds WHERE id = ?", (round_id,),
+        """SELECT plan_signature,master_plan_version_id,sub_plan_id,sub_plan_version_id,
+                  sub_plan_stage_id,sub_plan_snapshot,sub_plan_stage_snapshot
+           FROM spiral_rounds WHERE id = ?""", (round_id,),
     ).fetchone()
     round_signature = round_row["plan_signature"] if round_row else None
     round_plan = None
-    if round_signature:
+    if round_row and round_row["sub_plan_id"]:
+        master_row = conn.execute(
+            "SELECT plan_signature,plan_snapshot FROM master_plan_versions WHERE id=?",
+            (round_row["master_plan_version_id"],),
+        ).fetchone()
+        if master_row is None or master_row["plan_signature"] != round_signature:
+            raise StaleTaskSnapshot("轮次绑定的主计划版本缺失或签名不一致")
+        try:
+            round_plan = json.loads(master_row["plan_snapshot"])
+        except (TypeError, ValueError):
+            raise StaleTaskSnapshot("轮次绑定的主计划快照损坏")
+    elif round_signature:
         row = conn.execute(
             "SELECT plan_snapshot FROM signature_history WHERE round_id = ? "
             "ORDER BY id DESC LIMIT 1",
@@ -87,7 +100,10 @@ def build_execution_snapshot(cfg, conn, *, round_id: int, parameters: dict[str, 
 
     # 未保存母计划时，轮次签名代表创建该轮时的显式参数（选题数/平台等）。
     # load_plan(source='derived') 是默认推导值，不是该轮的计划，不能拿它覆盖/否定轮次快照。
-    if source == "derived" and round_signature:
+    if round_row and round_row["sub_plan_id"]:
+        effective_signature = round_signature
+        source = "subplan_version"
+    elif source == "derived" and round_signature:
         effective_signature = round_signature
     else:
         if round_signature and round_signature != signature:
@@ -103,6 +119,18 @@ def build_execution_snapshot(cfg, conn, *, round_id: int, parameters: dict[str, 
         "plan_source": source,
         "round_plan_signature": round_signature,
         "round_plan_snapshot": sanitize_snapshot(round_plan) if round_plan else None,
+        "round_binding": ({
+            "master_plan_version_id": round_row["master_plan_version_id"],
+            "sub_plan_id": round_row["sub_plan_id"],
+            "sub_plan_version_id": round_row["sub_plan_version_id"],
+            "sub_plan_stage_id": round_row["sub_plan_stage_id"],
+            "sub_plan_snapshot_sha256": hashlib.sha256(
+                str(round_row["sub_plan_snapshot"] or "").encode("utf-8")
+            ).hexdigest(),
+            "sub_plan_stage_snapshot_sha256": hashlib.sha256(
+                str(round_row["sub_plan_stage_snapshot"] or "").encode("utf-8")
+            ).hexdigest(),
+        } if round_row and round_row["sub_plan_id"] else None),
         "parameters": sanitize_snapshot(parameters),
     }
 
@@ -114,10 +142,65 @@ def validate_execution_snapshot(snapshot: dict[str, Any], cfg, conn) -> None:
     expected_config = str(snapshot.get("config_fingerprint") or "")
     if not expected_config or config_fingerprint(cfg) != expected_config:
         raise StaleTaskSnapshot("任务入队后账号组配置已变化；为避免使用新配置误执行，任务已停止，请确认配置后重新提交")
+    from .subplan_production import production_paused
+    if production_paused(conn):
+        raise StaleTaskSnapshot("内容生产已暂停，队列任务拒绝执行")
+    binding = snapshot.get("round_binding")
+    if binding is not None:
+        round_id = (snapshot.get("parameters") or {}).get("round_id")
+        row = conn.execute(
+            """SELECT master_plan_version_id,sub_plan_id,sub_plan_version_id,
+                      sub_plan_stage_id,sub_plan_snapshot,sub_plan_stage_snapshot
+               FROM spiral_rounds WHERE id=?""", (round_id,),
+        ).fetchone()
+        expected = (
+            binding.get("master_plan_version_id"), binding.get("sub_plan_id"),
+            binding.get("sub_plan_version_id"), binding.get("sub_plan_stage_id"),
+            binding.get("sub_plan_snapshot_sha256"), binding.get("sub_plan_stage_snapshot_sha256"),
+        )
+        actual = None
+        if row is not None:
+            actual = (
+                row["master_plan_version_id"], row["sub_plan_id"],
+                row["sub_plan_version_id"], row["sub_plan_stage_id"],
+                hashlib.sha256(str(row["sub_plan_snapshot"] or "").encode("utf-8")).hexdigest(),
+                hashlib.sha256(str(row["sub_plan_stage_snapshot"] or "").encode("utf-8")).hexdigest(),
+            )
+        if actual != expected or not all(expected):
+            raise StaleTaskSnapshot("轮次绑定的子计划版本/阶段快照已变化，拒绝执行")
+        identity = conn.execute(
+            "SELECT status,platform FROM sub_plans WHERE id=?", (binding.get("sub_plan_id"),),
+        ).fetchone()
+        stage = conn.execute(
+            """SELECT s.status,s.start_date,s.end_date,s.target_count,
+                      COALESCE(stats.confirmed_published_count,0) AS confirmed_published_count
+               FROM sub_plan_stages s
+               LEFT JOIN sub_plan_stage_publish_stats stats ON stats.stage_id=s.id
+               WHERE s.id=? AND s.sub_plan_version_id=?""",
+            (binding.get("sub_plan_stage_id"), binding.get("sub_plan_version_id")),
+        ).fetchone()
+        if identity is None or identity["status"] != "active":
+            raise StaleTaskSnapshot("子计划已暂停或撤销授权，拒绝执行")
+        if stage is None or stage["status"] in ("paused", "completed", "cancelled"):
+            raise StaleTaskSnapshot("子计划阶段已暂停或完成，拒绝执行")
+        if int(stage["confirmed_published_count"] or 0) >= int(stage["target_count"]):
+            raise StaleTaskSnapshot("阶段用户确认发布目标已达成，队列任务拒绝执行")
+        from .timezone import business_now
+        business_date = business_now(cfg).date().isoformat()
+        if stage["start_date"] and business_date < stage["start_date"]:
+            raise StaleTaskSnapshot("子计划阶段尚未到执行日期，队列任务拒绝执行")
+        if stage["end_date"] and business_date > stage["end_date"]:
+            raise StaleTaskSnapshot("子计划阶段执行窗口已结束，队列任务拒绝执行")
+        broken = conn.execute(
+            "SELECT 1 FROM circuit_breaker_events WHERE platform=? AND resolved_at IS NULL LIMIT 1",
+            (identity["platform"],),
+        ).fetchone()
+        if broken:
+            raise StaleTaskSnapshot("子计划所属平台已熔断，队列任务拒绝执行")
     expected_plan = str(snapshot.get("plan_signature") or "")
     # derived 轮次以创建时持久化的 round_plan_snapshot 为准；当前推导母计划会随最近轮次变化，
     # 不是可用于验证旧轮次的稳定版本。保存过的正式母计划仍必须严格比对。
-    if expected_plan:
+    if expected_plan and binding is None:
         from .plan_version import PlanVersionManager
         _, current_signature, _, current_source = PlanVersionManager(cfg, conn).load_plan()
         # 仅当入队和执行时都没有正式母计划，才忽略动态推导签名；

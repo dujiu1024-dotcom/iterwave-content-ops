@@ -21,8 +21,11 @@ def rank_media_with_vision(
     media_dir: Path, cfg=None,
 ) -> list[dict[str, Any]] | None:
     if cfg is None:
-        from src.core.config import get_config
-        cfg = get_config()
+        from src.core.task_context import current_config
+        cfg = current_config()
+        if cfg is None:
+            # 视觉排序不是必需路径；缺少任务租户配置时跳过，不回退到前台租户。
+            return None
     policy = cfg.vision_ranking
     # Image bytes leave the local machine only when explicitly enabled by the operator.
     enabled = os.getenv("ITERWAVE_ENABLE_VISION_MEDIA_RANKING", "").strip().lower() in ("1", "true", "yes")

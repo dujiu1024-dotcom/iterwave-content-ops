@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -213,6 +214,10 @@ class PlanVersionStore:
     ) -> dict[str, Any]:
         if not isinstance(snapshot, dict):
             raise PlanVersionError("子计划快照必须是对象")
+        if snapshot.get("title") is not None:
+            title = str(snapshot["title"]).strip()
+            if not title or len(title) > 160:
+                raise PlanVersionError("子计划标题必须为 1-160 个字符")
         stages = stages or []
         if not isinstance(stages, list):
             raise PlanVersionError("阶段必须是数组")
@@ -231,12 +236,20 @@ class PlanVersionStore:
                 raise PlanVersionError("关联的主计划版本不存在")
             if master["status"] != "effective":
                 raise PlanVersionError("新子计划版本必须关联当前生效的主计划版本")
+            base_stage_keys: set[str] = set()
             if based_on_version_id is not None:
                 base = self.conn.execute(
                     "SELECT sub_plan_id FROM sub_plan_versions WHERE id=?", (based_on_version_id,)
                 ).fetchone()
                 if base is None or base["sub_plan_id"] != sub_plan_id:
                     raise PlanVersionError("基准版本不属于当前子计划")
+                base_stage_keys = {
+                    str(row["stage_key"])
+                    for row in self.conn.execute(
+                        "SELECT stage_key FROM sub_plan_stages WHERE sub_plan_version_id=?",
+                        (based_on_version_id,),
+                    ).fetchall()
+                }
 
             version_no = int(self.conn.execute(
                 "SELECT COALESCE(MAX(version_no),0)+1 FROM sub_plan_versions WHERE sub_plan_id=?",
@@ -252,17 +265,31 @@ class PlanVersionStore:
                  based_on_version_id, now, author, change_note),
             )
             version_id = int(cur.lastrowid)
+            seen_stage_keys: set[str] = set()
             for index, stage in enumerate(stages, start=1):
                 if not isinstance(stage, dict):
                     raise PlanVersionError("阶段条目必须是对象")
+                supplied_stage_key = stage.get("stage_key")
+                if supplied_stage_key and str(supplied_stage_key) not in base_stage_keys:
+                    raise PlanVersionError("阶段稳定标识必须继承自当前子计划的基准版本")
+                stage_key = str(supplied_stage_key or uuid.uuid4().hex).strip()
+                if not stage_key or len(stage_key) > 100 or stage_key in seen_stage_keys:
+                    raise PlanVersionError("阶段稳定标识无效或重复")
+                seen_stage_keys.add(stage_key)
                 title = str(stage.get("title") or "").strip()
                 if not title or len(title) > 160:
                     raise PlanVersionError("阶段标题必须为 1-160 个字符")
+                raw_order = stage.get("stage_order", index)
+                raw_target = stage.get("target_count", 1)
+                if raw_order is None or raw_target is None or isinstance(raw_order, bool) or isinstance(raw_target, bool):
+                    raise PlanVersionError("阶段顺序和目标篇数必须是整数")
                 try:
-                    stage_order = int(stage.get("stage_order", index))
-                    target_count = int(stage.get("target_count", 1))
-                except (TypeError, ValueError) as exc:
+                    stage_order = int(raw_order)
+                    target_count = int(raw_target)
+                except (TypeError, ValueError, OverflowError) as exc:
                     raise PlanVersionError("阶段顺序和目标篇数必须是整数") from exc
+                if str(raw_order).strip() != str(stage_order) or str(raw_target).strip() != str(target_count):
+                    raise PlanVersionError("阶段顺序和目标篇数必须是整数")
                 if stage_order < 1:
                     raise PlanVersionError("阶段顺序必须大于等于 1")
                 if not 1 <= target_count <= 10000:
@@ -275,15 +302,18 @@ class PlanVersionStore:
                             datetime.strptime(str(date_value), "%Y-%m-%d")
                         except ValueError as exc:
                             raise PlanVersionError(f"{field_name} 必须为 YYYY-MM-DD") from exc
+                stage_status = str(stage.get("status") or "pending")
+                if stage_status not in {"pending", "in_progress", "completed", "paused", "cancelled"}:
+                    raise PlanVersionError("阶段状态无效")
                 self.conn.execute(
                     """INSERT INTO sub_plan_stages(
-                        sub_plan_version_id,stage_order,title,direction,target_count,
+                        sub_plan_version_id,stage_key,stage_order,title,direction,target_count,
                         start_date,end_date,completion_condition,status,notes,created_at,updated_at
-                    ) VALUES(?,?,?,?,?,?,?,?, 'pending',?,?,?)""",
-                    (version_id, stage_order, title,
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (version_id, stage_key, stage_order, title,
                      str(stage.get("direction") or ""), target_count,
                      start_date, end_date, str(stage.get("completion_condition") or ""),
-                     str(stage.get("notes") or ""), now, now),
+                     stage_status, str(stage.get("notes") or ""), now, now),
                 )
             row = dict(self.conn.execute(
                 "SELECT * FROM sub_plan_versions WHERE id=?", (version_id,)
@@ -326,10 +356,13 @@ class PlanVersionStore:
                    WHERE id=? AND status='draft'""",
                 (now, reviewer, now, version_id),
             )
+            approved_snapshot = json.loads(row["snapshot_json"])
+            approved_title = str(approved_snapshot.get("title") or identity["title"]).strip()
             self.conn.execute(
                 """UPDATE sub_plans SET current_version_id=?,master_plan_version_id=?,
-                       status='active',updated_at=? WHERE id=?""",
-                (version_id, row["master_plan_version_id"], now, row["sub_plan_id"]),
+                       title=?,status='active',updated_at=? WHERE id=?""",
+                (version_id, row["master_plan_version_id"], approved_title,
+                 now, row["sub_plan_id"]),
             )
             self.conn.commit()
             return dict(self.conn.execute(
@@ -553,6 +586,8 @@ class PlanVersionStore:
         round_number: Optional[int] = None,
         topic_ids: Optional[list[str]] = None,
         content_variants: Optional[list[dict[str, Any]]] = None,
+        trigger_source: str = "auto",
+        applied_feedback: Optional[str] = None,
     ) -> dict[str, Any]:
         """Atomically create, bind and complete one leased round.
 
@@ -605,16 +640,20 @@ class PlanVersionStore:
             variants_json = json.dumps(content_variants or [], ensure_ascii=False)
             cur = self.conn.execute(
                 """INSERT INTO spiral_rounds(
-                    goal_id,round_number,status,topic_ids,content_variants,
+                    goal_id,round_number,status,topic_ids,content_variants,trigger_source,applied_feedback,
                     master_plan_version_id,sub_plan_id,sub_plan_version_id,sub_plan_stage_id,
                     sub_plan_snapshot,sub_plan_stage_snapshot,plan_signature,plan_attribution_status
-                ) VALUES(?,?,'created',?,?,?,?,?,?,?,?,?,'resolved')""",
-                (goal_id, round_number, topics_json, variants_json,
+                ) VALUES(?,?,'created',?,?,?,?,?,?,?,?,?,?,?,'resolved')""",
+                (goal_id, round_number, topics_json, variants_json, trigger_source, applied_feedback,
                  lock["master_plan_version_id"], lock["sub_plan_id"],
                  lock["sub_plan_version_id"], lock["sub_plan_stage_id"],
                  version["snapshot_json"], stage_snapshot, version["plan_signature"]),
             )
             round_id = int(cur.lastrowid)
+            self.conn.execute(
+                "UPDATE sub_plans SET updated_at=? WHERE id=?",
+                (now, lock["sub_plan_id"]),
+            )
             self.conn.execute(
                 """UPDATE round_open_idempotency
                    SET status='created',round_id=?,lease_until=NULL,updated_at=?

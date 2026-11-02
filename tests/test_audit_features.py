@@ -279,6 +279,11 @@ def test_http_plan_v2(client):
         "cadence": {"round_interval_days": 3, "rounds_planned": 6},
     })
     assert r.status_code == 200, r.text
+    assert r.json()["requires_review"] is True
+    assert r.json()["effective"] is False
+    version_id = r.json()["draft"]["id"]
+    reviewed = client.post(f"/api/plans/{version_id}/review", json={"action": "approve"})
+    assert reviewed.status_code == 200, reviewed.text
     p = client.get("/api/plans").json()
     assert p["plan"]["cadence"]["rounds_planned"] == 6
     assert p["per_platform"]["xhs"]["topic_count"] == 3 and p["per_platform"]["xhs"]["publish_slots"] == ["19:30"]

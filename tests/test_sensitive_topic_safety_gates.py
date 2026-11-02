@@ -64,15 +64,22 @@ def test_sensitive_hot_topic_import_requires_operator_confirmation(client):
     assert "时政" in row["categories"]
 
 
-def test_correct_login_is_not_blocked_by_other_users_ip_failures(monkeypatch):
+def test_correct_login_is_blocked_after_ip_failure_threshold(tmp_path, monkeypatch):
+    import pytest
     import src.core.auth as auth
 
-    monkeypatch.setattr(auth, "verify_password", lambda value: value == "correct-secret")
+    monkeypatch.setenv("ITERWAVE_ENV_FILE", str(tmp_path / ".env"))
+    calls = []
+    monkeypatch.setattr(auth, "verify_password", lambda value: calls.append(value) or value == "correct-secret")
     monkeypatch.setattr(auth, "_new_session", lambda: "session-token")
-    monkeypatch.setitem(auth._failures, "shared-nat", [auth.time.time()] * auth.LOGIN_MAX_FAILURES)
+    for _ in range(auth.LOGIN_MAX_FAILURES):
+        auth.record_failure("shared-nat")
 
-    assert auth.login("correct-secret", "shared-nat") == "session-token"
-    assert "shared-nat" not in auth._failures
+    with pytest.raises(PermissionError):
+        auth.login("correct-secret", "shared-nat")
+    # 限速命中时不再运行昂贵的 PBKDF2 校验。
+    assert calls == []
+    assert auth.is_rate_limited("shared-nat")
 
 
 

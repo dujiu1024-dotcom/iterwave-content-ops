@@ -30,7 +30,7 @@ const STATUS_LABEL: Record<string, string> = {
 };
 
 const DRAFT_STATUS_LABEL: Record<string, string> = {
-  draft_pending: "待存草稿", draft_saved: "已存草稿", draft_failed: "存草稿失败", published: "已发布",
+  draft_pending: "待存草稿", pending_verify: "待核实平台保存", draft_saved: "已存草稿", draft_failed: "存草稿失败", published: "已发布",
   collecting: "数据采集中", collected: "已采集", expired: "已过期", cancelled: "已取消", failed: "失败",
 };
 
@@ -518,7 +518,7 @@ function PublishPane() {
       const all = await api.draftsAll();
       // draft_pending 代表仅保存在本地的干跑/待存内容；用户可以复制到平台手动发布后在这里登记。
       setDrafts(all.filter((d) =>
-        d.status === "draft_pending" || d.status === "draft_saved" ||
+        d.status === "draft_pending" || d.status === "pending_verify" || d.status === "draft_saved" ||
         d.status === "user_published" || d.status === "data_fetching" || d.status === "published"
       ));
       setPage(1);
@@ -628,6 +628,12 @@ function PublishPane() {
                     ? " · 仅保存在 IterWave，本内容尚未存入平台"
                     : d.saved_at ? ` · 存草稿 ${new Date(d.saved_at).toLocaleString("zh-CN")}` : ""}
                 </div>
+                {d.status === "pending_verify" && (
+                  <div className="note" style={{ marginTop: 6, color: "var(--orange)" }}>
+                    平台保存结果不确定，系统不会自动重试，以免生成重复草稿。请进入「内容生产」对应轮次，
+                    在平台草稿箱核实后选择「平台已存」或「平台未存」。
+                  </div>
+                )}
                 {d.status === "draft_pending" && (
                   <div className="note" style={{ marginTop: 6 }}>
                     这是干跑/待存内容。请在「内容生产 → 内容编辑与审核」复制文案，手动发布到平台后再回来登记；系统不会自动发布。

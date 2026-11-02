@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from src.core.timezone import business_now
 from typing import Any
 
 from src.core.industry_presets import PRESETS
@@ -10,8 +10,8 @@ from src.core.industry_presets import PRESETS
 SEED_MARKER = "industry_presets_builtin_seed_v1"
 
 
-def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+def _now(cfg=None) -> str:
+    return business_now(cfg).isoformat(timespec="seconds")
 
 
 def _decode(row) -> dict[str, Any]:
@@ -32,13 +32,13 @@ def _decode(row) -> dict[str, Any]:
     }
 
 
-def seed_builtins(conn) -> dict[str, int]:
+def seed_builtins(conn, cfg=None) -> dict[str, int]:
     lock = getattr(conn, "_lock", None)
     if lock:
         lock.acquire()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        now = _now()
+        now = _now(cfg)
         imported = 0
         for item in PRESETS:
             cursor = conn.execute(
@@ -87,7 +87,7 @@ def get_preset(conn, key: str) -> dict[str, Any] | None:
     return _decode(row) if row else None
 
 
-def upsert_custom_preset(conn, item: dict[str, Any]) -> dict[str, Any]:
+def upsert_custom_preset(conn, item: dict[str, Any], cfg=None) -> dict[str, Any]:
     """Create/update a tenant-owned preset without allowing built-in key takeover."""
     key = str(item.get("key") or "").strip()
     if not key or len(key) > 64 or not key.replace("_", "").replace("-", "").isalnum():
@@ -117,7 +117,7 @@ def upsert_custom_preset(conn, item: dict[str, Any]) -> dict[str, Any]:
         existing = conn.execute("SELECT is_builtin FROM industry_presets WHERE key=?", (key,)).fetchone()
         if existing and existing["is_builtin"]:
             raise ValueError("内置模板不可覆盖")
-        now = _now()
+        now = _now(cfg)
         if existing:
             previous = conn.execute("SELECT * FROM industry_presets WHERE key=?", (key,)).fetchone()
             if previous is not None:
@@ -160,7 +160,7 @@ def upsert_custom_preset(conn, item: dict[str, Any]) -> dict[str, Any]:
     return get_preset(conn, key)
 
 
-def delete_custom_preset(conn, key: str) -> bool:
+def delete_custom_preset(conn, key: str, cfg=None) -> bool:
     """Archive a custom preset instead of deleting versioned business data."""
     lock = getattr(conn, "_lock", None)
     if lock:
@@ -174,7 +174,7 @@ def delete_custom_preset(conn, key: str) -> bool:
         if existing["is_builtin"]:
             raise ValueError("内置模板不可删除")
         if existing["is_active"]:
-            now = _now()
+            now = _now(cfg)
             row = conn.execute("SELECT * FROM industry_presets WHERE key=?", (key,)).fetchone()
             conn.execute(
                 "INSERT OR IGNORE INTO industry_preset_versions(preset_key,version,snapshot_json,created_at) VALUES(?,?,?,?)",
@@ -194,7 +194,7 @@ def delete_custom_preset(conn, key: str) -> bool:
             lock.release()
 
 
-def restore_custom_preset(conn, key: str) -> dict[str, Any] | None:
+def restore_custom_preset(conn, key: str, cfg=None) -> dict[str, Any] | None:
     lock = getattr(conn, "_lock", None)
     if lock:
         lock.acquire()
@@ -207,7 +207,7 @@ def restore_custom_preset(conn, key: str) -> dict[str, Any] | None:
         if row["is_builtin"]:
             raise ValueError("内置模板无需恢复")
         if not row["is_active"]:
-            now = _now()
+            now = _now(cfg)
             conn.execute(
                 "UPDATE industry_presets SET is_active=1,archived_at=NULL,version=version+1,updated_at=? WHERE key=? AND is_active=0",
                 (now, key),

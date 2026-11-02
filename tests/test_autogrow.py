@@ -146,6 +146,31 @@ class FakePvm:
 
 
 def _ctl(cfg, conn, executor=None):
+    # New autogrow contract requires a reviewed platform subplan and an executable stage.
+    from src.core.plan_version_store import PlanVersionStore
+    store = PlanVersionStore(conn)
+    master = conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective' LIMIT 1"
+    ).fetchone()
+    if master is None:
+        draft = store.create_master_draft({
+            "topic_count_per_platform": 5, "enabled_platforms": ["xhs"],
+            "dimension_allocation": {"AI教育": 5}, "content_format": "image_text",
+        })
+        master_id = int(store.activate_master_version(draft["id"], reviewer="test")["id"])
+    else:
+        master_id = int(master["id"])
+    if conn.execute("SELECT 1 FROM sub_plans WHERE status='active' LIMIT 1").fetchone() is None:
+        sub_id = "autogrow-test-subplan"
+        store.create_subplan(
+            sub_id, master_plan_version_id=master_id, platform="xhs", title="autogrow test",
+        )
+        version = store.create_subplan_version(
+            sub_id, {"title": "autogrow test", "platform": "xhs"},
+            master_plan_version_id=master_id,
+            stages=[{"title": "test stage", "target_count": 100}],
+        )
+        store.activate_subplan_version(version["id"], reviewer="test")
     return AutogrowController(cfg, conn, executor or FakeExecutor(conn), pvm=FakePvm(),
                               guard=UltimateGoalChecker(cfg))
 
@@ -230,3 +255,18 @@ def test_autogrow_config_patchable(cfg, conn, tmp_path, monkeypatch):
     monkeypatch.setattr("src.core.config_store.OVERRIDES_FILE", tmp_path / "ov.json")
     patch_config(cfg, conn, {"autogrow.cooldown_hours": 6, "autogrow.enabled": False})
     assert cfg.autogrow.cooldown_hours == 6 and cfg.autogrow.enabled is False
+
+
+
+def test_autogrow_requires_approved_subplan_stage(cfg, conn, seed):
+    seed.round(status="completed")
+    controller = AutogrowController(
+        cfg, conn, FakeExecutor(conn), pvm=FakePvm(),
+        guard=UltimateGoalChecker(cfg),
+    )
+    before = int(conn.execute("SELECT COUNT(*) FROM spiral_rounds").fetchone()[0])
+    result = controller.evaluate(force=True)
+    after = int(conn.execute("SELECT COUNT(*) FROM spiral_rounds").fetchone()[0])
+    assert not result["can_start"]
+    assert result["reason_code"] == "no_active_subplan_stage"
+    assert after == before
