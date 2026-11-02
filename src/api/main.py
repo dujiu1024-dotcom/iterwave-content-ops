@@ -5725,64 +5725,65 @@ def _register_routes(app: FastAPI) -> None:
     def update_content(content_id: str, req: UpdateContentRequest):
         """人工编辑未发布文案 → 写 user_override 留痕；已发布内容保持不可变。"""
         conn = _g()["conn"]
-        row = _content_row(conn, content_id)
-        _ensure_content_round_idle(row, "编辑内容")
-        published = conn.execute(
-            "SELECT status FROM drafts WHERE content_id = ? "
-            "AND (user_confirmed_at IS NOT NULL "
-            "     OR status IN ('user_published', 'data_fetching', 'published')) "
-            "ORDER BY rowid DESC LIMIT 1",
-            (content_id,),
-        ).fetchone()
-        if published:
-            raise HTTPException(
-                409,
-                "该内容已确认发布或已进入数据采集，不能原地修改历史记录；请新建一篇修订内容",
+        with conn:
+            row = _content_row(conn, content_id)
+            _ensure_content_round_idle(row, "编辑内容")
+            published = conn.execute(
+                "SELECT status FROM drafts WHERE content_id = ? "
+                "AND (user_confirmed_at IS NOT NULL "
+                "     OR status IN ('user_published', 'data_fetching', 'published')) "
+                "ORDER BY rowid DESC LIMIT 1",
+                (content_id,),
+            ).fetchone()
+            if published:
+                raise HTTPException(
+                    409,
+                    "该内容已确认发布或已进入数据采集，不能原地修改历史记录；请新建一篇修订内容",
+                )
+    
+            title = req.title if req.title is not None else row["title"]
+            body = req.body if req.body is not None else row["body"]
+            tags_json = (
+                json.dumps(req.tags, ensure_ascii=False)
+                if req.tags is not None else row["tags"]
             )
-
-        title = req.title if req.title is not None else row["title"]
-        body = req.body if req.body is not None else row["body"]
-        tags_json = (
-            json.dumps(req.tags, ensure_ascii=False)
-            if req.tags is not None else row["tags"]
-        )
-        changed = (
-            title != row["title"] or body != row["body"] or tags_json != row["tags"]
-        )
-
-        if changed:
-            # G2 结果绑定的是具体文案版本。修改标题/正文/标签后，旧的 PASS 不能继续显示为有效。
-            conn.execute(
-                "UPDATE contents SET title = ?, body = ?, tags = ?, word_count = ?, "
-                "guard_outcome = NULL, guard_reason = NULL WHERE id = ?",
-                (title, body, tags_json, len(body or ""), content_id),
+            changed = (
+                title != row["title"] or body != row["body"] or tags_json != row["tags"]
             )
-        else:
-            conn.execute(
-                "UPDATE contents SET title = ?, body = ?, tags = ?, word_count = ? WHERE id = ?",
-                (title, body, tags_json, len(body or ""), content_id),
-            )
-        if changed:
-            conn.execute(
-                "INSERT INTO user_override (round_id, override_field, original_value, "
-                "override_value, reason, overridden_by, overridden_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    row["round_id"], "content",
-                    json.dumps({"title": row["title"], "body_len": len(row["body"] or "")},
-                               ensure_ascii=False)[:500],
-                    json.dumps({"title": title, "body_len": len(body or "")},
-                               ensure_ascii=False)[:500],
-                    req.reason or "UI 编辑", "web-ui",
-                    _now().strftime("%Y-%m-%d %H:%M:%S"),
-                ),
-            )
-        conn.commit()
-        return {
-            "id": content_id, "changed": changed, "title": title, "body": body,
-            "tags": json.loads(tags_json) if tags_json else [],
-        }
-
+    
+            if changed:
+                # G2 结果绑定的是具体文案版本。修改标题/正文/标签后，旧的 PASS 不能继续显示为有效。
+                conn.execute(
+                    "UPDATE contents SET title = ?, body = ?, tags = ?, word_count = ?, "
+                    "guard_outcome = NULL, guard_reason = NULL WHERE id = ?",
+                    (title, body, tags_json, len(body or ""), content_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE contents SET title = ?, body = ?, tags = ?, word_count = ? WHERE id = ?",
+                    (title, body, tags_json, len(body or ""), content_id),
+                )
+            if changed:
+                conn.execute(
+                    "INSERT INTO user_override (round_id, override_field, original_value, "
+                    "override_value, reason, overridden_by, overridden_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        row["round_id"], "content",
+                        json.dumps({"title": row["title"], "body_len": len(row["body"] or "")},
+                                   ensure_ascii=False)[:500],
+                        json.dumps({"title": title, "body_len": len(body or "")},
+                                   ensure_ascii=False)[:500],
+                        req.reason or "UI 编辑", "web-ui",
+                        _now().strftime("%Y-%m-%d %H:%M:%S"),
+                    ),
+                )
+            conn.commit()
+            return {
+                "id": content_id, "changed": changed, "title": title, "body": body,
+                "tags": json.loads(tags_json) if tags_json else [],
+            }
+    
     @app.post("/api/contents/{content_id}/cards")
     def regenerate_cards(content_id: str):
         """按当前标题/正文重新出图（封面 + 正文分页），补上历史内容的「只有文没有图」。"""
