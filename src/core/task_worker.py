@@ -257,9 +257,9 @@ class GlobalTaskWorker:
         if conn is None or not callable(getattr(conn, "execute", None)):
             return None
         import json
-        from src.core.timezone import business_now
+        from src.core.timezone import storage_now
         try:
-            now = business_now(cfg).isoformat(timespec="seconds")
+            now = storage_now().isoformat(timespec="seconds")
             identity = json.dumps(args, ensure_ascii=False, default=str)[:300]
             with conn:
                 cur = conn.execute(
@@ -276,12 +276,12 @@ class GlobalTaskWorker:
     def _finish_scheduler_task_run(conn, cfg, task_run_id: int | None, status: str, error_msg: str | None) -> None:
         if conn is None or task_run_id is None:
             return
-        from src.core.timezone import business_now
+        from src.core.timezone import storage_now
         try:
             with conn:
                 conn.execute(
                     "UPDATE task_runs SET status=?, finished_at=?, error_msg=? WHERE id=? AND status='running'",
-                    (status, business_now(cfg).isoformat(timespec="seconds"), error_msg, task_run_id),
+                    (status, storage_now().isoformat(timespec="seconds"), error_msg, task_run_id),
                 )
         except Exception:
             logger.exception("结束定时任务审计记录失败 task_run_id=%s", task_run_id)
@@ -351,8 +351,8 @@ class GlobalTaskWorker:
         """原子标记关联计划失败；拒绝覆盖已取消、已完成等终态计划。"""
         if conn is None or not callable(getattr(conn, "execute", None)):
             return
-        from src.core.timezone import business_now
-        now = business_now(cfg).isoformat(timespec="seconds")
+        from src.core.timezone import storage_now
+        now = storage_now().isoformat(timespec="seconds")
         transaction = conn if callable(getattr(conn, "__enter__", None)) else nullcontext()
         with transaction:
             conn.execute("BEGIN IMMEDIATE")
@@ -375,8 +375,8 @@ class GlobalTaskWorker:
         """原子关联轮次草稿并推进计划；迟到结果不得覆盖已终止计划。"""
         if conn is None or not callable(getattr(conn, "execute", None)):
             return
-        from src.core.timezone import business_now
-        now = business_now(cfg).isoformat(timespec="seconds")
+        from src.core.timezone import storage_now
+        now = storage_now().isoformat(timespec="seconds")
         transaction = conn if callable(getattr(conn, "__enter__", None)) else nullcontext()
         with transaction:
             conn.execute("BEGIN IMMEDIATE")

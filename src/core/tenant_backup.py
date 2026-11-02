@@ -13,7 +13,7 @@ import shutil
 import sqlite3
 import tempfile
 import zipfile
-from src.core.timezone import business_now
+from src.core.timezone import business_now, storage_now
 from pathlib import Path, PurePosixPath
 
 MAX_BACKUP_BYTES = 2 * 1024 * 1024 * 1024
@@ -135,7 +135,7 @@ def create_backup(db_path: Path | str, data_dir: Path | str,
         manifest = {
             "version": 1,
             "tenant_id": tenant_id,
-            "created_at": business_now(cfg).isoformat(timespec="seconds"),
+            "created_at": storage_now().isoformat(timespec="seconds"),
             "database_sha256": _sha256(snapshot_db),
             "media_files": media_files,
             "output_files": output_files,

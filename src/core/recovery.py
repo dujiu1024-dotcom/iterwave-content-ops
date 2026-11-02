@@ -18,7 +18,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Optional
 
-from .timezone import business_now
+from .timezone import storage_now
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +60,7 @@ class RecoveryManager:
 
     def _mark_interrupted_running(self) -> int:
         """上次进程被强杀留下的 running 行 → interrupted。"""
-        now = business_now(self.cfg).strftime("%Y-%m-%d %H:%M:%S")
+        now = storage_now().isoformat(timespec="seconds")
         rows = self.conn.execute(
             "SELECT id FROM task_runs WHERE status = 'running'"
         ).fetchall()
@@ -112,7 +112,7 @@ class RecoveryManager:
                         self.conn.execute("RELEASE SAVEPOINT requeue_missing_data_fetch")
                         continue
                 if self.scheduler is not None:
-                    run_at = business_now(self.cfg) + timedelta(
+                    run_at = storage_now() + timedelta(
                         minutes=self.cfg.timeouts.recovery_retry_delay_minutes
                     )
                     self.scheduler.schedule_data_fetch(draft_id, run_at)
@@ -122,7 +122,7 @@ class RecoveryManager:
                     "next_run_at) VALUES ('data_fetch', ?, ?, 'pending', 1, ?)",
                     (
                         draft_id, row["platform"],
-                        (business_now(self.cfg) + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S"),
+                        (storage_now() + timedelta(minutes=1)).isoformat(timespec="seconds"),
                     ),
                 )
                 self.conn.execute("RELEASE SAVEPOINT requeue_missing_data_fetch")

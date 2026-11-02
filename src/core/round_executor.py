@@ -32,7 +32,7 @@ from typing import Optional
 
 from .config import PROJECT_ROOT
 
-from .timezone import business_now
+from .timezone import business_now, storage_now
 from .task_context import bind_task_context
 from .kb_reader import KbReader  # noqa: F401 — 兼容旧引用
 from .topic_pool import load_pool
@@ -247,7 +247,7 @@ class RoundExecutor:
             "template_id": template_data["id"] if template_data else None,
             "template_title": template_data["title"] if template_data else None,
             "round_number": round_row["round_number"],
-            "started_at": business_now(self.cfg).isoformat(),
+            "started_at": storage_now().isoformat(),
             "platforms": [p.value for p in platforms],
             "topic_count_requested": topic_count,
             "plan_source": self._plan_source,
@@ -313,7 +313,7 @@ class RoundExecutor:
                 self.sm_round.transition(round_id, "failed", "选题库无可用选题")
                 report["final_status"] = "failed"
                 self._finish_task_run(task_run_id, "failed", "选题库无可用选题")
-                report["finished_at"] = business_now(self.cfg).isoformat()
+                report["finished_at"] = storage_now().isoformat()
                 report["step_status"] = step_status_from_report(report, self._orch)
                 try:
                     self.conn.execute(
@@ -394,7 +394,7 @@ class RoundExecutor:
             self._finish_task_run(task_run_id, "success")
         task_context.__exit__(None, None, None)
 
-        report["finished_at"] = business_now(self.cfg).isoformat()
+        report["finished_at"] = storage_now().isoformat()
         report["step_status"] = step_status_from_report(report, self._orch)
         try:
             self.conn.execute(
@@ -532,7 +532,7 @@ class RoundExecutor:
         report: dict = {
             "round_id": round_id,
             "round_number": round_row["round_number"],
-            "started_at": business_now(self.cfg).isoformat(),
+            "started_at": storage_now().isoformat(),
             "steps": [],
             "contents_created": 0,
             "drafts_created": len(rows),
@@ -552,7 +552,7 @@ class RoundExecutor:
             "WHERE c.round_id = ? AND d.status = 'draft_pending'",
             (round_id,),
         ).fetchone()[0])
-        report["finished_at"] = business_now(self.cfg).isoformat()
+        report["finished_at"] = storage_now().isoformat()
 
         # 保留原有生产报告，并把恢复操作作为历史事件追加；移除当前态的 dry_run 标记，
         # 避免工作流仍被展示为“存草稿已跳过”。
@@ -602,7 +602,7 @@ class RoundExecutor:
             cur = self.conn.execute(
                 "INSERT INTO task_runs (task_type, biz_id, status, attempt, started_at) "
                 "VALUES ('round_pipeline', ?, 'running', 1, ?)",
-                (str(round_id), business_now(self.cfg).strftime("%Y-%m-%d %H:%M:%S")),
+                (str(round_id), storage_now().isoformat(timespec="seconds")),
             )
             self.conn.commit()
             return cur.lastrowid
@@ -619,7 +619,7 @@ class RoundExecutor:
             self.conn.execute(
                 "UPDATE task_runs SET status = ?, finished_at = ?, error_msg = ? WHERE id = ?",
                 (
-                    status, business_now(self.cfg).strftime("%Y-%m-%d %H:%M:%S"),
+                    status, storage_now().isoformat(timespec="seconds"),
                     error[:500] if error else None, task_run_id,
                 ),
             )
@@ -1473,12 +1473,12 @@ class RoundExecutor:
                         "saved_platform_title": payload.title,
                     },
                 )
-                from src.core.timezone import business_now
+                from src.core.timezone import business_now, storage_now
                 self.conn.execute(
                     "UPDATE draft_save_verifications SET status='verified_saved', verified_at=?, "
                     "platform_draft_id=?, error_msg=NULL WHERE draft_id=? AND status='verified_missing'",
                     (
-                        business_now(self.cfg).isoformat(timespec="seconds"),
+                        storage_now().isoformat(timespec="seconds"),
                         result.platform_draft_id, row["draft_id"],
                     ),
                 )
@@ -1494,7 +1494,7 @@ class RoundExecutor:
             elif result.needs_human_verify:
                 # 不确定保存结果单独记账，drafts.status 保持 draft_pending，
                 # 但待存查询会排除此记录，避免自动重试造成平台重复草稿。
-                from src.core.timezone import business_now
+                from src.core.timezone import storage_now
                 self.conn.execute(
                     "INSERT INTO draft_save_verifications "
                     "(draft_id, status, attempted_at, platform_draft_id, error_msg) "
@@ -1504,7 +1504,7 @@ class RoundExecutor:
                     "verified_at=NULL, platform_draft_id=excluded.platform_draft_id, "
                     "error_msg=excluded.error_msg, note=NULL",
                     (
-                        row["draft_id"], business_now(self.cfg).isoformat(timespec="seconds"),
+                        row["draft_id"], storage_now().isoformat(timespec="seconds"),
                         result.platform_draft_id, result.error_msg or "needs_human_verify",
                     ),
                 )
