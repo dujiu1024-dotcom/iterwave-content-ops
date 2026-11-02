@@ -1566,18 +1566,6 @@ export interface ActivationSampleRun {
   };
   contents: ActivationSample[];
 }
-export interface ActivationMetrics {
-  cohort_size: number; ttv_seconds: number | null; ttv_sample_count?: number;
-  ttv_p50_seconds?: number | null; ttv_p90_seconds?: number | null; ttv_percentile_scope?: string;
-  seven_day_activation_rate: number | null;
-  activation_input_wait_seconds?: number | null; model_queue_wait_seconds?: number | null;
-  generation_processing_seconds?: number | null;
-  first_publish_rate: number | null; data_return_rate: number | null;
-  quick_experience_completion_rate?: number | null; sample_attempted_count?: number; sample_ready_count?: number;
-  weekly_adopted_published: number; weekly_effective_review_count?: number; published_content_count?: number;
-  platform_model_breakdown?: { platform: Platform; model_mode: string; run_count: number; ready_count: number }[];
-  data_returned_count?: number; observation_window_complete: boolean; limitations?: string[];
-}
 export interface WeeklyReport {
   period: { start: string; end: string };
   best_content: { platform: Platform; metric: string; value: number; content_id: string;
@@ -2308,5 +2296,4 @@ export const api = {
     fetchJson<{ suggestion_key: string; decision: string; outcome: string; outcome_note?: string | null }>(
       "/api/reports/weekly/actions", { method: "POST", body: JSON.stringify(data) },
     ),
-  activationMetrics: () => fetchJson<ActivationMetrics>("/api/activation/metrics"),
 };
