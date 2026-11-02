@@ -209,7 +209,7 @@ DRAFT_STATUSES = (
 
 DRAFT_TRANSITIONS: dict[str, set[str]] = {
     "draft_pending":    {"draft_saved", "pending_verify", "user_published", "failed", "cancelled"},
-    "pending_verify":   {"draft_saved", "draft_pending", "failed", "cancelled"},
+    "pending_verify":   {"draft_saved", "draft_pending"},
     "draft_saved":      {"user_published", "failed", "cancelled", "expired"},
     "user_published":   {"data_fetching", "failed"},
     "data_fetching":    {"published", "failed"},
