@@ -208,6 +208,22 @@ CREATE INDEX IF NOT EXISTS idx_content_plan_stages_status
 -- Cross-version stage consistency is enforced by PlanVersionStore.bind_round()
 -- and independently audited by PlanVersionStore.validate_integrity().
 
+-- Durable cross-process idempotency for scheduler/automatic round opening.
+CREATE TABLE IF NOT EXISTS round_open_idempotency (
+    idempotency_key TEXT PRIMARY KEY,
+    request_hash TEXT NOT NULL,
+    master_plan_version_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'reserved'
+        CHECK(status IN ('reserved','created','failed')),
+    round_id INTEGER UNIQUE,
+    lease_until TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    error_message TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_round_open_idempotency_status
+    ON round_open_idempotency(status, lease_until);
+
 CREATE VIEW IF NOT EXISTS content_plan_stage_publish_stats AS
 SELECT
     s.id AS stage_id,
