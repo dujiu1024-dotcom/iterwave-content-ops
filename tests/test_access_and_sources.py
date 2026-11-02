@@ -190,13 +190,16 @@ def test_session_cookie_marks_https_as_secure():
 
 
 def test_login_rate_limit():
+    auth.clear_failures("1.2.3.4")
+    auth.clear_failures("5.6.7.8")
     auth.set_password("Secret123!")
     for _ in range(auth.LOGIN_MAX_FAILURES):
         with pytest.raises(ValueError):
             auth.login("wrong", "1.2.3.4")
-    # 正确口令优先于失败计数；同一出口 IP 的错误尝试不能锁住合法用户。
-    assert auth.login("Secret123!", "1.2.3.4")
-    assert auth.is_rate_limited("1.2.3.4") is False
+    # 达到阈值后，即使口令正确也先拒绝，避免攻击者持续触发 PBKDF2。
+    with pytest.raises(PermissionError):
+        auth.login("Secret123!", "1.2.3.4")
+    assert auth.is_rate_limited("1.2.3.4") is True
     # 其它 IP 不受影响
     assert auth.login("Secret123!", "5.6.7.8")
 
