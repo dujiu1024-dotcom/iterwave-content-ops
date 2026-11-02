@@ -71,6 +71,19 @@ export default function VisualBrandPane() {
           <label className="field-label">辅助色（#RRGGBB）
             <input className="field" value={profile.secondary_color ?? ""} onChange={(e) => update("secondary_color", e.target.value)} placeholder="#D9A441" />
           </label>
+          <label className="field-label">背景色（#RRGGBB）
+            <input className="field" value={profile.background_color ?? ""} onChange={(e) => update("background_color", e.target.value)} placeholder="#F3F5F7" />
+          </label>
+          <label className="field-label">正文色（#RRGGBB）
+            <input className="field" value={profile.text_color ?? ""} onChange={(e) => update("text_color", e.target.value)} placeholder="#17212B" />
+          </label>
+          <label className="field-label">信息组件样式
+            <select className="field" value={profile.component_style ?? "card"} onChange={(e) => update("component_style", e.target.value as VisualBrandProfile["component_style"])}>
+              <option value="card">卡片式</option>
+              <option value="minimal">极简式</option>
+              <option value="editorial">编辑式</option>
+            </select>
+          </label>
           <label className="field-label">字体名称
             <input className="field" maxLength={120} value={profile.font_family ?? ""} onChange={(e) => update("font_family", e.target.value)} placeholder="留空使用系统默认字体" />
           </label>
