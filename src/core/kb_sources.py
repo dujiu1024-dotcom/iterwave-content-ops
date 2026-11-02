@@ -26,6 +26,7 @@ import threading
 import xml.etree.ElementTree as ET
 import zipfile
 from datetime import datetime
+from .timezone import business_now
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
@@ -135,7 +136,7 @@ def _default_source(cfg) -> dict:
         "field_mapping": dict(cfg.topic_kb.field_mapping or {}),
         "table_name": cfg.topic_kb.table_name,
         "headers": {},
-        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "created_at": business_now(cfg).isoformat(timespec="seconds"),
         "last_sync_at": None,
         "last_error": None,
         "rows": None,
@@ -578,7 +579,7 @@ def sync_remote(cfg, source: dict) -> dict:
     else:
         raise ValueError("远程来源不支持写入缓存（仅 CSV / JSON / JSONL / RSS）")
     return {
-        "last_sync_at": datetime.now().isoformat(timespec="seconds"),
+        "last_sync_at": business_now(cfg).isoformat(timespec="seconds"),
         "last_error": None,
         "rows": len(rows),
         "columns": columns,
@@ -622,7 +623,7 @@ def sync_all_remote(cfg) -> dict:
         except Exception as exc:  # noqa: BLE001 — 单源失败不影响其它来源
             safe_error = _safe_source_error(exc, remote=True)
             source["last_error"] = safe_error
-            source["last_sync_at"] = datetime.now().isoformat(timespec="seconds")
+            source["last_sync_at"] = business_now(cfg).isoformat(timespec="seconds")
             results[source["id"]] = "failed"
             logger.warning("选题库远程同步失败 %s: %s", redact(str(source.get("name") or "")), safe_error)
     save_registry(cfg, sources)
@@ -829,7 +830,7 @@ def add_upload(cfg, *, filename: str, content_b64: str, name: str = "",
     fmt = _EXT_FORMAT[ext]
     if fmt == "xlsx" and not zipfile.is_zipfile(io.BytesIO(data)):
         raise ValueError("文件不是有效的 .xlsx")
-    dest = upload_dir(cfg) / f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{safe}"
+    dest = upload_dir(cfg) / f"{business_now(cfg).strftime('%Y%m%d%H%M%S')}-{safe}"
     dest.write_bytes(data)
     try:
         dest.chmod(0o600)
