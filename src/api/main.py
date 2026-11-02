@@ -37,6 +37,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import inspect
 import io
 import json
 import os
@@ -54,7 +55,6 @@ from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.routing import APIRoute
-import inspect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -66,6 +66,12 @@ from starlette.responses import Response
 from src.core.config import load_config, get_config, DEFAULT_ENV_PATH
 from src.core.timezone import business_now
 from src.core.config import PROJECT_ROOT
+from src.api.response_utils import (
+    api_datetime as _api_datetime,
+    friendly_validation_messages as _friendly_validation_messages,
+)
+# Keep NotifyRuleRequest in this module namespace: FastAPI resolves the wrapped route signature here.
+from src.api.notify_rules import NotifyRuleRequest, build_notify_rules_router  # noqa: F401
 from src.core.tenant_registry import TenantRegistry, TenantError
 from src.core.task_queue import GlobalTaskQueue, TaskQueueError
 from src.core.tenant_switch_gate import TenantSwitchGate, TenantSwitchInProgress
@@ -101,6 +107,10 @@ from src.adapters import get_adapters
 logger = logging.getLogger(__name__)
 
 
+# =====================================================================
+# 全局单例（启动时初始化一次）
+# =====================================================================
+
 class TransactionalAPIRoute(APIRoute):
     """为同步写 API 提供请求级事务边界，异常时自动回滚并释放连接锁。
 
@@ -131,9 +141,6 @@ class TransactionalAPIRoute(APIRoute):
             endpoint = transactional_endpoint
         super().__init__(path, endpoint, **kwargs)
 
-# =====================================================================
-# 全局单例（启动时初始化一次）
-# =====================================================================
 
 _g_ctx: dict = {}
 _task_queue: GlobalTaskQueue | None = None
@@ -573,57 +580,6 @@ async def _switch_tenant_runtime(tenant_id: str) -> dict:
         raise HTTPException(
             500, f"切换失败，已恢复账号组「{old_tenant_id}」：{type(exc).__name__}",
         ) from exc
-
-
-_VALIDATION_FIELD_LABELS = {
-    "platform": "平台标识", "usage_role": "图片用途", "limit": "数量",
-    "tenant_id": "账号组标识", "name": "名称", "path": "文件位置",
-    "email": "邮箱", "url": "链接", "content_id": "内容标识",
-}
-
-
-def _api_datetime(value, *, naive_timezone=timezone.utc):
-    """API 时间统一携带时区；默认历史数据库时间按 UTC 解释，租户目录时间显式传业务时区。"""
-    if not value or not isinstance(value, str):
-        return value
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return value
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=naive_timezone)
-    return parsed.isoformat()
-
-
-def _friendly_validation_messages(errors: list[dict]) -> list[str]:
-    """将 Pydantic 默认英文校验信息转换为稳定的中文提示，不回显校验器原文。"""
-    messages: list[str] = []
-    for error in errors:
-        loc = error.get("loc") or ()
-        field = str(loc[-1]) if loc else ""
-        label = _VALIDATION_FIELD_LABELS.get(field, "请求参数")
-        kind = str(error.get("type") or "")
-        ctx = error.get("ctx") or {}
-        if kind == "missing":
-            reason = "不能为空"
-        elif kind in ("string_pattern_mismatch", "string_type"):
-            reason = "格式不符合要求"
-        elif kind in ("int_parsing", "int_type", "float_parsing", "float_type"):
-            reason = "类型或格式不正确"
-        elif kind in ("greater_than_equal", "greater_than"):
-            bound = ctx.get("ge", ctx.get("gt", "允许范围"))
-            reason = f"不能小于 {bound}" if "ge" in ctx else f"必须大于 {bound}"
-        elif kind in ("less_than_equal", "less_than"):
-            bound = ctx.get("le", ctx.get("lt", "允许范围"))
-            reason = f"不能大于 {bound}" if "le" in ctx else f"必须小于 {bound}"
-        elif kind == "string_too_short":
-            reason = "长度不足"
-        elif kind == "string_too_long":
-            reason = "长度超出限制"
-        else:
-            reason = "内容不符合要求"
-        messages.append(f"{label}：{reason}")
-    return messages or ["请求参数不符合要求"]
 
 
 def _persist_activation_sample_results(
@@ -1329,38 +1285,6 @@ class CreateRoundRequest(BaseModel):
     # 内容计划 ID/版本仅参与请求去重键，不改变生产配置来源。
     content_plan_id: Optional[str] = None
     content_plan_version: Optional[int] = None
-
-class NotifyRuleRequest(BaseModel):
-    scenario: str
-    channel: str
-    level: str
-    enabled: bool = True
-    condition: Optional[str] = None
-    notes: Optional[str] = None
-    platforms: Optional[list[str]] = None
-
-    @field_validator("scenario")
-    @classmethod
-    def _scenario_ok(cls, v: str) -> str:
-        text = v.strip()
-        if not text or len(text) > 64:
-            raise ValueError("scenario 必须是 1-64 字的场景标识")
-        return text
-
-    @field_validator("channel")
-    @classmethod
-    def _channel_enum(cls, v: str) -> str:
-        if v not in ("macos", "wecom", "feishu", "console"):
-            raise ValueError("channel 只能是 macos / wecom / feishu / console")
-        return v
-
-    @field_validator("level")
-    @classmethod
-    def _level_enum(cls, v: str) -> str:
-        if v not in ("info", "warning", "error", "critical"):
-            raise ValueError("level 只能是 info / warning / error / critical")
-        return v
-
 
 class PlatformStyleUpdate(BaseModel):
     """平台文案风格（platform_styles 表）：只提交改动字段。"""
@@ -5977,7 +5901,8 @@ def _register_routes(app: FastAPI) -> None:
                 "SELECT dimension FROM topics WHERE id = ?", (row["topic_id"],)
             ).fetchone()
             dimension = (topic["dimension"] if topic else "") or ""
-        except Exception:  # noqa: BLE001 — 维度只是装饰，取不到不影响出图
+        except sqlite3.Error:  # 维度只是装饰；仅数据库兼容/读取故障允许退回空值
+            logger.warning("重出图读取选题维度失败 content_id=%s", content_id, exc_info=True)
             dimension = ""
 
         from ..core.content_pipeline import (
@@ -5997,7 +5922,9 @@ def _register_routes(app: FastAPI) -> None:
                     "model": (mg_row["model"] or "").strip() or "gpt-image-1",
                     "size": (mg_row["size"] or "").strip() or "1024x1536",
                 }
-        except Exception:  # noqa: BLE001 — 旧库无此表时退回纯模板
+        except sqlite3.Error:  # 旧库缺少可选配图设置表时退回纯模板
+            logger.warning("重出图读取 AI 配图设置失败，退回纯模板 content_id=%s",
+                           content_id, exc_info=True)
             settings = None
         # 出图要调外部服务（数十秒），先结束读事务释放 SQLite 锁，避免长时间持锁把其它写入卡死
         conn.commit()
@@ -8667,72 +8594,9 @@ def _register_routes(app: FastAPI) -> None:
     # Operations 补齐（对比报告 3.7 🔴 后端真缺失）
     # ============================================================
 
-    # --- 通知规则配置（目前规则硬编码在 notify 模块，补可编辑 CRUD）---
-    @app.get("/api/notify_rules")
-    def list_notify_rules():
-        conn = _g()["conn"]
-        try:
-            rows = conn.execute(
-                "SELECT * FROM notify_rules ORDER BY id ASC"
-            ).fetchall()
-        except sqlite3.OperationalError:
-            # 表不存在 — 自动建表（首次调用时 lazy create）
-            conn.executescript(_NOTIFY_RULES_SCHEMA)
-            conn.commit()
-            rows = []
-        return [dict(r) for r in rows]
-
-    @app.post("/api/notify_rules")
-    def create_notify_rule(req: NotifyRuleRequest):
-        conn = _g()["conn"]
-        try:
-            conn.execute("SELECT 1 FROM notify_rules LIMIT 1")
-        except sqlite3.OperationalError:
-            conn.executescript(_NOTIFY_RULES_SCHEMA); conn.commit()
-        now = _now().isoformat(timespec="seconds")  # R5：本地时区
-        # 同场景同通道只保留一条（唯一索引兜底；老库没有索引时这里先做 upsert）
-        existing = conn.execute(
-            "SELECT id FROM notify_rules WHERE scenario=? AND channel=?",
-            (req.scenario, req.channel),
-        ).fetchone()
-        if existing:
-            conn.execute(
-                """UPDATE notify_rules SET level=?, enabled=?, condition=?, notes=?,
-                          updated_at=? WHERE id=?""",
-                (req.level, 1 if req.enabled else 0, req.condition, req.notes,
-                 now, existing[0]),
-            )
-            conn.commit()
-            return {"id": existing[0], "message": "同场景同通道规则已存在，已更新"}
-        cur = conn.execute(
-            """INSERT INTO notify_rules (scenario, channel, level, enabled, condition, notes, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (req.scenario, req.channel, req.level, 1 if req.enabled else 0,
-             req.condition, req.notes, now),
-        )
-        conn.commit()
-        return {"id": cur.lastrowid, "message": "创建成功"}
-
-    @app.patch("/api/notify_rules/{rule_id}")
-    def update_notify_rule(rule_id: int, req: NotifyRuleRequest):
-        conn = _g()["conn"]
-        conn.execute(
-            """UPDATE notify_rules SET scenario=?, channel=?, level=?, enabled=?,
-                      condition=?, notes=?, updated_at=?
-               WHERE id=?""",
-            (req.scenario, req.channel, req.level, 1 if req.enabled else 0,
-             req.condition, req.notes,
-             _now().isoformat(timespec="seconds"), rule_id),
-        )
-        conn.commit()
-        return {"id": rule_id, "message": "更新成功"}
-
-    @app.delete("/api/notify_rules/{rule_id}")
-    def delete_notify_rule(rule_id: int):
-        conn = _g()["conn"]
-        conn.execute("DELETE FROM notify_rules WHERE id=?", (rule_id,))
-        conn.commit()
-        return {"message": "删除成功"}
+    app.include_router(build_notify_rules_router(
+        _g, _now, route_class=TransactionalAPIRoute,
+    ))
 
     # --- 平台文案风格（platform_styles 表，migrations/016）---
     @app.get("/api/platform_styles")
@@ -9028,24 +8892,6 @@ def _register_routes(app: FastAPI) -> None:
 # ============================================================
 # notify_rules 表 schema（lazy create，首次调用 get/post 时自动建立）
 # ============================================================
-_NOTIFY_RULES_SCHEMA = """
-CREATE TABLE IF NOT EXISTS notify_rules (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    scenario   TEXT NOT NULL,            -- 触发场景（circuit_broken / round_completed / ...）
-    channel    TEXT NOT NULL CHECK (channel IN ('macos', 'wecom', 'feishu', 'console')),
-    level      TEXT NOT NULL DEFAULT 'warning'
-               CHECK (level IN ('info', 'warning', 'error', 'critical')),
-    enabled    INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
-    condition  TEXT,                     -- 条件表达式（SQL fragment / JSON filter）
-    notes      TEXT,
-    created_at DATETIME,
-    updated_at DATETIME
-);
-CREATE UNIQUE INDEX IF NOT EXISTS ux_notify_rules_scenario_channel
-    ON notify_rules (scenario, channel);
-"""
-
-
 def _find_round_for_draft(conn, draft_id: str) -> Optional[int]:
     row = conn.execute(
         "SELECT c.round_id FROM drafts d JOIN contents c ON d.content_id = c.id WHERE d.id = ?",

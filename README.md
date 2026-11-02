@@ -86,7 +86,15 @@ uvicorn src.api.main:app --reload
 cd web
 npm install
 npm run dev
+
+# 前端 API 错误提示单元测试（Node.js 内置 test runner，无额外测试依赖）
+npm test
+
+# 生产构建（TypeScript 类型检查 + Vite）
+npm run build
 ```
+
+前端 API 客户端的错误信息净化逻辑位于 `web/src/api-error.js`，通过 `web/tests/api-error.test.mjs` 覆盖安全业务提示透传、内部诊断信息隐藏和空响应兜底。
 
 ## 项目结构
 
@@ -160,7 +168,7 @@ IterWave 的部分平台适配器代码基于 [Easel](https://github.com/kaichen
 
 ### API 层
 
-`src/api/main.py` — FastAPI 路由入口，覆盖状态机、选题、评分、运营、熔断、配置、通知、账号组与任务队列等端点；同步写请求提供请求级事务边界，异步写路径单独定义事务范围。
+`src/api/main.py` — FastAPI 应用生命周期、事务路由和尚未迁移的业务端点入口。`src/api/notify_rules.py` 独立承载通知规则 CRUD、请求模型与可选表的惰性建表；`src/api/response_utils.py` 承载时间序列化与参数校验错误映射。同步事务路由暂留主入口，以保留 FastAPI 类型注解解析所需的全局命名空间；其余路由仍需按领域继续拆分，异步写路径单独定义事务范围。
 
 ### React 前端（web/）
 
