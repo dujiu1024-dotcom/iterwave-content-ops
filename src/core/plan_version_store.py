@@ -407,8 +407,9 @@ class PlanVersionStore:
                        JOIN master_plan_versions m ON m.id=v.master_plan_version_id
                        WHERE v.id=? AND v.sub_plan_id=? AND v.master_plan_version_id=?
                          AND v.status='effective' AND p.status='active'
-                         AND p.current_version_id=v.id AND m.status='effective'""",
-                    (sub_plan_version_id, sub_plan_id, master_plan_version_id),
+                         AND p.current_version_id=v.id
+                         AND p.master_plan_version_id=? AND m.status='effective'""",
+                    (sub_plan_version_id, sub_plan_id, master_plan_version_id, master_plan_version_id),
                 ).fetchone()
                 if version is None:
                     raise PlanVersionError("子计划版本必须是所属生效主计划下的有效版本")
@@ -464,8 +465,9 @@ class PlanVersionStore:
                JOIN master_plan_versions m ON m.id=v.master_plan_version_id
                WHERE v.id=? AND v.sub_plan_id=? AND v.master_plan_version_id=?
                  AND v.status='effective' AND p.status='active'
-                 AND p.current_version_id=v.id AND m.status='effective'""",
-            (sub_plan_version_id, sub_plan_id, master_plan_version_id),
+                 AND p.current_version_id=v.id
+                 AND p.master_plan_version_id=? AND m.status='effective'""",
+            (sub_plan_version_id, sub_plan_id, master_plan_version_id, master_plan_version_id),
         ).fetchone()
         stage = self.conn.execute(
             """SELECT 1 FROM sub_plan_stages
@@ -551,8 +553,10 @@ class PlanVersionStore:
                    JOIN sub_plans p ON p.id=v.sub_plan_id
                    JOIN master_plan_versions m ON m.id=v.master_plan_version_id
                    WHERE v.id=? AND v.sub_plan_id=? AND v.status='effective'
-                     AND p.current_version_id=v.id""",
-                (lock["sub_plan_version_id"], lock["sub_plan_id"]),
+                     AND p.current_version_id=v.id
+                     AND p.master_plan_version_id=?""",
+                (lock["sub_plan_version_id"], lock["sub_plan_id"],
+                 lock["master_plan_version_id"]),
             ).fetchone()
             stage = self.conn.execute(
                 """SELECT * FROM sub_plan_stages
