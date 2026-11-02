@@ -932,7 +932,7 @@ def test_interrupted_round_reconciliation_retries_after_transient_context_failur
     )
     monkeypatch.setattr(
         GlobalTaskWorker, "_mark_content_plan_failed",
-        staticmethod(lambda *_args: calls.__setitem__("plan", calls["plan"] + 1)),
+        staticmethod(lambda *_args, **_kwargs: calls.__setitem__("plan", calls["plan"] + 1)),
     )
     worker = GlobalTaskWorker(queue, build_context)
 
