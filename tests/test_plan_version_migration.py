@@ -56,6 +56,8 @@ def test_migration_restores_history_and_marks_missing_round_signature_pending():
     conn = _legacy_db()
     db = Database.__new__(Database)
     db._run_migration(conn, Migration(115, MIGRATION, "plan_version_lifecycle"))
+    stage_migration = Path(__file__).resolve().parents[1] / "migrations" / "116_subplan_round_metadata.sql"
+    db._run_migration(conn, Migration(116, stage_migration, "subplan_round_metadata"))
 
     restored = conn.execute(
         "SELECT plan_signature,status,legacy_history_id FROM master_plan_versions"
@@ -109,6 +111,8 @@ def test_stage_publish_stats_count_only_user_confirmed_drafts():
     conn = _legacy_db()
     db = Database.__new__(Database)
     db._run_migration(conn, Migration(115, MIGRATION, "plan_version_lifecycle"))
+    stage_migration = Path(__file__).resolve().parents[1] / "migrations" / "116_subplan_round_metadata.sql"
+    db._run_migration(conn, Migration(116, stage_migration, "subplan_round_metadata"))
     conn.execute(
         "INSERT INTO spiral_rounds(id,round_number,status,plan_signature,created_at) "
         "VALUES(3,3,'created',NULL,'2026-01-03')"
