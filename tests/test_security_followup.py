@@ -270,7 +270,7 @@ def test_auth_failure_rate_limit_state_is_thread_safe_and_bounded(monkeypatch):
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(auth.record_failure, ["198.51.100.1"] * 64))
-    assert len(auth._recent_failures("198.51.100.1")) == 64
+    assert len(auth._recent_failures("198.51.100.1")) == auth.LOGIN_MAX_FAILURES
     assert auth.is_rate_limited("198.51.100.1")
 
     for index in range(20):
