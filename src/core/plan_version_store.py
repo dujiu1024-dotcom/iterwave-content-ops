@@ -213,6 +213,10 @@ class PlanVersionStore:
     ) -> dict[str, Any]:
         if not isinstance(snapshot, dict):
             raise PlanVersionError("子计划快照必须是对象")
+        if snapshot.get("title") is not None:
+            title = str(snapshot["title"]).strip()
+            if not title or len(title) > 160:
+                raise PlanVersionError("子计划标题必须为 1-160 个字符")
         stages = stages or []
         if not isinstance(stages, list):
             raise PlanVersionError("阶段必须是数组")
@@ -258,11 +262,17 @@ class PlanVersionStore:
                 title = str(stage.get("title") or "").strip()
                 if not title or len(title) > 160:
                     raise PlanVersionError("阶段标题必须为 1-160 个字符")
+                raw_order = stage.get("stage_order", index)
+                raw_target = stage.get("target_count", 1)
+                if raw_order is None or raw_target is None or isinstance(raw_order, bool) or isinstance(raw_target, bool):
+                    raise PlanVersionError("阶段顺序和目标篇数必须是整数")
                 try:
-                    stage_order = int(stage.get("stage_order", index))
-                    target_count = int(stage.get("target_count", 1))
-                except (TypeError, ValueError) as exc:
+                    stage_order = int(raw_order)
+                    target_count = int(raw_target)
+                except (TypeError, ValueError, OverflowError) as exc:
                     raise PlanVersionError("阶段顺序和目标篇数必须是整数") from exc
+                if str(raw_order).strip() != str(stage_order) or str(raw_target).strip() != str(target_count):
+                    raise PlanVersionError("阶段顺序和目标篇数必须是整数")
                 if stage_order < 1:
                     raise PlanVersionError("阶段顺序必须大于等于 1")
                 if not 1 <= target_count <= 10000:
@@ -326,10 +336,13 @@ class PlanVersionStore:
                    WHERE id=? AND status='draft'""",
                 (now, reviewer, now, version_id),
             )
+            approved_snapshot = json.loads(row["snapshot_json"])
+            approved_title = str(approved_snapshot.get("title") or identity["title"]).strip()
             self.conn.execute(
                 """UPDATE sub_plans SET current_version_id=?,master_plan_version_id=?,
-                       status='active',updated_at=? WHERE id=?""",
-                (version_id, row["master_plan_version_id"], now, row["sub_plan_id"]),
+                       title=?,status='active',updated_at=? WHERE id=?""",
+                (version_id, row["master_plan_version_id"], approved_title,
+                 now, row["sub_plan_id"]),
             )
             self.conn.commit()
             return dict(self.conn.execute(
