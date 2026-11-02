@@ -399,9 +399,9 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
             "{title,direction,target_count,start_date,end_date,completion_condition,notes}]}]}。"
             "每个子计划至少 1 个阶段；阶段顺序按数组顺序；target_count 是用户最终确认发布篇数，"
             "不是生成草稿数。不得输出审核状态或要求自动生效。"
-            "\\n母计划："
+            "\n母计划："
             + json.dumps(master_snapshot, ensure_ascii=False)
-            + "\\n目标平台：" + json.dumps(platforms, ensure_ascii=False)
+            + "\n目标平台：" + json.dumps(platforms, ensure_ascii=False)
         )
 
         # Use the same independently configured primary/fallback providers as content
