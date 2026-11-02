@@ -350,12 +350,12 @@ def _build_tenant_runtime_context(
         )
         from src.core.config_store import overrides_path
         try:
-            legacy_result = import_legacy_overrides(conn, overrides_path(cfg))
+            legacy_result = import_legacy_overrides(conn, overrides_path(cfg), cfg=cfg)
             if legacy_result["imported"] or legacy_result["rejected"]:
                 logger.info("账号组旧配置回填 tenant=%s imported=%d rejected=%d",
                             tenant_id, legacy_result["imported"], legacy_result["rejected"])
             # 与启动迁移保持一致：热切换进入任一账号组时清除历史危险路径配置。
-            purge_disallowed_settings(conn, {"topic_kb.path"})
+            purge_disallowed_settings(conn, {"topic_kb.path"}, cfg=cfg)
             persisted_settings = read_settings(conn)
         except Exception as exc:
             logger.exception("账号组 SQLite 配置回填失败，回退旧 JSON tenant=%s error=%s",
@@ -7342,7 +7342,7 @@ def _register_routes(app: FastAPI) -> None:
             step_key, step_index = validate_onboarding_progress(req)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
-        return set_onboarding_progress(_g()["conn"], step_key, step_index, by="web-ui")
+        return set_onboarding_progress(_g()["conn"], step_key, step_index, by="web-ui", cfg=_g()["cfg"])
 
     # --- 通知通道自检（不落 notifications 表）---
     @app.post("/api/notify/test")
