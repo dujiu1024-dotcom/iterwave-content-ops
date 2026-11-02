@@ -354,6 +354,7 @@ class Database:
                 "media_generation_settings", "media_generation_jobs",
                 "tenant_settings", "tenant_setting_versions", "tenant_setting_migrations",
                 "ops_targets", "industry_presets",
+                "visual_design_versions", "visual_jobs", "visual_brand_profiles",
             }
             result["missing_tables"] = sorted(expected_tables - existing)
             result["existing_tables"] = sorted(existing & expected_tables)

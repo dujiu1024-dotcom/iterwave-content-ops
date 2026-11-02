@@ -1041,6 +1041,27 @@ def plan_body_pages(body: str, per_page: int = 9, max_pages: int = 9) -> list[li
     return pages
 
 
+def image_generation_settings(conn) -> "tuple[Optional[dict], str]":
+    """AI 配图配置的唯一来源：media_generation_settings（图片素材库设置）。
+
+    返回 (settings, 不可用原因)；settings 含 prefix/model/size。轮次生产、手动重出图、
+    视觉软门优化、单页重做共用此函数，不再读取环境变量开关。
+    """
+    try:
+        row = conn.execute(
+            "SELECT enabled, prompt_prefix, model, size FROM media_generation_settings WHERE id = 1"
+        ).fetchone()
+    except Exception:  # noqa: BLE001 — 旧库无此表
+        return None, "media_generation_settings 未就绪"
+    if not row or not row["enabled"]:
+        return None, "AI 配图未在图片素材库设置中启用"
+    return {
+        "prefix": (row["prompt_prefix"] or "").strip(),
+        "model": (row["model"] or "").strip() or os.getenv("ITERWAVE_IMAGE_MODEL", "gpt-image-1"),
+        "size": (row["size"] or "").strip() or "1024x1536",
+    }, ""
+
+
 def cover_prompt(title: str, dimension: str) -> str:
     """封面底图提示词：深色调、下半部纯色留白给白色标题。"""
     return (
@@ -1093,27 +1114,57 @@ def make_card_set(
     platform: Platform = Platform.XHS,
     footer: str = "",
     max_pages: int = 9,
+    theme: str = "knowledge_infographic",
+    renderer: str = "chromium_v2",
+    background_path: Optional[Path] = None,
+    brand_palette: Optional[dict] = None,
+    font_family: str = "Noto Sans CJK SC",
     cover_image: "Path | None" = None,
     body_images: "list[Path | None] | None" = None,
     pages: "list[list[str]] | None" = None,
 ) -> list[Path]:
-    """生成一组图文卡片：1 张封面 + N 张正文分页（首页图 + 内容图，最多 max_pages 张）。
+    """生成一组图文卡片：1 张封面 + N 张正文分页。
 
-    封面与正文页都可用 AI 底图（body_images 与 pages 一一对应，缺省退回渐变）。
+    生产默认 ``chromium_v2``（HTML/CSS 排版 + 浏览器实测分页 + 版式/OCR 硬门）；
+    ``legacy_v1`` 为 Pillow 降级，仅显式指定时使用。封面与正文页都可用 AI 底图
+    （``cover_image``/``body_images``，来自 media_generation_settings），缺省退回主题底色。
+    chromium_v2 下 ``pages`` 必须来自 :func:`plan_visual_pages`（与 body_images 一一对应）。
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    if pages is None:
-        pages = plan_body_pages(body, per_page=9, max_pages=max_pages)
+    if renderer == "legacy_v1":
+        if pages is None:
+            pages = plan_body_pages(body, per_page=9, max_pages=max_pages)
+        total = len(pages) + 1
+        paths = [make_card(title, subtitle, output_dir, platform, footer, page_text=f"1/{total}",
+                           cover_image=cover_image or background_path)]
+        for idx, page_lines in enumerate(pages, start=2):
+            background = None
+            if body_images and idx - 2 < len(body_images):
+                background = body_images[idx - 2]
+            paths.append(_render_body_page(
+                page_lines, output_dir, platform, footer, f"{idx}/{total}", background=background,
+            ))
+        return paths
+    if renderer != "chromium_v2":
+        raise ValueError(f"不支持的视觉渲染器: {renderer}")
+    from .visual_renderer import render_card_set
+    return render_card_set(
+        title=title, subtitle=subtitle, body=body, output_dir=output_dir,
+        platform=platform, footer=footer, max_pages=max_pages, theme=theme,
+        background_path=cover_image or background_path, brand_palette=brand_palette,
+        font_family=font_family, page_backgrounds=body_images, pages=pages,
+    )
 
-    total = len(pages) + 1
-    paths = [make_card(title, subtitle, output_dir, platform, footer, page_text=f"1/{total}",
-                       cover_image=cover_image)]
-    for idx, page_lines in enumerate(pages, start=2):
-        background = None
-        if body_images and idx - 2 < len(body_images):
-            background = body_images[idx - 2]
-        paths.append(_render_body_page(
-            page_lines, output_dir, platform, footer, f"{idx}/{total}", background=background,
-        ))
-    return paths
+
+def plan_visual_pages(
+    title: str, subtitle: str, body: str, platform: Platform = Platform.XHS,
+    footer: str = "", max_pages: int = 9, theme: str = "knowledge_infographic",
+    brand_palette: Optional[dict] = None, font_family: str = "Noto Sans CJK SC",
+) -> list[list[str]]:
+    """chromium_v2 的正文分页（浏览器实测高度），用于逐页规划 AI 底图；超上限直接报错。"""
+    from .visual_renderer import plan_card_pages
+    return plan_card_pages(
+        title, subtitle, body, platform=platform, footer=footer, max_pages=max_pages,
+        theme=theme, brand_palette=brand_palette, font_family=font_family,
+    )

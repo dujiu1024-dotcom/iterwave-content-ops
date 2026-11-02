@@ -23,6 +23,10 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: python -m pip install --upgrade pip && pip install -e ".[dev]"
+      - name: Install OCR language data
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng fonts-noto-cjk
+      - name: Install Chromium for visual renderer tests
+        run: python -m playwright install --with-deps chromium
       - name: Run tests
         run: python -m pytest -q
       - name: Compile Python sources
@@ -52,6 +56,16 @@ jobs:
       - name: Build production app
         working-directory: web
         run: npm run build
+      - name: Ensure demo mock API is excluded from production bundle
+        working-directory: web
+        run: |
+          if grep -R -n -E "installDemoApi|__iwDemoApi" dist/assets; then
+            echo "Demo mock API leaked into production assets"
+            exit 1
+          fi
       - name: Build isolated offline demo
         working-directory: web
         run: npm run build:demo
+      - name: Verify offline demo artifact
+        working-directory: web
+        run: test -s ../iterwave-prototype.html && grep -q "静态原型演示" ../iterwave-prototype.html
