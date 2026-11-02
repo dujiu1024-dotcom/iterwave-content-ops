@@ -96,8 +96,8 @@ class Normalizer:
         ).fetchall()
 
         values = [r[0] for r in rows if r[0] is not None]
-        if len(values) < 5:
-            return None  # 少于 5 个独立样本不输出 z-score，避免小样本误导
+        if len(values) < 3:
+            return None  # 少于 3 个独立样本不输出 z-score，避免小样本误导
 
         mean = statistics.mean(values)
         # 使用样本标准差（n-1），避免总体标准差在小样本下系统性放大 |z|。 
