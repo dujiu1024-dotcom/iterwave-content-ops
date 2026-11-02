@@ -752,7 +752,7 @@ class DraftSaver:
                     const label = [
                         el.innerText, el.textContent,
                         el.getAttribute('aria-label'), el.getAttribute('title')
-                    ].filter(Boolean).join(' ').replace(/\\s+/g, '');
+                    ].filter(Boolean).join(' ').replace(/\s+/g, '');
                     if (!['暂存离开', '存草稿', '保存草稿', '保存到草稿箱', 'Save draft']
                         .some(token => label.includes(token))) return false;
                     if (['发布', '发送', '立即发布', 'Publish', 'Send']
