@@ -205,31 +205,8 @@ CREATE INDEX IF NOT EXISTS idx_content_plan_stages_version
 CREATE INDEX IF NOT EXISTS idx_content_plan_stages_status
     ON content_plan_stages(status, start_date, end_date);
 
-CREATE TRIGGER IF NOT EXISTS trg_round_subplan_stage_insert
-BEFORE INSERT ON spiral_rounds
-WHEN NEW.content_plan_stage_id IS NOT NULL
-BEGIN
-    SELECT CASE WHEN NEW.content_plan_version_id IS NULL
-        THEN RAISE(ABORT,'content_plan_version_id is required when stage is set') END;
-    SELECT CASE WHEN NOT EXISTS (
-        SELECT 1 FROM content_plan_stages s
-        WHERE s.id=NEW.content_plan_stage_id
-          AND s.content_plan_version_id=NEW.content_plan_version_id
-    ) THEN RAISE(ABORT,'stage does not belong to the selected subplan version') END;
-END;
-
-CREATE TRIGGER IF NOT EXISTS trg_round_subplan_stage_update
-BEFORE UPDATE OF content_plan_version_id, content_plan_stage_id ON spiral_rounds
-WHEN NEW.content_plan_stage_id IS NOT NULL
-BEGIN
-    SELECT CASE WHEN NEW.content_plan_version_id IS NULL
-        THEN RAISE(ABORT,'content_plan_version_id is required when stage is set') END;
-    SELECT CASE WHEN NOT EXISTS (
-        SELECT 1 FROM content_plan_stages s
-        WHERE s.id=NEW.content_plan_stage_id
-          AND s.content_plan_version_id=NEW.content_plan_version_id
-    ) THEN RAISE(ABORT,'stage does not belong to the selected subplan version') END;
-END;
+-- Cross-version stage consistency is enforced by PlanVersionStore.bind_round()
+-- and independently audited by PlanVersionStore.validate_integrity().
 
 CREATE VIEW IF NOT EXISTS content_plan_stage_publish_stats AS
 SELECT
