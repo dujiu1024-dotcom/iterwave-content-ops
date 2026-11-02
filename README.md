@@ -117,8 +117,8 @@ IterWave 的部分平台适配器代码基于 [Easel](https://github.com/kaichen
 
 - API Key、Cookie、Token 只存本地 `.env` / 登录态文件，已 `chmod 600`
 - 日志中的敏感信息脱敏（保留前 4 位 + `***`）
-- Playwright 永不点击"发布"按钮
-- 主动评论、关注等操作极低配额，崩溃场景标记 `pending_verify` 待用户核实
+- Playwright 永不点击"发布"按钮；默认仅存草稿与只读采集
+- 自动评论（含被动回复）、主动评论和关注默认关闭；只有部署者显式设置 `ITERWAVE_ENABLE_AUTOMATED_ENGAGEMENT=1` 才启用，启用前必须确认平台规则与账号授权；不设置时这些动作只记为 skipped
 - 熔断机制：检测到平台异常自动停止所有运营，3 步验证后方可恢复
 
 ## 代码现状（Early Preview）
