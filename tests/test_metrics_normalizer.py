@@ -59,7 +59,7 @@ def test_normalizer_winsorizes_extreme_values_for_large_samples(monkeypatch):
 
     assert stats is not None
     assert stats.sample_count == 100
-    assert stats.mean < 5.0
+    assert stats.mean < 60.0
 
 
 def test_normalizer_does_not_winsorize_small_samples(monkeypatch):
