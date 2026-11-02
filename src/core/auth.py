@@ -21,6 +21,7 @@ import logging
 import os
 import secrets
 import time
+import threading
 from typing import Optional
 
 from .env_store import read_env, write_env
@@ -32,6 +33,49 @@ COOKIE_NAME = "iterwave_session"
 SESSION_TTL_SECONDS = 30 * 24 * 3600
 LOGIN_MAX_FAILURES = 5
 LOGIN_WINDOW_SECONDS = 10 * 60
+
+
+def client_ip(request) -> str:
+    """Resolve the client address without trusting arbitrary forwarded headers.
+
+    Only peers listed in ITERWAVE_TRUSTED_PROXY_IPS may supply X-Forwarded-For.
+    The default trusts loopback proxies (common for same-host Nginx deployments).
+    """
+    peer = request.client.host if request.client else "unknown"
+    try:
+        peer_ip = ipaddress.ip_address(peer)
+    except ValueError:
+        return "unknown"
+
+    configured = os.getenv("ITERWAVE_TRUSTED_PROXY_IPS", "127.0.0.1,::1")
+    trusted = []
+    for value in configured.split(","):
+        value = value.strip()
+        if not value:
+            continue
+        try:
+            trusted.append(ipaddress.ip_network(value, strict=False))
+        except ValueError:
+            logger.warning("忽略无效的可信代理网段配置")
+    if not any(peer_ip in network for network in trusted):
+        return str(peer_ip)
+
+    forwarded = request.headers.get("x-forwarded-for", "")
+    chain = []
+    for value in forwarded.split(","):
+        value = value.strip()
+        try:
+            chain.append(ipaddress.ip_address(value))
+        except ValueError:
+            # 任一代理链条目无效时不信任整个转发头。
+            return str(peer_ip)
+
+    current = peer_ip
+    for candidate in reversed(chain):
+        if not any(current in network for network in trusted):
+            break
+        current = candidate
+    return str(current)
 
 
 def is_trusted_local_setup(request) -> bool:
@@ -67,6 +111,7 @@ REVOCATION_FILE_NAME = ".session_revocations.json"
 _revoked: dict[str, float] = {}
 _revoked_mtime: float = -1.0
 _failures: dict[str, list[float]] = {}
+_failures_lock = threading.RLock()
 
 
 # ----------------------------------------------------------------------
@@ -286,23 +331,27 @@ def audit_actor(request) -> str:
 # ----------------------------------------------------------------------
 
 def _recent_failures(ip: str) -> list[float]:
-    now = time.time()
-    keep = [t for t in _failures.get(ip, []) if now - t < LOGIN_WINDOW_SECONDS]
-    _failures[ip] = keep
-    return keep
+    with _failures_lock:
+        now = time.time()
+        keep = [t for t in _failures.get(ip, []) if now - t < LOGIN_WINDOW_SECONDS]
+        _failures[ip] = keep
+        return keep
 
 
 def is_rate_limited(ip: str) -> bool:
-    return len(_recent_failures(ip)) >= LOGIN_MAX_FAILURES
+    with _failures_lock:
+        return len(_recent_failures(ip)) >= LOGIN_MAX_FAILURES
 
 
 def record_failure(ip: str) -> None:
-    _failures.setdefault(ip, []).append(time.time())
-    _recent_failures(ip)
+    with _failures_lock:
+        _failures.setdefault(ip, []).append(time.time())
+        _recent_failures(ip)
 
 
 def clear_failures(ip: str) -> None:
-    _failures.pop(ip, None)
+    with _failures_lock:
+        _failures.pop(ip, None)
 
 
 def login(password: str, ip: str) -> str:
