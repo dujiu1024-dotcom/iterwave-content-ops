@@ -137,12 +137,12 @@ def test_backfill_rolls_back_normalization_when_duplicate_merge_fails():
     conn.close()
 
 
-def test_cross_platform_dedup_updates_are_transactional(monkeypatch):
+def test_cross_platform_dedup_updates_are_transactional():
     from src.core.hot_topic_dedup import mark_cross_platform
 
     conn = _dedup_connection()
     cfg = SimpleNamespace(business_timezone="Asia/Shanghai")
-    now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    now = timezone.business_now(cfg).strftime("%Y-%m-%dT%H:%M:%S")
     conn.executemany(
         "INSERT INTO hot_topics(id,platform,title_norm,evidence_status,discovered_at,last_seen_at) "
         "VALUES(?,?,?,?,?,?)",
