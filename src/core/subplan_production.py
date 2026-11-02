@@ -92,14 +92,19 @@ def active_subplan_stage(conn, *, today: str | None = None, advance: bool = Fals
         # A platform subplan becomes completed only when every stage reached its
         # confirmed-publish target; cancelled/paused stages are not treated as success.
         status_counts = conn.execute(
-            "SELECT COUNT(*),SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) "
+            "SELECT COUNT(*),SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END),"
+            "SUM(CASE WHEN status='cancelled' THEN 1 ELSE 0 END) "
             "FROM sub_plan_stages WHERE sub_plan_version_id=?",
             (identity["current_version_id"],),
         ).fetchone()
-        if advance and status_counts and int(status_counts[0] or 0) > 0 and int(status_counts[0]) == int(status_counts[1] or 0):
+        total = int(status_counts[0] or 0) if status_counts else 0
+        completed = int(status_counts[1] or 0) if status_counts else 0
+        cancelled = int(status_counts[2] or 0) if status_counts else 0
+        if advance and total > 0 and completed + cancelled == total:
+            terminal_status = "completed" if completed == total else "cancelled"
             conn.execute(
-                "UPDATE sub_plans SET status='completed',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='active'",
-                (identity["sub_plan_id"],),
+                "UPDATE sub_plans SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='active'",
+                (terminal_status, identity["sub_plan_id"]),
             )
             conn.commit()
         # Continue to the next platform subplan if this one has no executable stage.
