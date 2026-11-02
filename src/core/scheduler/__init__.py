@@ -1549,10 +1549,20 @@ class SchedulerEngine:
         }
 
     async def _job_autogrow_next_round(self) -> dict:
-        """自动闭环：满足条件时开下一轮并生成草稿（发布仍需用户确认）。"""
+        """自动闭环：满足条件时开下一轮并生成草稿（发布仍需用户确认）。
+
+        必须把 autogrow.tick() 的结构化报告返回给全局任务队列；否则失败报告会被
+        Worker 当成 None/成功处理，运营中心无法准确呈现自动开轮失败。
+        """
         if self.autogrow is None:
             return {"final_status": "skipped", "reason": "自动闭环控制器未启用"}
-        await self.autogrow.tick()
+        report = await self.autogrow.tick()
+        if not isinstance(report, dict):
+            return {
+                "final_status": "failed",
+                "errors": ["自动闭环返回了无效执行报告"],
+            }
+        return report
 
     async def _job_cb_recovery(self) -> dict:
         """熔断恢复 3 步验证（冷却到期 + test_login + test_lightweight_action，R6）。"""
