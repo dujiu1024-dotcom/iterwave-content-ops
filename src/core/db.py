@@ -70,6 +70,7 @@ class Database:
             # dict factory 让返回值可以像 dict 访问
             detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
             check_same_thread=False,  # 异步环境可能多线程访问
+            timeout=30.0,  # SQLite busy handler；单位为秒
         )
         # 数据库包含用户内容、运营日志等私有数据；限制同机其他用户直接读取。
         try:
@@ -79,7 +80,7 @@ class Database:
         conn.execute("PRAGMA foreign_keys = ON;")
         conn.execute("PRAGMA journal_mode = WAL;")    # 读写并发
         conn.execute("PRAGMA synchronous = NORMAL;")    # WAL 下足够安全
-        conn.execute("PRAGMA timeout = 30000;")        # 忙等 30s
+        conn.execute("PRAGMA busy_timeout = 30000;")  # 忙等 30s
         _restrict_sqlite_file_permissions(self.db_path)
         conn.row_factory = sqlite3.Row                  # 列名访问
         return conn
@@ -98,7 +99,10 @@ class Database:
 
         # 发现迁移脚本
         migrations = self._discover_migrations()
-        pending = [m for m in migrations if m.version > current_version]
+        # 不能用 MAX(version) 推断所有较小版本都已执行：并行分支晚合入的
+        # 低编号迁移必须仍能执行。以 schema_version 中的实际记录为准。
+        applied_versions = self._get_applied_versions()
+        pending = [m for m in migrations if m.version not in applied_versions]
 
         if not pending:
             logger.info("数据库已对齐最新 schema，无需迁移")
@@ -141,6 +145,25 @@ class Database:
                 return 0
             row = conn.execute("SELECT COALESCE(MAX(version), 0) FROM schema_version").fetchone()
             return int(row[0]) if row else 0
+        finally:
+            conn.close()
+
+    def _get_applied_versions(self) -> set[int]:
+        """读取实际已登记的迁移版本，避免较小编号的晚合入迁移被静默跳过。"""
+        if not self.db_path.exists():
+            return set()
+        conn = self.connect()
+        try:
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'"
+            ).fetchone()
+            if exists is None:
+                return set()
+            return {
+                int(row[0]) for row in conn.execute(
+                    "SELECT version FROM schema_version"
+                ).fetchall()
+            }
         finally:
             conn.close()
 
