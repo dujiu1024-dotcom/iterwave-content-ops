@@ -337,6 +337,8 @@ class RoundExecutor:
             "c.review_rejection_reason "
             "FROM drafts d JOIN contents c ON c.id = d.content_id "
             "WHERE c.round_id = ? AND d.status = 'draft_pending' "
+            "AND NOT EXISTS (SELECT 1 FROM draft_save_verifications v "
+            "                WHERE v.draft_id = d.id AND v.status = 'pending_verify') "
             "ORDER BY c.rowid, d.rowid",
             (round_id,),
         ).fetchall()
@@ -1036,17 +1038,23 @@ class RoundExecutor:
                         draft_id=row["draft_id"], round_id=round_id,
                     )
             elif result.needs_human_verify:
-                # 平台保存结果不确定不是失败：保留可恢复状态，禁止自动重试以免重复建草稿。
-                verify_updates = {
-                    "error_msg": result.error_msg or "needs_human_verify",
-                }
-                if result.platform_draft_id:
-                    verify_updates["draft_id"] = result.platform_draft_id
-                self.sm_draft.transition(
-                    row["draft_id"], "pending_verify",
-                    reason="needs_human_verify: 存草稿后未检测到平台成功信号",
-                    extra_updates=verify_updates,
+                # 不确定保存结果单独记账，drafts.status 保持 draft_pending，
+                # 但待存查询会排除此记录，避免自动重试造成平台重复草稿。
+                from src.core.timezone import business_now
+                self.conn.execute(
+                    "INSERT INTO draft_save_verifications "
+                    "(draft_id, status, attempted_at, platform_draft_id, error_msg) "
+                    "VALUES (?, 'pending_verify', ?, ?, ?) "
+                    "ON CONFLICT(draft_id) DO UPDATE SET "
+                    "status='pending_verify', attempted_at=excluded.attempted_at, "
+                    "verified_at=NULL, platform_draft_id=excluded.platform_draft_id, "
+                    "error_msg=excluded.error_msg, note=NULL",
+                    (
+                        row["draft_id"], business_now(self.cfg).isoformat(timespec="seconds"),
+                        result.platform_draft_id, result.error_msg or "needs_human_verify",
+                    ),
                 )
+                self.conn.commit()
                 report.setdefault("drafts_needs_human_verify", 0)
                 report["drafts_needs_human_verify"] += 1
                 logger.warning(
