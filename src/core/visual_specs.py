@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 from ..adapters.base import Platform
 
@@ -34,3 +35,49 @@ PLATFORM_SPECS: dict[Platform, VisualPlatformSpec] = {
 
 def get_visual_platform_spec(platform: Platform) -> VisualPlatformSpec:
     return PLATFORM_SPECS.get(platform, PLATFORM_SPECS[Platform.XHS])
+
+
+@dataclass(frozen=True)
+class VisualComponent:
+    """Semantic infographic component inferred from an authored paragraph."""
+
+    kind: str
+    text: str
+    value: str = ""
+    label: str = ""
+
+
+_STEP_PREFIX = re.compile(r"^(第[一二三四五六七八九十0-9]+(?:步|阶段|点))\s*[：:、-]?\s*(.*)$")
+_NUMBER_TOKEN = re.compile(r"(?<![0-9])([0-9]+(?:\.[0-9]+)?%?)(?![0-9])")
+
+
+def build_infographic_components(paragraphs: list[str]) -> list[VisualComponent]:
+    """Map source paragraphs to safe, deterministic visual components without rewriting copy.
+
+    Numeric claims become inline stat highlights, ordered process headings become step
+    cards, quoted statements become quote panels, and all remaining copy stays a text
+    component. Text content is preserved byte-for-byte for OCR comparison.
+    """
+    components: list[VisualComponent] = []
+    for paragraph in paragraphs:
+        text = str(paragraph or "").strip()
+        if not text:
+            continue
+        step = _STEP_PREFIX.match(text)
+        if step:
+            components.append(VisualComponent(
+                kind="step", text=text, label=step.group(1),
+            ))
+            continue
+        if text.startswith(("“", "「", "『", '"', "‘")):
+            components.append(VisualComponent(kind="quote", text=text))
+            continue
+        number = _NUMBER_TOKEN.search(text)
+        if number and len(text) <= 120:
+            components.append(VisualComponent(
+                kind="stat", text=text, value=number.group(1),
+                label=text[:number.start()] + text[number.end():],
+            ))
+            continue
+        components.append(VisualComponent(kind="text", text=text))
+    return components
