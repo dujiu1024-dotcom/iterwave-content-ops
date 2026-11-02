@@ -20,8 +20,8 @@ import json
 import logging
 import os
 import secrets
+import sqlite3
 import time
-import threading
 from typing import Optional
 
 from .env_store import read_env, write_env
@@ -110,9 +110,6 @@ REVOCATION_FILE_NAME = ".session_revocations.json"
 # 修改或清除口令后旧会话自动全部失效。登出的令牌记入 .env 同目录的吊销表（0600）。
 _revoked: dict[str, float] = {}
 _revoked_mtime: float = -1.0
-_failures: dict[str, list[float]] = {}
-_failure_lock = threading.RLock()
-_FAILURE_IP_LIMIT = 4096
 
 
 # ----------------------------------------------------------------------
@@ -331,51 +328,135 @@ def audit_actor(request) -> str:
 # 登录限速
 # ----------------------------------------------------------------------
 
+def _rate_limit_connection() -> sqlite3.Connection:
+    """Open the shared, permission-restricted rate-limit store.
+
+    The store lives beside the configured .env file so all API worker processes
+    on this host use the same failure history without depending on process memory.
+    """
+    from .env_store import env_file
+
+    path = env_file().with_name(".auth_rate_limits.sqlite3")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path), timeout=5.0, isolation_level=None)
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS auth_failures ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT NOT NULL, failed_at REAL NOT NULL)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_auth_failures_ip_time "
+        "ON auth_failures(ip, failed_at)"
+    )
+    try:
+        path.chmod(0o600)
+    except OSError:
+        logger.warning("无法收紧认证限流数据库文件权限")
+    return conn
+
+
 def _recent_failures(ip: str) -> list[float]:
-    now = time.monotonic()
-    with _failure_lock:
-        keep = [t for t in _failures.get(ip, []) if now - t < LOGIN_WINDOW_SECONDS]
-        if keep:
-            _failures[ip] = keep
-        else:
-            _failures.pop(ip, None)
-        return list(keep)
+    """Return recent failures from the shared store (visible across processes)."""
+    cutoff = time.time() - LOGIN_WINDOW_SECONDS
+    conn = _rate_limit_connection()
+    try:
+        rows = conn.execute(
+            "SELECT failed_at FROM auth_failures WHERE ip=? AND failed_at>=? ORDER BY failed_at",
+            (ip, cutoff),
+        ).fetchall()
+        return [float(row[0]) for row in rows]
+    finally:
+        conn.close()
 
 
 def is_rate_limited(ip: str) -> bool:
-    with _failure_lock:
-        return len(_recent_failures(ip)) >= LOGIN_MAX_FAILURES
+    cutoff = time.time() - LOGIN_WINDOW_SECONDS
+    conn = _rate_limit_connection()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM auth_failures WHERE ip=? AND failed_at>=?",
+            (ip, cutoff),
+        ).fetchone()
+        return bool(row and int(row[0]) >= LOGIN_MAX_FAILURES)
+    finally:
+        conn.close()
+
+
+def reserve_auth_attempt(ip: str) -> bool:
+    """Atomically reserve one authentication attempt before expensive PBKDF2.
+
+    BEGIN IMMEDIATE serializes reservations across threads and processes. This
+    prevents concurrent requests from all passing the threshold check before
+    any of them records a failed password.
+    """
+    now = time.time()
+    cutoff = now - LOGIN_WINDOW_SECONDS
+    conn = _rate_limit_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM auth_failures WHERE failed_at<?", (cutoff,))
+        row = conn.execute(
+            "SELECT COUNT(*) FROM auth_failures WHERE ip=? AND failed_at>=?",
+            (ip, cutoff),
+        ).fetchone()
+        if row and int(row[0]) >= LOGIN_MAX_FAILURES:
+            conn.commit()
+            return False
+        conn.execute(
+            "INSERT INTO auth_failures(ip, failed_at) VALUES (?, ?)",
+            (ip, now),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def record_failure(ip: str) -> None:
-    now = time.monotonic()
-    with _failure_lock:
-        failures = _failures.setdefault(ip, [])
-        failures.append(now)
-        _recent_failures(ip)
-        # 未认证来源可任意伪造/轮换 IP；限制状态表大小，避免限速器本身被打成内存耗尽点。
-        if len(_failures) > _FAILURE_IP_LIMIT:
-            oldest_ip = min(
-                _failures,
-                key=lambda key: _failures[key][-1] if _failures[key] else float("-inf"),
-            )
-            _failures.pop(oldest_ip, None)
+    """Persist a failed attempt atomically for every API process on this host."""
+    now = time.time()
+    cutoff = now - LOGIN_WINDOW_SECONDS
+    conn = _rate_limit_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM auth_failures WHERE failed_at<?", (cutoff,))
+        conn.execute(
+            "INSERT INTO auth_failures(ip, failed_at) VALUES (?, ?)",
+            (ip, now),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def clear_failures(ip: str) -> None:
-    with _failure_lock:
-        _failures.pop(ip, None)
+    conn = _rate_limit_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM auth_failures WHERE ip=?", (ip,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def login(password: str, ip: str) -> str:
-    """校验口令并签发会话 token；失败抛 ValueError / 限速抛 PermissionError。"""
-    # 先验证正确口令：共享出口 IP 下其他人的错误尝试，不应锁住合法用户。
+    """校验口令并签发会话 token；达到失败阈值后先限速，再执行昂贵的 PBKDF2。"""
+    # 限速必须发生在口令校验之前，否则达到阈值后仍可用正确口令登录，
+    # 同时攻击者仍可持续触发 PBKDF2 消耗 CPU。
+    if not reserve_auth_attempt(ip):
+        raise PermissionError("尝试次数过多，请 10 分钟后再试")
     if verify_password(password):
         clear_failures(ip)
         return _new_session()
-    if is_rate_limited(ip):
-        raise PermissionError("尝试次数过多，请 10 分钟后再试")
-    record_failure(ip)
     raise ValueError("访问口令不正确")
 
 
@@ -393,27 +474,31 @@ def request_token(cookie_token: Optional[str], headers) -> Optional[str]:
     return cookie_token or header_token or None
 
 
-def is_authenticated(cookie_token: Optional[str], headers, ip: Optional[str] = None) -> bool:
+def authenticate_request(cookie_token: Optional[str], headers, ip: Optional[str] = None) -> tuple[bool, bool]:
+    """Return (authenticated, rate_limited) while preserving the exact attempt boundary."""
     if not password_configured():
-        # 未完成首次设置时不宣称请求已认证；中间件只开放明确的初始化路由。
-        return False
-    # Cookie 只接受服务端签发的会话 token；无效 Cookie 不再触发 PBKDF2 口令校验。
+        return False, False
+    # Cookie 只接受服务端签发的会话 token；无效 Cookie 不触发 PBKDF2。
     if _session_valid(cookie_token):
-        return True
+        return True, False
 
-    # 脚本口令只能从明确的认证请求头传入，并且与登录接口共用失败计数/限速。
     candidate = request_token(None, headers)
     if not candidate:
-        return False
+        return False, False
     client_ip = ip or "unknown"
-    # 正确的脚本口令不应被同一出口 IP 的其他错误登录锁住。
+    if not reserve_auth_attempt(client_ip):
+        return False, True
     if verify_password(candidate):
         clear_failures(client_ip)
-        return True
-    if is_rate_limited(client_ip):
-        return False
-    record_failure(client_ip)
-    return False
+        return True, False
+    # 第五次错误仍返回认证失败；只有后续被拒绝的请求返回 429。
+    return False, False
+
+
+def is_authenticated(cookie_token: Optional[str], headers, ip: Optional[str] = None) -> bool:
+    """Boolean compatibility wrapper for callers that do not need the rate-limit reason."""
+    authenticated, _rate_limited = authenticate_request(cookie_token, headers, ip=ip)
+    return authenticated
 
 
 def status(cookie_token: Optional[str], headers, ip: Optional[str] = None) -> dict:
