@@ -56,6 +56,8 @@ def test_migration_restores_history_and_marks_missing_round_signature_pending():
     conn = _legacy_db()
     db = Database.__new__(Database)
     db._run_migration(conn, Migration(115, MIGRATION, "plan_version_lifecycle"))
+    stage_migration = Path(__file__).resolve().parents[1] / "migrations" / "116_subplan_round_metadata.sql"
+    db._run_migration(conn, Migration(116, stage_migration, "subplan_round_metadata"))
 
     restored = conn.execute(
         "SELECT plan_signature,status,legacy_history_id FROM master_plan_versions"
@@ -109,6 +111,8 @@ def test_stage_publish_stats_count_only_user_confirmed_drafts():
     conn = _legacy_db()
     db = Database.__new__(Database)
     db._run_migration(conn, Migration(115, MIGRATION, "plan_version_lifecycle"))
+    stage_migration = Path(__file__).resolve().parents[1] / "migrations" / "116_subplan_round_metadata.sql"
+    db._run_migration(conn, Migration(116, stage_migration, "subplan_round_metadata"))
     conn.execute(
         "INSERT INTO spiral_rounds(id,round_number,status,plan_signature,created_at) "
         "VALUES(3,3,'created',NULL,'2026-01-03')"
@@ -149,4 +153,44 @@ def test_stage_publish_stats_count_only_user_confirmed_drafts():
     assert conn.execute(
         "SELECT status FROM sub_plan_stages WHERE id=?", (stage_id,)
     ).fetchone()[0] == "completed"
+
+    prior_stage = dict(conn.execute(
+        "SELECT * FROM sub_plan_stages WHERE id=?", (stage_id,)
+    ).fetchone())
+    revised = store.create_subplan_version(
+        "sub-xhs", {"title": "subplan revised"}, master_plan_version_id=master["id"],
+        stages=[{key: prior_stage[key] for key in (
+            "stage_key", "stage_order", "title", "direction", "target_count",
+            "start_date", "end_date", "completion_condition", "status", "notes",
+        )}],
+        based_on_version_id=subplan["id"],
+    )
+    revised_stage_id = conn.execute(
+        "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=?", (revised["id"],)
+    ).fetchone()[0]
+    assert store.get_stage_publish_stats(revised_stage_id)["confirmed_published_count"] == 1
+    assert conn.execute(
+        "SELECT status FROM sub_plan_stages WHERE id=?", (revised_stage_id,)
+    ).fetchone()[0] == "completed"
+    conn.close()
+
+
+def test_round_metadata_migration_adds_origin_and_feedback_columns():
+    conn = _legacy_db()
+    db = Database.__new__(Database)
+    db._run_migration(conn, Migration(115, MIGRATION, "plan_version_lifecycle"))
+    migration = Path(__file__).resolve().parents[1] / "migrations" / "116_subplan_round_metadata.sql"
+    db._run_migration(conn, Migration(116, migration, "subplan_round_metadata"))
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(spiral_rounds)")}
+    assert {"trigger_source", "applied_feedback"} <= columns
+    stage_columns = {row["name"] for row in conn.execute("PRAGMA table_info(sub_plan_stages)")}
+    assert "stage_key" in stage_columns
+    conn.execute(
+        "INSERT INTO spiral_rounds(id,round_number,status) VALUES(9,9,'created')"
+    )
+    row = conn.execute(
+        "SELECT trigger_source,applied_feedback FROM spiral_rounds WHERE id=9"
+    ).fetchone()
+    assert row["trigger_source"] == "manual"
+    assert row["applied_feedback"] is None
     conn.close()

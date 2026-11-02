@@ -4486,6 +4486,11 @@ def _register_routes(app: FastAPI) -> None:
     @app.post("/api/rounds")
     def create_round(req: CreateRoundRequest):
         conn = _g()["conn"]
+        active_subplans = int(conn.execute(
+            "SELECT COUNT(*) FROM sub_plans WHERE status NOT IN ('archived','cancelled')"
+        ).fetchone()[0])
+        if active_subplans:
+            raise HTTPException(409, "当前账号组已启用平台子计划；请从对应子计划阶段创建生产轮次")
         key = "round:" + hashlib.sha256(req.model_dump_json().encode()).hexdigest()
 
         def _produce() -> dict:  # G-11：10s 内相同请求只落一条
@@ -4562,11 +4567,62 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(503, "全局任务队列尚未初始化")
         runtime_context = _g()
         tenant_id = runtime_context.get("runtime_tenant_id", "default")
+        from src.core.subplan_production import production_paused
+        if production_paused(runtime_context["conn"]):
+            raise HTTPException(409, "内容生产已暂停")
         round_row = runtime_context["conn"].execute(
-            "SELECT id, status FROM spiral_rounds WHERE id=?", (round_id,),
+            "SELECT id, status, sub_plan_id, sub_plan_version_id, sub_plan_stage_id FROM spiral_rounds WHERE id=?",
+            (round_id,),
         ).fetchone()
         if round_row is None:
             raise HTTPException(404, "当前账号组不存在该生产轮次")
+        active_subplans = int(runtime_context["conn"].execute(
+            "SELECT COUNT(*) FROM sub_plans WHERE status NOT IN ('archived','cancelled')"
+        ).fetchone()[0])
+        if active_subplans and not all((
+            round_row["sub_plan_id"], round_row["sub_plan_version_id"],
+            round_row["sub_plan_stage_id"],
+        )):
+            raise HTTPException(409, "新体系下生产轮次必须绑定已审核子计划版本和阶段")
+        effective_topic_count = req.topic_count
+        effective_platforms = req.platforms
+        if round_row["sub_plan_id"]:
+            stage_row = runtime_context["conn"].execute(
+                """SELECT p.platform,p.status AS subplan_status,s.status,s.target_count,
+                          s.start_date,s.end_date,
+                          COALESCE(stats.confirmed_published_count,0) AS published_count
+                   FROM sub_plans p JOIN sub_plan_stages s ON s.id=?
+                   LEFT JOIN sub_plan_stage_publish_stats stats ON stats.stage_id=s.id
+                   WHERE p.id=? AND s.sub_plan_version_id=?""",
+                (round_row["sub_plan_stage_id"], round_row["sub_plan_id"],
+                 round_row["sub_plan_version_id"]),
+            ).fetchone()
+            if (stage_row is None or stage_row["subplan_status"] != "active"
+                    or stage_row["status"] in ("paused", "completed", "cancelled")):
+                raise HTTPException(409, "生产轮次对应子计划或阶段已暂停/完成")
+            from src.core.timezone import business_now
+            business_date = business_now(runtime_context["cfg"]).date().isoformat()
+            if stage_row["start_date"] and business_date < stage_row["start_date"]:
+                raise HTTPException(409, "生产轮次对应阶段尚未到执行日期")
+            if stage_row["end_date"] and business_date > stage_row["end_date"]:
+                raise HTTPException(409, "生产轮次对应阶段执行窗口已结束")
+            broken = runtime_context["conn"].execute(
+                "SELECT 1 FROM circuit_breaker_events WHERE platform=? AND resolved_at IS NULL LIMIT 1",
+                (stage_row["platform"],),
+            ).fetchone()
+            if broken:
+                raise HTTPException(409, "子计划所属平台处于熔断状态，不能开轮")
+            remaining = max(0, int(stage_row["target_count"]) - int(stage_row["published_count"]))
+            if remaining <= 0:
+                raise HTTPException(409, "当前阶段用户确认发布目标已达成")
+            effective_topic_count = min(
+                int(req.topic_count or runtime_context["cfg"].autogrow.topic_count), remaining,
+            )
+            if req.topic_count and int(req.topic_count) > remaining:
+                raise HTTPException(422, f"本阶段仅剩 {remaining} 篇待确认发布目标，不能超量生产")
+            if req.platforms and set(req.platforms) != {stage_row["platform"]}:
+                raise HTTPException(422, "该轮次只能生产其绑定子计划所属平台")
+            effective_platforms = [stage_row["platform"]]
         # 仅允许新建轮次入队。producing 及后续状态不能再次启动，
         # 防止已进入发布/采集/复盘或终态的轮次被重复生产。
         # 并发重复请求仍由全局队列的 aggregate 去重负责（状态尚未推进时）。
@@ -4599,15 +4655,15 @@ def _register_routes(app: FastAPI) -> None:
                 aggregate_id=str(round_id),
                 payload={
                     "round_id": round_id,
-                    "topic_count": req.topic_count,
-                    "platforms": req.platforms,
+                    "topic_count": effective_topic_count,
+                    "platforms": effective_platforms,
                     "save_drafts": req.save_drafts,
                     "template_snapshot": template_snapshot,
                     "execution_snapshot": _build_task_execution_snapshot(
                         tenant_id, round_id, {
                             "round_id": round_id,
-                            "topic_count": req.topic_count,
-                            "platforms": req.platforms,
+                            "topic_count": effective_topic_count,
+                            "platforms": effective_platforms,
                             "save_drafts": req.save_drafts,
                             "template_snapshot": template_snapshot,
                         }, runtime_context=runtime_context,
@@ -5396,7 +5452,7 @@ def _register_routes(app: FastAPI) -> None:
         active = conn.execute(
             "SELECT id, round_number, status, plan_signature FROM spiral_rounds "
             "WHERE status IN ('created','producing','awaiting_publish') "
-            "AND plan_signature IS NOT NULL"
+            "AND plan_signature IS NOT NULL AND sub_plan_id IS NULL"
         ).fetchall()
         stale = [dict(r) for r in active if r["plan_signature"] != signature]
 
@@ -5410,13 +5466,17 @@ def _register_routes(app: FastAPI) -> None:
             "stale_rounds": stale,
         }
 
+    @app.get("/api/plans/versions")
+    def list_plan_versions(limit: int = Query(100, ge=1, le=500)):
+        from src.core.plan_version_store import PlanVersionStore
+        return {"items": PlanVersionStore(_g()["conn"]).list_master_versions(limit)}
+
     @app.post("/api/plans")
     def update_plan(req: UpdatePlanRequest):
-        """保存母计划 → 新签名 + signature_history + 下游失效（R18）。"""
+        """创建母计划草稿；只有显式审核通过后才切换生效版本。"""
+        from src.core.plan_version_store import PlanVersionStore, PlanVersionError
         pvm = _g()["plan_version_manager"]
         cfg = _g()["cfg"]
-        _, previous_signature, _, _ = pvm.load_plan()
-
         platforms = req.enabled_platforms or cfg.platforms.enabled_keys()
         plan = pvm.build_plan(
             topic_count_per_platform=req.topic_count_per_platform,
@@ -5429,43 +5489,108 @@ def _register_routes(app: FastAPI) -> None:
         alloc_total = sum(req.dimension_allocation.values())
         if alloc_total > req.topic_count_per_platform:
             raise HTTPException(400, f"维度分配合计 {alloc_total} 条，超过每平台选题数 {req.topic_count_per_platform}")
-        result = pvm.save_plan(plan, author="web-ui")
-        result["previous_signature"] = previous_signature
-        result["changed"] = previous_signature != result["signature"]
-        return result
+        active = _g()["conn"].execute(
+            "SELECT id FROM master_plan_versions WHERE status='effective'"
+        ).fetchone()
+        try:
+            draft = PlanVersionStore(_g()["conn"]).create_master_draft(
+                plan, author="web-ui", source="user",
+                based_on_version_id=int(active["id"]) if active else None,
+                change_note="母计划人工编辑草稿",
+            )
+        except PlanVersionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"draft": draft, "requires_review": True, "effective": False}
+
+    @app.post("/api/plans/{version_id}/review")
+    def review_master_plan(version_id: int, req: dict):
+        from src.core.plan_version_store import PlanVersionStore, PlanVersionError
+        action = (req or {}).get("action", "approve")
+        if action == "reject":
+            conn = _g()["conn"]
+            reason = str((req or {}).get("reason") or "人工审核未通过")[:500]
+            cur = conn.execute(
+                """UPDATE master_plan_versions
+                   SET status='archived',reviewed_at=CURRENT_TIMESTAMP,reviewed_by='user',
+                       change_note=COALESCE(change_note,'') || ?
+                   WHERE id=? AND status='draft'""",
+                ("；审核拒绝：" + reason, version_id),
+            )
+            if cur.rowcount != 1:
+                raise HTTPException(409, "只有草稿版本可以拒绝")
+            conn.commit()
+            return {"version_id": version_id, "status": "archived", "effective": False,
+                    "reason": reason}
+        if action != "approve":
+            raise HTTPException(422, "action 只能是 approve 或 reject")
+        try:
+            result = PlanVersionStore(_g()["conn"]).activate_master_version(
+                version_id, reviewer="user",
+            )
+            return {"version": result, "effective": True}
+        except PlanVersionError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @app.post("/api/plan_adjustments/adopt")
     def adopt_plan_adjustments(req: dict):
-        """复盘「采纳建议」→ 把缺口维度写回母计划（R18：签名变化自动失效下游）。"""
+        """复盘采纳只为已存在的平台子计划创建新草稿版本，不写入生效母计划。"""
+        from src.core.plan_version_store import PlanVersionStore, PlanVersionError
         raw = (req or {}).get("dimensions") or []
         dims = list(dict.fromkeys(str(d).strip() for d in raw if str(d).strip()))
         if not dims:
             raise HTTPException(400, "dimensions 不能为空")
-        pvm = _g()["plan_version_manager"]
-        cfg = _g()["cfg"]
-        plan, previous_signature, _, _ = pvm.load_plan()
-
-        allocation = dict(plan.get("dimension_allocation") or {})
-        for d in dims:
-            allocation[d] = int(allocation.get(d) or 0) + 1
-
-        new_plan = pvm.build_plan(
-            topic_count_per_platform=plan.get("topic_count_per_platform") or 5,
-            platforms=plan.get("enabled_platforms") or cfg.platforms.enabled_keys(),
-            dimension_allocation=allocation,
-            content_format=plan.get("content_format") or "image_text",
-            per_platform=plan.get("per_platform"),
-            cadence=plan.get("cadence"),
-        )
-        if sum(allocation.values()) > new_plan["topic_count_per_platform"]:
-            new_plan["topic_count_per_platform"] = min(50, sum(allocation.values()))
-        result = pvm.save_plan(new_plan, author="web-ui:adopt-gaps")
-        result.update({
-            "previous_signature": previous_signature,
+        conn = _g()["conn"]
+        rows = conn.execute(
+            """SELECT p.id,p.platform,p.master_plan_version_id,p.current_version_id,
+                      v.snapshot_json
+               FROM sub_plans p JOIN sub_plan_versions v ON v.id=p.current_version_id
+               WHERE p.status IN ('active','paused') AND v.status='effective'
+               ORDER BY p.platform,p.id"""
+        ).fetchall()
+        if not rows:
+            raise HTTPException(409, "当前没有已审核的平台子计划；请先创建并审核子计划")
+        store = PlanVersionStore(conn)
+        drafts = []
+        for row in rows:
+            try:
+                snapshot = json.loads(row["snapshot_json"])
+            except (TypeError, ValueError):
+                raise HTTPException(409, f"子计划 {row['id']} 的生效快照损坏")
+            prior_adoptions = snapshot.get("review_adoptions")
+            adoption = list(prior_adoptions) if isinstance(prior_adoptions, list) else []
+            adoption.append({
+                "dimensions": dims,
+                "created_at": _now().isoformat(timespec="seconds"),
+                "source": "review_adoption",
+                "status": "suggestion",
+            })
+            snapshot["review_adoptions"] = adoption
+            stages = [dict(stage) for stage in conn.execute(
+                "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order",
+                (row["current_version_id"],),
+            ).fetchall()]
+            for stage in stages:
+                for key in ("id", "sub_plan_version_id", "created_at", "updated_at"):
+                    stage.pop(key, None)
+            try:
+                draft = store.create_subplan_version(
+                    row["id"], snapshot,
+                    master_plan_version_id=int(row["master_plan_version_id"]),
+                    author="review_adoption", stages=stages,
+                    based_on_version_id=int(row["current_version_id"]),
+                    change_note="复盘建议采纳草稿：" + "、".join(dims),
+                )
+                drafts.append({
+                    "sub_plan_id": row["id"], "platform": row["platform"],
+                    "draft_version": draft, "effective": False,
+                })
+            except PlanVersionError as exc:
+                raise HTTPException(409, str(exc)) from exc
+        return {
+            "drafts": drafts, "effective": False, "requires_human_review": True,
             "adopted_dimensions": dims,
-            "dimension_allocation": allocation,
-        })
-        return result
+            "message": "复盘建议已生成平台子计划草稿；修改并审核通过后才会生效",
+        }
 
     @app.post("/api/plans/suggest_from_goal")
     def plan_suggest_from_goal(req: dict):
@@ -6653,8 +6778,12 @@ def _register_routes(app: FastAPI) -> None:
 
         sql = (
             "SELECT d.id, d.platform, d.status, d.scheduled_publish_at, d.saved_at, "
-            "       c.title, c.round_id "
+            "       c.title, c.round_id, r.master_plan_version_id, r.sub_plan_id, "
+            "       r.sub_plan_version_id, r.sub_plan_stage_id, s.stage_order, s.title AS stage_title, "
+            "       s.start_date AS stage_start_date, s.end_date AS stage_end_date "
             "FROM drafts d JOIN contents c ON d.content_id = c.id "
+            "LEFT JOIN spiral_rounds r ON r.id = c.round_id "
+            "LEFT JOIN sub_plan_stages s ON s.id = r.sub_plan_stage_id "
             "WHERE (d.scheduled_publish_at IS NOT NULL "
             "        AND DATE(d.scheduled_publish_at) BETWEEN ? AND ?) "
             "   OR (d.scheduled_publish_at IS NULL "
@@ -6681,6 +6810,14 @@ def _register_routes(app: FastAPI) -> None:
                 "platform": row["platform"],
                 "status": row["status"],
                 "round_id": row["round_id"],
+                "master_plan_version_id": row["master_plan_version_id"],
+                "sub_plan_id": row["sub_plan_id"],
+                "sub_plan_version_id": row["sub_plan_version_id"],
+                "sub_plan_stage_id": row["sub_plan_stage_id"],
+                "stage_order": row["stage_order"],
+                "stage_title": row["stage_title"],
+                "stage_start_date": row["stage_start_date"],
+                "stage_end_date": row["stage_end_date"],
                 "scheduled": row["scheduled_publish_at"],
                 "saved_at": row["saved_at"],
                 "day": day,
@@ -8840,6 +8977,10 @@ def _register_routes(app: FastAPI) -> None:
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
+    
+    # Platform subplan APIs use the same tenant-scoped runtime as all existing routes.
+    from src.api.subplans import register_subplan_routes
+    register_subplan_routes(app, _g)
 
 
 # ============================================================
@@ -8861,7 +9002,6 @@ CREATE TABLE IF NOT EXISTS notify_rules (
 CREATE UNIQUE INDEX IF NOT EXISTS ux_notify_rules_scenario_channel
     ON notify_rules (scenario, channel);
 """
-
 
 
 def _find_round_for_draft(conn, draft_id: str) -> Optional[int]:
