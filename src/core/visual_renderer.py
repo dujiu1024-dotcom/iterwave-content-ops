@@ -113,7 +113,19 @@ def _document(*, title: str, subtitle: str, paragraphs: list[str], footer: str,
               page_text: str, theme: str, cover: bool, width: int, height: int,
               background_data_uri: str = "", palette_override: dict | None = None,
               font_family: str = "Noto Sans CJK SC") -> str:
-    palette = {**THEMES.get(theme, THEMES["knowledge_infographic"]), **(palette_override or {})}
+    overrides = palette_override or {}
+    component_style = str(overrides.get("component_style") or "card")
+    if component_style not in {"card", "minimal", "editorial"}:
+        raise ValueError("不支持的组件样式")
+    palette = {
+        **THEMES.get(theme, THEMES["knowledge_infographic"]),
+        **{key: value for key, value in overrides.items() if key in {"bg", "fg", "accent", "muted"}},
+    }
+    component_style_css = {
+        "card": "",
+        "minimal": ".visual-component{padding:14px 0;border:0;border-radius:0;background:transparent}.visual-stat{border-left:6px solid " + palette["accent"] + "}",
+        "editorial": ".visual-component{padding:18px 22px;border:0;border-bottom:2px solid " + palette["muted"] + ";border-radius:0;background:transparent}.visual-quote{border-left:6px solid " + palette["accent"] + "}",
+    }[component_style]
     allowed_fonts = {"Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", "Arial"}
     if font_family not in allowed_fonts:
         raise ValueError("不支持的字体族")
@@ -187,7 +199,7 @@ border:1px solid rgba(23,33,43,.10);overflow-wrap:anywhere;word-break:break-word
 .step-label{{flex:0 0 auto;padding:9px 16px;border-radius:999px;background:{palette['accent']};
 color:{_contrast_text(palette['accent'])};font-size:25px;font-weight:800}}
 .visual-quote{{margin:0;border-left:10px solid {palette['accent']};font-style:italic}}
-.visual-text{{background:rgba(255,255,255,.32)}}
+.visual-text{{background:rgba(255,255,255,.32)}}\n{component_style_css}
 .footer{{position:absolute;left:92px;bottom:52px;max-width:760px;color:{palette['muted']};
 font-size:22px;line-height:1.35;overflow-wrap:anywhere}}
 .page{{position:absolute;right:92px;bottom:52px;color:{palette['muted']};font-size:22px}}
