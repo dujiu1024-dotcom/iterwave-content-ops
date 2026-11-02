@@ -523,15 +523,18 @@ def read_table(path: Path, fmt: str, table_name: Optional[str] = None) -> tuple[
 
 def fetch_remote(source: dict, timeout: int | None = None) -> tuple[list[str], list[dict]]:
     """通过固定到已验证公网 IP 的连接抓取远程来源。"""
-    from .safe_http import fetch_public_bytes
+    from .safe_http import fetch_public_bytes, validate_public_url
+
+    url = (source.get("url") or "").strip()
+    # 先验证 URL 安全边界，再解析任务配置；非法目标必须稳定返回安全错误。
     if timeout is None:
+        validate_public_url(url)
         from .task_context import current_config
         cfg = current_config()
         if cfg is None:
             raise RuntimeError("fetch_remote 必须显式传入 timeout 或绑定账号组任务配置")
         timeout = cfg.topic_kb.remote_timeout_seconds
 
-    url = (source.get("url") or "").strip()
     headers = {str(k): str(v) for k, v in (source.get("headers") or {}).items() if k and v}
     headers.setdefault("User-Agent", "iterwave/0.1 (+local)")
 
