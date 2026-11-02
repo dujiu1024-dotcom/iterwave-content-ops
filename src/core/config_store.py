@@ -68,6 +68,7 @@ STRING_RULES: dict[str, tuple[int, int]] = {
     "render.card_tag_fallback": (1, 20),
     "llm.provider": (1, 32),
     "llm.model": (1, 128),
+    "llm.fallback_provider": (0, 32),
     "llm.fallback_model": (0, 128),
     "vision_ranking.base_url": (1, 256),
     "vision_ranking.model": (1, 128),
@@ -384,13 +385,19 @@ def _validate(key: str, value: Any) -> Any:
             raise ConfigPatchError(f"{key} 最长 256 字符")
         return value.rstrip("/")
 
-    # —— LLM base_url（按量付费 / plan 通道切换时可调）——
-    if key == "llm.base_url":
+    # —— LLM base_url（主模型 / 兜底模型端点可分别调整）——
+    if key in ("llm.base_url", "llm.fallback_base_url"):
         if not isinstance(value, str) or not value.strip().startswith(("http://", "https://")):
             raise ConfigPatchError(f"{key} 必须是 http(s) URL")
         if len(value) > 256:
             raise ConfigPatchError(f"{key} 最长 256 字符")
         return value.rstrip("/")
+
+    # —— 思考模式开关（仅主模型发送；空串 = 不发送该字段）——
+    if key == "llm.thinking":
+        if value not in ("", "enabled", "disabled"):
+            raise ConfigPatchError("llm.thinking 只能是空串 / enabled / disabled")
+        return value
 
     # —— 平台登录态 key（换号/多账号时改，决定 login_state 文件读哪个）——
     if len(parts) == 3 and parts[0] == "platforms" and parts[2] == "account_key":
@@ -981,13 +988,20 @@ def current_config_view(cfg: Config, conn) -> dict[str, Any]:
             # —— LLM（Settings 页「主模型与备用」panel）——
             "llm_provider": cfg.llm.provider,
             "llm_model": cfg.llm.model,
+            "llm_fallback_provider": cfg.llm.fallback_provider,
             "llm_fallback_model": getattr(cfg.llm, "fallback_model", None),
+            "llm_base_url": cfg.llm.base_url,
+            "llm_fallback_base_url": cfg.llm.fallback_base_url,
+            "llm_thinking": cfg.llm.thinking,
             # 计费通道：由 base_url 推导（前端下拉选择按量付费 / 专属 Agent Plan）
             "llm_channel": llm_channel(cfg.llm.base_url),
             "llm_temperature": cfg.llm.temperature,
             "llm_timeout_seconds": cfg.llm.timeout_seconds,
             "llm_enabled": cfg.llm.enabled,
             "llm_has_api_key": bool(__import__("os").environ.get(cfg.llm.api_key_env)),
+            "llm_fallback_has_api_key": bool(
+                __import__("os").environ.get(cfg.llm.fallback_api_key_env)
+            ),
             # —— 平台连接状态（只读，登录态文件 + enabled 开关）——
             "platforms": {
                 k: {"enabled": getattr(cfg.platforms, k).enabled}

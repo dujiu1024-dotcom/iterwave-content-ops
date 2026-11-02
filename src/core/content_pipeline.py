@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..adapters.base import Platform
+from .llm_endpoints import has_llm_endpoint, llm_endpoints
 
 logger = logging.getLogger(__name__)
 
@@ -185,10 +186,8 @@ def build_template_hint_block(template_data: Optional[dict]) -> str:
 
 
 def _llm_available(cfg) -> bool:
-    llm = getattr(cfg, "llm", None)
-    if not llm or not getattr(llm, "enabled", False):
-        return False
-    return bool(os.getenv(getattr(llm, "api_key_env", "ARK_API_KEY")))
+    """主模型或兜底模型任一有可用密钥即视为可用（兜底可在主模型失败时接管）。"""
+    return has_llm_endpoint(cfg)
 
 
 def build_asset_context_block(
@@ -307,12 +306,9 @@ def _generate_via_llm(
     strategy_hints: Optional[list[str]] = None,
     template_data: Optional[dict] = None,
 ) -> Optional[tuple[str, str, list[str]]]:
-    """调用 Agent Plan（ARK）Chat Completions，强制 JSON 输出。"""
-    import httpx
-
-    llm = cfg.llm
-    api_key = os.getenv(llm.api_key_env)
-    if not api_key:
+    """调用 OpenAI 兼容 Chat Completions 生成文案（主模型失败时自动切换兜底模型）。"""
+    endpoints = llm_endpoints(cfg)
+    if not endpoints:
         return None
 
     system_prompt = (
@@ -375,33 +371,63 @@ def _generate_via_llm(
             f"请改写并规避该问题，不要重复同样的表达。"
         )
 
+    last_error: Optional[ContentGenerationError] = None
+    for index, endpoint in enumerate(endpoints):
+        if index > 0:
+            logger.warning(
+                "主模型调用失败，切换到兜底模型 %s / %s：%s",
+                endpoint.provider, endpoint.model, last_error,
+            )
+        try:
+            return _request_copy_once(
+                cfg, endpoint, system_prompt, user_prompt, platform, style,
+                conn=conn, topic_id=topic_id, round_id=round_id,
+            )
+        except ContentGenerationError as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    return None
+
+
+def _request_copy_once(
+    cfg, endpoint, system_prompt: str, user_prompt: str, platform: Platform,
+    style: dict, *, conn, topic_id: Optional[str], round_id: Optional[int],
+) -> tuple[str, str, list[str]]:
+    """单端点请求 + JSON 解析；失败抛 ContentGenerationError 供上层切换兜底。"""
+    import httpx
+
     payload = {
-        "model": llm.model,
+        "model": endpoint.model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "temperature": llm.temperature,
+        "temperature": cfg.llm.temperature,
         "max_tokens": cfg.copy_generation.max_output_tokens,
         "response_format": {"type": "json_object"},
     }
+    # 商汤等供应商默认开启思考模式，与 JSON 输出不兼容；仅主模型按配置关闭。
+    if endpoint.thinking:
+        # 商汤/火山都要求 thinking 为对象；字符串会被判为 invalid arguments
+        payload["thinking"] = {"type": endpoint.thinking}
+
     started = time.monotonic()
-    client = None
     try:
-        client = httpx.Client(timeout=llm.timeout_seconds)
-        resp = client.post(
-            f"{llm.base_url.rstrip('/')}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        with httpx.Client(timeout=cfg.llm.timeout_seconds) as client:
+            resp = client.post(
+                f"{endpoint.base_url.rstrip('/')}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {endpoint.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
     except httpx.TimeoutException as exc:
         _log_ai_call(
-            conn, platform, llm.model, topic_id, round_id,
+            conn, platform, endpoint.model, topic_id, round_id,
             latency_ms=int((time.monotonic() - started) * 1000),
             tokens_in=None, tokens_out=None, success=False, output_valid=False,
         )
@@ -410,11 +436,12 @@ def _generate_via_llm(
         ) from exc
     except httpx.HTTPStatusError as exc:
         _log_ai_call(
-            conn, platform, llm.model, topic_id, round_id,
+            conn, platform, endpoint.model, topic_id, round_id,
             latency_ms=int((time.monotonic() - started) * 1000),
             tokens_in=None, tokens_out=None, success=False, output_valid=False,
         )
         status = exc.response.status_code
+        retry_after_seconds = None
         if status in (401, 403):
             code, message, retryable = "model_auth_failed", "模型鉴权失败，请检查 API Key", False
         elif status == 402:
@@ -443,11 +470,11 @@ def _generate_via_llm(
             code, message, retryable = "model_request_failed", "模型请求失败，请检查模型配置", False
         raise ContentGenerationError(
             code, message, retryable=retryable,
-            retry_after_seconds=locals().get("retry_after_seconds"),
+            retry_after_seconds=retry_after_seconds,
         ) from exc
     except httpx.RequestError as exc:
         _log_ai_call(
-            conn, platform, llm.model, topic_id, round_id,
+            conn, platform, endpoint.model, topic_id, round_id,
             latency_ms=int((time.monotonic() - started) * 1000),
             tokens_in=None, tokens_out=None, success=False, output_valid=False,
         )
@@ -457,7 +484,7 @@ def _generate_via_llm(
         ) from exc
     except Exception as exc:
         _log_ai_call(
-            conn, platform, llm.model, topic_id, round_id,
+            conn, platform, endpoint.model, topic_id, round_id,
             latency_ms=int((time.monotonic() - started) * 1000),
             tokens_in=None, tokens_out=None, success=False, output_valid=False,
         )
@@ -465,16 +492,13 @@ def _generate_via_llm(
             "model_unavailable", "模型服务暂时不可用，请检查服务状态后重试",
             retryable=True,
         ) from exc
-    finally:
-        if client is not None:
-            client.close()
 
     latency_ms = int((time.monotonic() - started) * 1000)
     try:
         content = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError):
         _log_ai_call(
-            conn, platform, llm.model, topic_id, round_id,
+            conn, platform, endpoint.model, topic_id, round_id,
             latency_ms=latency_ms, tokens_in=None, tokens_out=None,
             success=False, output_valid=False,
         )
@@ -489,7 +513,7 @@ def _generate_via_llm(
         parsed = json.loads(content)
     except (TypeError, ValueError):
         _log_ai_call(
-            conn, platform, llm.model, topic_id, round_id,
+            conn, platform, endpoint.model, topic_id, round_id,
             latency_ms=latency_ms, tokens_in=tokens_in, tokens_out=tokens_out,
             success=False, output_valid=False,
         )
@@ -499,7 +523,7 @@ def _generate_via_llm(
 
     if not isinstance(parsed, dict):
         _log_ai_call(
-            conn, platform, llm.model, topic_id, round_id,
+            conn, platform, endpoint.model, topic_id, round_id,
             latency_ms=latency_ms, tokens_in=tokens_in, tokens_out=tokens_out,
             success=False, output_valid=False,
         )
@@ -513,7 +537,7 @@ def _generate_via_llm(
     body = body.strip() if isinstance(body, str) else ""
     output_valid = bool(title and body)
     _log_ai_call(
-        conn, platform, llm.model, topic_id, round_id,
+        conn, platform, endpoint.model, topic_id, round_id,
         latency_ms=latency_ms, tokens_in=tokens_in, tokens_out=tokens_out,
         success=output_valid, output_valid=output_valid,
     )

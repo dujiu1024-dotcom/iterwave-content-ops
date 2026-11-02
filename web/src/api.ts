@@ -847,13 +847,18 @@ export interface SystemConfigView {
     // LLM 配置
     llm_provider: string;
     llm_model: string;
+    llm_fallback_provider: string;
     llm_fallback_model: string;
+    llm_base_url: string;
+    llm_fallback_base_url: string;
+    llm_thinking: "" | "enabled" | "disabled";
     /** 计费通道：plan=Agent Plan 专属通道，metered=按量付费，custom=自定义端点 */
     llm_channel: "plan" | "metered" | "custom";
     llm_temperature: number;
     llm_timeout_seconds: number;
     llm_enabled: boolean;
     llm_has_api_key: boolean;
+    llm_fallback_has_api_key: boolean;
     // 平台连接
     platforms: Record<string, { enabled: boolean }>;
     /** R8：各阶段独立超时（小时），可在线改 */
@@ -2044,9 +2049,9 @@ export const api = {
       "/api/config", { method: "PATCH", body: JSON.stringify({ updates }) },
     ),
   /** R23：Key 只写 config/.env（chmod 600）；返回值只有状态，无明文 */
-  saveLlmKey: (apiKey: string) =>
-    fetchJson<{ ok: boolean; has_key: boolean }>("/api/config/llm_key", {
-      method: "POST", body: JSON.stringify({ api_key: apiKey }),
+  saveLlmKey: (apiKey: string, target: "primary" | "fallback" = "primary") =>
+    fetchJson<{ ok: boolean; target: string; has_key: boolean }>("/api/config/llm_key", {
+      method: "POST", body: JSON.stringify({ api_key: apiKey, target }),
     }),
   notifyRules: () => fetchJson<NotifyRule[]>("/api/notify_rules"),
   createNotifyRule: (data: Partial<NotifyRule>) =>

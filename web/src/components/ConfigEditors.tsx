@@ -236,10 +236,8 @@ export function KbEditor({ view, onSaved }: {
 // 火山方舟两条计费通道：按量付费 /、Agent Plan 专属通道。
 // Agent Plan 只支持套餐内模型（见 https://www.volcengine.com/docs/82379/2366394），
 // 用不支持的模型会返回 UnsupportedModel 错误。
-const ARK_CHANNEL_BASE: Record<string, string> = {
-  metered: "https://ark.cn-beijing.volces.com/api/v3",
-  plan: "https://ark.cn-beijing.volces.com/api/plan/v3",
-};
+type LlmPresetKey = "sensenova" | "ark_plan" | "ark_metered" | "custom";
+
 const ARK_PLAN_MODELS = [
   "doubao-seed-2.1-lite",
   "doubao-seed-2.0-mini",
@@ -251,6 +249,42 @@ const ARK_PLAN_MODELS = [
   "kimi-k3.1-pro",
 ];
 
+const LLM_PRESETS: Record<Exclude<LlmPresetKey, "custom">, {
+  label: string; base: string; provider: string; models: string[];
+  thinking: "" | "enabled" | "disabled";
+}> = {
+  sensenova: {
+    label: "商汤 SenseNova",
+    base: "https://token.sensenova.cn/v1",
+    provider: "sensenova",
+    models: ["deepseek-flash", "glm-5.2", "kimi-k3", "sensenova-6.8-flash-lite"],
+    // 商汤默认开启思考模式，与 JSON 输出不兼容；默认关闭
+    thinking: "disabled",
+  },
+  ark_plan: {
+    label: "火山方舟 · Agent Plan",
+    base: "https://ark.cn-beijing.volces.com/api/plan/v3",
+    provider: "ark",
+    models: ARK_PLAN_MODELS,
+    thinking: "",
+  },
+  ark_metered: {
+    label: "火山方舟 · 按量付费",
+    base: "https://ark.cn-beijing.volces.com/api/v3",
+    provider: "ark",
+    models: ARK_PLAN_MODELS,
+    thinking: "",
+  },
+};
+
+function detectLlmPreset(baseUrl: string): LlmPresetKey {
+  const url = (baseUrl || "").replace(/\/$/, "");
+  if (url.includes("token.sensenova.cn")) return "sensenova";
+  if (url.includes("/api/plan/")) return "ark_plan";
+  if (url.includes("ark.cn-beijing.volces.com")) return "ark_metered";
+  return "custom";
+}
+
 export function LlmEditor({ view, onSaved }: {
   view: SystemConfigView; onSaved?: () => void;
 }) {
@@ -258,16 +292,30 @@ export function LlmEditor({ view, onSaved }: {
   const [enabled, setEnabled] = useState(view.readonly.llm_enabled);
   const [provider, setProvider] = useState(view.readonly.llm_provider || "ark");
   const [model, setModel] = useState(view.readonly.llm_model || "");
-  const [fallback, setFallback] = useState(view.readonly.llm_fallback_model || "");
-  const [channel, setChannel] = useState<"plan" | "metered" | "custom">(
-    view.readonly.llm_channel || "metered",
+  const [baseUrl, setBaseUrl] = useState(view.readonly.llm_base_url || "");
+  const [thinking, setThinking] = useState<"" | "enabled" | "disabled">(
+    view.readonly.llm_thinking ?? "",
   );
-  const [baseUrl, setBaseUrl] = useState("");
+  const [preset, setPreset] = useState<LlmPresetKey>(
+    detectLlmPreset(view.readonly.llm_base_url || ""),
+  );
+  const [fallbackProvider, setFallbackProvider] = useState(
+    view.readonly.llm_fallback_provider || "ark",
+  );
+  const [fallback, setFallback] = useState(view.readonly.llm_fallback_model || "");
+  const [fallbackBaseUrl, setFallbackBaseUrl] = useState(
+    view.readonly.llm_fallback_base_url || "",
+  );
+  const [fallbackPreset, setFallbackPreset] = useState<LlmPresetKey>(
+    detectLlmPreset(view.readonly.llm_fallback_base_url || ""),
+  );
   const [temperature, setTemperature] = useState(String(view.readonly.llm_temperature ?? ""));
   const [timeoutSec, setTimeoutSec] = useState(String(view.readonly.llm_timeout_seconds ?? ""));
   const [apiKey, setApiKey] = useState("");
+  const [fallbackApiKey, setFallbackApiKey] = useState("");
   const busy = isPending("cfg:llm");
-  const keyBusy = isPending("cfg:llm_key");
+  const keyBusy = isPending("cfg:llm_key:primary");
+  const fallbackKeyBusy = isPending("cfg:llm_key:fallback");
 
   const saveModel = async () => {
     if (!model.trim()) { showToast("主模型不能为空", "error"); return; }
@@ -275,10 +323,19 @@ export function LlmEditor({ view, onSaved }: {
     if (enabled !== view.readonly.llm_enabled) updates["llm.enabled"] = enabled;
     if (provider.trim() !== view.readonly.llm_provider) updates["llm.provider"] = provider.trim();
     if (model.trim() !== view.readonly.llm_model) updates["llm.model"] = model.trim();
+    if (baseUrl.trim() && baseUrl.trim() !== view.readonly.llm_base_url) {
+      updates["llm.base_url"] = baseUrl.trim();
+    }
+    if (thinking !== (view.readonly.llm_thinking ?? "")) updates["llm.thinking"] = thinking;
+    if (fallbackProvider.trim() !== view.readonly.llm_fallback_provider) {
+      updates["llm.fallback_provider"] = fallbackProvider.trim();
+    }
     if (fallback.trim() !== (view.readonly.llm_fallback_model || "")) {
       updates["llm.fallback_model"] = fallback.trim();
     }
-    if (baseUrl.trim()) updates["llm.base_url"] = baseUrl.trim();
+    if (fallbackBaseUrl.trim() && fallbackBaseUrl.trim() !== view.readonly.llm_fallback_base_url) {
+      updates["llm.fallback_base_url"] = fallbackBaseUrl.trim();
+    }
     const temp = Number(temperature);
     if (temperature !== "" && temp !== Number(view.readonly.llm_temperature)) {
       if (!Number.isFinite(temp) || temp < 0 || temp > 2) { showToast("生成随机度必须在 0-2 之间", "error"); return; }
@@ -328,12 +385,16 @@ export function LlmEditor({ view, onSaved }: {
     }
   };
 
-  const saveKey = async (value: string) => {
+  const saveKey = async (value: string, target: "primary" | "fallback") => {
     try {
-      const r = await withPending("cfg:llm_key", () => api.saveLlmKey(value));
+      const r = await withPending(
+        target === "fallback" ? "cfg:llm_key:fallback" : "cfg:llm_key:primary",
+        () => api.saveLlmKey(value, target),
+      );
       if (!r) return;
-      setApiKey("");
-      showToast(value ? "✓ 服务密钥已安全保存" : "✓ 已清除 API Key", "success");
+      if (target === "fallback") setFallbackApiKey(""); else setApiKey("");
+      const label = target === "fallback" ? "兜底模型密钥" : "主模型密钥";
+      showToast(value ? `✓ ${label}已安全保存` : `✓ 已清除${label}`, "success");
       onSaved?.();
     } catch (e: any) {
       showToast(`保存密钥失败: ${e?.message ?? e}`, "error");
@@ -346,45 +407,112 @@ export function LlmEditor({ view, onSaved }: {
         <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
         启用大模型（关闭时选题评分 / 文案生成自动降级为模板）
       </label>
-      <Field label="模型服务商">
-        <input style={{ ...inputStyle, width: 200 }} value={provider}
-          onChange={(e) => setProvider(e.target.value)} placeholder="ark" />
-      </Field>
-      <Field label="计费通道（火山方舟）">
-        <select className="field" style={{ ...inputStyle }} value={channel}
-          onChange={(e) => {
-            const next = e.target.value as "plan" | "metered" | "custom";
-            setChannel(next);
-            if (ARK_CHANNEL_BASE[next]) setBaseUrl(ARK_CHANNEL_BASE[next]);
-          }}>
-          <option value="plan">专属 Agent Plan</option>
-          <option value="metered">按量付费</option>
-          <option value="custom">自定义端点</option>
-        </select>
-      </Field>
-      <Field label="主模型（Agent Plan 套餐只支持套餐内模型，选错会报模型不支持）">
-        <input style={{ ...inputStyle, fontFamily: "monospace" }} value={model}
-          list="ark-plan-models" onChange={(e) => setModel(e.target.value)}
-          placeholder="doubao-seed-2.1-lite" />
-        <datalist id="ark-plan-models">
-          {ARK_PLAN_MODELS.map((m) => <option key={m} value={m} />)}
-        </datalist>
-      </Field>
-      <Field label="兜底模型（可留空）">
-        <input style={{ ...inputStyle, fontFamily: "monospace" }} value={fallback}
-          onChange={(e) => setFallback(e.target.value)} placeholder="留空 = 不启用兜底" />
-      </Field>
-      {channel === "custom" ? (
-        <Field label="Base URL（自定义端点）">
-          <input style={{ ...inputStyle, fontFamily: "monospace" }} value={baseUrl}
-            onChange={(e) => setBaseUrl(e.target.value)}
-            placeholder="已配置的服务地址不会回显；输入新地址以替换" />
+
+      <div style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 12, display: "grid", gap: 10 }}>
+        <strong style={{ fontSize: 13 }}>主模型（首选通道，失败时自动切换到下方兜底模型）</strong>
+        <Field label="通道">
+          <select className="field" style={{ ...inputStyle }} value={preset}
+            onChange={(e) => {
+              const next = e.target.value as LlmPresetKey;
+              setPreset(next);
+              if (next !== "custom") {
+                const p = LLM_PRESETS[next];
+                setProvider(p.provider);
+                setBaseUrl(p.base);
+                setThinking(p.thinking);
+                if (p.models.length) setModel(p.models[0]);
+              }
+            }}>
+            <option value="sensenova">商汤 SenseNova</option>
+            <option value="ark_plan">火山方舟 · Agent Plan</option>
+            <option value="ark_metered">火山方舟 · 按量付费</option>
+            <option value="custom">自定义端点</option>
+          </select>
         </Field>
-      ) : (
-        <div style={{ fontSize: 12, color: "var(--subtle)" }}>
-          {channel === "plan" ? "使用专属 Agent Plan 服务通道" : "使用按量付费服务通道"}（切换通道后保存即生效，无需重启）
-        </div>
-      )}
+        <Field label="模型服务商">
+          <input style={{ ...inputStyle, width: 200 }} value={provider}
+            onChange={(e) => setProvider(e.target.value)} placeholder="sensenova / ark" />
+        </Field>
+        <Field label="主模型">
+          <input style={{ ...inputStyle, fontFamily: "monospace" }} value={model}
+            list="llm-primary-models" onChange={(e) => setModel(e.target.value)}
+            placeholder="deepseek-flash / doubao-seed-2.1-lite" />
+          <datalist id="llm-primary-models">
+            {Object.values(LLM_PRESETS).flatMap((p) => p.models).map((m) => <option key={m} value={m} />)}
+          </datalist>
+        </Field>
+        <Field label="Base URL">
+          <input style={{ ...inputStyle, fontFamily: "monospace" }} value={baseUrl}
+            onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://token.sensenova.cn/v1" />
+        </Field>
+        <Field label="思考模式（商汤默认开启思考，与 JSON 输出不兼容，务必选「关闭」）">
+          <select className="field" style={{ ...inputStyle }} value={thinking}
+            onChange={(e) => setThinking(e.target.value as "" | "enabled" | "disabled")}>
+            <option value="">不发送（火山方舟等兼容通道）</option>
+            <option value="disabled">关闭（商汤 SenseNova 建议）</option>
+            <option value="enabled">开启</option>
+          </select>
+        </Field>
+        <Field label={`主模型密钥（仅保存于服务端，不回显；当前：${view.readonly.llm_has_api_key ? "已配置" : "未配置"}）`}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <input style={{ ...inputStyle, flex: "1 1 240px", fontFamily: "monospace" }} type="password"
+              value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="粘贴 sk- 密钥后点击「保存密钥」" />
+            <button className="btn primary sm" disabled={!apiKey.trim() || keyBusy}
+              onClick={() => saveKey(apiKey, "primary")}>保存密钥</button>
+            {view.readonly.llm_has_api_key && (
+              <button className="btn sm" disabled={keyBusy} onClick={() => saveKey("", "primary")}>清除 Key</button>
+            )}
+          </div>
+        </Field>
+      </div>
+
+      <div style={{ border: "1px dashed var(--border)", borderRadius: 8, padding: 12, display: "grid", gap: 10 }}>
+        <strong style={{ fontSize: 13 }}>兜底模型（主模型失败 / 熔断时使用；留空 = 不启用）</strong>
+        <Field label="通道">
+          <select className="field" style={{ ...inputStyle }} value={fallbackPreset}
+            onChange={(e) => {
+              const next = e.target.value as LlmPresetKey;
+              setFallbackPreset(next);
+              if (next !== "custom") {
+                const p = LLM_PRESETS[next];
+                setFallbackProvider(p.provider);
+                setFallbackBaseUrl(p.base);
+                if (p.models.length) setFallback(p.models[0]);
+              }
+            }}>
+            <option value="ark_plan">火山方舟 · Agent Plan</option>
+            <option value="ark_metered">火山方舟 · 按量付费</option>
+            <option value="sensenova">商汤 SenseNova</option>
+            <option value="custom">自定义端点</option>
+          </select>
+        </Field>
+        <Field label="兜底服务商">
+          <input style={{ ...inputStyle, width: 200 }} value={fallbackProvider}
+            onChange={(e) => setFallbackProvider(e.target.value)} placeholder="ark" />
+        </Field>
+        <Field label="兜底模型">
+          <input style={{ ...inputStyle, fontFamily: "monospace" }} value={fallback}
+            onChange={(e) => setFallback(e.target.value)} placeholder="doubao-seed-2.0-mini；留空 = 不启用兜底" />
+        </Field>
+        <Field label="兜底 Base URL">
+          <input style={{ ...inputStyle, fontFamily: "monospace" }} value={fallbackBaseUrl}
+            onChange={(e) => setFallbackBaseUrl(e.target.value)}
+            placeholder="https://ark.cn-beijing.volces.com/api/plan/v3" />
+        </Field>
+        <Field label={`兜底模型密钥（仅保存于服务端，不回显；当前：${view.readonly.llm_fallback_has_api_key ? "已配置" : "未配置"}）`}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <input style={{ ...inputStyle, flex: "1 1 240px", fontFamily: "monospace" }} type="password"
+              value={fallbackApiKey} onChange={(e) => setFallbackApiKey(e.target.value)} placeholder="粘贴火山方舟密钥后点击「保存密钥」" />
+            <button className="btn primary sm" disabled={!fallbackApiKey.trim() || fallbackKeyBusy}
+              onClick={() => saveKey(fallbackApiKey, "fallback")}>保存密钥</button>
+            {view.readonly.llm_fallback_has_api_key && (
+              <button className="btn sm" disabled={fallbackKeyBusy}
+                onClick={() => saveKey("", "fallback")}>清除 Key</button>
+            )}
+          </div>
+        </Field>
+      </div>
+
       <div className="grid three" style={{ gap: 10 }}>
         <Field label="生成随机度（0-2）">
           <input className="field" type="number" step="0.1" min={0} max={2} style={{ width: "100%" }}
@@ -396,21 +524,9 @@ export function LlmEditor({ view, onSaved }: {
         </Field>
       </div>
       <SaveBar onSave={saveModel} busy={busy} />
-      <div style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
-        <Field label={`服务密钥（仅保存在服务端，不回显；当前：${view.readonly.llm_has_api_key ? "已配置" : "未配置"}）`}>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <input style={{ ...inputStyle, flex: "1 1 240px", fontFamily: "monospace" }} type="password"
-              value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="粘贴密钥后点击「保存密钥」" />
-            <button className="btn primary sm" disabled={!apiKey.trim() || keyBusy}
-              onClick={() => saveKey(apiKey)}>保存密钥</button>
-            {view.readonly.llm_has_api_key && (
-              <button className="btn sm" disabled={keyBusy} onClick={() => saveKey("")}>清除 Key</button>
-            )}
-          </div>
-        </Field>
-        <div style={{ fontSize: 11, color: "var(--subtle)", marginTop: 8 }}>
-          密钥保存在运行服务所在服务器的本机环境配置文件中（.env），不写入应用日志，也不会回显到页面。
-        </div>
+      <div style={{ fontSize: 11, color: "var(--subtle)" }}>
+        密钥保存在运行服务所在服务器的本机环境配置文件中（.env），不写入应用日志，也不会回显到页面。
+        文案生成与热点研判会自动按「主模型 → 兜底模型」顺序切换。
       </div>
     </div>
   );
