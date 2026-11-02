@@ -730,7 +730,7 @@ export interface MediaUsageTarget {
   created_at: string | null;
   visual_status: "degraded" | "media_asset" | "generated";
   visual_reason: string | null;
-  draft_status: "draft_pending" | "draft_saved";
+  draft_status: "draft_pending" | "pending_verify" | "draft_saved";
 }
 
 export interface MediaRecommendation {
@@ -1732,6 +1732,11 @@ export const api = {
           platform_sync_override_reason: platformSyncOverrideReason?.trim() || null,
         }),
       },
+    ),
+  verifyDraftSave: (draftId: string, saved: boolean, note: string) =>
+    fetchJson<{ draft_id: string; status: string; message: string }>(
+      `/api/drafts/${draftId}/verify_save`,
+      { method: "POST", body: JSON.stringify({ saved, note: note.trim() }) },
     ),
   confirmPlatformSync: (draftId: string, reason: string) =>
     fetchJson<{ draft_id: string; platform_content_sync: string; message: string }>(
