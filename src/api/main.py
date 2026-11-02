@@ -8917,6 +8917,10 @@ def _register_routes(app: FastAPI) -> None:
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
+    
+    # Platform subplan APIs use the same tenant-scoped runtime as all existing routes.
+    from src.api.subplans import register_subplan_routes
+    register_subplan_routes(app, _g)
 
 
 # ============================================================
@@ -8939,11 +8943,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_notify_rules_scenario_channel
     ON notify_rules (scenario, channel);
 """
 
-
-
-    # Platform subplan APIs use the same tenant-scoped runtime as all existing routes.
-    from src.api.subplans import register_subplan_routes
-    register_subplan_routes(app, _g)
 
 def _find_round_for_draft(conn, draft_id: str) -> Optional[int]:
     row = conn.execute(
