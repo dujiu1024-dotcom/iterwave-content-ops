@@ -1,11 +1,13 @@
 # B 组子计划业务实现说明
 
 > 日期：2026-11-02  
-> 依赖：A 组 Migration 115 / PlanVersionStore，分支 `feature/a-plan-version-data-20261102`  
-> 实现分支：`feat/subplan-business-flow-20261102`  
-> PR：#107（Draft，依赖 A 组先合入）
+> 依赖：A 组 Migration 115 / PlanVersionStore，B 组 Migration 116 补充轮次触发来源与复盘采纳元数据，分支 `feature/a-plan-version-data-20261102`  
+> 实现分支：`feat/subplan-business-flow-final-20261102`  
+> PR：#112（Draft，依赖 A 组先合入）
 
 ## 1. 实现原则
+
+- Migration 116 在 A 的 115 基础上为 `spiral_rounds` 增加 `trigger_source` 与 `applied_feedback`，记录自动/手工开轮来源及实际采纳的复盘反馈，不修改 A 的冻结迁移。
 
 - `content_plans` 保持旧内容日历/聚合计划语义，不复用为平台子计划。
 - 母计划和子计划的编辑均创建不可变草稿版本；只有审核接口可以切换 effective 版本。
