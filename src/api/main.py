@@ -5481,6 +5481,11 @@ def _register_routes(app: FastAPI) -> None:
         row = conn.execute("SELECT status FROM drafts WHERE id = ?", (draft_id,)).fetchone()
         if not row:
             raise HTTPException(404, "草稿不存在")
+        verification = conn.execute(
+            "SELECT status FROM draft_save_verifications WHERE draft_id=?", (draft_id,),
+        ).fetchone()
+        if verification and verification["status"] == "pending_verify":
+            raise HTTPException(409, "平台保存结果尚待人工核实；核实前不能取消或删除该草稿")
         ok = _g()["sm_draft"].transition(draft_id, "cancelled", reason="用户取消发布")
         if not ok:
             raise HTTPException(400, f"状态迁移失败（当前 {row['status']}）")
