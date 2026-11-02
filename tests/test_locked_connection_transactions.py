@@ -159,3 +159,29 @@ def test_caught_sql_error_marks_request_transaction_rollback_only():
 
     assert conn.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 0
     conn.close()
+
+
+def test_pending_verify_draft_can_be_manually_reconciled(seed, conn):
+    from src.core.state_machine import DraftStateMachine, DRAFT_STATUSES
+
+    round_id = seed.round(status="producing")
+    saved_id = seed.draft(round_id, draft_status="pending_verify", fetch_status=None)
+    retry_id = seed.draft(round_id, draft_status="pending_verify", fetch_status=None)
+    machine = DraftStateMachine(conn)
+
+    assert "pending_verify" in DRAFT_STATUSES
+    assert machine.transition(
+        saved_id, "draft_saved", reason="operator verified platform draft exists",
+        extra_updates={"saved_content_hash": "verified-hash", "error_msg": None},
+    )
+    assert machine.transition(
+        retry_id, "draft_pending", reason="operator verified platform draft is absent",
+        extra_updates={"draft_id": None, "error_msg": None},
+    )
+    statuses = {
+        row["id"]: row["status"]
+        for row in conn.execute(
+            "SELECT id, status FROM drafts WHERE id IN (?, ?)", (saved_id, retry_id),
+        ).fetchall()
+    }
+    assert statuses == {saved_id: "draft_saved", retry_id: "draft_pending"}
