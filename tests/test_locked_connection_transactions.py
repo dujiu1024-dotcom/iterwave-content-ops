@@ -185,3 +185,20 @@ def test_pending_verify_draft_can_be_manually_reconciled(seed, conn):
         ).fetchall()
     }
     assert statuses == {saved_id: "draft_saved", retry_id: "draft_pending"}
+
+
+def test_pending_verify_content_cannot_be_deleted(cfg, conn, seed):
+    from src.core.content_admin import delete_contents
+
+    round_id = seed.round(status="awaiting_publish")
+    draft_id = seed.draft(round_id, draft_status="pending_verify", fetch_status=None)
+    content_id = conn.execute(
+        "SELECT content_id FROM drafts WHERE id=?", (draft_id,),
+    ).fetchone()[0]
+
+    result = delete_contents(cfg, conn, [content_id])
+    assert result["deleted"] == []
+    assert result["blocked"]
+    assert conn.execute(
+        "SELECT status FROM drafts WHERE id=?", (draft_id,),
+    ).fetchone()[0] == "pending_verify"
