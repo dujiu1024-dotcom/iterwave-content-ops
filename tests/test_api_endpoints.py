@@ -48,6 +48,41 @@ def client(cfg, conn, seed, test_auth):
 
 
 # ---------------------------------------------------------------- R-2 采纳缺口
+def test_activation_samples_reject_second_active_run_and_replay_idempotently(client, monkeypatch):
+    tc, conn, _ = client
+    from src.core import content_pipeline
+
+    monkeypatch.setattr(content_pipeline, "_llm_available", lambda _cfg: False)
+    now = datetime.now().isoformat(sep=" ", timespec="seconds")
+    conn.execute(
+        "INSERT INTO sample_runs "
+        "(id, tenant_id, platform, account_description, status, model_mode, "
+        "idempotency_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("active-sample", "default", "xhs", "职场AI效率提升方法", "generating",
+         "byok", "request-active", now),
+    )
+    conn.commit()
+
+    # 相同幂等键必须返回原任务，不应被活动任务互斥规则误拒绝。
+    replay = tc.post("/api/activation/samples", json={
+        "platform": "xhs", "account_description": "职场AI效率提升方法",
+        "idempotency_key": "request-active",
+    })
+    assert replay.status_code == 202
+    assert replay.json()["sample_run_id"] == "active-sample"
+    assert replay.json()["deduplicated"] is True
+
+    # 不同幂等键不能绕过同一账号组的活动任务限制。
+    conflict = tc.post("/api/activation/samples", json={
+        "platform": "douyin", "account_description": "职场AI效率提升方法",
+        "idempotency_key": "request-another",
+    })
+    assert conflict.status_code == 409
+    assert conn.execute(
+        "SELECT COUNT(*) FROM sample_runs WHERE tenant_id='default' "
+        "AND status IN ('created','generating','quality_check')"
+    ).fetchone()[0] == 1
+
 def test_rhythm_config_exposes_quota_slots_for_all_supported_platforms(client):
     tc, _, _ = client
     response = tc.get("/api/rhythm")
