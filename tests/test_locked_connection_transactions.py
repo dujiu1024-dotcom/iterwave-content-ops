@@ -137,3 +137,25 @@ def test_nested_transaction_scope_does_not_commit_early():
     # A failed nested scope marks the complete outer transaction rollback-only.
     assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0
     conn.close()
+
+
+def test_caught_sql_error_marks_request_transaction_rollback_only():
+    raw = sqlite3.connect(":memory:", check_same_thread=False)
+    conn = LockedConnection(raw)
+    conn.execute(
+        "CREATE TABLE records (value TEXT NOT NULL UNIQUE CHECK(length(value) < 8)"
+        ")"
+    )
+    conn.commit()
+
+    with conn:
+        conn.execute("INSERT INTO records(value) VALUES ('first')")
+        try:
+            conn.execute("INSERT INTO records(value) VALUES ('too-long-value')")
+        except sqlite3.IntegrityError:
+            # Even if application code catches the SQL exception, the request must roll back.
+            pass
+        conn.execute("INSERT INTO records(value) VALUES ('third')")
+
+    assert conn.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 0
+    conn.close()
