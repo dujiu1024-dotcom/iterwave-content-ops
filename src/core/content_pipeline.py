@@ -1038,6 +1038,7 @@ def body_page_prompt(title: str, dimension: str, page_lines: list[str]) -> str:
 
 def render_ai_background(
     prompt: str, *, model: str, size: str, cfg, platform: Platform, kind: str = "body",
+    allow_fallback: bool | None = None,
 ) -> "Path | None":
     """调用文生图生成底图并落盘；失败返回 None（该图退回渐变，不阻断出图）。"""
     from .media_generation import generate_image_bytes
@@ -1045,7 +1046,7 @@ def render_ai_background(
     out_dir = Path(cfg.resolve_path(cfg.paths.output_dir))
     try:
         raw, _mime, suffix, _w, _h = generate_image_bytes(
-            prompt, model=model, size=size, cfg=cfg,
+            prompt, model=model, size=size, cfg=cfg, allow_fallback=allow_fallback,
         )
     except Exception as exc:  # noqa: BLE001 — 单页配图失败不阻断整组卡片
         logger.warning("正文配图生成失败，该页退回渐变：%s", exc)

@@ -861,7 +861,8 @@ class RoundExecutor:
         """读取图片素材库设置；返回 (settings, 不可用原因)。"""
         try:
             row = self.conn.execute(
-                "SELECT enabled, prompt_prefix, model, size FROM media_generation_settings WHERE id = 1"
+                "SELECT enabled, prompt_prefix, model, size, fallback_enabled "
+                "FROM media_generation_settings WHERE id = 1"
             ).fetchone()
         except Exception:  # noqa: BLE001 — 旧库无此表
             return None, "media_generation_settings 未就绪"
@@ -871,6 +872,7 @@ class RoundExecutor:
             "prefix": (row["prompt_prefix"] or "").strip(),
             "model": (row["model"] or "").strip() or os.getenv("ITERWAVE_IMAGE_MODEL", "gpt-image-1"),
             "size": (row["size"] or "").strip() or "1024x1536",
+            "fallback_enabled": bool(row["fallback_enabled"]),
         }, ""
 
     def _persist_image(self, raw: bytes, suffix: str, platform: Platform, kind: str) -> str:
@@ -902,6 +904,7 @@ class RoundExecutor:
             raw, _mime, suffix, _w, _h = await asyncio.to_thread(
                 generate_image_bytes, prompt,
                 model=settings["model"], size=settings["size"], cfg=self.cfg,
+                allow_fallback=settings["fallback_enabled"],
             )
         except Exception as exc:  # noqa: BLE001 — 失败必须降级而不是阻断轮次
             logger.warning("文生图封面失败，退回模板：%s", exc)
@@ -926,7 +929,7 @@ class RoundExecutor:
             asyncio.to_thread(
                 render_ai_background, prompt,
                 model=settings["model"], size=settings["size"], cfg=self.cfg,
-                platform=platform,
+                platform=platform, allow_fallback=settings["fallback_enabled"],
             )
             for prompt in prompts
         ), return_exceptions=True)

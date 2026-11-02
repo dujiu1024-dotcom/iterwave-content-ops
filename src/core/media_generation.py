@@ -96,7 +96,7 @@ def _watermark(value) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
-def _endpoints(cfg, model: str) -> list[_ImageEndpoint]:
+def _endpoints(cfg, model: str, allow_fallback: bool | None = None) -> list[_ImageEndpoint]:
     """按主模型 → 兜底模型顺序返回可用图片端点；缺密钥/地址的通道直接跳过。"""
     policy = cfg.media_generation
 
@@ -129,6 +129,11 @@ def _endpoints(cfg, model: str) -> list[_ImageEndpoint]:
         api_key=primary_key,
         watermark=_watermark(attr("watermark", None)),
     ))
+
+    if allow_fallback is None:
+        allow_fallback = bool(attr("fallback_enabled", True))
+    if not allow_fallback:
+        return endpoints
 
     fallback_base_url = str(attr("fallback_base_url", "") or "").strip().rstrip("/")
     fallback_model = str(attr("fallback_model", "") or "").strip()
@@ -262,10 +267,14 @@ def generate_image_bytes(
     source_mime_type: str | None = None,
     source_filename: str | None = None,
     cfg=None,
+    allow_fallback: bool | None = None,
 ) -> tuple[bytes, str, str, int, int]:
-    """按主模型 → 兜底模型顺序调用图片生成/编辑接口，返回校验后的图片与元数据。"""
+    """按主模型 → 兜底模型顺序调用图片生成/编辑接口，返回校验后的图片与元数据。
+
+    allow_fallback=None 时按配置默认值；False 表示只用主模型，失败直接抛错。
+    """
     cfg = _resolve_config(cfg)
-    endpoints = _endpoints(cfg, model)
+    endpoints = _endpoints(cfg, model, allow_fallback=allow_fallback)
     if not endpoints:
         raise ImageGenerationError(
             "未配置图片生成服务密钥。请检查服务端部署环境中的密钥配置."

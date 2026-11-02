@@ -203,6 +203,7 @@ export default function MediaLibraryPane() {
         const saved = await api.saveMediaGenerationSettings({
           enabled: settings.enabled, monthly_quota: settings.monthly_quota,
           prompt_prefix: settings.prompt_prefix, model: settings.model, size: settings.size,
+          fallback_enabled: settings.fallback_enabled,
         });
         setSettings(saved);
         showToast("AI 配图设置已保存", "success");

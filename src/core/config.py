@@ -473,6 +473,8 @@ class MediaGenerationConfig(BaseModel):
     fallback_base_url: str = "https://ark.cn-beijing.volces.com/api/plan/v3"
     fallback_model: str = "doubao-seedream-5-0-pro"
     fallback_api_key_env: str = "ARK_API_KEY"
+    # 兜底通道默认启用；租户可在设置页关闭（关闭后主模型失败直接报错，不静默换供应商）
+    fallback_enabled: bool = True
     timeout_seconds: int = Field(150, ge=1, le=300)
     connect_timeout_seconds: int = Field(15, ge=1, le=60)
     max_response_bytes: int = Field(20 * 1024 * 1024, ge=1024, le=20 * 1024 * 1024)
