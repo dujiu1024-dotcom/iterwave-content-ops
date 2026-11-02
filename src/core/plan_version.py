@@ -226,7 +226,7 @@ class PlanVersionManager:
         placeholders = ",".join("?" for _ in _ACTIVE_STATUSES)
         rows = self.conn.execute(
             f"SELECT id, status, plan_signature, transition_log FROM spiral_rounds "
-            f"WHERE status IN ({placeholders}) AND plan_signature IS NOT NULL",
+            f"WHERE status IN ({placeholders}) AND plan_signature IS NOT NULL AND sub_plan_id IS NULL",
             _ACTIVE_STATUSES,
         ).fetchall()
 
