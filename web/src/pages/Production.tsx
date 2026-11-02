@@ -21,7 +21,7 @@ const STATUS_CLS: Record<string, string> = {
   created: "gray", producing: "orange", awaiting_publish: "blue",
   collecting_metrics: "purple", analyzing: "teal",
   completed: "green", partial_completed: "orange", failed: "red", cancelled: "gray",
-  draft_pending: "gray", draft_saved: "blue", user_published: "purple",
+  draft_pending: "gray", pending_verify: "orange", draft_saved: "blue", user_published: "purple",
   data_fetching: "orange", published: "green", expired: "gray",
 };
 
@@ -329,6 +329,26 @@ export default function Production() {
     } catch (e: any) { showToast(`确认失败: ${e.message}`, "error"); }
   };
 
+  const verifyDraftSave = async (draftId: string, saved: boolean) => {
+    const promptText = saved
+      ? "请先打开对应平台的草稿箱，确认这篇内容确实存在。请填写核实说明："
+      : "请先检查对应平台草稿箱，确认这篇内容不存在。确认后填写核实说明，系统才会恢复为待存状态：";
+    const note = window.prompt(promptText, "");
+    if (note === null) return;
+    if (note.trim().length < 3) {
+      showToast("核实说明至少需要 3 个字符", "error");
+      return;
+    }
+    try {
+      await api.verifyDraftSave(draftId, saved, note);
+      showToast(saved ? "已确认平台草稿存在" : "已恢复为待存草稿，可重新执行存草稿");
+      await refresh();
+      if (currentRoundId) await loadRoundData(currentRoundId);
+    } catch (e: any) {
+      showToast(`核实失败: ${e.message}`, "error");
+    }
+  };
+
   /** 「✕ 不发了」：draft_pending / draft_saved → cancelled（R9：不冻结未发布草稿） */
   const cancelDraft = async (draftId: string) => {
     try {
@@ -542,6 +562,7 @@ export default function Production() {
     const matchesState = reviewState === "all"
       || (reviewState === "needs_review" && (item.guard_outcome !== "pass" || item.review_rejected))
       || (reviewState === "not_saved" && status === "draft_pending")
+      || (reviewState === "pending_verify" && status === "pending_verify")
       || (reviewState === "saved" && status === "draft_saved")
       || (reviewState === "rejected" && !!item.review_rejected);
     return matchesQuery && matchesPlatform && matchesState;
@@ -1095,7 +1116,8 @@ export default function Production() {
               </select>
               <select aria-label="按状态筛选" value={reviewState} onChange={(event) => setReviewState(event.target.value)}>
                 <option value="all">全部状态</option><option value="needs_review">需要复核</option>
-                <option value="not_saved">待存草稿</option><option value="saved">已存草稿</option><option value="rejected">已驳回</option>
+                <option value="not_saved">待存草稿</option><option value="pending_verify">待核实平台保存</option>
+                <option value="saved">已存草稿</option><option value="rejected">已驳回</option>
               </select>
             </div>
             <div className="list review-content-list">
@@ -1459,10 +1481,16 @@ export default function Production() {
                               {d.status === "draft_saved" && (
                                 <button className="btn sm primary" onClick={() => confirmPublish(d.id)}>✓ 我已发布</button>
                               )}
-                              {(d.status === "draft_saved" || d.status === "draft_pending") && (
+                              {d.status === "pending_verify" && (
+                                <>
+                                  <button className="btn sm primary" onClick={() => verifyDraftSave(d.id, true)}>✓ 平台已存</button>
+                                  <button className="btn sm ghost" style={{ marginLeft: 6 }} onClick={() => verifyDraftSave(d.id, false)}>↻ 平台未存</button>
+                                </>
+                              )}
+                              {(d.status === "draft_saved" || d.status === "draft_pending" || d.status === "pending_verify") && (
                                 <button className="btn sm ghost" style={{ marginLeft: 6 }} onClick={() => cancelDraft(d.id)}>✕ 不发了</button>
                               )}
-                              {d.status !== "draft_saved" && d.status !== "draft_pending" && <span style={{ color: "var(--subtle)" }}>—</span>}
+                              {d.status !== "draft_saved" && d.status !== "draft_pending" && d.status !== "pending_verify" && <span style={{ color: "var(--subtle)" }}>—</span>}
                             </td>
                           </tr>
                         ))}
