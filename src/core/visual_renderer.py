@@ -199,7 +199,8 @@ border:1px solid rgba(23,33,43,.10);overflow-wrap:anywhere;word-break:break-word
 .step-label{{flex:0 0 auto;padding:9px 16px;border-radius:999px;background:{palette['accent']};
 color:{_contrast_text(palette['accent'])};font-size:25px;font-weight:800}}
 .visual-quote{{margin:0;border-left:10px solid {palette['accent']};font-style:italic}}
-.visual-text{{background:rgba(255,255,255,.32)}}\n{component_style_css}
+.visual-text{{background:rgba(255,255,255,.32)}}
+{component_style_css}
 .footer{{position:absolute;left:92px;bottom:52px;max-width:760px;color:{palette['muted']};
 font-size:22px;line-height:1.35;overflow-wrap:anywhere}}
 .page{{position:absolute;right:92px;bottom:52px;color:{palette['muted']};font-size:22px}}
