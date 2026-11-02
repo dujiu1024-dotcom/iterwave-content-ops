@@ -69,7 +69,7 @@ from src.core.config import PROJECT_ROOT
 from src.core.tenant_registry import TenantRegistry, TenantError
 from src.core.task_queue import GlobalTaskQueue, TaskQueueError
 from src.core.tenant_switch_gate import TenantSwitchGate, TenantSwitchInProgress
-from src.core.db import Database
+from src.core.db import Database, connection_transaction
 from src.core.state_machine import RoundStateMachine, DraftStateMachine
 from src.core.scoring.topic_eval import ScoringEngine, TopicItem
 from src.core.guard.ultimate_goal_checker import UltimateGoalChecker
@@ -4220,6 +4220,29 @@ def _register_routes(app: FastAPI) -> None:
         from ..core.persona import personas_view
         return personas_view(_g()["cfg"])
 
+    def _validate_goal_hierarchy(conn, goal_id, level, parent_id) -> None:
+        """两级目标约束：总目标(north_star)位于顶层；平台目标只能挂到顶层总目标下。"""
+        level = level or "platform"
+        if parent_id:
+            if level == "north_star":
+                raise HTTPException(422, "总目标不能再挂到其它总目标下")
+            if goal_id is not None and str(parent_id) == str(goal_id):
+                raise HTTPException(422, "目标不能挂到自身下面")
+            parent = conn.execute(
+                "SELECT goal_level, parent_goal_id FROM goals WHERE id = ?", (parent_id,),
+            ).fetchone()
+            if parent is None:
+                raise HTTPException(422, "所属总目标不存在")
+            if (parent["goal_level"] or "platform") != "north_star" or parent["parent_goal_id"]:
+                raise HTTPException(422, "只能挂到顶层总目标下面")
+        if goal_id is not None and (level != "north_star" or parent_id):
+            # 已有子目标的总目标不能降级或挂到别处，否则子目标会变成三级或挂在非总目标下。
+            child = conn.execute(
+                "SELECT 1 FROM goals WHERE parent_goal_id = ? LIMIT 1", (goal_id,),
+            ).fetchone()
+            if child is not None:
+                raise HTTPException(422, "该总目标下仍有子目标，请先移走子目标再修改层级")
+
     @app.post("/api/goals")
     def create_goal(req: CreateGoalRequest):
         """创建阶段目标（R21：6 个口径字段齐备才落库）。
@@ -4231,13 +4254,7 @@ def _register_routes(app: FastAPI) -> None:
         goal_id = f"goal-{uuid.uuid4().hex[:12]}"
         now = _now().isoformat(timespec="seconds")
         if req.parent_goal_id:
-            parent = conn.execute("SELECT goal_level FROM goals WHERE id = ?", (req.parent_goal_id,)).fetchone()
-            if not parent:
-                raise HTTPException(422, "所属总目标不存在")
-            if (parent["goal_level"] or "platform") != "north_star":
-                raise HTTPException(422, "只能挂到总目标下面")
-            if req.goal_level == "north_star":
-                raise HTTPException(422, "总目标不能再挂到其它总目标下")
+            _validate_goal_hierarchy(conn, None, req.goal_level or "platform", req.parent_goal_id)
         conn.execute(
             "INSERT INTO goals (id, goal_type, goal_text, target_metric, target_value,"
             " target_platform, metric_scope, baseline_value, baseline_at,"
@@ -4262,16 +4279,29 @@ def _register_routes(app: FastAPI) -> None:
     def update_goal(goal_id: str, req: "GoalUpdateRequest"):
         """编辑阶段目标口径 / 暂停或完成目标（current_value 只由采集回写）。"""
         conn = _g()["conn"]
-        row = conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone()
-        if not row:
-            raise HTTPException(404, "目标不存在")
         fields = req.model_dump(exclude_unset=True)
         if not fields:
             raise HTTPException(422, "没有需要更新的字段")
-        sets = ", ".join(f"{k} = ?" for k in fields)
-        conn.execute(f"UPDATE goals SET {sets} WHERE id = ?", (*fields.values(), goal_id))
-        conn.commit()
-        item = dict(conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone())
+        # 读取、层级校验与写入在同一个写事务内，防止并发 PATCH 绕过两级目标约束。
+        with connection_transaction(conn, immediate=True):
+            row = conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone()
+            if not row:
+                raise HTTPException(404, "目标不存在")
+            if "parent_goal_id" in fields:
+                raw_parent = fields["parent_goal_id"]
+                fields["parent_goal_id"] = (str(raw_parent).strip() or None) if raw_parent is not None else None
+            if "goal_level" in fields and fields["goal_level"] is None:
+                raise HTTPException(422, "goal_level 不能为空")
+            # 校验 PATCH 之后的完整层级，而不只是本次提交的字段。
+            next_level = fields.get("goal_level", row["goal_level"] or "platform")
+            next_parent_id = fields.get("parent_goal_id", row["parent_goal_id"])
+            _validate_goal_hierarchy(conn, goal_id, next_level, next_parent_id)
+            if next_level == "north_star":
+                # 与创建口径一致：总目标是跨平台汇总，不绑定单一平台。
+                fields["target_platform"] = None
+            sets = ", ".join(f"{k} = ?" for k in fields)
+            conn.execute(f"UPDATE goals SET {sets} WHERE id = ?", (*fields.values(), goal_id))
+            item = dict(conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone())
         item["achievement_rate"] = GoalProgressUpdater.rate_for(item)
         return item
 

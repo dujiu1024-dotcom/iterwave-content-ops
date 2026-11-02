@@ -20,12 +20,16 @@ DraftSaver — 通用 Playwright 存草稿工具（四平台共用）。
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import mimetypes
 import os
+import re
+import weakref
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import parse_qs, urlsplit
 
 from playwright.async_api import Page, BrowserContext, async_playwright
 
@@ -37,6 +41,109 @@ from .base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Page.route is the final in-process boundary: a UI regression or a platform button
+# label change must not be able to submit a publish-like network operation.
+_PUBLISH_GUARD_CONTEXTS = weakref.WeakSet()
+_PUBLISH_PATH_RE = re.compile(
+    r"(?:^|/)(?:publish|submit|send|release|post-publish|publish-post)(?:/|$|[._?-])",
+    re.IGNORECASE,
+)
+_PUBLISH_ACTION_KEYS = {
+    "action", "operation", "op", "command", "intent", "publishaction",
+    "submitaction", "publishtype", "submittype", "contentaction",
+}
+_PUBLISH_ACTION_VALUES = {
+    "publish", "published", "publishnow", "publishimmediately",
+    "submit", "submitnow", "send", "sendnow", "release", "post",
+}
+
+
+def _normalize_action_token(value: object) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+
+def _contains_publish_action(value) -> bool:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            normalized_key = _normalize_action_token(key)
+            if normalized_key in _PUBLISH_ACTION_KEYS:
+                action_values = child if isinstance(child, list) else [child]
+                if any(
+                    isinstance(item, str) and _normalize_action_token(item) in _PUBLISH_ACTION_VALUES
+                    for item in action_values
+                ):
+                    return True
+                if any(
+                    item is True for item in action_values
+                ) and normalized_key in {"publishaction", "submitaction"}:
+                    return True
+            if _contains_publish_action(child):
+                return True
+    elif isinstance(value, list):
+        return any(_contains_publish_action(item) for item in value)
+    return False
+
+
+def _is_publish_network_request(method: str, url: str, post_data: str | None = None) -> bool:
+    """识别写请求中的发布动作；草稿保存路径不属于发布动作。"""
+    if str(method or "").upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return False
+    parsed_url = urlsplit(str(url or ""))
+    path = parsed_url.path.lower()
+    # Some platform APIs put the operation in the URL query rather than the body.
+    query_payload = {
+        key: values for key, values in parse_qs(parsed_url.query).items() if values
+    }
+    payload = None
+    if post_data:
+        try:
+            payload = json.loads(post_data)
+        except (TypeError, ValueError):
+            # Some platform endpoints submit form-urlencoded action fields.
+            try:
+                payload = {key: values for key, values in parse_qs(post_data).items() if values}
+            except (TypeError, ValueError):
+                payload = None
+    # An explicit publish action always wins, even if the URL contains "draft".
+    if _contains_publish_action(query_payload) or _contains_publish_action(payload):
+        return True
+    # Only explicit draft-save routes are exempt; a generic /draft/* path is not.
+    if re.search(r"/(?:draft|drafts)/(?:save|create)(?:/|$)", path) or re.search(
+        r"/save[-_]draft(?:/|$)", path,
+    ):
+        return False
+    return bool(_PUBLISH_PATH_RE.search(path))
+
+
+async def _install_publish_network_guard(target: Page | BrowserContext) -> None:
+    """在整个 BrowserContext 安装请求级发布拦截，覆盖其全部页面和弹窗。"""
+    try:
+        # Prefer context-wide routing. Page-only fakes remain supported by unit tests.
+        context = target if hasattr(target, "pages") else getattr(target, "context", target)
+        if context in _PUBLISH_GUARD_CONTEXTS:
+            return
+
+        async def guard(route):
+            request = route.request
+            if _is_publish_network_request(
+                request.method, request.url, getattr(request, "post_data", None),
+            ):
+                parsed = urlsplit(request.url)
+                logger.critical(
+                    "平台发布网络请求已拦截 method=%s host=%s path=%s",
+                    request.method, parsed.netloc, parsed.path[:160],
+                )
+                await route.abort(error_code="blockedbyclient")
+                return
+            await route.continue_()
+
+        await context.route("**/*", guard)
+        _PUBLISH_GUARD_CONTEXTS.add(context)
+    except Exception as exc:
+        logger.exception("无法安装发布网络拦截，拒绝继续草稿保存")
+        raise RuntimeError("发布网络安全拦截未能启用，已停止平台操作") from exc
 
 
 # =====================================================================
@@ -321,6 +428,8 @@ class DraftSaver:
           ❌ 明确失败（登录态 / 熔断 / 图片数量不符 / 按钮未找到）→ success=False
         """
         try:
+            # UI 白名单之外再加一层请求级防线（BrowserContext 级）；安装失败时 fail closed。
+            await _install_publish_network_guard(page)
             # 0. 视频号图文走独立链路（入口在「内容管理→图文」列表页，创作器在嵌套 iframe 里）
             if content.image_paths and self.selectors.get("image_flow") == "wechat_finder":
                 return await self._save_wechat_image_draft(page, content)
