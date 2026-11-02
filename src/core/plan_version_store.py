@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from .plan_version import PlanVersionManager
@@ -292,6 +292,95 @@ class PlanVersionStore:
         )
         if cur.rowcount != 1:
             raise PlanVersionError("轮次不存在")
+        self.conn.commit()
+
+    def reserve_round_open(
+        self,
+        idempotency_key: str,
+        request_hash: str,
+        master_plan_version_id: int,
+        *,
+        lease_seconds: int = 300,
+    ) -> dict[str, Any]:
+        """Acquire a durable scheduler lease; same key cannot open two rounds."""
+        key = str(idempotency_key or "").strip()
+        digest = str(request_hash or "").strip()
+        if not key or len(key) > 200 or not digest or len(digest) > 128:
+            raise PlanVersionError("自动开轮幂等键或请求摘要无效")
+        if self.conn.execute(
+            "SELECT 1 FROM master_plan_versions WHERE id=?", (master_plan_version_id,)
+        ).fetchone() is None:
+            raise PlanVersionError("自动开轮引用的主计划版本不存在")
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat(timespec="seconds")
+        lease_until = (now_dt + timedelta(seconds=max(30, min(int(lease_seconds), 3600)))).isoformat(timespec="seconds")
+        self._begin()
+        try:
+            row = self.conn.execute(
+                "SELECT * FROM round_open_idempotency WHERE idempotency_key=?", (key,)
+            ).fetchone()
+            if row is not None:
+                if row["request_hash"] != digest or int(row["master_plan_version_id"]) != int(master_plan_version_id):
+                    raise PlanVersionError("相同幂等键对应不同开轮请求，拒绝重复执行")
+                if row["status"] == "created":
+                    self.conn.commit()
+                    return {"acquired": False, "status": "created", "round_id": row["round_id"]}
+                if row["status"] == "reserved" and row["lease_until"] and row["lease_until"] > now:
+                    self.conn.commit()
+                    return {"acquired": False, "status": "in_progress", "round_id": None}
+                self.conn.execute(
+                    """UPDATE round_open_idempotency
+                       SET status='reserved',lease_until=?,updated_at=?,error_message=NULL
+                       WHERE idempotency_key=?""", (lease_until, now, key)
+                )
+            else:
+                self.conn.execute(
+                    """INSERT INTO round_open_idempotency(
+                        idempotency_key,request_hash,master_plan_version_id,status,
+                        lease_until,created_at,updated_at
+                    ) VALUES(?,?,?,'reserved',?,?,?)""",
+                    (key, digest, master_plan_version_id, lease_until, now, now),
+                )
+            self.conn.commit()
+            return {"acquired": True, "status": "reserved", "round_id": None, "lease_until": lease_until}
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def complete_round_open(self, idempotency_key: str, round_id: int) -> dict[str, Any]:
+        now = _now()
+        self._begin()
+        try:
+            lock = self.conn.execute(
+                "SELECT * FROM round_open_idempotency WHERE idempotency_key=?",
+                (idempotency_key,),
+            ).fetchone()
+            if lock is None or lock["status"] != "reserved":
+                raise PlanVersionError("自动开轮租约不存在或已失效")
+            round_row = self.conn.execute(
+                "SELECT master_plan_version_id FROM spiral_rounds WHERE id=?", (round_id,)
+            ).fetchone()
+            if round_row is None or round_row["master_plan_version_id"] != lock["master_plan_version_id"]:
+                raise PlanVersionError("轮次尚未绑定租约指定的主计划版本")
+            self.conn.execute(
+                """UPDATE round_open_idempotency
+                   SET status='created',round_id=?,lease_until=NULL,updated_at=?
+                   WHERE idempotency_key=? AND status='reserved'""",
+                (round_id, now, idempotency_key),
+            )
+            self.conn.commit()
+            return {"status": "created", "round_id": round_id}
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def fail_round_open(self, idempotency_key: str, error_message: str) -> None:
+        self.conn.execute(
+            """UPDATE round_open_idempotency
+               SET status='failed',lease_until=NULL,updated_at=?,error_message=?
+               WHERE idempotency_key=? AND status='reserved'""",
+            (_now(), str(error_message or "开轮失败")[:500], idempotency_key),
+        )
         self.conn.commit()
 
     def update_stage_status(self, stage_id: int, status: str) -> dict[str, Any]:
