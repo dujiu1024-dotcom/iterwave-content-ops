@@ -19,6 +19,7 @@ SQLite 连接管理 + schema 迁移。
 from __future__ import annotations
 
 import hashlib
+from contextlib import contextmanager
 import logging
 import shutil
 import sqlite3
@@ -599,6 +600,36 @@ class LockedConnection:
                 self._lock.release()
             self._lock.release()
 
+    @contextmanager
+    def transaction(self, *, immediate: bool = True):
+        """显式事务 API；事务期间独占连接，默认先取得 SQLite 写保留锁。"""
+        self._lock.acquire()
+        owner = _threading.get_ident()
+        if self._conn.in_transaction:
+            self._lock.release()
+            raise RuntimeError(
+                "LockedConnection.transaction 不支持隐式嵌套；"
+                "请让最外层事务统一管理提交与回滚"
+            )
+        object.__setattr__(self, "_context_owner", owner)
+        object.__setattr__(self, "_context_depth", 1)
+        object.__setattr__(self, "_rollback_only", False)
+        try:
+            self._conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+        except BaseException:
+            object.__setattr__(self, "_context_owner", None)
+            object.__setattr__(self, "_context_depth", 0)
+            object.__setattr__(self, "_rollback_only", False)
+            self._lock.release()
+            raise
+        try:
+            yield self
+        except BaseException as exc:
+            self.__exit__(type(exc), exc, exc.__traceback__)
+            raise
+        else:
+            self.__exit__(None, None, None)
+
     def close(self) -> None:
         self._lock.acquire()
         owner = _threading.get_ident()
@@ -676,3 +707,26 @@ class LockedConnection:
     def __setattr__(self, name, value):
         setattr(self._conn, name, value)
 
+
+
+
+@contextmanager
+def connection_transaction(conn, *, immediate: bool = True):
+    """兼容 LockedConnection 与原生 sqlite3.Connection 的事务上下文。"""
+    transaction = getattr(conn, "transaction", None)
+    if callable(transaction):
+        with transaction(immediate=immediate):
+            yield conn
+        return
+
+    if getattr(conn, "in_transaction", False):
+        raise RuntimeError(
+            "connection_transaction 不支持隐式嵌套；请让最外层事务统一管理提交与回滚"
+        )
+    conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+    try:
+        yield conn
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
