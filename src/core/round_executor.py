@@ -1188,22 +1188,23 @@ class RoundExecutor:
                         report["errors"].append("生成期间阶段确认发布目标已达成，丢弃当前候选内容")
                         continue
                 content_id = f"content-{uuid.uuid4().hex[:12]}"
-                self.conn.execute(
-                    "INSERT INTO contents (id, round_id, topic_id, platform, title, body, "
-                    "tags, image_paths, word_count, card_style, guard_outcome, guard_reason, "
-                    "visual_status, visual_reason, template_id, template_version, template_snapshot_json) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'degraded', ?, ?, ?, ?)",
-                    (
-                        content_id, round_id, topic.id, platform.value, title, body,
-                        json.dumps(tags, ensure_ascii=False),
-                        json.dumps([str(p) for p in image_paths], ensure_ascii=False),
-                        len(body), "knowledge", outcome.result.value, outcome.reason,
-                        ("已使用 Chromium 确定性文字排版；OCR 校验通过，AI 语义审美评估结果已记录，仍需人工审核" if visual_ocr.get("status") == "passed" else "已使用 Chromium 确定性文字排版；OCR 校验未通过或不可用，禁止自动判定视觉通过，需人工复核"),
-                        template_data["id"] if template_data else None,
-                        template_data["version"] if template_data else None,
-                        json.dumps(template_data, ensure_ascii=False) if template_data else None,
-                    ),
-                )
+                with self.conn:
+                    self.conn.execute(
+                        "INSERT INTO contents (id, round_id, topic_id, platform, title, body, "
+                        "tags, image_paths, word_count, card_style, guard_outcome, guard_reason, "
+                        "visual_status, visual_reason, template_id, template_version, template_snapshot_json) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'degraded', ?, ?, ?, ?)",
+                        (
+                            content_id, round_id, topic.id, platform.value, title, body,
+                            json.dumps(tags, ensure_ascii=False),
+                            json.dumps([str(p) for p in image_paths], ensure_ascii=False),
+                            len(body), "knowledge", outcome.result.value, outcome.reason,
+                            ("已使用 Chromium 确定性文字排版；OCR 校验通过，AI 语义审美评估结果已记录，仍需人工审核" if visual_ocr.get("status") == "passed" else "已使用 Chromium 确定性文字排版；OCR 校验未通过或不可用，禁止自动判定视觉通过，需人工复核"),
+                            template_data["id"] if template_data else None,
+                            template_data["version"] if template_data else None,
+                            json.dumps(template_data, ensure_ascii=False) if template_data else None,
+                        ),
+                    )
 
                 # 视觉版本与逐页任务留痕。版本绑定最终正文哈希，单页任务可独立追踪。
                 if image_paths:
@@ -1212,51 +1213,52 @@ class RoundExecutor:
                             compute_content_hash, create_visual_page_job, create_visual_version,
                             transition_visual_job,
                         )
-                        content_hash = compute_content_hash(title, body)
-                        visual_version_id = create_visual_version(
-                            self.conn, content_id=content_id, content_hash=content_hash,
-                            renderer="chromium_v2", style_key=self._visual_render_options()["theme"],
-                            design={
-                                "platform": platform.value,
-                                "title": title,
-                                "subtitle": topic.dimension,
-                                "body": body,
-                                "footer": self._card_footer(platform),
-                                "render_options": self._visual_render_options(),
-                                "background_path": visual_asset.get("path"),
-                                "pages": [
-                                    {"page_index": index, "image_path": str(path), "background_path": visual_asset.get("path")}
-                                    for index, path in enumerate(image_paths)
-                                ],
-                                "ocr": visual_ocr,
-                                "review": visual_review,
-                                "generation": visual_generation_attempts,
-                            },
-                        )
-                        version_status = (
-                            "rendered" if visual_ocr.get("status") == "passed"
-                            else "review_required"
-                        )
-                        self.conn.execute(
-                            "UPDATE visual_design_versions SET status=? WHERE id=?",
-                            (version_status, visual_version_id),
-                        )
-                        for page_index, image_path in enumerate(image_paths):
-                            job_id = create_visual_page_job(
-                                self.conn, content_id=content_id,
-                                visual_version_id=visual_version_id,
-                                page_index=page_index, job_type="generate",
-                                input_data={"platform": platform.value},
+                        with self.conn:
+                            content_hash = compute_content_hash(title, body)
+                            visual_version_id = create_visual_version(
+                                self.conn, content_id=content_id, content_hash=content_hash,
+                                renderer="chromium_v2", style_key=self._visual_render_options()["theme"],
+                                design={
+                                    "platform": platform.value,
+                                    "title": title,
+                                    "subtitle": topic.dimension,
+                                    "body": body,
+                                    "footer": self._card_footer(platform),
+                                    "render_options": self._visual_render_options(),
+                                    "background_path": visual_asset.get("path"),
+                                    "pages": [
+                                        {"page_index": index, "image_path": str(path), "background_path": visual_asset.get("path")}
+                                        for index, path in enumerate(image_paths)
+                                    ],
+                                    "ocr": visual_ocr,
+                                    "review": visual_review,
+                                    "generation": visual_generation_attempts,
+                                },
                             )
-                            transition_visual_job(
-                                self.conn, job_id=job_id,
-                                expected_status="queued", new_status="running",
+                            version_status = (
+                                "rendered" if visual_ocr.get("status") == "passed"
+                                else "review_required"
                             )
-                            transition_visual_job(
-                                self.conn, job_id=job_id,
-                                expected_status="running", new_status="succeeded",
-                                output_data={"image_path": str(image_path)},
+                            self.conn.execute(
+                                "UPDATE visual_design_versions SET status=? WHERE id=?",
+                                (version_status, visual_version_id),
                             )
+                            for page_index, image_path in enumerate(image_paths):
+                                job_id = create_visual_page_job(
+                                    self.conn, content_id=content_id,
+                                    visual_version_id=visual_version_id,
+                                    page_index=page_index, job_type="generate",
+                                    input_data={"platform": platform.value},
+                                )
+                                transition_visual_job(
+                                    self.conn, job_id=job_id,
+                                    expected_status="queued", new_status="running",
+                                )
+                                transition_visual_job(
+                                    self.conn, job_id=job_id,
+                                    expected_status="running", new_status="succeeded",
+                                    output_data={"image_path": str(image_path)},
+                                )
                     except Exception:
                         logger.exception(
                             "视觉版本留痕写入失败 content=%s platform=%s",
