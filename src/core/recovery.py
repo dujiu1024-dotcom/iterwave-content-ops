@@ -157,7 +157,7 @@ class RecoveryManager:
 
         from .state_machine import RoundStateMachine
 
-        sm = RoundStateMachine(self.conn)
+        sm = RoundStateMachine(self.conn, cfg=self.cfg)
         migrated: list[int] = []
         for row in rows:
             round_id = row["id"]
