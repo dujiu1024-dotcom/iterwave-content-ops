@@ -923,7 +923,11 @@ def _build_app() -> FastAPI:
                     (request.headers.get("authorization") or "").lower().startswith("bearer ")
                 )
                 limited_before = has_token_header and auth.is_rate_limited(client_ip)
-                if not auth.is_authenticated(cookie_token, request.headers, ip=client_ip):
+                # PBKDF2-HMAC-SHA256 是 CPU 密集型同步计算，不能在 ASGI 事件循环内执行。
+                authenticated = await asyncio.to_thread(
+                    auth.is_authenticated, cookie_token, request.headers, ip=client_ip,
+                )
+                if not authenticated:
                     return JSONResponse(
                         {
                             "detail": "认证尝试次数过多，请 10 分钟后再试" if limited_before else "需要登录",
