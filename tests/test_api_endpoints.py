@@ -124,21 +124,18 @@ def test_adopt_gaps_rejects_empty(client):
     assert tc.post("/api/plan_adjustments/adopt", json={"dimensions": []}).status_code == 400
 
 
-def test_adopt_gaps_writes_plan_and_changes_signature(client):
+def test_adopt_gaps_requires_existing_approved_subplan(client):
     tc, conn, _ = client
-    pvm = PlanVersionManager(api_main._g_ctx["cfg"], conn)
-    before = pvm.load_plan()[1]
-
+    before = conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective'"
+    ).fetchone()
     r = tc.post("/api/plan_adjustments/adopt", json={"dimensions": ["政策解读", "家庭场景"]})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["adopted_dimensions"] == ["政策解读", "家庭场景"]
-    assert body["dimension_allocation"]["政策解读"] == 1
-    assert body["signature"] != before
-
-    # 签名已持久化到 signature_history（R18 审计追溯）
-    rows = conn.execute("SELECT COUNT(*) FROM signature_history").fetchone()[0]
-    assert rows >= 1
+    assert r.status_code == 409
+    assert "已审核的平台子计划" in r.text
+    after = conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective'"
+    ).fetchone()
+    assert (before[0] if before else None) == (after[0] if after else None)
 
 
 # ---------------------------------------------------------------- R-3 热点入库
