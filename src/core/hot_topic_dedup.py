@@ -125,25 +125,28 @@ def mark_cross_platform(
     return sum(1 for v in assign.values() if v)
 
 
-def prune(conn, *, retention_days: int, max_rows: int) -> int:
-    """规则 3：按保留天数与总量上限清理。返回删除行数。"""
-    cutoff = (datetime.now() - timedelta(days=retention_days)).isoformat(timespec="seconds")
-    deleted = conn.execute(
-        "DELETE FROM hot_topics WHERE COALESCE(last_seen_at, discovered_at) < ?", (cutoff,)
-    ).rowcount
-    total = conn.execute("SELECT COUNT(*) FROM hot_topics").fetchone()[0]
-    if total > max_rows:
-        deleted += conn.execute(
-            "DELETE FROM hot_topics WHERE id IN (SELECT id FROM hot_topics "
-            "ORDER BY COALESCE(last_seen_at, discovered_at) ASC LIMIT ?)",
-            (total - max_rows,),
+def prune(conn, *, retention_days: int, max_rows: int, cfg=None) -> int:
+    """规则 3：按账号组业务时区、保留天数与总量上限原子清理。"""
+    from .timezone import business_now
+
+    cutoff = (business_now(cfg) - timedelta(days=retention_days)).isoformat(timespec="seconds")
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        deleted = conn.execute(
+            "DELETE FROM hot_topics WHERE COALESCE(last_seen_at, discovered_at) < ?", (cutoff,)
         ).rowcount
-    # 主条目被删后，残留的 duplicate_of 指针清空（下一轮重新判定）
-    conn.execute(
-        "UPDATE hot_topics SET duplicate_of = NULL WHERE duplicate_of IS NOT NULL "
-        "AND duplicate_of NOT IN (SELECT id FROM hot_topics)"
-    )
-    conn.commit()
+        total = conn.execute("SELECT COUNT(*) FROM hot_topics").fetchone()[0]
+        if total > max_rows:
+            deleted += conn.execute(
+                "DELETE FROM hot_topics WHERE id IN (SELECT id FROM hot_topics "
+                "ORDER BY COALESCE(last_seen_at, discovered_at) ASC LIMIT ?)",
+                (total - max_rows,),
+            ).rowcount
+        # 主条目被删后，残留的 duplicate_of 指针清空（下一轮重新判定）
+        conn.execute(
+            "UPDATE hot_topics SET duplicate_of = NULL WHERE duplicate_of IS NOT NULL "
+            "AND duplicate_of NOT IN (SELECT id FROM hot_topics)"
+        )
     if deleted:
         logger.info("🧹 热点保留清理：删除 %d 行（保留 %d 天，上限 %d 行）", deleted, retention_days, max_rows)
     return deleted
