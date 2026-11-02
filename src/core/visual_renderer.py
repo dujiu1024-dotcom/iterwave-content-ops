@@ -280,11 +280,19 @@ _LAYOUT_JS = """() => {
     if (w > 3 && h > 3) overlaps.push({a:a.name,b:b.name,area:Math.round(w*h)});
   }
   const outOfBounds = boxes.filter(b => b.left < 0 || b.top < 0 || b.right > rootRect.width+1 || b.bottom > rootRect.height+1);
+  const bodyEl = root.querySelector('.body');
+  if (bodyEl) {
+    const br = bodyEl.getBoundingClientRect();
+    for (const el of bodyEl.querySelectorAll('.visual-component')) {
+      const r = el.getBoundingClientRect();
+      if (r.bottom > br.bottom + 0.5 || r.right > br.right + 0.5) outOfBounds.push({name: 'clipped-component'});
+    }
+  }
   const overflowNodes = [...root.querySelectorAll('*')].filter(el => {
     const style = getComputedStyle(el);
     const clipsX = ['hidden','clip','auto','scroll'].includes(style.overflowX);
     const clipsY = ['hidden','clip','auto','scroll'].includes(style.overflowY);
-    return (clipsX && el.scrollWidth > el.clientWidth + 2) || (clipsY && el.scrollHeight > el.clientHeight + 2);
+    return (clipsX && el.scrollWidth > el.clientWidth) || (clipsY && el.scrollHeight > el.clientHeight);
   }).map(el => el.className || el.tagName.toLowerCase());
   const regions = [...root.querySelectorAll('""" + _OCR_REGION_SELECTOR + """')]
     .filter(el => el.innerText.trim()).map(el => {
@@ -311,7 +319,7 @@ _LAYOUT_JS = """() => {
               h: r.height - pt - pb, font_size: parseFloat(cs.fontSize), color: cs.color};
     });
   return {overlaps, outOfBounds, overflowNodes, regions, numbers,
-          rootOverflow: root.scrollWidth > root.clientWidth + 1 || root.scrollHeight > root.clientHeight + 1};
+          rootOverflow: root.scrollWidth > root.clientWidth || root.scrollHeight > root.clientHeight};
 }"""
 
 
