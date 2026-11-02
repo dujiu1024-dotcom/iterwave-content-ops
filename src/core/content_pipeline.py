@@ -843,23 +843,36 @@ def make_card_set(
     platform: Platform = Platform.XHS,
     footer: str = "",
     max_pages: int = 9,
+    theme: str = "knowledge_infographic",
+    renderer: str = "chromium_v2",
+    background_path: Optional[Path] = None,
+    brand_palette: Optional[dict] = None,
+    font_family: str = "Noto Sans CJK SC",
 ) -> list[Path]:
-    """生成一组图文卡片：1 张封面 + N 张正文分页（首页图 + 内容图，最多 max_pages 张）。
-
-    之前每篇只出 1 张标题封面，正文全在文案里，发出来是「只有文没有图」的观感。
-    """
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    body_font = _load_font(52)
-    lines = _wrap_cjk(_strip_emoji(body), body_font, CARD_SIZE[0] - 192)
-    per_page = 12
-    pages = [lines[i:i + per_page] for i in range(0, len(lines), per_page)] or [[]]
-    if len(pages) > max_pages - 1:
-        pages = pages[:max_pages - 1]
-        pages[-1] = pages[-1][-11:] + ["…（更多内容见正文）"]
-
-    total = len(pages) + 1
-    paths = [make_card(title, subtitle, output_dir, platform, footer, page_text=f"1/{total}")]
-    for idx, page_lines in enumerate(pages, start=2):
-        paths.append(_render_body_page(page_lines, output_dir, platform, footer, f"{idx}/{total}"))
-    return paths
+    """Render a card set. Chromium is the production default; legacy is explicit only."""
+    if renderer == "legacy_v1":
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        body_font = _load_font(52)
+        lines = _wrap_cjk(_strip_emoji(body), body_font, CARD_SIZE[0] - 192)
+        per_page = 12
+        pages = [lines[i:i + per_page] for i in range(0, len(lines), per_page)] or [[]]
+        if len(pages) + 1 > max_pages:
+            raise ValueError(
+                f"legacy_v1 正文需要 {len(pages) + 1} 页，超过上限 {max_pages} 页；"
+                "已阻止旧逻辑静默截断"
+            )
+        total = len(pages) + 1
+        paths = [make_card(title, subtitle, output_dir, platform, footer, page_text=f"1/{total}")]
+        for idx, page_lines in enumerate(pages, start=2):
+            paths.append(_render_body_page(page_lines, output_dir, platform, footer, f"{idx}/{total}"))
+        return paths
+    if renderer != "chromium_v2":
+        raise ValueError(f"不支持的视觉渲染器: {renderer}")
+    from .visual_renderer import render_card_set
+    return render_card_set(
+        title=title, subtitle=subtitle, body=body, output_dir=Path(output_dir),
+        platform=platform, footer=footer, max_pages=max_pages, theme=theme,
+        background_path=background_path, brand_palette=brand_palette,
+        font_family=font_family,
+    )
