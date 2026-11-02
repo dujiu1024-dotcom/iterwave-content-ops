@@ -19,4 +19,7 @@ def test_mean_confidence_interval_is_missing_for_single_sample():
 
 
 def test_mean_confidence_interval_collapses_for_constant_values():
-    assert PlatformInsightsEngine._mean_ci95([0.2, 0.2, 0.2]) == (0.2, 0.2)
+    interval = PlatformInsightsEngine._mean_ci95([0.2, 0.2, 0.2])
+    assert interval is not None
+    assert interval[0] == pytest.approx(0.2)
+    assert interval[1] == pytest.approx(0.2)
