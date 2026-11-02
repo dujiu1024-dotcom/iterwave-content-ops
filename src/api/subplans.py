@@ -100,7 +100,11 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
             raise HTTPException(422, "expected_version_no 必须是正整数")
         if str(expected).strip() != str(value) or value < 1:
             raise HTTPException(422, "expected_version_no 必须是正整数")
-        if value != int(version["version_no"]):
+        latest = get_runtime()["conn"].execute(
+            "SELECT MAX(version_no) FROM sub_plan_versions WHERE sub_plan_id=?",
+            (version["sub_plan_id"],),
+        ).fetchone()[0]
+        if value != int(version["version_no"]) or value != int(latest or 0):
             raise HTTPException(409, "子计划版本已变化，请刷新后重试")
 
     def _create_revision(sub_plan_id: str, base_version_id: int | None,
