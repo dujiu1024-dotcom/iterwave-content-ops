@@ -245,7 +245,7 @@ class SpiralEngine:
                     target_count=target_count,
                     sample_count=sample_count,
                     avg_interaction_rate=avg_ir,
-                    confidence="high",
+                    confidence="medium",
                 ))
 
         return gaps
