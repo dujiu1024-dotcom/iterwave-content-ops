@@ -341,41 +341,50 @@ class GlobalTaskWorker:
         return reconciled
 
     @staticmethod
+    @staticmethod
     def _mark_content_plan_failed(conn, round_id: int, cfg=None) -> None:
-        """生产异常时将关联计划标记失败，允许用户修复后重试。"""
+        """原子标记关联计划失败；拒绝覆盖已取消、已完成等终态计划。"""
         if conn is None or not callable(getattr(conn, "execute", None)):
             return
+        from src.core.timezone import business_now
+        now = business_now(cfg).isoformat(timespec="seconds")
         transaction = conn if callable(getattr(conn, "__enter__", None)) else nullcontext()
         with transaction:
             conn.execute("BEGIN IMMEDIATE")
             relation = conn.execute(
-                "SELECT plan_id FROM content_plan_rounds WHERE round_id=?", (round_id,),
+                "SELECT r.plan_id FROM content_plan_rounds r "
+                "JOIN content_plans p ON p.id=r.plan_id "
+                "WHERE r.round_id=? AND p.status='generating'",
+                (round_id,),
             ).fetchone()
             if relation is None:
                 return
-            from src.core.timezone import business_now
             conn.execute(
                 "UPDATE content_plans SET status='failed',version=version+1,updated_at=? "
                 "WHERE id=? AND status='generating'",
-                (business_now(cfg).isoformat(timespec="seconds"), relation["plan_id"]),
+                (now, relation["plan_id"]),
             )
 
     @staticmethod
     def _complete_content_plan(conn, round_id: int, report: Any, cfg=None) -> None:
-        """生产完成后把轮次产出的草稿关联回计划，并推进计划状态。"""
+        """原子关联轮次草稿并推进计划；迟到结果不得覆盖已终止计划。"""
         if conn is None or not callable(getattr(conn, "execute", None)):
             return
+        from src.core.timezone import business_now
+        now = business_now(cfg).isoformat(timespec="seconds")
         transaction = conn if callable(getattr(conn, "__enter__", None)) else nullcontext()
         with transaction:
             conn.execute("BEGIN IMMEDIATE")
             relation = conn.execute(
-                "SELECT plan_id FROM content_plan_rounds WHERE round_id=?", (round_id,),
+                "SELECT r.plan_id FROM content_plan_rounds r "
+                "JOIN content_plans p ON p.id=r.plan_id "
+                "WHERE r.round_id=? AND p.status='generating'",
+                (round_id,),
             ).fetchone()
+            # 计划已取消/失败/完成时，迟到的 Worker 结果不得再挂接草稿或改写计划。
             if relation is None:
                 return
             plan_id = relation["plan_id"]
-            from src.core.timezone import business_now
-            now = business_now(cfg).isoformat(timespec="seconds")
             drafts = conn.execute(
                 "SELECT d.id FROM drafts d JOIN contents c ON c.id=d.content_id WHERE c.round_id=?",
                 (round_id,),
