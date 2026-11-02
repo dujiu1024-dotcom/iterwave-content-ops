@@ -64,6 +64,9 @@ def test_run_rejects_round_not_in_created_state(tmp_path, monkeypatch):
         "CREATE TABLE spiral_rounds (id INTEGER PRIMARY KEY, status TEXT NOT NULL)"
     )
     conn.execute(
+        "CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT, updated_by TEXT)"
+    )
+    conn.execute(
         "INSERT INTO spiral_rounds(id, status) VALUES(7, 'awaiting_publish')"
     )
     monkeypatch.setattr(api_main, "_task_queue", queue)
