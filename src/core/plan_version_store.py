@@ -211,8 +211,6 @@ class PlanVersionStore:
             raise PlanVersionError("关联的主计划版本不存在")
         if master["status"] != "effective":
             raise PlanVersionError("新子计划版本必须关联当前生效的主计划版本")
-        if int(identity["master_plan_version_id"]) != int(master_plan_version_id):
-            raise PlanVersionError("子计划所属主计划版本不匹配")
         if based_on_version_id is not None:
             base = self.conn.execute(
                 "SELECT sub_plan_id FROM sub_plan_versions WHERE id=?", (based_on_version_id,)
@@ -279,8 +277,12 @@ class PlanVersionStore:
             ).fetchone()
             if identity is None:
                 raise PlanVersionError("子计划身份不存在")
-            if int(row["master_plan_version_id"]) != int(identity["master_plan_version_id"]):
-                raise PlanVersionError("子计划版本与所属主计划版本不一致")
+            master = self.conn.execute(
+                "SELECT status FROM master_plan_versions WHERE id=?",
+                (row["master_plan_version_id"],),
+            ).fetchone()
+            if master is None or master["status"] != "effective":
+                raise PlanVersionError("子计划版本只能在其主计划版本生效期间审核")
             self.conn.execute(
                 """UPDATE sub_plan_versions SET status='archived',superseded_at=?
                    WHERE sub_plan_id=? AND status='effective'""", (now, row["sub_plan_id"])
