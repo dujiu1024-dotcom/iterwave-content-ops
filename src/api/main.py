@@ -1558,7 +1558,9 @@ def _unscheduled_drafts(conn) -> list[dict]:
     rows = conn.execute(
         "SELECT d.id, d.platform, d.status, c.title, c.round_id "
         "FROM drafts d JOIN contents c ON d.content_id = c.id "
+        "LEFT JOIN draft_save_verifications v ON v.draft_id=d.id "
         "WHERE d.scheduled_publish_at IS NULL AND d.status IN ('draft_pending','draft_saved') "
+        "AND COALESCE(v.status, '') != 'pending_verify' "
         "ORDER BY d.created_at DESC LIMIT 50"
     ).fetchall()
     return [dict(r) for r in rows]
@@ -4683,8 +4685,10 @@ def _register_routes(app: FastAPI) -> None:
         # 附带 drafts 列表
         drafts = conn.execute(
             "SELECT d.*, c.review_rejected AS review_rejected, "
-            "c.review_rejection_reason AS review_rejection_reason "
-            "FROM drafts d JOIN contents c ON c.id = d.content_id WHERE c.round_id = ?",
+            "c.review_rejection_reason AS review_rejection_reason, "
+            "v.status AS save_verification_status "
+            "FROM drafts d JOIN contents c ON c.id = d.content_id "
+            "LEFT JOIN draft_save_verifications v ON v.draft_id=d.id WHERE c.round_id = ?",
             (round_id,),
         ).fetchall()
         result = dict(row)
@@ -4694,6 +4698,9 @@ def _register_routes(app: FastAPI) -> None:
         round_drafts = []
         for draft in drafts:
             item = dict(draft)
+            if item.get("save_verification_status") == "pending_verify":
+                item["status"] = "pending_verify"
+            item.pop("save_verification_status", None)
             item["review_rejected"] = bool(item.get("review_rejected"))
             round_drafts.append(item)
         result["drafts"] = round_drafts
@@ -4978,7 +4985,9 @@ def _register_routes(app: FastAPI) -> None:
                 # cancelled 轮次里仍可恢复存平台的 draft_pending 记录。
                 pending = conn.execute(
                     "SELECT d.id FROM drafts d JOIN contents c ON c.id = d.content_id "
-                    "WHERE c.round_id = ? AND d.status = 'draft_pending'",
+                    "WHERE c.round_id = ? AND d.status = 'draft_pending' "
+                    "AND NOT EXISTS (SELECT 1 FROM draft_save_verifications v "
+                    "                WHERE v.draft_id=d.id AND v.status='pending_verify')",
                     (round_id,),
                 ).fetchall()
                 for item in pending:
