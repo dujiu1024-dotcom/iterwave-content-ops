@@ -341,5 +341,5 @@ def restore_backup(backup_path: Path | str, db_path: Path | str, data_dir: Path 
                 shutil.copy2(config_rollback, config_path)
             else:
                 config_path.unlink(missing_ok=True)
-            raise BackupError(f"恢复未完成，已尝试回滚：{exc}") from exc
+            raise BackupError(f"恢复未完成，已尝试回滚（{type(exc).__name__}）") from exc
     return {"database": str(db_path), "media_dir": str(media_dir), "rollback_db": str(db_rollback)}

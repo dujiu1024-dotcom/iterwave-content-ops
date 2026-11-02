@@ -45,6 +45,13 @@ class QueuedTask:
     result: dict[str, Any] | None
     error_code: str | None
     error_message: str | None
+    retry_of_task_id: str | None = None
+    retry_confirmed_by: str | None = None
+    retry_confirmation_note: str | None = None
+    resolution_action: str | None = None
+    resolution_actor: str | None = None
+    resolution_note: str | None = None
+    resolution_at: str | None = None
 
 
 class TaskQueueError(RuntimeError):
@@ -101,7 +108,10 @@ class GlobalTaskQueue:
                     lease_expires_at TEXT,
                     result_json TEXT,
                     error_code TEXT,
-                    error_message TEXT
+                    error_message TEXT,
+                    retry_of_task_id TEXT,
+                    retry_confirmed_by TEXT,
+                    retry_confirmation_note TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_global_task_queue_tenant
                     ON global_task_queue(tenant_id, created_at DESC);
@@ -112,6 +122,13 @@ class GlobalTaskQueue:
                     singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
                     owner TEXT NOT NULL,
                     expires_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS global_task_actions (
+                    task_id TEXT PRIMARY KEY REFERENCES global_task_queue(task_id) ON DELETE CASCADE,
+                    action TEXT NOT NULL CHECK(action IN ('handled','ignored')),
+                    actor TEXT NOT NULL,
+                    note TEXT NOT NULL,
+                    acted_at TEXT NOT NULL
                 );
                 """
             )
@@ -129,6 +146,16 @@ class GlobalTaskQueue:
                     )
                 if "available_at" not in columns:
                     conn.execute("ALTER TABLE global_task_queue ADD COLUMN available_at TEXT")
+                if "retry_of_task_id" not in columns:
+                    conn.execute("ALTER TABLE global_task_queue ADD COLUMN retry_of_task_id TEXT")
+                if "retry_confirmed_by" not in columns:
+                    conn.execute("ALTER TABLE global_task_queue ADD COLUMN retry_confirmed_by TEXT")
+                if "retry_confirmation_note" not in columns:
+                    conn.execute("ALTER TABLE global_task_queue ADD COLUMN retry_confirmation_note TEXT")
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_global_task_retry_parent "
+                    "ON global_task_queue(retry_of_task_id) WHERE retry_of_task_id IS NOT NULL"
+                )
                 conn.execute(
                     "UPDATE global_task_queue SET available_at=created_at WHERE available_at IS NULL"
                 )
@@ -172,6 +199,13 @@ class GlobalTaskQueue:
             started_at=row["started_at"], finished_at=row["finished_at"],
             attempts=int(row["attempts"]), result=result,
             error_code=row["error_code"], error_message=row["error_message"],
+            retry_of_task_id=row["retry_of_task_id"],
+            retry_confirmed_by=row["retry_confirmed_by"],
+            retry_confirmation_note=row["retry_confirmation_note"],
+            resolution_action=row["resolution_action"] if "resolution_action" in row.keys() else None,
+            resolution_actor=row["resolution_actor"] if "resolution_actor" in row.keys() else None,
+            resolution_note=row["resolution_note"] if "resolution_note" in row.keys() else None,
+            resolution_at=row["resolution_at"] if "resolution_at" in row.keys() else None,
         )
 
     def enqueue(
@@ -490,8 +524,135 @@ class GlobalTaskQueue:
         conn = self._connect()
         try:
             return self._decode(conn.execute(
-                "SELECT * FROM global_task_queue WHERE task_id=?", (task_id,)
+                "SELECT q.*, a.action AS resolution_action, a.actor AS resolution_actor, "
+                "a.note AS resolution_note, a.acted_at AS resolution_at "
+                "FROM global_task_queue q LEFT JOIN global_task_actions a ON a.task_id=q.task_id "
+                "WHERE q.task_id=?", (task_id,)
             ).fetchone())
+        finally:
+            conn.close()
+
+    def resolve_failed_task(
+        self, task_id: str, *, action: str, actor: str, note: str,
+    ) -> tuple[dict[str, str], bool]:
+        """Close a failed-task todo without rewriting the immutable execution result."""
+        if action not in {"handled", "ignored"}:
+            raise ValueError("action 必须是 handled 或 ignored")
+        actor = str(actor or "").strip()
+        note = str(note or "").strip()
+        if not actor or len(actor) > 100:
+            raise ValueError("actor 无效")
+        if len(note) < 8 or len(note) > 500:
+            raise ValueError("note 长度必须为 8 到 500 个字符")
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            task = conn.execute(
+                "SELECT status FROM global_task_queue WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if task is None:
+                raise TaskQueueError("任务不存在")
+            if task["status"] not in ("failed", "interrupted"):
+                raise TaskQueueError("只有 failed/interrupted 任务可以处理")
+            existing = conn.execute(
+                "SELECT action, actor, note, acted_at FROM global_task_actions WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            if existing is not None:
+                conn.commit()
+                if existing["action"] != action:
+                    raise TaskQueueError("该任务已完成其他处理，不允许反向修改")
+                return dict(existing), False
+            acted_at = _stamp()
+            conn.execute(
+                "INSERT INTO global_task_actions(task_id,action,actor,note,acted_at) VALUES(?,?,?,?,?)",
+                (task_id, action, actor, note, acted_at),
+            )
+            conn.commit()
+            return {"action": action, "actor": actor, "note": note, "acted_at": acted_at}, True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def retry_after_manual_verification(
+        self, task_id: str, *, confirmed_by: str, confirmation_note: str,
+        confirmed_not_executed: bool,
+    ) -> tuple[QueuedTask, bool]:
+        """Create one retry child only after an operator confirms no platform side effect occurred.
+
+        The original row is immutable history. The child copies its tenant, task type,
+        aggregate and exact payload snapshot; a unique parent link makes the request idempotent.
+        """
+        actor = str(confirmed_by or "").strip()
+        note = str(confirmation_note or "").strip()
+        if not confirmed_not_executed:
+            raise ValueError("必须明确确认平台侧未执行，状态不明时禁止恢复")
+        if not actor or len(actor) > 100:
+            raise ValueError("confirmed_by 无效")
+        if len(note) < 8 or len(note) > 500:
+            raise ValueError("confirmation_note 长度必须为 8 到 500 个字符")
+
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            parent = conn.execute(
+                "SELECT * FROM global_task_queue WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if parent is None:
+                raise TaskQueueError("原任务不存在")
+            if parent["status"] not in ("failed", "interrupted"):
+                raise TaskQueueError("只有 failed/interrupted 任务可以人工恢复")
+            resolved = conn.execute(
+                "SELECT 1 FROM global_task_actions WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if resolved is not None:
+                raise TaskQueueError("该任务已被标记处理或忽略，不能再次恢复")
+            existing = conn.execute(
+                "SELECT * FROM global_task_queue WHERE retry_of_task_id=?", (task_id,)
+            ).fetchone()
+            if existing is not None:
+                conn.commit()
+                task = self._decode(existing)
+                assert task is not None
+                return task, False
+
+            if parent["aggregate_id"] is not None:
+                active = conn.execute(
+                    "SELECT task_id FROM global_task_queue WHERE tenant_id=? AND task_type=? "
+                    "AND aggregate_id=? AND status IN ('queued','running') LIMIT 1",
+                    (parent["tenant_id"], parent["task_type"], parent["aggregate_id"]),
+                ).fetchone()
+                if active is not None:
+                    raise TaskQueueError("相同业务对象已有活动任务，拒绝重复恢复")
+
+            now = _stamp()
+            queue_order = int(conn.execute(
+                "SELECT COALESCE(MAX(queue_order), 0) + 1 FROM global_task_queue"
+            ).fetchone()[0])
+            retry_id = uuid.uuid4().hex
+            conn.execute(
+                "INSERT INTO global_task_queue("
+                "queue_order,task_id,task_type,tenant_id,aggregate_id,payload_json,available_at,"
+                "status,created_at,max_attempts,retry_of_task_id,retry_confirmed_by,"
+                "retry_confirmation_note) VALUES(?,?,?,?,?,?,?,'queued',?,1,?,?,?)",
+                (
+                    queue_order, retry_id, parent["task_type"], parent["tenant_id"],
+                    parent["aggregate_id"], parent["payload_json"], now, now,
+                    task_id, actor, note,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM global_task_queue WHERE task_id=?", (retry_id,)
+            ).fetchone()
+            conn.commit()
+            task = self._decode(row)
+            assert task is not None
+            return task, True
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -511,7 +672,9 @@ class GlobalTaskQueue:
     def list_page(
         self, *, page: int = 1, page_size: int = 20,
         scope: str = "history", tenant_id: str | None = None,
-        task_type: str | None = None,
+        task_type: str | None = None, error_keyword: str | None = None,
+        date_from: str | None = None, date_to: str | None = None,
+        unresolved_only: bool = False,
     ) -> tuple[list[QueuedTask], int]:
         """Return a stable, database-paginated slice of active or historical tasks."""
         page = max(1, int(page))
@@ -524,25 +687,46 @@ class GlobalTaskQueue:
             else ("succeeded", "failed", "cancelled", "interrupted")
         )
         placeholders = ",".join("?" for _ in statuses)
-        where = f"status IN ({placeholders})"
+        where = f"q.status IN ({placeholders})"
         params: list[object] = list(statuses)
+        if unresolved_only:
+            if scope != "failed":
+                raise ValueError("unresolved_only 仅适用于 failed scope")
+            where += " AND NOT EXISTS (SELECT 1 FROM global_task_actions a WHERE a.task_id=q.task_id)"
+
         if tenant_id is not None:
-            where += " AND tenant_id=?"
+            where += " AND q.tenant_id=?"
             params.append(tenant_id)
         if task_type is not None:
             if not task_type or len(task_type) > 80:
                 raise ValueError("task_type is invalid")
-            where += " AND task_type=?"
+            where += " AND q.task_type=?"
             params.append(task_type)
+        if error_keyword is not None:
+            keyword = error_keyword.strip()
+            if not keyword or len(keyword) > 120:
+                raise ValueError("error_keyword is invalid")
+            where += " AND COALESCE(q.error_message, '') LIKE ?"
+            params.append(f"%{keyword}%")
+        if date_from is not None:
+            where += " AND substr(q.created_at, 1, 10) >= ?"
+            params.append(date_from)
+        if date_to is not None:
+            where += " AND substr(q.created_at, 1, 10) <= ?"
+            params.append(date_to)
+        if date_from and date_to and date_from > date_to:
+            raise ValueError("date_from cannot be later than date_to")
         offset = (page - 1) * page_size
         conn = self._connect()
         try:
             total_row = conn.execute(
-                f"SELECT COUNT(*) AS n FROM global_task_queue WHERE {where}", params
+                f"SELECT COUNT(*) AS n FROM global_task_queue q WHERE {where}", params
             ).fetchone()
             rows = conn.execute(
-                f"SELECT * FROM global_task_queue WHERE {where} "
-                f"ORDER BY queue_order {'ASC' if scope == 'active' else 'DESC'} LIMIT ? OFFSET ?",
+                f"SELECT q.*, a.action AS resolution_action, a.actor AS resolution_actor, "
+                f"a.note AS resolution_note, a.acted_at AS resolution_at "
+                f"FROM global_task_queue q LEFT JOIN global_task_actions a ON a.task_id=q.task_id "
+                f"WHERE {where} ORDER BY q.queue_order {'ASC' if scope == 'active' else 'DESC'} LIMIT ? OFFSET ?",
                 (*params, page_size, offset),
             ).fetchall()
             tasks: list[QueuedTask] = []

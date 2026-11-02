@@ -22,7 +22,7 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "media", label: "图片素材库" },
   { key: "sources", label: "外部参考" },
   { key: "voice", label: "个人观点与画像" },
-  { key: "industry", label: "行业模板" },
+  { key: "industry", label: "行业预设" },
   { key: "templates", label: "内容模板" },
   { key: "mapping", label: "知识库来源" },
 ];
@@ -36,15 +36,15 @@ export default function Assets() {
   const [config, setConfig] = useState<SystemConfigView | null>(null);
   const [hot, setHot] = useState<HotTopicItem[]>([]);
   const [assets, setAssets] = useState<Record<AssetType, AssetItem[]>>({ reference: [], voice: [], template: [] });
-  const [assetTotals, setAssetTotals] = useState<Record<AssetType, number>>({ reference: 0, voice: 0, template: 0 });
   const [assetPages, setAssetPages] = useState<Record<AssetType, number>>({ reference: 1, voice: 1, template: 1 });
-  const [referencePage, setReferencePage] = useState(1);
-  const [voicePage, setVoicePage] = useState(1);
-  const [templatePage, setTemplatePage] = useState(1);
-  const assetPageSize = 12;
+  const [assetTotals, setAssetTotals] = useState<Record<AssetType, number>>({ reference: 0, voice: 0, template: 0 });
+  const [assetPageCounts, setAssetPageCounts] = useState<Record<AssetType, number>>({ reference: 1, voice: 1, template: 1 });
+  const [editingTemplate, setEditingTemplate] = useState<AssetItem | null>(null);
+  const [viewingTemplateId, setViewingTemplateId] = useState<number | null>(null);
+  const [templateVersions, setTemplateVersions] = useState<Array<{ version: number; title: string; body: string | null; created_at: string | null }>>([]);
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [editingTemplate, setEditingTemplate] = useState<AssetItem | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -58,9 +58,9 @@ export default function Assets() {
         api.kbInspect(),
         api.config(),
         api.hotTopics(),
-        api.assets("reference", referencePage, assetPageSize),
-        api.assets("voice", voicePage, assetPageSize),
-        api.assets("template", templatePage, assetPageSize),
+        api.assetsPage("reference", 1, 20),
+        api.assetsPage("voice", 1, 20),
+        api.assetsPage("template", 1, 20, true),
       ]);
       // 成功的逐个 set；失败的汇总成 error 提示
       const failures: string[] = [];
@@ -80,6 +80,17 @@ export default function Assets() {
         reference: refs?.items ?? [],
         voice: voices?.items ?? [],
         template: templates?.items ?? [],
+      });
+      setAssetPages({ reference: 1, voice: 1, template: 1 });
+      setAssetTotals({
+        reference: refs?.total ?? 0,
+        voice: voices?.total ?? 0,
+        template: templates?.total ?? 0,
+      });
+      setAssetPageCounts({
+        reference: refs?.pages ?? 1,
+        voice: voices?.pages ?? 1,
+        template: templates?.pages ?? 1,
       });
 
       setAssetTotals({
@@ -105,6 +116,18 @@ export default function Assets() {
 
   useEffect(() => { void load(); }, [load]);
 
+  const loadAssetPage = async (type: AssetType, page: number) => {
+    try {
+      const result = await api.assetsPage(type, page, 20, type === "template");
+      setAssets((current) => ({ ...current, [type]: result.items }));
+      setAssetPages((current) => ({ ...current, [type]: result.page }));
+      setAssetTotals((current) => ({ ...current, [type]: result.total }));
+      setAssetPageCounts((current) => ({ ...current, [type]: result.pages }));
+    } catch (e) {
+      showToast(`资产列表加载失败：${e instanceof Error ? e.message : String(e)}`, "error");
+    }
+  };
+
   const addAsset = async (type: AssetType, data: { title: string; body?: string; source_url?: string }) => {
     try {
       await withPending(`asset:${type}`, () => api.createAsset({ asset_type: type, ...data }));
@@ -114,6 +137,27 @@ export default function Assets() {
     } catch (e: any) {
       showToast(`保存失败: ${e?.message ?? e}`, "error");
       return false;
+    }
+  };
+
+  const openTemplateVersions = async (id: number) => {
+    try {
+      const result = await api.assetVersions(id);
+      setTemplateVersions(result.items);
+      setViewingTemplateId(id);
+    } catch (e) {
+      showToast(`模板版本历史加载失败：${e instanceof Error ? e.message : String(e)}`, "error");
+    }
+  };
+
+  const restoreTemplateVersion = async (id: number, version: number) => {
+    try {
+      await api.restoreAssetVersion(id, version);
+      showToast(`已从 v${version} 恢复；系统创建了新的版本记录`, "success");
+      setViewingTemplateId(null);
+      await load();
+    } catch (e) {
+      showToast(`模板版本恢复失败：${e instanceof Error ? e.message : String(e)}`, "error");
     }
   };
 
@@ -359,7 +403,13 @@ export default function Assets() {
       )}
 
       {tab === "industry" && (
-        <IndustryPresetPicker onApplied={load} />
+        <>
+          <div className="panel">
+            <div className="panel-title">行业预设</div>
+            <div className="panel-sub">选择适合当前账号组的行业配置模板；应用后会更新目标与策略配置。</div>
+          </div>
+          <IndustryPresetPicker onApplied={load} />
+        </>
       )}
 
       {tab === "templates" && (
@@ -371,7 +421,7 @@ export default function Assets() {
             </div>
             <div className="template-howto-steps">
               <span><b>1</b> 新建或添加示例模板</span>
-              <span><b>2</b> 在下方模板卡片点击“编辑”修改结构</span>
+              <span><b>2</b> 在下方模板卡片点击“编辑模板”修改结构</span>
               <span><b>3</b> 到“内容生产 → 生产线”选择模板</span>
               <span><b>4</b> 本轮 AI 会参考结构生成，之后修改只影响新生产</span>
             </div>
@@ -381,6 +431,7 @@ export default function Assets() {
               <button className="btn sm" type="button" onClick={() => navigate("production")}>去内容生产选择模板 →</button>
             </div>
           </div>
+          {editingTemplate && <TemplateEditor item={editingTemplate} onCancel={() => setEditingTemplate(null)} onSaved={async () => { setEditingTemplate(null); await load(); }} />}
           <AssetForm
             type="template"
             titleLabel="模板"
@@ -388,11 +439,33 @@ export default function Assets() {
             pending={isPending("asset:template")}
             onSubmit={addAsset}
           />
-          <div className="note" style={{ marginBottom: 12 }}>
-            内容模板是 AI 写作的结构骨架，不是完整文案。例如：痛点引入 → 个人经历 → 方法步骤 → 证据 → 局限 → 总结。
-            保存后，在「内容生产 → 生产线 → 内容结构模板」中选择；所选结构会注入本轮生成提示词。可随时编辑，修改只影响后续生产。
-          </div>
-          {editingTemplate && <TemplateEditor item={editingTemplate} onCancel={() => setEditingTemplate(null)} onSaved={async () => { setEditingTemplate(null); await load(); }} />}
+          {viewingTemplateId !== null && (
+            <div className="panel">
+              <div className="panel-head">
+                <div>
+                  <div className="panel-title">模板版本历史</div>
+                  <div className="panel-sub">恢复历史版本会创建一个新的版本号，不会覆盖已有历史。</div>
+                </div>
+                <button className="btn xs" type="button" onClick={() => setViewingTemplateId(null)}>关闭</button>
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead><tr><th>版本</th><th>名称</th><th>结构说明</th><th>创建时间</th><th>操作</th></tr></thead>
+                  <tbody>
+                    {templateVersions.map((version) => (
+                      <tr key={version.version}>
+                        <td>v{version.version}</td>
+                        <td>{version.title}</td>
+                        <td style={{ whiteSpace: "pre-line" }}>{version.body || "—"}</td>
+                        <td>{version.created_at?.slice(0, 16).replace("T", " ") ?? "—"}</td>
+                        <td><button className="btn xs" type="button" onClick={() => void restoreTemplateVersion(viewingTemplateId, version.version)}>恢复此版本</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
           <div className="panel">
             <div className="panel-head">
               <div>
@@ -404,16 +477,26 @@ export default function Assets() {
               <EmptyHint next="先添加一套结构，例如「痛点引入 → 真实体验 → 证据 → 局限 → 结论」，然后在内容生产的生产线中选择它。">暂无模板</EmptyHint>
             ) : (
               <div className="grid three">
-                {assets.template.map((t) => (
-                  <div className="skill-card" key={t.id}>
-                    <div className="skill-name">{t.title}</div>
+                {assets.template.map((t) => {
+                  // 后端统一返回 bool；兼容旧数据的 0/1，缺省视为启用。
+                  const inactive = t.is_active !== undefined && t.is_active !== null && !Number(t.is_active);
+                  return (
+                  <div className="skill-card" key={t.id} style={{ opacity: inactive ? 0.62 : 1 }}>
+                    <div className="skill-name">{t.title} {inactive && <span className="tag gray">已停用</span>}</div>
                     <div className="skill-desc" style={{ whiteSpace: "pre-line" }}>{t.body || "（无结构说明）"}</div>
                     <div className="skill-foot">
-                      <span>{t.created_at?.slice(0, 10) ?? "—"}</span>
-                      <button className="btn xs primary" type="button" onClick={() => setEditingTemplate(t)}>编辑结构</button>
+                      <span>v{t.version ?? 1} · {t.updated_at?.slice(0, 10) ?? t.created_at?.slice(0, 10) ?? "—"}</span>
+                      <button className="btn xs" type="button" onClick={() => setEditingTemplate(t)}>编辑模板</button>
+                      <button className="btn xs" type="button" onClick={() => void openTemplateVersions(t.id)}>版本历史</button>
+                      {inactive ? (
+                        <button className="btn xs" type="button" onClick={async () => { await api.restoreAsset(t.id); await loadAssetPage("template", assetPages.template); }}>恢复</button>
+                      ) : (
+                        <button className="btn xs" type="button" onClick={async () => { await api.archiveAsset(t.id); await loadAssetPage("template", assetPages.template); }}>停用</button>
+                      )}
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
             <AssetPagination page={templatePage} pages={assetPages.template} total={assetTotals.template}
@@ -422,58 +505,22 @@ export default function Assets() {
         </>
       )}
 
+      {(tab === "sources" || tab === "voice" || tab === "templates") && (() => {
+        const type: AssetType = tab === "sources" ? "reference" : tab === "voice" ? "voice" : "template";
+        const page = assetPages[type];
+        const pages = assetPageCounts[type];
+        return assetTotals[type] > 0 ? (
+          <div className="panel flex between center" style={{ gap: 10, flexWrap: "wrap" }}>
+            <span className="note">共 {assetTotals[type]} 条 · 第 {page}/{pages} 页 · 每页 20 条</span>
+            <div className="flex" style={{ gap: 6 }}>
+              <button className="btn sm" disabled={page <= 1} onClick={() => void loadAssetPage(type, page - 1)}>上一页</button>
+              <button className="btn sm" disabled={page >= pages} onClick={() => void loadAssetPage(type, page + 1)}>下一页</button>
+            </div>
+          </div>
+        ) : null;
+      })()}
       {tab === "mapping" && <KbSourcesPanel />}
     </>
-  );
-}
-
-
-function AssetPagination({ page, pages, total, pageSize, onPageChange }: {
-  page: number; pages: number; total: number; pageSize: number; onPageChange: (page: number) => void;
-}) {
-  if (total <= pageSize) return null;
-  return <div className="pagination-bar">
-    <span className="pagination-summary">共 {total} 条 · 第 {page}/{pages} 页 · 每页 {pageSize} 条</span>
-    <div className="pagination-actions">
-      <button className="btn sm" disabled={page <= 1} onClick={() => onPageChange(page - 1)}>上一页</button>
-      <button className="btn sm" disabled={page >= pages} onClick={() => onPageChange(page + 1)}>下一页</button>
-    </div>
-  </div>;
-}
-
-function TemplateEditor({ item, onCancel, onSaved }: {
-  item: AssetItem; onCancel: () => void; onSaved: () => void | Promise<void>;
-}) {
-  const { showToast } = useApp();
-  const [title, setTitle] = useState(item.title);
-  const [body, setBody] = useState(item.body ?? "");
-  const [busy, setBusy] = useState(false);
-  const save = async () => {
-    if (!title.trim() || !body.trim()) {
-      showToast("模板名称和结构说明不能为空", "error");
-      return;
-    }
-    setBusy(true);
-    try {
-      await api.updateAsset(item.id, { asset_type: "template", title: title.trim(), body: body.trim() });
-      showToast("内容模板已更新；后续生产将使用新结构", "success");
-      await onSaved();
-    } catch (e) {
-      showToast(`更新失败：${(e as Error).message}`, "error");
-    } finally { setBusy(false); }
-  };
-  return (
-    <div className="panel template-editor" style={{ marginBottom: 14, borderColor: "var(--blue)" }}>
-      <div className="panel-head">
-        <div><div className="panel-title">编辑内容模板</div><div className="panel-sub">只修改模板结构，不会回写已生成的内容。</div></div>
-        <button className="btn sm" type="button" onClick={onCancel}>取消</button>
-      </div>
-      <label className="form-label">模板名称<input className="field" value={title} onChange={(e) => setTitle(e.target.value)} /></label>
-      <label className="form-label">内容结构（建议每行一个环节）<textarea className="field" rows={5} value={body} onChange={(e) => setBody(e.target.value)} /></label>
-      <div className="flex" style={{ justifyContent: "flex-end" }}>
-        <button className="btn sm primary" type="button" disabled={busy} onClick={() => void save()}>{busy ? "保存中…" : "保存修改"}</button>
-      </div>
-    </div>
   );
 }
 
@@ -529,3 +576,41 @@ function AssetForm({
 function _num(v: number | null | undefined) {
   return v == null ? <span style={{ color: "var(--subtle)" }}>—</span> : v.toFixed(0);
 }
+
+
+function TemplateEditor({ item, onCancel, onSaved }: {
+  item: AssetItem; onCancel: () => void; onSaved: () => void | Promise<void>;
+}) {
+  const { showToast } = useApp();
+  const [title, setTitle] = useState(item.title);
+  const [body, setBody] = useState(item.body ?? "");
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    if (!title.trim() || !body.trim()) {
+      showToast("模板名称和结构说明不能为空", "error");
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.updateAsset(item.id, { asset_type: "template", title: title.trim(), body: body.trim() });
+      showToast("内容模板已更新；后续生产将使用新结构", "success");
+      await onSaved();
+    } catch (e) {
+      showToast(`更新失败：${(e as Error).message}`, "error");
+    } finally { setBusy(false); }
+  };
+  return (
+    <div className="panel template-editor" style={{ marginBottom: 14, borderColor: "var(--blue)" }}>
+      <div className="panel-head">
+        <div><div className="panel-title">编辑内容模板</div><div className="panel-sub">只修改模板结构，不会回写已生成的内容。</div></div>
+        <button className="btn sm" type="button" onClick={onCancel}>取消</button>
+      </div>
+      <label className="form-label">模板名称<input className="field" value={title} onChange={(e) => setTitle(e.target.value)} /></label>
+      <label className="form-label">内容结构（建议每行一个环节）<textarea className="field" rows={5} value={body} onChange={(e) => setBody(e.target.value)} /></label>
+      <div className="flex" style={{ justifyContent: "flex-end" }}>
+        <button className="btn sm primary" type="button" disabled={busy} onClick={() => void save()}>{busy ? "保存中…" : "保存修改"}</button>
+      </div>
+    </div>
+  );
+}
+

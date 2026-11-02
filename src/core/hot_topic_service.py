@@ -105,16 +105,16 @@ def run_once(
             else:
                 match["status"] = "completed"
         except Exception as exc:  # noqa: BLE001 — 匹配失败不回滚采集结果
-            from .redact import redact
+            from .redact import redact, safe_error_summary
             logger.error("热点标签匹配失败 tenant=%s error=%s", tenant_id, redact(str(exc))[:500])
-            match = {"error": redact(str(exc))[:500], "status": "failed"}
+            match = {"error": safe_error_summary(exc, "热点标签研判失败，请稍后重试"), "status": "failed"}
         logger.info(
             "热点后台刷新完成 trigger=%s tenant=%s report=%s",
             trigger, tenant_id, report,
         )
     except Exception as exc:  # noqa: BLE001
-        from .redact import redact
-        error = redact(str(exc))[:500]
+        from .redact import redact, safe_error_summary
+        error = safe_error_summary(exc, "热点采集或研判失败，请稍后重试")
         logger.error("热点后台刷新失败 tenant=%s error=%s", tenant_id, error)
     finally:
         if own_conn and conn is not None:
@@ -166,9 +166,9 @@ def trigger_background(cfg, *, trigger: str = "manual", tenant_id: str | None = 
     try:
         thread.start()
     except Exception as exc:
-        from .redact import redact
+        from .redact import redact, safe_error_summary
         with _LOCK:
-            _STATE.update(running=False, error=redact(str(exc))[:500],
+            _STATE.update(running=False, error=safe_error_summary(exc, "后台采集任务启动失败"),
                           finished_at=datetime.now().isoformat(timespec="seconds"))
         raise
     return {"started": True, **snapshot}
@@ -202,8 +202,8 @@ def run_research(
         report["remaining_pending"] = matcher.pending_count()
         logger.info("热点研判完成 tenant=%s report=%s", tenant_id, report)
     except Exception as exc:  # noqa: BLE001
-        from .redact import redact
-        error = redact(str(exc))[:500]
+        from .redact import redact, safe_error_summary
+        error = safe_error_summary(exc, "热点研判失败，请稍后重试")
         logger.error("热点研判失败 tenant=%s error=%s", tenant_id, error)
     finally:
         if own_conn and conn is not None:
@@ -238,10 +238,10 @@ def trigger_research(cfg, *, tenant_id: str | None = None) -> dict:
     try:
         thread.start()
     except Exception as exc:
-        from .redact import redact
+        from .redact import redact, safe_error_summary
         with _LOCK:
             _RESEARCH_STATE.update(
-                running=False, error=redact(str(exc))[:500],
+                running=False, error=safe_error_summary(exc, "后台研判任务启动失败"),
                 finished_at=datetime.now().isoformat(timespec="seconds"),
             )
         raise

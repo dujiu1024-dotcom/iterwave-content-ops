@@ -431,7 +431,7 @@ export default function HotTopics() {
           <option value="heat">按热度</option>
           <option value="match">按定位关联度</option>
         </select>
-        <select className="field" value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
+        <select className="field" value={sourceFilter} onChange={(e) => { setSourceFilter(e.target.value); setPage(1); }}>
           <option value="all">全部来源</option>
           {sourceOptions.map((source) => <option key={source} value={source}>{platformLabel(source.split("/").pop() || source)} · {source}</option>)}
         </select>
@@ -533,12 +533,10 @@ export default function HotTopics() {
           })}
         </div>
         {pageCount > 1 && (
-          <div className="pagination-bar" aria-label="热点分页">
-            <span className="pagination-summary">共 {hot?.total ?? items.length} 条 · 第 {page}/{pageCount} 页</span>
-            <div className="pagination-actions">
-              <button className="btn sm" disabled={page <= 1} onClick={() => setPage((n) => Math.max(1, n - 1))}>上一页</button>
-              <button className="btn sm" disabled={page >= pageCount} onClick={() => setPage((n) => Math.min(pageCount, n + 1))}>下一页</button>
-            </div>
+          <div className="pagination-row" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, flexWrap: "wrap", marginTop: 14 }}>
+            <button className="btn sm" disabled={page <= 1} onClick={() => setPage((n) => Math.max(1, n - 1))}>上一页</button>
+            <span className="tiny">第 {page} / {pageCount} 页 · 共 {hot?.total ?? items.length} 条热点</span>
+            <button className="btn sm" disabled={page >= pageCount} onClick={() => setPage((n) => Math.min(pageCount, n + 1))}>下一页</button>
           </div>
         )}
         </>
@@ -560,6 +558,7 @@ function HotSourceManager({ onSaved }: { onSaved: () => void }) {
   const [url, setUrl] = useState("");
   const [platform, setPlatform] = useState("");
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [testingIndex, setTestingIndex] = useState<number | null>(null);
 
   useEffect(() => {
     api.hotSources()
@@ -612,6 +611,22 @@ function HotSourceManager({ onSaved }: { onSaved: () => void }) {
     setPlatform(source.platform ?? "");
   };
 
+  const testSource = async (index: number) => {
+    setTestingIndex(index);
+    try {
+      const result = await api.testHotSource(index);
+      // 从服务端重新读取持久化的最近结果；刷新页面或重新进入后仍可见。
+      const latest = await api.hotSources();
+      setItems(latest.items);
+      showToast(result.message, result.ok ? "success" : "error");
+    } catch (e) {
+      const message = (e as Error).message || "来源试抓取失败";
+      showToast(message, "error");
+    } finally {
+      setTestingIndex(null);
+    }
+  };
+
   return (
     <div className="panel">
       <div className="panel-head">
@@ -624,7 +639,7 @@ function HotSourceManager({ onSaved }: { onSaved: () => void }) {
       {loading ? <div className="note">加载来源中…</div> : (
         <div className="table-wrap">
           <table>
-            <thead><tr><th>名称</th><th>类型</th><th>地址</th><th>平台</th><th>状态</th><th>操作</th></tr></thead>
+            <thead><tr><th>名称</th><th>类型</th><th>地址</th><th>平台</th><th>状态</th><th>操作</th><th>最近试抓取结果</th></tr></thead>
             <tbody>
               {items.map((s, i) => (
                 <tr key={`${s.name}-${i}`}>
@@ -635,14 +650,18 @@ function HotSourceManager({ onSaved }: { onSaved: () => void }) {
                   <td>{s.enabled === false ? <span className="tag gray">停用</span> : <span className="tag green">启用</span>}</td>
                   <td>
                     <div className="flex wrap" style={{ gap: 6 }}>
-                      {s.type !== "aggregate" && <button className="btn xs" type="button" disabled={busy}
-                        onClick={() => beginEdit(s, i)}>编辑</button>}
-                      <button className="btn xs soft" type="button" disabled={busy}
+                      {s.type !== "aggregate" && <>
+                        <button className="btn xs" type="button" disabled={busy || testingIndex !== null}
+                          onClick={() => beginEdit(s, i)}>编辑</button>
+                        <button className="btn xs" type="button" disabled={busy || testingIndex !== null}
+                          onClick={() => void testSource(i)}>{testingIndex === i ? "测试中…" : "试抓取"}</button>
+                      </>}
+                      <button className="btn xs soft" type="button" disabled={busy || testingIndex !== null}
                         onClick={() => save(items.map((x, idx) => idx === i ? { ...x, enabled: x.enabled === false } : x),
                           s.enabled === false ? "来源已启用" : "来源已停用")}>
                         {s.enabled === false ? "启用" : "停用"}
                       </button>
-                      <button className="btn xs danger" type="button" disabled={busy}
+                      <button className="btn xs danger" type="button" disabled={busy || testingIndex !== null}
                         onClick={() => {
                           if (window.confirm(`移除来源「${s.name}」？`)) {
                             save(items.filter((_, idx) => idx !== i), "来源已移除");
@@ -652,10 +671,22 @@ function HotSourceManager({ onSaved }: { onSaved: () => void }) {
                       </button>
                     </div>
                   </td>
+                  <td className="metric-foot">
+                    {s.last_test ? (
+                      <>
+                        <span className={`tag ${s.last_test.status === "success" ? "green" : s.last_test.status === "failed" ? "red" : "gray"}`}>
+                          {s.last_test.status === "success" ? "成功" : s.last_test.status === "failed" ? "失败" : "无有效内容"}
+                        </span>
+                        <div>{s.last_test.tested_at} · {s.last_test.item_count} 条</div>
+                        <div>{s.last_test.message}</div>
+                        {s.last_test.sample_titles.length > 0 && <div>示例：{s.last_test.sample_titles.join(" / ")}</div>}
+                      </>
+                    ) : "尚未试抓取"}
+                  </td>
                 </tr>
               ))}
               {items.length === 0 && (
-                <tr><td colSpan={6}><EmptyHint className="" next="在下方添加一个 RSS 或 JSON 行业源">没有配置热点来源</EmptyHint></td></tr>
+                <tr><td colSpan={7}><EmptyHint className="" next="在下方添加一个 RSS 或 JSON 行业源">没有配置热点来源</EmptyHint></td></tr>
               )}
             </tbody>
           </table>

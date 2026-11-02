@@ -43,9 +43,8 @@ export default function CreatedContentPane() {
   };
   useEffect(() => { load(); }, [status, platform, page]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const visibleDrafts = drafts ?? [];
-  const visibleDeletable = visibleDrafts.filter((d) => !LOCKED.has(d.status));
-  const allChecked = visibleDeletable.length > 0 && visibleDeletable.every((d) => selected.has(d.content_id));
+  const deletable = (drafts ?? []).filter((d) => !LOCKED.has(d.status));
+  const allChecked = deletable.length > 0 && deletable.every((d) => selected.has(d.content_id));
   const toggle = (cid: string) => setSelected((prev) => {
     const n = new Set(prev);
     n.has(cid) ? n.delete(cid) : n.add(cid);
@@ -99,13 +98,13 @@ export default function CreatedContentPane() {
             <thead><tr>
               <th style={{ width: 32 }}>
                 <input type="checkbox" aria-label="全选可删除" checked={allChecked}
-                  onChange={() => setSelected((old) => { const next = new Set(old); visibleDeletable.forEach((d) => allChecked ? next.delete(d.content_id) : next.add(d.content_id)); return next; })} />
+                  onChange={() => setSelected(allChecked ? new Set() : new Set(deletable.map((d) => d.content_id)))} />
               </th>
               <th>标题</th><th style={{ width: 70 }}>平台</th><th style={{ width: 60 }}>轮次</th>
               <th style={{ width: 110 }}>状态</th><th style={{ width: 110 }}>配图状态</th><th style={{ width: 140 }}>排期 / 存草稿</th><th style={{ width: 70 }}>操作</th>
             </tr></thead>
             <tbody>
-              {visibleDrafts.map((d) => {
+              {drafts.map((d) => {
                 const st = STATUS_LABEL[d.status] ?? { text: d.status, cls: "gray" };
                 const locked = LOCKED.has(d.status);
                 return (

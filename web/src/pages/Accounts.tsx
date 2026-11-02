@@ -19,9 +19,9 @@ const LOGIN_STATE_LABEL: Record<string, { label: string; color: string }> = {
 };
 
 const ACCOUNT_STATUS_LABEL: Record<string, { label: string; color: string }> = {
-  logged_in:     { label: "✓ 已登录",      color: "green" },
+  logged_in:     { label: "✓ 登录流程成功", color: "green" },
   logging_in:    { label: "▣ 登录中...",  color: "blue" },
-  not_logged_in: { label: "✕ 未登录",      color: "gray" },
+  not_logged_in: { label: "✕ 未配置登录态", color: "gray" },
 };
 
 export default function Accounts() {
@@ -34,10 +34,6 @@ export default function Accounts() {
   const [loginStatus, setLoginStatus] = useState<LoginStatus | null>(null);
   const [smsCode, setSmsCode] = useState("");
   const [smsSubmitting, setSmsSubmitting] = useState(false);
-  const [editingPlatform, setEditingPlatform] = useState<Platform | null>(null);
-  const [editHandle, setEditHandle] = useState("");
-  const [editDisplayName, setEditDisplayName] = useState("");
-  const [profileSaving, setProfileSaving] = useState(false);
 
   const load = async () => {
     setErr(null);
@@ -160,10 +156,6 @@ export default function Accounts() {
     }
   };
 
-  const activeLoginProfile = activeLogin
-    ? registeredAccounts.find((item) => item.platform === activeLogin)
-    : undefined;
-
   return (
     <>
       <div className="page-head">
@@ -181,9 +173,14 @@ export default function Accounts() {
       {/* 四平台账号状态卡 */}
       <div className="grid two" style={{ marginBottom: 20 }}>
         {(accounts || []).map((a) => {
-          const st = ACCOUNT_STATUS_LABEL[a.status] || ACCOUNT_STATUS_LABEL.not_logged_in;
+          const st = a.credential_present
+            ? { label: "本机登录态文件存在", color: "green" }
+            : a.status === "logging_in"
+              ? ACCOUNT_STATUS_LABEL.logging_in
+              : a.status === "logged_in"
+                ? { label: "登录流程成功，凭证待导出", color: "blue" }
+                : ACCOUNT_STATUS_LABEL.not_logged_in;
           const loginSt = a.login_proc_state ? LOGIN_STATE_LABEL[a.login_proc_state] : null;
-          const registered = registeredAccounts.find((item) => item.platform === a.platform);
           return (
             <div key={a.platform} className="panel" style={{ padding: 18 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
@@ -191,11 +188,7 @@ export default function Accounts() {
                   <span style={{ fontSize: 28 }}>{PLATFORM_EMOJI[a.platform as Platform]}</span>
                   <div>
                     <div style={{ fontWeight: 700, fontSize: 15 }}>{a.platform_display}</div>
-                    <div style={{ fontSize: 11, color: "var(--muted)" }}>本机登录 · 昵称为手动登记的识别信息</div>
-                    <div style={{ marginTop: 4 }}>
-                      <div style={{ fontSize: 13, fontWeight: 700 }}>{registered?.display_name || registered?.account_handle || "尚未登记账号昵称"}</div>
-                      {registered?.account_handle && <div style={{ fontSize: 10, color: "var(--muted)" }}>账号标识：{registered.account_handle}</div>}
-                    </div>
+                    <div style={{ fontSize: 11, color: "var(--muted)" }}>本机登录</div>
                   </div>
                 </div>
                 <span className={`tag ${st.color}`}>{st.label}</span>
@@ -209,12 +202,23 @@ export default function Accounts() {
                 </div>
               )}
 
-              {/* 已登录态信息 */}
-              {a.status === "logged_in" && (
+              {/* 本机凭证状态不等于平台会话实时有效；实际可用性仍需业务请求验证 */}
+              {a.credential_present && (
                 <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 10 }}>
-                  ✓ 登录有效 · 可用于存草稿、运营与数据采集
+                  ✓ 本机登录态文件存在 · 平台会话有效性仍需实际请求确认
                 </div>
               )}
+
+              <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 10 }}>
+                <span className={`tag ${a.preflight_ready ? "green" : "orange"}`}>
+                  {a.preflight_ready ? "运行前条件齐备" : "运行前条件未齐"}
+                </span>
+                <div style={{ marginTop: 5 }}>
+                  平台：{a.enabled ? "已启用" : "未启用"} · 账号登记：{a.account_active ? "已启用" : a.account_registered ? "已停用" : "未登记"} ·
+                  登录态文件：{a.credential_present ? "存在" : "缺失"} · 熔断：{a.circuit_broken ? "冷却中" : "正常"}
+                </div>
+                <div>运行前检查不代表平台会话已验证；实际可用性以平台请求结果为准。</div>
+              </div>
 
               {/* 账号身份备注：由运营者登记，用于区分同平台账号；不冒充平台自动采集昵称 */}
               {(() => {
@@ -222,6 +226,13 @@ export default function Accounts() {
                 const existing = registeredAccounts.find((item) => item.platform === a.platform);
                 return (
                   <div style={{ display: "grid", gap: 7, marginBottom: 12, padding: 10, border: "1px solid var(--line)", borderRadius: 8 }}>
+                    {existing && (
+                      <div style={{ display: "grid", gap: 3, paddingBottom: 7, borderBottom: "1px solid var(--line)" }}>
+                        <div style={{ fontSize: 13, fontWeight: 700 }}>{existing.display_name || "未设置昵称"}</div>
+                        <div style={{ fontSize: 11, color: "var(--muted)" }}>平台账号：{existing.account_handle || "未登记"}</div>
+                        <div style={{ fontSize: 11, color: "var(--muted)" }}>登记状态：{existing.status === "active" ? "已启用" : "已停用"}</div>
+                      </div>
+                    )}
                     <div style={{ fontSize: 11, color: "var(--muted)" }}>账号身份备注（手动登记，用于避免选错账号）</div>
                     <input className="field" value={draft.display_name} placeholder="账号昵称 / 备注名"
                       onChange={(e) => setIdentityDrafts((prev) => ({ ...prev, [a.platform]: { ...draft, display_name: e.target.value } }))} />
@@ -254,36 +265,6 @@ export default function Accounts() {
                 )}
                 {a.status === "logged_in" && (
                   <button className="btn danger" onClick={() => handleLogout(a.platform as Platform)}>✕ 退出登录</button>
-                )}
-              </div>
-              <div style={{ marginTop: 10 }}>
-                {editingPlatform === a.platform ? (
-                  <div className="account-profile-editor">
-                    <label className="form-label">账号昵称<input className="field" value={editDisplayName} onChange={(e) => setEditDisplayName(e.target.value)} placeholder="填写平台展示昵称" /></label>
-                    <label className="form-label">账号标识<input className="field" value={editHandle} onChange={(e) => setEditHandle(e.target.value)} placeholder="平台号 / 主页 ID / 账号标识" /></label>
-                    <div className="flex wrap" style={{ gap: 6 }}>
-                      <button className="btn sm primary" type="button" disabled={profileSaving || !editHandle.trim() || !editDisplayName.trim()} onClick={async () => {
-                        setProfileSaving(true);
-                        try {
-                          await api.savePlatformAccount(registered?.id ?? null, {
-                            platform: a.platform as Platform, account_handle: editHandle.trim(),
-                            display_name: editDisplayName.trim(), status: "active", notes: registered?.notes ?? "",
-                          });
-                          const refreshed = await api.platformAccounts();
-                          setRegisteredAccounts(refreshed.items ?? []);
-                          setEditingPlatform(null);
-                        } catch (e) { alert("账号资料保存失败：" + (e as Error).message); }
-                        finally { setProfileSaving(false); }
-                      }}>{profileSaving ? "保存中…" : "保存资料"}</button>
-                      <button className="btn sm" type="button" onClick={() => setEditingPlatform(null)}>取消</button>
-                    </div>
-                  </div>
-                ) : (
-                  <button className="btn xs" type="button" onClick={() => {
-                    setEditingPlatform(a.platform as Platform);
-                    setEditDisplayName(registered?.display_name ?? "");
-                    setEditHandle(registered?.account_handle ?? "");
-                  }}>{registered ? "编辑账号资料" : "登记账号昵称"}</button>
                 )}
               </div>
             </div>

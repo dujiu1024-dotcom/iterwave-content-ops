@@ -22,6 +22,8 @@ from src.adapters.base import (
 )
 from src.core.ops.circuit_breaker import CircuitBreakerEngine
 from src.core.ops.engine import OperationsEngine
+from src.core.task_context import bind_task_context
+from src.core.notify import Notifier
 
 
 class _NoRhythm:
@@ -131,3 +133,24 @@ def test_ops_engine_logs_failed_when_login_missing(cfg, conn, no_login) -> None:
     ).fetchone()
     assert row is not None and row[0] == "failed"
     assert "登录" in (row[1] or "")
+
+
+def test_operation_log_and_notification_keep_task_run_reference(cfg, conn) -> None:
+    task_id = conn.execute(
+        "INSERT INTO task_runs (task_type, biz_id, status, started_at) "
+        "VALUES ('daily_ops', 'correlation-test', 'running', '2026-11-01 10:00:00')"
+    ).lastrowid
+    engine = OperationsEngine(cfg, conn, {}, None, _NoRhythm())
+    with bind_task_context(task_id):
+        engine._log_op(Platform.XHS, "passive_reply", "success", content="audit link")
+        Notifier(cfg, conn)._save(
+            "round_completed", "info", "xhs", "关联通知", "关联任务通知", None,
+        )
+    op = conn.execute(
+        "SELECT task_run_id FROM ops_logs WHERE content = 'audit link'"
+    ).fetchone()
+    notification = conn.execute(
+        "SELECT task_run_id FROM notifications WHERE title = '关联通知'"
+    ).fetchone()
+    assert op is not None and op["task_run_id"] == task_id
+    assert notification is not None and notification["task_run_id"] == task_id

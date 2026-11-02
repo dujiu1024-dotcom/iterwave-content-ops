@@ -65,7 +65,7 @@ from src.core.config import load_config, get_config, DEFAULT_ENV_PATH
 from src.core.timezone import business_now
 from src.core.config import PROJECT_ROOT
 from src.core.tenant_registry import TenantRegistry, TenantError
-from src.core.task_queue import GlobalTaskQueue
+from src.core.task_queue import GlobalTaskQueue, TaskQueueError
 from src.core.task_worker import GlobalTaskWorker
 from src.core.tenant_switch_gate import TenantSwitchGate, TenantSwitchInProgress
 from src.core.db import Database
@@ -140,6 +140,54 @@ def _enqueue_round_task(*, tenant_id: str, round_id: int, topic_count=None,
         aggregate_id=str(round_id),
         payload={**parameters, "execution_snapshot": snapshot},
     )
+
+
+def _round_id_from_aggregate(task_type: str, aggregate_id) -> Optional[int]:
+    """round_run 任务的 aggregate_id 形如 "<round_id>" 或 "<round_id>:<operation>"（round_id 为数据库主键）。"""
+    if task_type != "round_run" or not aggregate_id:
+        return None
+    head = str(aggregate_id).split(":", 1)[0]
+    return int(head) if head.isdigit() else None
+
+
+def _resolve_task_round_numbers(registry, tasks) -> dict:
+    """把 round_run 任务的数据库轮次 id 解析为业务轮次编号 round_number。
+
+    返回 {(tenant_id, round_id): round_number}。每个账号组数据库只读打开一次；
+    数据库缺失/不可读/轮次已删除时不写入映射（前端显示不带编号的文案，绝不回退显示数据库 id）。
+    """
+    wanted: dict[str, set[int]] = {}
+    for task in tasks:
+        rid = _round_id_from_aggregate(task.task_type, task.aggregate_id)
+        if rid is not None:
+            wanted.setdefault(task.tenant_id, set()).add(rid)
+    resolved: dict = {}
+    if not wanted or registry is None:
+        return resolved
+    for tenant_id, round_ids in wanted.items():
+        conn = None
+        try:
+            try:
+                name = str(registry.get(tenant_id).get("name") or tenant_id)
+            except Exception:  # noqa: BLE001 — 注册表无该账号组时按 id 推导路径
+                name = tenant_id
+            db_file = registry.paths(tenant_id, name=name).db_file
+            if not db_file.exists():
+                continue
+            conn = sqlite3.connect(db_file.as_uri() + "?mode=ro", uri=True, timeout=2)
+            ids = sorted(round_ids)
+            placeholders = ",".join("?" for _ in ids)
+            for rid, number in conn.execute(
+                f"SELECT id, round_number FROM spiral_rounds WHERE id IN ({placeholders})", ids,
+            ).fetchall():
+                if number is not None:
+                    resolved[(tenant_id, int(rid))] = int(number)
+        except Exception:  # noqa: BLE001 — 单个账号组不可读不影响队列列表
+            continue
+        finally:
+            if conn is not None:
+                conn.close()
+    return resolved
 
 
 def _tenant_scoped_hot_topic_status(status: dict, tenant_id: str) -> dict:
@@ -1564,6 +1612,62 @@ def _register_routes(app: FastAPI) -> None:
     def _tenant_id() -> str:
         return str(_g().get("runtime_tenant_id") or "default")
 
+    def _platform_status_snapshot(cfg=None, conn=None) -> dict[str, dict]:
+        """四平台统一状态口径；凭证文件存在不等于平台会话已验证。"""
+        cfg = cfg or _g()["cfg"]
+        conn = conn or _g()["conn"]
+        enabled = set(cfg.platforms.enabled_keys())
+        login_dir = Path(cfg.resolve_path(cfg.paths.data_dir))
+        registered_rows = {
+            row["platform"]: row["status"]
+            for row in conn.execute("SELECT platform, status FROM platform_accounts").fetchall()
+        }
+        broken = {
+            row["platform"] for row in conn.execute(
+                "SELECT DISTINCT platform FROM circuit_breaker_events WHERE resolved_at IS NULL"
+            ).fetchall()
+        }
+        from src.core.login_manager import has_login_state
+
+        result = {}
+        for platform in Platform:
+            key = platform.value
+            platform_cfg = getattr(cfg.platforms, key, None)
+            configured = bool(
+                platform_cfg
+                and str(getattr(platform_cfg, "base_url", "") or "").strip()
+                and str(getattr(platform_cfg, "account_key", "") or "").strip()
+            )
+            account_status = registered_rows.get(key)
+            try:
+                credential_present = bool(has_login_state(platform, data_dir=login_dir))
+            except Exception:  # noqa: BLE001 — 状态读取失败必须按未就绪处理
+                logger.warning("读取平台登录态失败 platform=%s", key)
+                credential_present = False
+            is_enabled = key in enabled
+            is_broken = key in broken
+            account_active = account_status == "active"
+            blockers = []
+            if not configured: blockers.append("platform_config_missing")
+            if not is_enabled: blockers.append("platform_disabled")
+            if not account_status: blockers.append("account_not_registered")
+            elif not account_active: blockers.append("account_inactive")
+            if not credential_present: blockers.append("login_state_missing")
+            if is_broken: blockers.append("circuit_broken")
+            result[key] = {
+                "supported": True,
+                "configured": configured,
+                "enabled": is_enabled,
+                "account_registered": account_status is not None,
+                "account_active": account_active,
+                "credential_present": credential_present,
+                "session_validity": "not_checked",
+                "circuit_broken": is_broken,
+                "preflight_ready": not blockers,
+                "blockers": blockers,
+            }
+        return result
+
     def _record_content_event(event_type: str, *, content_id: str | None = None,
                               sample_content_id: str | None = None, sample_run_id: str | None = None,
                               metadata: dict | None = None, idempotency_key: str | None = None) -> None:
@@ -1672,14 +1776,13 @@ def _register_routes(app: FastAPI) -> None:
             "activation_limits": {
                 "account_description_min_chars": cfg.activation.account_description_min_chars,
                 "account_description_max_chars": cfg.activation.account_description_max_chars,
-                "max_runs_per_day": cfg.activation.max_runs_per_day,
                 "sample_max_output_tokens": cfg.activation.sample_max_output_tokens,
                 "max_model_calls_per_run": cfg.activation.max_model_calls_per_run,
                 "max_total_output_tokens_per_run": (
                     cfg.activation.sample_max_output_tokens * cfg.activation.max_model_calls_per_run
                 ),
+                # 自用不设每日次数上限，仅展示今日已体验次数。
                 "daily_runs_used": int(daily_runs_used),
-                "daily_runs_remaining": max(0, cfg.activation.max_runs_per_day - int(daily_runs_used)),
             },
             "model_message": "模型配置已就绪，首次生成时验证连通性" if _llm_available(cfg) else "需要先配置自己的模型服务和 API Key",
             "formal_setup": {
@@ -1716,13 +1819,6 @@ def _register_routes(app: FastAPI) -> None:
         ).fetchone()
         if existing:
             return {"sample_run_id": existing["id"], "status": existing["status"], "deduplicated": True}
-        day_start = _now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat(sep=" ")
-        daily_runs = conn.execute(
-            "SELECT COUNT(*) FROM sample_runs WHERE tenant_id=? AND created_at>=?",
-            (tenant_id, day_start),
-        ).fetchone()[0]
-        if daily_runs >= activation_cfg.max_runs_per_day:
-            raise HTTPException(429, "今日快速体验次数已用完；可明日重试，或继续使用正式运营工作台")
         active = conn.execute(
             "SELECT COUNT(*) FROM sample_runs WHERE tenant_id=? AND status IN ('created','generating','quality_check')",
             (tenant_id,),
@@ -1904,8 +2000,15 @@ def _register_routes(app: FastAPI) -> None:
                     logger.exception("快速体验成功事件记录失败 run=%s", run_id)
             except Exception as exc:
                 logger.exception("快速体验生成失败 run=%s", run_id)
-                code = getattr(exc, "code", "sample_generation_failed")
-                safe_message = str(exc) if getattr(exc, "code", None) else "样稿生成失败，请检查模型配置后重试"
+                # 只有本模块定义的业务异常拥有可展示文案；不能用任意异常的
+                # duck-typed .code 属性作为信任依据，否则底层异常可能泄漏到 API。
+                from src.core.content_pipeline import ContentGenerationError
+                if isinstance(exc, ContentGenerationError):
+                    code = str(exc.code)[:80]
+                    safe_message = str(exc)[:300]
+                else:
+                    code = "sample_generation_failed"
+                    safe_message = "样稿生成失败，请检查模型配置后重试"
                 try:
                     conn_bg.rollback()
                 except Exception:
@@ -2790,6 +2893,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(409, "已有图片生成任务正在执行，请稍后重试")
         try:
             now = _now().strftime("%Y-%m-%d %H:%M:%S")
+            # 个人账号组素材库不设置人为月度次数上限；成功次数仅用于成本与使用分析。
             cur = conn.execute(
                 "INSERT INTO media_generation_jobs (prompt, final_prompt, model, status, created_at) "
                 "VALUES (?, ?, ?, 'running', ?)",
@@ -3336,6 +3440,95 @@ def _register_routes(app: FastAPI) -> None:
         conn.commit()
         return {"id": asset_id, "status": "archived", "already_archived": row["status"] == "archived"}
 
+    @app.post("/api/media/{asset_id}/restore")
+    def restore_media_asset(asset_id: int):
+        registry = _g().get("tenant_registry")
+        if registry is None:
+            raise HTTPException(503, "账号组注册表尚未初始化")
+        tenant_id = _g().get("runtime_tenant_id", "default")
+        conn = _g()["conn"]
+        row = conn.execute(
+            "SELECT status, stored_filename FROM media_assets WHERE id = ?", (asset_id,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, "图片素材不存在")
+        if row["status"] != "archived":
+            return {"id": asset_id, "status": "active", "already_active": True}
+        paths = registry.paths(tenant_id, create=True)
+        file_path = (paths.media_dir / row["stored_filename"]).resolve()
+        if not file_path.is_relative_to(paths.media_dir.resolve()) or not file_path.is_file():
+            raise HTTPException(409, "素材原始文件不存在，不能恢复为可用状态")
+        conn.execute(
+            "UPDATE media_assets SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (asset_id,),
+        )
+        conn.commit()
+        return {"id": asset_id, "status": "active", "restored": True}
+
+    @app.patch("/api/media/{asset_id}")
+    def rename_media_asset(asset_id: int, req: dict):
+        title = str((req or {}).get("title") or "").strip()
+        if not title or len(title) > 120:
+            raise HTTPException(422, "素材名称不能为空且不能超过 120 个字符")
+        conn = _g()["conn"]
+        cur = conn.execute(
+            "UPDATE media_assets SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (title, asset_id),
+        )
+        if cur.rowcount == 0:
+            conn.commit()
+            raise HTTPException(404, "图片素材不存在")
+        conn.commit()
+        return {"id": asset_id, "title": title}
+
+    @app.delete("/api/media/{asset_id}")
+    def delete_media_asset(asset_id: int):
+        registry = _g().get("tenant_registry")
+        if registry is None:
+            raise HTTPException(503, "账号组注册表尚未初始化")
+        tenant_id = _g().get("runtime_tenant_id", "default")
+        conn = _g()["conn"]
+        row = conn.execute(
+            "SELECT id, status, stored_filename FROM media_assets WHERE id = ?", (asset_id,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, "图片素材不存在")
+        if row["status"] != "archived":
+            raise HTTPException(409, "请先归档素材，再执行永久删除")
+        usage_count = int(conn.execute(
+            "SELECT COUNT(*) FROM media_asset_usages WHERE media_asset_id = ?", (asset_id,)
+        ).fetchone()[0])
+        direct_ref_count = int(conn.execute(
+            "SELECT COUNT(*) FROM contents WHERE image_paths LIKE ?",
+            (f"%{row['stored_filename']}%",),
+        ).fetchone()[0])
+        if usage_count or direct_ref_count:
+            raise HTTPException(
+                409,
+                f"素材仍被内容引用，禁止永久删除（使用记录 {usage_count} 条，图片路径引用 {direct_ref_count} 条）；可继续归档保留",
+            )
+        paths = registry.paths(tenant_id, create=True)
+        file_path = (paths.media_dir / row["stored_filename"]).resolve()
+        if not file_path.is_relative_to(paths.media_dir.resolve()):
+            raise HTTPException(400, "素材文件路径无效")
+        cur = conn.execute(
+            "DELETE FROM media_assets WHERE id = ? AND status = 'archived' "
+            "AND NOT EXISTS (SELECT 1 FROM media_asset_usages WHERE media_asset_id = ?) "
+            "AND NOT EXISTS (SELECT 1 FROM contents WHERE image_paths LIKE ?)",
+            (asset_id, asset_id, f"%{row['stored_filename']}%"),
+        )
+        if cur.rowcount == 0:
+            conn.commit()
+            raise HTTPException(409, "素材引用状态已变化，删除已取消；请刷新后重新检查")
+        conn.commit()
+        file_removed = True
+        try:
+            file_path.unlink(missing_ok=True)
+        except OSError:
+            file_removed = False
+            logger.warning("素材记录已删除但文件清理失败 asset_id=%s", asset_id)
+        return {"id": asset_id, "deleted": True, "file_removed": file_removed}
+
     @app.post("/api/tenant-backup")
     def create_tenant_backup():
         cfg = _g()["cfg"]
@@ -3348,7 +3541,7 @@ def _register_routes(app: FastAPI) -> None:
             target = create_backup(db_path, data_dir, backup_dir, tenant_id, cfg=cfg)
         except Exception as exc:  # noqa: BLE001
             logger.exception("账号组备份失败 tenant=%s", tenant_id)
-            raise HTTPException(500, f"账号组备份失败：{exc}") from exc
+            raise HTTPException(500, "账号组备份失败，请检查备份目录权限或联系管理员") from exc
         return {
             "backup_name": target.name,
             "size_bytes": target.stat().st_size,
@@ -3491,7 +3684,7 @@ def _register_routes(app: FastAPI) -> None:
         for tenant in registry.list():
             tenant_id = tenant["id"]
             paths = registry.paths(tenant_id, name=str(tenant.get("name") or tenant_id))
-            row = {"tenant_id": tenant_id, "tenant_name": tenant["name"], "created_at": tenant.get("created_at"), "db_available": False, "db_status": "uninitialized", "contents_period": 0, "contents_all": 0, "drafts_all": 0, "drafts_pending": 0, "drafts_saved": 0, "drafts_published": 0, "drafts_failed": 0, "media_active": 0, "media_usage": 0, "registered_accounts": 0, "registered_accounts_active": 0, "platforms": {}}
+            row = {"tenant_id": tenant_id, "tenant_name": tenant["name"], "created_at": tenant.get("created_at"), "db_available": False, "db_status": "uninitialized", "contents_period": 0, "contents_all": 0, "drafts_all": 0, "drafts_pending": 0, "drafts_saved": 0, "drafts_published": 0, "drafts_failed": 0, "media_active": 0, "media_usage": 0, "registered_accounts": 0, "registered_accounts_active": 0, "platforms": {}, "recent_execution": None}
             db_file = paths.db_file
             if db_file.exists():
                 # 文件存在但读取失败才是故障；尚未创建数据库属于正常的未初始化状态。
@@ -3501,6 +3694,20 @@ def _register_routes(app: FastAPI) -> None:
                     conn = sqlite3.connect(db_file.as_uri() + "?mode=ro", uri=True, timeout=2)
                     conn.row_factory = sqlite3.Row
                     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
+                    if "task_runs" in tables:
+                        latest_run = conn.execute(
+                            "SELECT task_type, status, started_at, finished_at, created_at, error_msg "
+                            "FROM task_runs ORDER BY COALESCE(started_at, created_at) DESC, id DESC LIMIT 1"
+                        ).fetchone()
+                        if latest_run is not None:
+                            row["recent_execution"] = {
+                                "task_type": str(latest_run["task_type"]),
+                                "status": str(latest_run["status"]),
+                                "has_error_detail": bool(latest_run["error_msg"]),
+                                "started_at": latest_run["started_at"],
+                                "finished_at": latest_run["finished_at"],
+                                "created_at": latest_run["created_at"],
+                            }
                     if "contents" in tables:
                         row["contents_all"] = int(conn.execute("SELECT COUNT(*) FROM contents").fetchone()[0])
                         cols = {r["name"] for r in conn.execute("PRAGMA table_info(contents)").fetchall()}
@@ -3553,12 +3760,10 @@ def _register_routes(app: FastAPI) -> None:
             if context is not None:
                 try:
                     cfg = context["cfg"]
-                    enabled = cfg.platforms.enabled_keys()
-                    from src.core.login_manager import has_login_state
-                    login_dir = Path(cfg.resolve_path(cfg.paths.data_dir))
-                    logged = [
-                        platform.value for platform in Platform
-                        if platform.value in enabled and has_login_state(platform, data_dir=login_dir)
+                    platform_status = _platform_status_snapshot(cfg, context["conn"])
+                    enabled = [key for key, state in platform_status.items() if state["enabled"]]
+                    credential_present = [
+                        key for key, state in platform_status.items() if state["credential_present"]
                     ]
                     scheduler = context.get("scheduler")
                     jobs = scheduler.scheduler.get_jobs() if scheduler is not None else []
@@ -3567,8 +3772,13 @@ def _register_routes(app: FastAPI) -> None:
                     runtime.update({
                         "available": True,
                         "enabled_platforms": enabled,
-                        "logged_in_platforms": logged,
-                        "platforms_without_login": [p for p in enabled if p not in logged],
+                        "logged_in_platforms": credential_present,
+                        "credential_present_platforms": credential_present,
+                        "platform_status": platform_status,
+                        "platforms_without_login": [
+                            key for key, state in platform_status.items()
+                            if state["enabled"] and not state["credential_present"]
+                        ],
                         "circuit_broken_platforms": sorted({event["platform"] for event in cb_events}),
                         "scheduler_running": bool(scheduler and scheduler.scheduler.running),
                         "scheduler_job_count": len(jobs),
@@ -3590,6 +3800,330 @@ def _register_routes(app: FastAPI) -> None:
                     platform_totals[platform]["registered_accounts"] += int(values.get("registered_accounts", 0))
             tenant_rows.append(row)
         return {"days": days, "since": since, "totals": totals, "platform_totals": platform_totals, "tenants": tenant_rows, "account_count_note": "账号数量来自用户登记的平台账号标识，按账号组和平台去重；未登记的账号不会自动推断计入。"}
+
+    @app.get("/api/todos")
+    def list_global_todos(
+        page: int = Query(1, ge=1, le=50),
+        page_size: int = Query(20, ge=1, le=100),
+        tenant_id: Optional[str] = Query(None, min_length=1, max_length=100),
+        source: Optional[str] = Query(None),
+    ):
+        """跨账号组待办聚合。只读扫描各组数据库，统一返回可跳转的待处理事项。"""
+        allowed_sources = {"global_queue", "task_run", "ops_log", "circuit_breaker", "hot_topic_source", "media_review", "notification", "media_generation", "account_login", "goal", "publish_decision"}
+        if source and source not in allowed_sources:
+            raise HTTPException(400, "不支持的待办来源")
+        registry = _g().get("tenant_registry")
+        if registry is None:
+            raise HTTPException(503, "账号组注册表尚未初始化")
+        fetch_limit = min(page * page_size, 5000)
+        items: list[dict] = []
+        counts = {key: 0 for key in sorted(allowed_sources)}
+        capped = False
+
+        def add_item(tenant: dict, source_key: str, item_id: int, title: str,
+                     detail: str, status: str, created_at: str | None,
+                     severity: str, target_page: str, target_tab: str):
+            if source and source != source_key:
+                return
+            items.append({
+                "id": f"{tenant['id']}:{source_key}:{item_id}",
+                "record_id": item_id,
+                "source": source_key,
+                "source_label": {
+                    "global_queue": "全局任务队列", "task_run": "任务追踪", "ops_log": "运营日志",
+                    "circuit_breaker": "平台熔断", "hot_topic_source": "热点采集失败",
+                    "media_review": "素材审核", "notification": "通知",
+                    "media_generation": "AI 配图",
+                    "account_login": "账号登录", "goal": "目标逾期", "publish_decision": "待确认发布",
+                }[source_key],
+                "tenant_id": tenant["id"],
+                "tenant_name": tenant.get("name") or tenant["id"],
+                "title": redact(str(title or "待处理事项"))[:160],
+                "detail": redact(str(detail or ""))[:240],
+                "status": status,
+                "created_at": created_at,
+                "severity": severity,
+                "target_page": target_page,
+                "target_tab": target_tab,
+            })
+
+        if not source or source == "global_queue":
+            queue = _task_queue
+            if queue is not None:
+                try:
+                    queue_page_size = 500
+                    first_page, queue_total = queue.list_page(
+                        scope="failed", page=1, page_size=queue_page_size, tenant_id=tenant_id,
+                        unresolved_only=True,
+                    )
+                    counts["global_queue"] = int(queue_total)
+                    queue_fetch_total = min(int(queue_total), fetch_limit)
+                    capped = capped or int(queue_total) > queue_fetch_total
+                    tenant_names = {item["id"]: item for item in registry.list()}
+                    queue_rows = list(first_page)
+                    queue_pages = (queue_fetch_total + queue_page_size - 1) // queue_page_size
+                    for queue_page in range(2, queue_pages + 1):
+                        page_rows, _ = queue.list_page(
+                            scope="failed", page=queue_page, page_size=queue_page_size, tenant_id=tenant_id,
+                            unresolved_only=True,
+                        )
+                        queue_rows.extend(page_rows)
+                    for task in queue_rows:
+                        task_tenant = tenant_names.get(task.tenant_id, {
+                            "id": task.tenant_id, "name": task.tenant_id,
+                        })
+                        add_item(task_tenant, "global_queue", task.task_id,
+                                 f"{task.task_type} · {task.status}",
+                                 task.error_message or "全局队列任务需要处理",
+                                 task.status, task.created_at,
+                                 "high", "task-queue", "history")
+                except Exception as exc:  # noqa: BLE001 — 全局队列故障不能阻断其他账号组待办
+                    logger.warning("todo scan skipped global queue error=%s", type(exc).__name__)
+
+        for tenant in registry.list():
+            if tenant_id and tenant["id"] != tenant_id:
+                continue
+            paths = registry.paths(tenant["id"], name=str(tenant.get("name") or tenant["id"]))
+            db_file = paths.db_file
+            if not db_file.exists():
+                continue
+            conn = None
+            try:
+                conn = sqlite3.connect(db_file.as_uri() + "?mode=ro", uri=True, timeout=2)
+                conn.row_factory = sqlite3.Row
+                tables = {row["name"] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()}
+
+                if "goals" in tables and (not source or source == "goal"):
+                    goal_rows = conn.execute(
+                        "SELECT id, goal_text, target_platform, target_metric, target_value, "
+                        "metric_scope, baseline_value, baseline_at, current_value, metric_period_end "
+                        "FROM goals WHERE status='active' AND metric_period_end IS NOT NULL "
+                        "AND substr(metric_period_end, 1, 10) < ? "
+                        "ORDER BY metric_period_end DESC, id DESC",
+                        (_now().date().isoformat(),),
+                    ).fetchall()
+                    goal_count = 0
+                    for goal in goal_rows:
+                        rate = GoalProgressUpdater.rate_for(goal)
+                        if rate is not None and rate >= 100:
+                            continue
+                        goal_count += 1
+                        pct = f"{rate:.0f}%" if rate is not None else "数据待采集"
+                        add_item(
+                            tenant, "goal", goal["id"],
+                            f"目标「{goal['goal_text']}」已过截止日期（{pct}）",
+                            f"{goal['target_platform'] or '全平台'} · {goal['target_metric']} 目标 {goal['target_value']} · 当前 {goal['current_value'] if goal['current_value'] is not None else '待采集'}",
+                            "overdue", goal["metric_period_end"], "high", "goals", "goals",
+                        )
+                    counts["goal"] += goal_count
+
+                if "spiral_rounds" in tables and (not source or source == "publish_decision"):
+                    total = int(conn.execute(
+                        "SELECT COUNT(*) FROM spiral_rounds WHERE status='awaiting_publish'"
+                    ).fetchone()[0])
+                    counts["publish_decision"] += total
+                    rows = conn.execute(
+                        "SELECT id, round_number, created_at, awaiting_publish_ended_at "
+                        "FROM spiral_rounds WHERE status='awaiting_publish' "
+                        "ORDER BY COALESCE(awaiting_publish_ended_at, created_at) DESC, id DESC LIMIT ?",
+                        (fetch_limit,),
+                    ).fetchall()
+                    capped = capped or total > fetch_limit
+                    for row in rows:
+                        add_item(
+                            tenant, "publish_decision", row["id"],
+                            f"第 {row['round_number']} 轮草稿待确认发布",
+                            f"创建于 {row['created_at']} · 请审核并确认发布或取消",
+                            "awaiting_publish", row["awaiting_publish_ended_at"] or row["created_at"],
+                            "high", "production", "review",
+                        )
+
+                if "platform_accounts" in tables and getattr(paths, "data_dir", None) and (not source or source == "account_login"):
+                    # 只对用户明确登记且启用的平台账号提示缺失登录态；不把本机凭证文件存在误判为登录有效。
+                    account_rows = conn.execute(
+                        "SELECT id, platform, account_handle, display_name, created_at "
+                        "FROM platform_accounts WHERE status='active' "
+                        "ORDER BY platform, id"
+                    ).fetchall()
+                    missing_login_rows = []
+                    for account in account_rows:
+                        state_file = paths.data_dir / "login_states" / f"{account['platform']}.json"
+                        if not state_file.is_file():
+                            missing_login_rows.append(account)
+                    counts["account_login"] += len(missing_login_rows)
+                    for account in missing_login_rows:
+                        label = account["display_name"] or account["account_handle"] or account["platform"]
+                        add_item(
+                            tenant, "account_login", account["id"],
+                            f"{account['platform']} · {label} 尚未配置登录态",
+                            "该账号已登记并启用，但账号组内没有登录态文件；请进入账号与登录重新扫码。"
+                            "此项只表示登录态缺失，不代表已有登录态已失效。",
+                            "missing", account["created_at"], "high",
+                            "accounts", "accounts",
+                        )
+
+                if "circuit_breaker_events" in tables and (not source or source == "circuit_breaker"):
+                    total = int(conn.execute(
+                        "SELECT COUNT(*) FROM circuit_breaker_events WHERE resolved_at IS NULL"
+                    ).fetchone()[0])
+                    counts["circuit_breaker"] += total
+                    rows = conn.execute(
+                        "SELECT id, platform, reason, detected_at, cooldown_until "
+                        "FROM circuit_breaker_events WHERE resolved_at IS NULL "
+                        "ORDER BY detected_at DESC, id DESC LIMIT ?",
+                        (fetch_limit,),
+                    ).fetchall()
+                    capped = capped or total > fetch_limit
+                    for row in rows:
+                        if row["reason"] == "login_expired":
+                            add_item(
+                                tenant, "circuit_breaker", row["id"],
+                                f"{row['platform']} · 登录态已被平台判定失效",
+                                "这是运行过程中收到的实际鉴权失败/登录过期信号，不是根据本地登录态文件推断；请进入账号与登录重新扫码。",
+                                "login_expired", row["detected_at"], "high",
+                                "accounts", "accounts",
+                            )
+                        else:
+                            add_item(tenant, "circuit_breaker", row["id"],
+                                     f"{row['platform']} · 平台熔断待恢复",
+                                     f"{row['reason']} · 冷却至 {row['cooldown_until'] or '待确认'}",
+                                     "open", row["detected_at"], "high",
+                                     "operations", "breaker")
+
+                if "hot_topics" in tables and (not source or source == "hot_topic_source"):
+                    total = int(conn.execute(
+                        "SELECT COUNT(*) FROM hot_topics WHERE evidence_status = 'failed'"
+                    ).fetchone()[0])
+                    counts["hot_topic_source"] += total
+                    rows = conn.execute(
+                        "SELECT id, source, title, discovered_at FROM hot_topics "
+                        "WHERE evidence_status = 'failed' "
+                        "ORDER BY discovered_at DESC, id DESC LIMIT ?",
+                        (fetch_limit,),
+                    ).fetchall()
+                    capped = capped or total > fetch_limit
+                    for row in rows:
+                        add_item(tenant, "hot_topic_source", row["id"],
+                                 f"热点来源采集失败 · {row['source']}",
+                                 row["title"] or "请检查数据源配置和抓取诊断",
+                                 "failed", row["discovered_at"], "high", "hot", "sources")
+
+                if "task_runs" in tables and (not source or source == "task_run"):
+                    total = int(conn.execute(
+                        "SELECT COUNT(*) FROM task_runs WHERE status IN ('pending_verify','failed','interrupted')"
+                    ).fetchone()[0])
+                    counts["task_run"] += total
+                    rows = conn.execute(
+                        "SELECT id, task_type, status, platform, error_msg, "
+                        "COALESCE(finished_at, started_at, created_at) AS todo_at "
+                        "FROM task_runs WHERE status IN ('pending_verify','failed','interrupted') "
+                        "ORDER BY COALESCE(finished_at, started_at, created_at) DESC, id DESC LIMIT ?",
+                        (fetch_limit,),
+                    ).fetchall()
+                    capped = capped or total > fetch_limit
+                    for row in rows:
+                        status = str(row["status"])
+                        add_item(tenant, "task_run", row["id"],
+                                 f"{row['task_type']} · {status}",
+                                 f"{row['platform'] or '未指定平台'} · {row['error_msg'] or '需要检查任务结果'}",
+                                 status, row["todo_at"],
+                                 "high" if status in ("failed", "interrupted") else "medium",
+                                 "operations", "tasks")
+
+                if "ops_logs" in tables and (not source or source == "ops_log"):
+                    total = int(conn.execute(
+                        "SELECT COUNT(*) FROM ops_logs WHERE status IN ('pending_verify','failed')"
+                    ).fetchone()[0])
+                    counts["ops_log"] += total
+                    rows = conn.execute(
+                        "SELECT id, platform, action_type, content, status, "
+                        "COALESCE(executed_at, schedule_time) AS todo_at "
+                        "FROM ops_logs WHERE status IN ('pending_verify','failed') "
+                        "ORDER BY COALESCE(executed_at, schedule_time) DESC, id DESC LIMIT ?",
+                        (fetch_limit,),
+                    ).fetchall()
+                    capped = capped or total > fetch_limit
+                    for row in rows:
+                        status = str(row["status"])
+                        add_item(tenant, "ops_log", row["id"],
+                                 f"{row['action_type']} · {status}",
+                                 f"{row['platform'] or '未知平台'} · {row['content'] or '请核实运营操作结果'}",
+                                 status, row["todo_at"],
+                                 "high" if status == "failed" else "medium",
+                                 "operations", "logs")
+
+                if "media_assets" in tables and (not source or source == "media_review"):
+                    total = int(conn.execute(
+                        "SELECT COUNT(*) FROM media_assets WHERE status='active' AND review_status='pending_review'"
+                    ).fetchone()[0])
+                    counts["media_review"] += total
+                    rows = conn.execute(
+                        "SELECT id, title, created_at FROM media_assets "
+                        "WHERE status='active' AND review_status='pending_review' "
+                        "ORDER BY created_at DESC, id DESC LIMIT ?",
+                        (fetch_limit,),
+                    ).fetchall()
+                    capped = capped or total > fetch_limit
+                    for row in rows:
+                        add_item(tenant, "media_review", row["id"], f"素材待审核 · {row['title']}",
+                                 "审核通过后才能用于内容配图", "pending_review", row["created_at"],
+                                 "medium", "assets", "media")
+
+                if "notifications" in tables and (not source or source == "notification"):
+                    columns = {row["name"] for row in conn.execute("PRAGMA table_info(notifications)").fetchall()}
+                    if "read_at" in columns:
+                        total = int(conn.execute(
+                            "SELECT COUNT(*) FROM notifications WHERE read_at IS NULL"
+                        ).fetchone()[0])
+                        counts["notification"] += total
+                        rows = conn.execute(
+                            "SELECT id, level, title, body, sent_at FROM notifications "
+                            "WHERE read_at IS NULL ORDER BY sent_at DESC, id DESC LIMIT ?",
+                            (fetch_limit,),
+                        ).fetchall()
+                        capped = capped or total > fetch_limit
+                        for row in rows:
+                            level = str(row["level"] or "info")
+                            add_item(tenant, "notification", row["id"], row["title"],
+                                     row["body"] or "有一条未读通知", "unread", row["sent_at"],
+                                     "high" if level in ("error", "critical") else "medium",
+                                     "operations", "notifications")
+
+                if "media_generation_jobs" in tables and (not source or source == "media_generation"):
+                    total = int(conn.execute(
+                        "SELECT COUNT(*) FROM media_generation_jobs WHERE status='failed'"
+                    ).fetchone()[0])
+                    counts["media_generation"] += total
+                    rows = conn.execute(
+                        "SELECT id, error_message, created_at FROM media_generation_jobs "
+                        "WHERE status='failed' ORDER BY created_at DESC, id DESC LIMIT ?",
+                        (fetch_limit,),
+                    ).fetchall()
+                    capped = capped or total > fetch_limit
+                    for row in rows:
+                        add_item(tenant, "media_generation", row["id"], "AI 配图生成失败",
+                                 row["error_message"] or "请检查图片生成配置后重试", "failed",
+                                 row["created_at"], "high", "assets", "media")
+            except (sqlite3.Error, OSError) as exc:
+                logger.warning("todo scan skipped tenant=%s error=%s", tenant["id"], type(exc).__name__)
+            finally:
+                if conn is not None:
+                    conn.close()
+
+        items.sort(key=lambda item: (item["created_at"] or "", item["id"]), reverse=True)
+        total_items = sum(counts.values())
+        offset = (page - 1) * page_size
+        return {
+            "items": items[offset:offset + page_size],
+            "total": total_items,
+            "counts": counts,
+            "page": page,
+            "page_size": page_size,
+            "pages": max(1, (total_items + page_size - 1) // page_size),
+            "capped": capped,
+        }
 
     # --- 访问保护（口令 / 会话 / 脚本令牌）---
     @app.get("/api/auth/status")
@@ -3682,20 +4216,19 @@ def _register_routes(app: FastAPI) -> None:
         published_count = row[0]
 
         cfg = g2["cfg"]
-        # R20/B-1：登录态是「能否真实操作」的前置条件，前端据此打 🔴 标注
-        from src.core.login_manager import has_login_state
-
-        login_data_dir = Path(cfg.resolve_path(cfg.paths.data_dir))
-        logged_in = [
-            p.value for p in Platform
-            if p.value in cfg.platforms.enabled_keys()
-            and has_login_state(p, data_dir=login_data_dir)
+        platform_status = _platform_status_snapshot(cfg, conn)
+        credential_present = [
+            key for key, state in platform_status.items() if state["credential_present"]
         ]
+        # logged_in_platforms 为旧客户端兼容字段；语义实际是本机凭证存在，不代表会话有效。
         return {
             "enabled_platforms": cfg.platforms.enabled_keys(),
-            "logged_in_platforms": logged_in,
+            "logged_in_platforms": credential_present,
+            "credential_present_platforms": credential_present,
+            "platform_status": platform_status,
             "platforms_without_login": [
-                p for p in cfg.platforms.enabled_keys() if p not in logged_in
+                key for key, state in platform_status.items()
+                if state["enabled"] and not state["credential_present"]
             ],
             "circuit_broken_platforms": broken_platforms,
             "active_rounds": active_rounds,
@@ -3871,9 +4404,15 @@ def _register_routes(app: FastAPI) -> None:
         page: int = Query(1, ge=1),
         page_size: int = Query(20, ge=1, le=100),
         task_type: str | None = Query(None, min_length=1, max_length=80),
+        tenant_id: str | None = Query(None, min_length=1, max_length=100),
+        error_keyword: str | None = Query(None, min_length=1, max_length=120),
+        date_from: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        date_to: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
     ):
         if _task_queue is None:
             raise HTTPException(503, "全局任务队列尚未初始化")
+        if date_from and date_to and date_from > date_to:
+            raise HTTPException(422, "date_from 不能晚于 date_to")
         registry = _g().get("tenant_registry")
         if scope == "all":
             tasks = _task_queue.list(limit=limit)
@@ -3883,29 +4422,42 @@ def _register_routes(app: FastAPI) -> None:
                 page=page,
                 page_size=page_size,
                 scope=scope, task_type=task_type,
+                tenant_id=tenant_id, error_keyword=error_keyword,
+                date_from=date_from, date_to=date_to,
             )
         items = []
+        round_numbers = _resolve_task_round_numbers(registry, tasks)
         for task in tasks:
             try:
                 tenant_name = registry.get(task.tenant_id)["name"] if registry else task.tenant_id
             except TenantError:
                 tenant_name = task.tenant_id
+            round_id = _round_id_from_aggregate(task.task_type, task.aggregate_id)
             items.append({
                 "queue_order": task.queue_order,
                 "task_id": task.task_id, "task_type": task.task_type,
                 "tenant_id": task.tenant_id, "tenant_name": tenant_name,
-                "aggregate_id": task.aggregate_id, "status": task.status,
+                "aggregate_id": task.aggregate_id,
+                "round_number": round_numbers.get((task.tenant_id, round_id)) if round_id is not None else None,
+                "status": task.status,
                 "created_at": task.created_at, "available_at": task.available_at,
                 "started_at": task.started_at,
                 "finished_at": task.finished_at, "attempts": task.attempts,
                 "error_code": task.error_code, "error_message": task.error_message,
+                "retry_of_task_id": task.retry_of_task_id,
+                "retry_confirmed_by": task.retry_confirmed_by,
+                "retry_confirmation_note": task.retry_confirmation_note,
+                "resolution_action": task.resolution_action,
+                "resolution_actor": task.resolution_actor,
+                "resolution_note": task.resolution_note,
+                "resolution_at": task.resolution_at,
             })
         response = {"items": items}
         if scope != "all":
             response.update({
-                "total": total, "page": page, "page_size": page_size,
+                "total": total, "page": page,
+                "page_size": page_size,
                 "pages": max(1, (total + page_size - 1) // page_size),
-                "counts": _task_queue.status_counts(scope=scope),
             })
             if scope == "active":
                 active_stats = _task_queue.status_counts(scope="active")
@@ -3922,15 +4474,77 @@ def _register_routes(app: FastAPI) -> None:
         task = _task_queue.get(task_id)
         if task is None:
             raise HTTPException(404, "任务不存在")
+        round_id = _round_id_from_aggregate(task.task_type, task.aggregate_id)
+        round_numbers = _resolve_task_round_numbers(_g().get("tenant_registry"), [task])
         return {
             "queue_order": task.queue_order,
             "task_id": task.task_id, "task_type": task.task_type,
             "tenant_id": task.tenant_id, "aggregate_id": task.aggregate_id,
+            "round_number": round_numbers.get((task.tenant_id, round_id)) if round_id is not None else None,
             "status": task.status, "payload": task.payload, "result": task.result,
             "created_at": task.created_at, "available_at": task.available_at,
             "started_at": task.started_at,
             "finished_at": task.finished_at, "attempts": task.attempts,
             "error_code": task.error_code, "error_message": task.error_message,
+            "retry_of_task_id": task.retry_of_task_id,
+            "retry_confirmed_by": task.retry_confirmed_by,
+            "retry_confirmation_note": task.retry_confirmation_note,
+            "resolution_action": task.resolution_action,
+            "resolution_actor": task.resolution_actor,
+            "resolution_note": task.resolution_note,
+            "resolution_at": task.resolution_at,
+        }
+
+    @app.post("/api/task-queue/{task_id}/resolve")
+    def resolve_global_task(task_id: str, body: dict, request: Request):
+        """记录失败任务的人工处理/忽略决定，不修改原始执行状态。"""
+        if _task_queue is None:
+            raise HTTPException(503, "全局任务队列尚未初始化")
+        data = body or {}
+        try:
+            resolution, created = _task_queue.resolve_failed_task(
+                task_id,
+                action=str(data.get("action") or ""),
+                actor=auth.audit_actor(request),
+                note=str(data.get("note") or ""),
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except TaskQueueError as exc:
+            message = str(exc)
+            raise HTTPException(404 if "不存在" in message else 409, message) from exc
+        return {"task_id": task_id, **resolution, "created": created}
+
+    @app.post("/api/task-queue/{task_id}/retry")
+    def retry_global_task_after_manual_verification(task_id: str, body: dict, request: Request):
+        """人工确认平台侧未执行后，按原账号组和原始任务快照创建重试子任务。"""
+        if _task_queue is None:
+            raise HTTPException(503, "全局任务队列尚未初始化")
+        data = body or {}
+        if data.get("confirmed_not_executed") is not True:
+            raise HTTPException(400, "必须确认平台侧未执行；结果不确定时不得重试")
+        try:
+            task, created = _task_queue.retry_after_manual_verification(
+                task_id,
+                confirmed_by=auth.audit_actor(request),
+                confirmation_note=data.get("confirmation_note", ""),
+                confirmed_not_executed=True,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except TaskQueueError as exc:
+            message = str(exc)
+            status_code = 404 if "不存在" in message else 409
+            raise HTTPException(status_code, message) from exc
+        return {
+            "task_id": task.task_id,
+            "retry_of_task_id": task.retry_of_task_id,
+            "tenant_id": task.tenant_id,
+            "task_type": task.task_type,
+            "status": task.status,
+            "created": created,
+            "confirmed_by": task.retry_confirmed_by,
+            "confirmation_note": task.retry_confirmation_note,
         }
 
     @app.post("/api/task-queue/{task_id}/cancel")
@@ -4071,13 +4685,15 @@ def _register_routes(app: FastAPI) -> None:
         template_snapshot = None
         if req.template_id is not None:
             template_row = runtime_context["conn"].execute(
-                "SELECT id, title, body FROM content_assets WHERE id=? AND asset_type='template'",
+                "SELECT id, title, body, version FROM content_assets "
+                "WHERE id=? AND asset_type='template' AND is_active=1",
                 (req.template_id,),
             ).fetchone()
             if template_row is None:
                 raise HTTPException(404, "所选内容模板不存在或已删除，请刷新模板列表")
             template_snapshot = {
                 "id": int(template_row["id"]),
+                "version": int(template_row["version"] or 1),
                 "title": str(template_row["title"] or "")[:200],
                 "body": str(template_row["body"] or "")[:8000],
             }
@@ -4343,6 +4959,7 @@ def _register_routes(app: FastAPI) -> None:
     def list_drafts(
         status: Optional[str] = Query(None),
         platform: Optional[str] = Query(None),
+        draft_id: Optional[str] = Query(None, min_length=1, max_length=128),
         page: Optional[int] = Query(None, ge=1),
         page_size: int = Query(20, ge=1, le=100),
     ):
@@ -4363,9 +4980,14 @@ def _register_routes(app: FastAPI) -> None:
         if platform:
             where.append("d.platform = ?")
             params.append(platform)
+        if draft_id:
+            where.append("d.id = ?")
+            params.append(draft_id)
         count_sql = "SELECT COUNT(*) FROM drafts d LEFT JOIN contents c ON d.content_id = c.id"
         if where:
-            count_sql += " WHERE " + " AND ".join(where)
+            where_sql = " WHERE " + " AND ".join(where)
+            count_sql += where_sql
+            sql += where_sql
         total = int(conn.execute(count_sql, params).fetchone()[0])
         if page is None:
             # 兼容旧调用方；新列表必须显式传 page 以获得分页契约。
@@ -4527,17 +5149,41 @@ def _register_routes(app: FastAPI) -> None:
             # 统一入口：改状态 + 回写链接 + 注册发布后数据采集 + 推进轮次（与轮询识别完全一致）
             ok = sched.on_user_published(draft_id, via="用户确认发布", note_url=note_url or None)
             if not ok:
+                # 并发请求可能在最初读取状态后被另一请求先完成；将其视为幂等重复确认，
+                # 不能重复写例外审计、通知或推进数据采集。
+                latest = conn.execute(
+                    "SELECT status, platform_note_url FROM drafts WHERE id=?", (draft_id,),
+                ).fetchone()
+                if latest and latest["status"] in ("user_published", "data_fetching", "published"):
+                    return {
+                        "draft_id": draft_id, "status": latest["status"],
+                        "note_url": latest["platform_note_url"], "already_confirmed": True,
+                    }
                 raise HTTPException(400, "状态迁移失败")
             if note_url:
                 conn.execute("UPDATE drafts SET platform_note_url = ? WHERE id = ?", (note_url, draft_id))
                 conn.commit()
         else:
-            ok = _g()["sm_draft"].transition(draft_id, "user_published", reason="用户确认发布")
-            if not ok:
+            # 即使调度器未注入（例如受限测试/维护模式），发布确认仍必须原子化。
+            cur = conn.execute(
+                "UPDATE drafts SET status='user_published', user_confirmed_at=? "
+                "WHERE id=? AND status IN ('draft_saved', 'draft_pending')",
+                (_now().isoformat(timespec="seconds"), draft_id),
+            )
+            if cur.rowcount != 1:
+                latest = conn.execute(
+                    "SELECT status, platform_note_url FROM drafts WHERE id=?", (draft_id,),
+                ).fetchone()
+                if latest and latest["status"] in ("user_published", "data_fetching", "published"):
+                    return {
+                        "draft_id": draft_id, "status": latest["status"],
+                        "note_url": latest["platform_note_url"], "already_confirmed": True,
+                    }
                 raise HTTPException(400, "状态迁移失败")
+            conn.commit()
             if note_url:
                 conn.execute(
-                    "UPDATE drafts SET platform_note_url = ? WHERE id = ?",
+                    "UPDATE drafts SET platform_note_url = COALESCE(platform_note_url, ?) WHERE id = ?",
                     (note_url, draft_id),
                 )
                 conn.commit()
@@ -4732,8 +5378,9 @@ def _register_routes(app: FastAPI) -> None:
             }
 
         history = [dict(r) for r in conn.execute(
-            "SELECT plan_signature, plan_snapshot, round_id, created_at, author "
-            "FROM signature_history ORDER BY id DESC LIMIT 10"
+            "SELECT h.plan_signature, h.plan_snapshot, h.round_id, r.round_number, h.created_at, h.author "
+            "FROM signature_history h LEFT JOIN spiral_rounds r ON r.id = h.round_id "
+            "ORDER BY h.id DESC LIMIT 10"
         ).fetchall()]
         for h in history:
             try:
@@ -5192,7 +5839,9 @@ def _register_routes(app: FastAPI) -> None:
             outcome = guard.check_content(row["title"], row["body"], tags, platform=plat)
         except Exception as exc:  # noqa: BLE001 — R2 红线
             logger.exception("G2 重检异常 content=%s", content_id)
-            raise HTTPException(500, f"检查器异常，不能默认通过：{redact(str(exc))}") from exc
+            raise HTTPException(
+                503, "质量检查服务暂时不可用，未放行本次内容；请检查服务状态后重试",
+            ) from exc
 
         conn.execute(
             "UPDATE contents SET guard_outcome = ?, guard_reason = ? WHERE id = ?",
@@ -5412,8 +6061,21 @@ def _register_routes(app: FastAPI) -> None:
                 except (TypeError, ValueError):
                     item[target] = []
             item["enabled"] = bool(item["enabled"])
+            item["installation_state"] = "registered"
+            item["enabled_state"] = "enabled" if item["enabled"] else "disabled"
+            item["runnable_state"] = "blocked_no_sandbox"
+            item["execution_mode"] = "metadata_only"
             items.append(item)
-        return {"items": items, "total": len(items), "execution_enabled": False}
+        from src.core.skills_registry import builtin_skills_catalog
+        builtin_items = builtin_skills_catalog()
+        return {
+            "items": items,
+            "total": len(items),
+            "builtin_items": builtin_items,
+            "builtin_total": len(builtin_items),
+            "execution_enabled": False,
+            "custom_execution_enabled": False,
+        }
 
     @app.post("/api/skills")
     def register_tenant_skill(req: dict):
@@ -5426,12 +6088,8 @@ def _register_routes(app: FastAPI) -> None:
         import re
         if not re.fullmatch(r"[a-z][a-z0-9_.-]{1,63}", skill_id):
             raise HTTPException(422, "skill_id 必须以小写字母开头，仅允许小写字母、数字、点、下划线和连字符")
-        builtin_skill_ids = {
-            "topic_scoring", "prompt_variants", "ultimate_goal_check", "image_card",
-            "draft_saver", "circuit_breaker", "rhythm_controller", "ops_engine",
-            "spiral_engine", "zscore_normalize", "recovery_manager", "autogrow",
-            "topic_pool", "orchestration", "scheduler", "platform_readback",
-        }
+        from src.core.skills_registry import builtin_skills_catalog
+        builtin_skill_ids = {item["skill_id"] for item in builtin_skills_catalog()}
         if skill_id in builtin_skill_ids:
             raise HTTPException(409, "该 ID 已被系统内置 Skill 占用")
         if not name or len(name) > 120 or len(description) > 2000:
@@ -5445,7 +6103,7 @@ def _register_routes(app: FastAPI) -> None:
         permissions = body.get("permissions") or []
         if not isinstance(inputs, list) or len(inputs) > 30 or not isinstance(outputs, list) or len(outputs) > 30:
             raise HTTPException(422, "inputs / outputs 必须是最多 30 项的数组")
-        if not isinstance(permissions, list) or any(p not in {"read_content", "read_plan", "read_drafts"} for p in permissions):
+        if not isinstance(permissions, list) or any(not isinstance(p, str) or p not in {"read_content", "read_plan", "read_drafts"} for p in permissions):
             raise HTTPException(422, "权限只允许 read_content / read_plan / read_drafts；不允许执行代码或访问外网")
         for schema in [*inputs, *outputs]:
             if not isinstance(schema, dict) or len(json.dumps(schema, ensure_ascii=False)) > 2000:
@@ -5472,6 +6130,8 @@ def _register_routes(app: FastAPI) -> None:
                 "category": category, "inputs": inputs, "outputs": outputs,
                 "permissions": sorted(set(permissions)), "enabled": False,
                 "manifest_version": 1, "created_at": now, "updated_at": now,
+                "installation_state": "registered", "enabled_state": "disabled",
+                "runnable_state": "blocked_no_sandbox", "execution_mode": "metadata_only",
                 "execution_enabled": False}
 
     @app.patch("/api/skills/{skill_id}")
@@ -5481,24 +6141,78 @@ def _register_routes(app: FastAPI) -> None:
             expected_version = int(body.get("manifest_version"))
         except (TypeError, ValueError) as exc:
             raise HTTPException(422, "更新必须提供当前 manifest_version") from exc
-        if not isinstance(body.get("enabled"), bool):
-            raise HTTPException(422, "enabled 必须是布尔值")
+        allowed = {"enabled", "name", "version", "description", "category", "inputs", "outputs", "permissions"}
+        if set(body) - allowed - {"manifest_version"}:
+            raise HTTPException(422, "包含不支持的 Skill 字段")
         conn = _g()["conn"]
+        existing = conn.execute(
+            "SELECT * FROM tenant_skill_registry WHERE skill_id=?", (skill_id,)
+        ).fetchone()
+        if existing is None:
+            raise HTTPException(404, "Skill 不存在")
+        if int(existing["manifest_version"]) != expected_version:
+            raise HTTPException(409, "Skill 已在其他窗口更新，请刷新后重试")
+
+        def _decode_manifest(column: str) -> list:
+            try:
+                return json.loads(existing[column] or "[]")
+            except (TypeError, ValueError):
+                return []
+
+        name = str(body.get("name", existing["name"]) or "").strip()
+        version = str(body.get("version", existing["version"]) or "").strip()
+        description = str(body.get("description", existing["description"]) or "").strip()
+        category = str(body.get("category", existing["category"]) or "custom").strip().lower()
+        inputs = body.get("inputs", _decode_manifest("inputs_json"))
+        outputs = body.get("outputs", _decode_manifest("outputs_json"))
+        permissions = body.get("permissions", _decode_manifest("permissions_json"))
+        enabled = body.get("enabled", bool(existing["enabled"]))
+        import re
+        if not isinstance(enabled, bool):
+            raise HTTPException(422, "enabled 必须是布尔值")
+        if not name or len(name) > 120 or len(description) > 2000:
+            raise HTTPException(422, "Skill 名称必填且不超过 120 字，说明不超过 2000 字")
+        if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+            raise HTTPException(422, "版本号必须采用 x.y.z 格式")
+        if not re.fullmatch(r"[a-z][a-z0-9_-]{1,39}", category):
+            raise HTTPException(422, "分类标识无效")
+        if not isinstance(inputs, list) or len(inputs) > 30 or not isinstance(outputs, list) or len(outputs) > 30:
+            raise HTTPException(422, "inputs / outputs 必须是最多 30 项的数组")
+        if not isinstance(permissions, list) or any(
+            not isinstance(permission, str) or permission not in {"read_content", "read_plan", "read_drafts"} for permission in permissions
+        ):
+            raise HTTPException(422, "权限只允许 read_content / read_plan / read_drafts；不允许执行代码或访问外网")
+        for schema in [*inputs, *outputs]:
+            if not isinstance(schema, dict) or len(json.dumps(schema, ensure_ascii=False)) > 2000:
+                raise HTTPException(422, "输入输出 schema 必须为 JSON 对象且单项不超过 2000 字")
+        if len(json.dumps([inputs, outputs], ensure_ascii=False)) > 20000:
+            raise HTTPException(422, "输入输出 schema 总大小不能超过 20000 字")
+
         now = _now().isoformat(timespec="seconds")
         cursor = conn.execute(
-            "UPDATE tenant_skill_registry SET enabled=?,manifest_version=manifest_version+1,updated_at=? "
+            "UPDATE tenant_skill_registry SET name=?,version=?,description=?,category=?,"
+            "inputs_json=?,outputs_json=?,permissions_json=?,enabled=?,"
+            "manifest_version=manifest_version+1,updated_at=? "
             "WHERE skill_id=? AND manifest_version=?",
-            (1 if body["enabled"] else 0, now, skill_id, expected_version),
+            (name, version, description, category,
+             json.dumps(inputs, ensure_ascii=False), json.dumps(outputs, ensure_ascii=False),
+             json.dumps(sorted(set(permissions)), ensure_ascii=False), 1 if enabled else 0,
+             now, skill_id, expected_version),
         )
         conn.commit()
         if cursor.rowcount != 1:
-            exists = conn.execute("SELECT 1 FROM tenant_skill_registry WHERE skill_id=?", (skill_id,)).fetchone()
-            if exists is None:
-                raise HTTPException(404, "Skill 不存在")
             raise HTTPException(409, "Skill 已在其他窗口更新，请刷新后重试")
-        return {"skill_id": skill_id, "enabled": body["enabled"],
-                "manifest_version": expected_version + 1, "updated_at": now,
-                "execution_enabled": False}
+        return {
+            "skill_id": skill_id, "name": name, "version": version,
+            "description": description, "category": category,
+            "inputs": inputs, "outputs": outputs,
+            "permissions": sorted(set(permissions)), "enabled": enabled,
+            "manifest_version": expected_version + 1, "updated_at": now,
+            "installation_state": "registered",
+            "enabled_state": "enabled" if enabled else "disabled",
+            "runnable_state": "blocked_no_sandbox", "execution_mode": "metadata_only",
+            "execution_enabled": False,
+        }
 
     @app.delete("/api/skills/{skill_id}")
     def delete_tenant_skill(skill_id: str):
@@ -5728,14 +6442,16 @@ def _register_routes(app: FastAPI) -> None:
         item = dict(row)
         item["platforms"] = json.loads(item.pop("platforms_json") or "[]")
         linked = conn.execute(
-            "SELECT d.id AS draft_id,d.platform,d.status,c.title,c.round_id,cpd.created_at "
+            "SELECT d.id AS draft_id,d.platform,d.status,c.title,c.round_id,r.round_number,cpd.created_at "
             "FROM content_plan_drafts cpd JOIN drafts d ON d.id=cpd.draft_id "
-            "JOIN contents c ON c.id=d.content_id WHERE cpd.plan_id=? ORDER BY cpd.created_at,d.id",
+            "JOIN contents c ON c.id=d.content_id LEFT JOIN spiral_rounds r ON r.id=c.round_id "
+            "WHERE cpd.plan_id=? ORDER BY cpd.created_at,d.id",
             (plan_id,),
         ).fetchall()
         rounds = conn.execute(
-            "SELECT round_id,task_id,created_at FROM content_plan_rounds "
-            "WHERE plan_id=? ORDER BY created_at DESC",
+            "SELECT cpr.round_id,r.round_number,cpr.task_id,cpr.created_at "
+            "FROM content_plan_rounds cpr LEFT JOIN spiral_rounds r ON r.id=cpr.round_id "
+            "WHERE cpr.plan_id=? ORDER BY cpr.created_at DESC",
             (plan_id,),
         ).fetchall()
         item["drafts"] = [dict(r) for r in linked]
@@ -5820,6 +6536,51 @@ def _register_routes(app: FastAPI) -> None:
         if cursor.rowcount != 1:
             raise HTTPException(409, "计划状态已变化，请刷新后重试")
         return {"id": plan_id, "status": "cancelled"}
+
+    @app.post("/api/content-plans/{plan_id}/archive")
+    def archive_content_plan(plan_id: str, version: int = Query(..., ge=1)):
+        """归档已结束计划；只做状态变更，保留所有历史关联。"""
+        conn = _g()["conn"]
+        row = conn.execute("SELECT status, version FROM content_plans WHERE id=?", (plan_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "计划不存在")
+        if int(row["version"]) != version:
+            raise HTTPException(409, "计划已被其他窗口修改，请刷新后重试")
+        if row["status"] not in ("generated", "reviewed", "failed", "cancelled"):
+            raise HTTPException(409, "只有已结束的计划可以归档")
+        now = _now().isoformat(timespec="seconds")
+        cursor = conn.execute(
+            "UPDATE content_plans SET status='archived',version=version+1,updated_at=? "
+            "WHERE id=? AND version=? AND status IN ('generated','reviewed','failed','cancelled')",
+            (now, plan_id, version),
+        )
+        conn.commit()
+        if cursor.rowcount != 1:
+            raise HTTPException(409, "计划状态已变化，请刷新后重试")
+        return {"id": plan_id, "status": "archived", "version": version + 1}
+
+    @app.post("/api/content-plans/{plan_id}/restore")
+    def restore_content_plan(plan_id: str, version: int = Query(..., ge=1)):
+        """恢复归档或已停用计划；历史轮次、任务和草稿关联保持不变。"""
+        conn = _g()["conn"]
+        row = conn.execute("SELECT status, version FROM content_plans WHERE id=?", (plan_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "计划不存在")
+        if int(row["version"]) != version:
+            raise HTTPException(409, "计划已被其他窗口修改，请刷新后重试")
+        restore_to = {"archived": "reviewed", "cancelled": "planned"}.get(str(row["status"]))
+        if restore_to is None:
+            raise HTTPException(409, "只有已归档或已停用的计划可以恢复")
+        now = _now().isoformat(timespec="seconds")
+        cursor = conn.execute(
+            "UPDATE content_plans SET status=?,version=version+1,updated_at=? "
+            "WHERE id=? AND version=? AND status=?",
+            (restore_to, now, plan_id, version, row["status"]),
+        )
+        conn.commit()
+        if cursor.rowcount != 1:
+            raise HTTPException(409, "计划状态已变化，请刷新后重试")
+        return {"id": plan_id, "status": restore_to, "version": version + 1}
 
     # --- 内容日历排期（§24.3）---
     @app.get("/api/schedule")
@@ -6052,6 +6813,103 @@ def _register_routes(app: FastAPI) -> None:
             "platform_only_metrics": raw_metrics,
         }
 
+    @app.get("/api/analytics/business-summary")
+    def analytics_business_summary(days: int = Query(30, ge=1, le=365)):
+        """业务经营 KPI 汇总（生产量、确认发布量、互动、粉丝增长）；只返回有明确定义的数据，未知值保留为 null。
+
+        不提供「草稿确认发布率」「平台发布成功率」等 SaaS 漏斗类比率：前者分母口径易误读，
+        后者缺少权威平台回执，均不属于自用运营闭环的经营指标。目标完成率见 /api/goals/summary。
+        """
+        from datetime import timedelta
+
+        conn = _g()["conn"]
+        since = (_now() - timedelta(days=days - 1)).strftime("%Y-%m-%d %H:%M:%S")
+
+        contents_created = int(conn.execute(
+            "SELECT COUNT(*) FROM contents WHERE datetime(created_at) >= datetime(?)", (since,)
+        ).fetchone()[0])
+        drafts_created = int(conn.execute(
+            "SELECT COUNT(*) FROM drafts WHERE datetime(created_at) >= datetime(?)", (since,)
+        ).fetchone()[0])
+        confirmed_published = int(conn.execute(
+            "SELECT COUNT(*) FROM drafts WHERE datetime(user_confirmed_at) >= datetime(?) "
+            "AND user_confirmed_at IS NOT NULL",
+            (since,),
+        ).fetchone()[0])
+
+        # 每篇草稿仅取窗口内最新一条成功/部分成功快照，避免重复采集被重复求和。
+        metric_row = conn.execute(
+            """WITH ranked AS (
+                   SELECT draft_id, views, likes, collects, comments, shares, new_followers,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY draft_id ORDER BY fetched_at DESC, id DESC
+                          ) AS rn
+                   FROM metrics
+                   WHERE draft_id IS NOT NULL
+                     AND datetime(fetched_at) >= datetime(?)
+                     AND fetch_status IN ('success','partial')
+               )
+               SELECT COUNT(*) AS sample_count,
+                      SUM(views) AS views, SUM(likes) AS likes,
+                      SUM(collects) AS collects, SUM(comments) AS comments,
+                      SUM(shares) AS shares, SUM(new_followers) AS new_followers,
+                      SUM(CASE WHEN views IS NOT NULL THEN 1 ELSE 0 END) AS views_samples,
+                      SUM(CASE WHEN likes IS NOT NULL THEN 1 ELSE 0 END) AS likes_samples,
+                      SUM(CASE WHEN collects IS NOT NULL THEN 1 ELSE 0 END) AS collects_samples,
+                      SUM(CASE WHEN comments IS NOT NULL THEN 1 ELSE 0 END) AS comments_samples,
+                      SUM(CASE WHEN shares IS NOT NULL THEN 1 ELSE 0 END) AS shares_samples
+               FROM ranked WHERE rn = 1""",
+            (since,),
+        ).fetchone()
+
+        followers_growth: dict[str, dict | None] = {}
+        for platform in _g()["cfg"].platforms.enabled_keys():
+            baseline = conn.execute(
+                "SELECT followers, captured_at FROM account_snapshots "
+                "WHERE platform=? AND followers IS NOT NULL AND datetime(captured_at) < datetime(?) "
+                "ORDER BY captured_at DESC, id DESC LIMIT 1",
+                (platform, since),
+            ).fetchone()
+            latest = conn.execute(
+                "SELECT followers, captured_at FROM account_snapshots "
+                "WHERE platform=? AND followers IS NOT NULL AND datetime(captured_at) >= datetime(?) "
+                "ORDER BY captured_at DESC, id DESC LIMIT 1",
+                (platform, since),
+            ).fetchone()
+            followers_growth[platform] = (
+                {
+                    "growth": int(latest["followers"]) - int(baseline["followers"]),
+                    "baseline_at": baseline["captured_at"],
+                    "latest_at": latest["captured_at"],
+                }
+                if baseline is not None and latest is not None else None
+            )
+
+        return {
+            "window_days": days,
+            "since": since,
+            "contents_created": contents_created,
+            "drafts_created": drafts_created,
+            "confirmed_published": confirmed_published,
+            "interactions": {
+                "sample_count": int(metric_row["sample_count"] or 0),
+                "views": metric_row["views"],
+                "likes": metric_row["likes"],
+                "collects": metric_row["collects"],
+                "comments": metric_row["comments"],
+                "shares": metric_row["shares"],
+                "new_followers": metric_row["new_followers"],
+                "known_samples": {
+                    "views": int(metric_row["views_samples"] or 0),
+                    "likes": int(metric_row["likes_samples"] or 0),
+                    "collects": int(metric_row["collects_samples"] or 0),
+                    "comments": int(metric_row["comments_samples"] or 0),
+                    "shares": int(metric_row["shares_samples"] or 0),
+                },
+            },
+            "followers_growth_by_platform": followers_growth,
+        }
+
     # --- 选题评分 ---
     @app.get("/api/topics/score")
     def score_topics(limit: int = Query(20, ge=1, le=200)):
@@ -6130,7 +6988,7 @@ def _register_routes(app: FastAPI) -> None:
 
         cfg = _g()["cfg"]
         if cfg.hot_topics.enabled is False:
-            raise HTTPException(409, "热点采集已在配置中关闭（hot_topics.enabled=false）")
+            raise HTTPException(409, "热点采集已在系统设置中关闭，请先启用后再试")
         tenant_id = _g().get("runtime_tenant_id", "default")
         result = hot_topic_service.trigger_background(cfg, trigger="manual", tenant_id=tenant_id)
         if not result.get("started") and result.get("tenant_id") != tenant_id and result.get("running"):
@@ -6306,6 +7164,21 @@ def _register_routes(app: FastAPI) -> None:
         paused = bool((req or {}).get("paused"))
         return set_ops_paused(_g()["conn"], paused, by="web-ui")
 
+    # --- 正式运营设置向导进度（按账号组存 app_settings，不依赖浏览器存储）---
+    @app.get("/api/onboarding/progress")
+    def get_onboarding_progress_api():
+        from src.core.onboarding_progress import get_onboarding_progress
+        return get_onboarding_progress(_g()["conn"])
+
+    @app.put("/api/onboarding/progress")
+    def put_onboarding_progress_api(req: dict):
+        from src.core.onboarding_progress import set_onboarding_progress, validate_onboarding_progress
+        try:
+            step_key, step_index = validate_onboarding_progress(req)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        return set_onboarding_progress(_g()["conn"], step_key, step_index, by="web-ui")
+
     # --- 通知通道自检（不落 notifications 表）---
     @app.post("/api/notify/test")
     def notify_test():
@@ -6346,17 +7219,22 @@ def _register_routes(app: FastAPI) -> None:
     # --- 运营日志（ops_logs）---
     @app.get("/api/ops_logs")
     def list_ops_logs(
-        platform: Optional[str] = Query(None),
-        action_type: Optional[str] = Query(None),
-        status: Optional[str] = Query(None),
+        platform: Optional[str] = Query(None, pattern="^(xhs|douyin|kuaishou|wechat_channels)$"),
+        action_type: Optional[str] = Query(None, pattern="^(passive_reply|active_comment|follow|browse)$"),
+        status: Optional[str] = Query(None, pattern="^(success|failed|skipped|circuit_broken|pending_verify)$"),
+        date_from: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        date_to: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
         page: Optional[int] = Query(None, ge=1),
         page_size: int = Query(20, ge=1, le=100),
         limit: int = Query(100, ge=1, le=500),
-        offset: int = Query(0, ge=0),
+        record_id: Optional[int] = Query(None, ge=1),
     ):
         conn = _g()["conn"]
         where = ["1=1"]
         params: list = []
+        if record_id is not None:
+            where.append("id = ?")
+            params.append(record_id)
         if platform:
             where.append("platform = ?")
             params.append(platform)
@@ -6366,6 +7244,14 @@ def _register_routes(app: FastAPI) -> None:
         if status:
             where.append("status = ?")
             params.append(status)
+        if date_from:
+            where.append("substr(COALESCE(executed_at, schedule_time), 1, 10) >= ?")
+            params.append(date_from)
+        if date_to:
+            where.append("substr(COALESCE(executed_at, schedule_time), 1, 10) <= ?")
+            params.append(date_to)
+        if date_from and date_to and date_from > date_to:
+            raise HTTPException(422, "date_from 不能晚于 date_to")
         where_sql = " WHERE " + " AND ".join(where)
         total = conn.execute("SELECT COUNT(*) FROM ops_logs" + where_sql, params).fetchone()[0]
         effective_limit = page_size if page is not None else limit
@@ -6383,25 +7269,97 @@ def _register_routes(app: FastAPI) -> None:
             } if page is not None else {}),
         }
 
+    @app.post("/api/ops_logs/{log_id}/resolve")
+    def resolve_pending_ops_log(log_id: int, body: dict, request: Request):
+        """逐条人工核实运营日志，并只同步其明确关联的任务记录。"""
+        conn = _g()["conn"]
+        row = conn.execute(
+            "SELECT status, resolution_action, task_run_id FROM ops_logs WHERE id = ?", (log_id,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, "运营日志不存在")
+        action = (body or {}).get("action")
+        target = {"sent": "success", "not_sent": "failed"}.get(action)
+        if target is None:
+            raise HTTPException(400, "action 必须是 sent 或 not_sent")
+        if row["status"] != "pending_verify":
+            if row["resolution_action"] == action:
+                return {"id": log_id, "status": row["status"], "already_resolved": True}
+            raise HTTPException(409, f"当前状态 {row['status']} 已收口，不能重复或反向核实")
+        resolved_at = _now().strftime("%Y-%m-%d %H:%M:%S")
+        note = "用户核实：已发出" if action == "sent" else "用户核实：未发出（不自动重发）"
+        actor = auth.audit_actor(request)
+        updated = conn.execute(
+            "UPDATE ops_logs SET status = ?, resolved_at = ?, resolved_by = ?, "
+            "resolution_action = ?, resolution_note = ? "
+            "WHERE id = ? AND status = 'pending_verify'",
+            (target, resolved_at, actor, action, note, log_id),
+        )
+        if updated.rowcount != 1:
+            conn.rollback()
+            raise HTTPException(409, "运营日志状态已被其他操作更新，请刷新后核对")
+        linked_task_run_id = row["task_run_id"]
+        if linked_task_run_id is not None:
+            conn.execute(
+                "UPDATE task_runs SET status = ?, finished_at = ?, error_msg = ?, "
+                "resolved_at = ?, resolved_by = ?, resolution_action = ? "
+                "WHERE id = ? AND status = 'pending_verify'",
+                (target, resolved_at, note, resolved_at, actor, action, linked_task_run_id),
+            )
+        conn.commit()
+        return {
+            "id": log_id, "status": target, "resolved_at": resolved_at,
+            "resolved_by": actor, "linked_task_run_id": linked_task_run_id,
+            "already_resolved": False,
+        }
+
     # --- 任务追踪（task_runs）---
     @app.get("/api/task_runs")
     def list_task_runs(
-        task_type: Optional[str] = Query(None),
-        status: Optional[str] = Query(None),
+        task_type: Optional[str] = Query(None, pattern="^(publish_polling|data_fetch|daily_ops|comment_polling|cb_recovery|kb_scan|draft_save|round_pipeline|data_retention_cleanup)$"),
+        status: Optional[str] = Query(None, pattern="^(pending|running|interrupted|success|failed|skipped|pending_verify)$"),
+        platform: Optional[str] = Query(None, pattern="^(xhs|douyin|kuaishou|wechat_channels)$"),
+        date_from: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        date_to: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
         page: Optional[int] = Query(None, ge=1),
         page_size: int = Query(20, ge=1, le=100),
         limit: int = Query(100, ge=1, le=500),
-        offset: int = Query(0, ge=0),
+        record_id: Optional[int] = Query(None, ge=1),
+        round_id: Optional[int] = Query(None, ge=1),
     ):
         conn = _g()["conn"]
         where = ["1=1"]
         params: list = []
+        if record_id is not None:
+            where.append("id = ?")
+            params.append(record_id)
+        if round_id is not None:
+            # Scheduler sweep/review runs may process several rounds in one invocation.
+            # Resolve those runs only through the explicit notification FK, never by
+            # guessing from platform/time or rewriting a scheduler biz_id as a round id.
+            where.append(
+                "task_type = 'round_pipeline' AND (biz_id = ? OR id IN ("
+                "SELECT task_run_id FROM notifications WHERE round_id = ? "
+                "AND task_run_id IS NOT NULL))"
+            )
+            params.extend((str(round_id), round_id))
         if task_type:
             where.append("task_type = ?")
             params.append(task_type)
         if status:
             where.append("status = ?")
             params.append(status)
+        if platform:
+            where.append("platform = ?")
+            params.append(platform)
+        if date_from:
+            where.append("substr(created_at, 1, 10) >= ?")
+            params.append(date_from)
+        if date_to:
+            where.append("substr(created_at, 1, 10) <= ?")
+            params.append(date_to)
+        if date_from and date_to and date_from > date_to:
+            raise HTTPException(422, "date_from 不能晚于 date_to")
         where_sql = " WHERE " + " AND ".join(where)
         total = conn.execute("SELECT COUNT(*) FROM task_runs" + where_sql, params).fetchone()[0]
         effective_limit = page_size if page is not None else limit
@@ -6419,7 +7377,7 @@ def _register_routes(app: FastAPI) -> None:
         }
 
     @app.post("/api/task_runs/{run_id}/resolve")
-    def resolve_pending_verify(run_id: int, body: dict):
+    def resolve_pending_verify(run_id: int, body: dict, request: Request):
         """R17：pending_verify（崩溃前可能已发出）由用户人工核实后收口。
 
         body.action:
@@ -6427,47 +7385,77 @@ def _register_routes(app: FastAPI) -> None:
         - "not_sent" 用户确认未发出 → status=failed（主动评论/关注不可盲目重发）
         """
         conn = _g()["conn"]
-        row = conn.execute("SELECT status FROM task_runs WHERE id = ?", (run_id,)).fetchone()
+        row = conn.execute(
+            "SELECT status, resolution_action FROM task_runs WHERE id = ?", (run_id,)
+        ).fetchone()
         if not row:
             raise HTTPException(404, "任务记录不存在")
-        if row["status"] != "pending_verify":
-            raise HTTPException(400, f"当前状态 {row['status']} 不是 pending_verify")
         action = (body or {}).get("action")
         target = {"sent": "success", "not_sent": "failed"}.get(action)
         if target is None:
             raise HTTPException(400, "action 必须是 sent 或 not_sent")
+        if row["status"] != "pending_verify":
+            if row["resolution_action"] == action:
+                return {"id": run_id, "status": row["status"], "already_resolved": True}
+            raise HTTPException(409, f"当前状态 {row['status']} 已收口，不能重复或反向核实")
         note = "用户核实：已发出" if action == "sent" else "用户核实：未发出（不自动重发）"
-        conn.execute(
-            "UPDATE task_runs SET status = ?, finished_at = ?, error_msg = ? WHERE id = ?",
-            (target, _now().strftime("%Y-%m-%d %H:%M:%S"), note, run_id),
+        resolved_at = _now().strftime("%Y-%m-%d %H:%M:%S")
+        actor = auth.audit_actor(request)
+        updated = conn.execute(
+            "UPDATE task_runs SET status = ?, finished_at = ?, error_msg = ?, "
+            "resolved_at = ?, resolved_by = ?, resolution_action = ? "
+            "WHERE id = ? AND status = 'pending_verify'",
+            (target, resolved_at, note, resolved_at, actor, action, run_id),
         )
-        # R17 收口：同步回写运营日志 ops_logs（引擎对 active_comment/follow 写的 pending_verify）。
-        # ops_logs 无 task_run 外键，且引擎写 ops_logs 时未带 round_id（该列恒为 NULL），
-        # 故只能按"同平台"近似收口该平台的待核实操作（pending_verify 量级小，且本就需用户核实）。
-        row2 = conn.execute(
-            "SELECT platform FROM task_runs WHERE id = ?", (run_id,)
-        ).fetchone()
-        if row2 and row2["platform"]:
-            conn.execute(
-                "UPDATE ops_logs SET status = ? WHERE platform = ? AND status = 'pending_verify'",
-                (target, row2["platform"]),
-            )
+        if updated.rowcount != 1:
+            conn.rollback()
+            raise HTTPException(409, "任务状态已被其他操作更新，请刷新后核对")
+        # 只同步带有精确 task_run_id 外键的运营日志；绝不按 platform 批量更新。
+        linked = conn.execute(
+            "UPDATE ops_logs SET status = ?, resolved_at = ?, resolved_by = ?, "
+            "resolution_action = ?, resolution_note = ? "
+            "WHERE task_run_id = ? AND status = 'pending_verify'",
+            (target, resolved_at, actor, action, note, run_id),
+        )
         conn.commit()
-        return {"id": run_id, "status": target}
+        return {
+            "id": run_id,
+            "status": target,
+            "resolved_at": resolved_at,
+            "resolved_by": actor,
+            "resolution_action": action,
+            "already_resolved": False,
+            "ops_logs_sync": "linked_records_updated" if linked.rowcount else "no_linked_pending_logs",
+            "ops_logs_pending_verify": 0,
+            "ops_logs_updated": linked.rowcount,
+        }
 
     # --- 通知中心（notifications）---
     @app.get("/api/notifications")
     def list_notifications(
         level: Optional[str] = Query(None),
+        read_status: Optional[str] = Query(None),
         page: Optional[int] = Query(None, ge=1),
         page_size: int = Query(20, ge=1, le=100),
         limit: int = Query(50, ge=1, le=200),
-        offset: int = Query(0, ge=0),
     ):
         conn = _g()["conn"]
-        where = " WHERE level = ?" if level else ""
-        params: list = [level] if level else []
+        if read_status not in (None, "all", "unread", "read"):
+            raise HTTPException(400, "read_status 仅支持 all、unread、read")
+        conditions: list[str] = []
+        params: list = []
+        if level:
+            conditions.append("level = ?")
+            params.append(level)
+        if read_status == "unread":
+            conditions.append("read_at IS NULL")
+        elif read_status == "read":
+            conditions.append("read_at IS NOT NULL")
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
         total = conn.execute("SELECT COUNT(*) FROM notifications" + where, params).fetchone()[0]
+        unread_total = conn.execute(
+            "SELECT COUNT(*) FROM notifications WHERE read_at IS NULL"
+        ).fetchone()[0]
         effective_limit = page_size if page is not None else limit
         effective_offset = (page - 1) * page_size if page is not None else 0
         items = [dict(r) for r in conn.execute(
@@ -6475,12 +7463,81 @@ def _register_routes(app: FastAPI) -> None:
             " ORDER BY sent_at DESC, id DESC LIMIT ? OFFSET ?",
             [*params, effective_limit, effective_offset],
         ).fetchall()]
+        # 通知深链使用事件类型的确定性路由，不根据平台/时间猜测某条业务记录 ID。
+        notification_targets = {
+            "login_expired": ("accounts", None),
+            "circuit_broken": ("operations", "breaker"),
+            "round_timeout": ("operations", "tasks"),
+            "publish_confirmed": ("operations", "logs"),
+            "quota_exhausted": ("operations", "rhythm"),
+            "draft_saved": ("calendar", None),
+            "draft_failed": ("calendar", None),
+            "data_fetch_failed": ("hot", None),
+            "goal_completed": ("goals", None),
+            "round_completed": ("operations", "logs"),
+        }
+        for item in items:
+            target_page, target_tab = notification_targets.get(
+                item.get("type"), ("operations", "notifications")
+            )
+            target_type = None
+            target_id = None
+            if item.get("type") in ("login_expired", "circuit_broken", "quota_exhausted", "goal_completed"):
+                # 这些事件的首要处置入口是账号、熔断、节奏或目标页面；
+                # task_run 仍保留在通知记录中，但不覆盖更直接的处置入口。
+                pass
+            elif item.get("type") in ("round_timeout", "round_completed") and item.get("round_id") is not None:
+                target_type, target_id = "round", item["round_id"]
+                target_page, target_tab = "operations", "tasks"
+            elif item.get("ops_log_id") is not None:
+                target_type, target_id = "ops_log", item["ops_log_id"]
+                target_page, target_tab = "operations", "logs"
+            elif item.get("draft_id"):
+                target_type, target_id = "draft", item["draft_id"]
+                target_page, target_tab = "calendar", None
+            elif item.get("task_run_id") is not None:
+                target_type, target_id = "task_run", item["task_run_id"]
+                target_page, target_tab = "operations", "tasks"
+            elif item.get("round_id") is not None:
+                target_type, target_id = "round", item["round_id"]
+                target_page, target_tab = "operations", "tasks"
+            item["target_page"] = target_page
+            item["target_tab"] = target_tab
+            item["target_type"] = target_type
+            item["target_id"] = target_id
         if page is None:
             return items
         return {
-            "items": items, "total": total, "page": page, "page_size": page_size,
+            "items": items, "total": total, "unread_total": unread_total,
+            "page": page, "page_size": page_size,
             "pages": max(1, (total + page_size - 1) // page_size),
         }
+
+    @app.post("/api/notifications/{notification_id}/read")
+    def mark_notification_read(notification_id: int):
+        conn = _g()["conn"]
+        cur = conn.execute(
+            "UPDATE notifications SET read_at = COALESCE(read_at, ?) WHERE id = ?",
+            (_now().strftime("%Y-%m-%d %H:%M:%S"), notification_id),
+        )
+        if cur.rowcount == 0:
+            conn.commit()
+            raise HTTPException(404, "通知不存在")
+        conn.commit()
+        row = conn.execute(
+            "SELECT id, read_at FROM notifications WHERE id = ?", (notification_id,)
+        ).fetchone()
+        return dict(row)
+
+    @app.post("/api/notifications/read-all")
+    def mark_all_notifications_read():
+        conn = _g()["conn"]
+        cur = conn.execute(
+            "UPDATE notifications SET read_at = ? WHERE read_at IS NULL",
+            (_now().strftime("%Y-%m-%d %H:%M:%S"),),
+        )
+        conn.commit()
+        return {"updated": cur.rowcount}
 
     # --- APScheduler 定时任务状态 ---
     # --- 自动闭环（自生长）---
@@ -6564,6 +7621,7 @@ def _register_routes(app: FastAPI) -> None:
         """
         cfg = _g()["cfg"]
         enabled = cfg.platforms.enabled_keys()
+        supported_platforms = ("xhs", "douyin", "kuaishou", "wechat_channels")
         quotas_map = getattr(cfg.rhythm, "daily_quotas", None) or {}
         windows = cfg.rhythm.windows or {}
 
@@ -6571,9 +7629,7 @@ def _register_routes(app: FastAPI) -> None:
         ops_win = windows.get("ops")
         ops_range = f"{ops_win.start_hour:02d}:00-{ops_win.end_hour:02d}:00" if ops_win else "08:00-23:00"
 
-        # 节奏配置对所有受支持平台都可见和可编辑；平台启停状态单独返回，
-        # 避免未启用平台（尤其快手）被误认为没有节奏控制能力。
-        supported_platforms = ("xhs", "douyin", "kuaishou", "wechat_channels")
+        # 每平台 posting_windows：目前四平台共用 ops 窗口（后续可分平台配）
         posting_windows = {p: [ops_range] for p in supported_platforms}
 
         return {
@@ -6654,17 +7710,31 @@ def _register_routes(app: FastAPI) -> None:
         return {"ok": True, "has_key": bool(os.environ.get(key_name))}
 
     # --- 内容资产（G-13：外部参考 / 个人观点 / 内容模板）---
+    def _asset_out(row) -> dict:
+        """统一内容资产输出：SQLite 的 is_active 0/1 序列化为 bool，与 archive/restore 返回一致。"""
+        item = dict(row)
+        if "is_active" in item:
+            item["is_active"] = bool(item["is_active"]) if item["is_active"] is not None else True
+        return item
+
     @app.get("/api/assets")
     def list_assets(
         asset_type: Optional[str] = Query(None),
         page: Optional[int] = Query(None, ge=1),
         page_size: int = Query(20, ge=1, le=100),
+        include_inactive: bool = Query(False),
     ):
         conn = _g()["conn"]
         if asset_type and asset_type not in ("reference", "voice", "template"):
             raise HTTPException(400, "asset_type 只能是 reference / voice / template")
-        where = " WHERE asset_type = ?" if asset_type else ""
-        params: list = [asset_type] if asset_type else []
+        filters = []
+        params: list = []
+        if asset_type:
+            filters.append("asset_type = ?")
+            params.append(asset_type)
+        if asset_type == "template" and not include_inactive:
+            filters.append("is_active = 1")
+        where = (" WHERE " + " AND ".join(filters)) if filters else ""
         if page is None:
             # 兼容旧调用方；新页面通过 page 参数读取完整分页。
             rows = conn.execute(
@@ -6673,7 +7743,7 @@ def _register_routes(app: FastAPI) -> None:
                 params,
             ).fetchall()
             total = conn.execute("SELECT COUNT(*) FROM content_assets" + where, params).fetchone()[0]
-            return {"items": [dict(r) for r in rows], "total": total}
+            return {"items": [_asset_out(r) for r in rows], "total": total}
         total = conn.execute("SELECT COUNT(*) FROM content_assets" + where, params).fetchone()[0]
         rows = conn.execute(
             "SELECT * FROM content_assets" + where +
@@ -6681,7 +7751,7 @@ def _register_routes(app: FastAPI) -> None:
             [*params, page_size, (page - 1) * page_size],
         ).fetchall()
         return {
-            "items": [dict(r) for r in rows],
+            "items": [_asset_out(r) for r in rows],
             "total": total,
             "page": page,
             "page_size": page_size,
@@ -6697,21 +7767,27 @@ def _register_routes(app: FastAPI) -> None:
         now = _now().isoformat(timespec="seconds")
         cur = conn.execute(
             "INSERT INTO content_assets "
-            "(asset_type, title, body, source_url, platform, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(asset_type, title, body, source_url, platform, created_at, updated_at, version, is_active) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1)",
             (req.asset_type, req.title, req.body, req.source_url, req.platform, now, now),
         )
+        if req.asset_type == "template":
+            conn.execute(
+                "INSERT INTO content_template_versions (template_id, version, title, body, created_at) "
+                "VALUES (?, 1, ?, ?, ?)",
+                (cur.lastrowid, req.title, req.body, now),
+            )
         conn.commit()
         row = conn.execute("SELECT * FROM content_assets WHERE id = ?",
                            (cur.lastrowid,)).fetchone()
-        return dict(row)
+        return _asset_out(row)
 
     @app.put("/api/assets/{asset_id}")
     def update_asset(asset_id: int, req: CreateAssetRequest):
         """编辑已有内容资产；类型不可变，避免模板/观点被误改为其他资产类别。"""
         conn = _g()["conn"]
         existing = conn.execute(
-            "SELECT asset_type FROM content_assets WHERE id = ?", (asset_id,),
+            "SELECT * FROM content_assets WHERE id = ?", (asset_id,),
         ).fetchone()
         if existing is None:
             raise HTTPException(404, "内容资产不存在")
@@ -6720,13 +7796,108 @@ def _register_routes(app: FastAPI) -> None:
         if req.asset_type == "reference" and not (req.source_url or "").strip():
             raise HTTPException(422, "外部参考必须填写原始链接 source_url（可溯源）")
         now = _now().isoformat(timespec="seconds")
-        conn.execute(
-            "UPDATE content_assets SET title=?, body=?, source_url=?, platform=?, updated_at=? WHERE id=?",
-            (req.title, req.body, req.source_url, req.platform, now, asset_id),
-        )
+        if req.asset_type == "template" and (
+            req.title != existing["title"] or (req.body or "") != (existing["body"] or "")
+        ):
+            next_version = int(existing["version"] or 1) + 1
+            conn.execute(
+                "INSERT INTO content_template_versions (template_id, version, title, body, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (asset_id, next_version, req.title, req.body, now),
+            )
+            conn.execute(
+                "UPDATE content_assets SET title=?, body=?, source_url=?, platform=?, "
+                "version=?, updated_at=? WHERE id=?",
+                (req.title, req.body, req.source_url, req.platform, next_version, now, asset_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE content_assets SET title=?, body=?, source_url=?, platform=?, updated_at=? WHERE id=?",
+                (req.title, req.body, req.source_url, req.platform, now, asset_id),
+            )
         conn.commit()
         row = conn.execute("SELECT * FROM content_assets WHERE id=?", (asset_id,)).fetchone()
-        return dict(row)
+        return _asset_out(row)
+
+    @app.get("/api/assets/{asset_id}/versions")
+    def list_asset_versions(asset_id: int):
+        conn = _g()["conn"]
+        asset = conn.execute(
+            "SELECT asset_type FROM content_assets WHERE id=?", (asset_id,),
+        ).fetchone()
+        if asset is None:
+            raise HTTPException(404, "内容资产不存在")
+        if asset["asset_type"] != "template":
+            raise HTTPException(400, "只有内容模板支持版本历史")
+        rows = conn.execute(
+            "SELECT version, title, body, created_at FROM content_template_versions "
+            "WHERE template_id=? ORDER BY version DESC", (asset_id,),
+        ).fetchall()
+        return {"items": [dict(row) for row in rows]}
+
+    @app.post("/api/assets/{asset_id}/versions/{version}/restore")
+    def restore_asset_version(asset_id: int, version: int):
+        conn = _g()["conn"]
+        current = conn.execute(
+            "SELECT asset_type, version FROM content_assets WHERE id=?", (asset_id,),
+        ).fetchone()
+        if current is None:
+            raise HTTPException(404, "内容资产不存在")
+        if current["asset_type"] != "template":
+            raise HTTPException(400, "只有内容模板支持版本恢复")
+        previous = conn.execute(
+            "SELECT title, body FROM content_template_versions WHERE template_id=? AND version=?",
+            (asset_id, version),
+        ).fetchone()
+        if previous is None:
+            raise HTTPException(404, "模板版本不存在")
+        next_version = int(current["version"] or 1) + 1
+        now = _now().isoformat(timespec="seconds")
+        conn.execute(
+            "INSERT INTO content_template_versions (template_id, version, title, body, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (asset_id, next_version, previous["title"], previous["body"], now),
+        )
+        conn.execute(
+            "UPDATE content_assets SET title=?, body=?, version=?, is_active=1, updated_at=? WHERE id=?",
+            (previous["title"], previous["body"], next_version, now, asset_id),
+        )
+        conn.commit()
+        return _asset_out(conn.execute("SELECT * FROM content_assets WHERE id=?", (asset_id,)).fetchone())
+
+    @app.post("/api/assets/{asset_id}/archive")
+    def archive_asset(asset_id: int):
+        conn = _g()["conn"]
+        row = conn.execute(
+            "SELECT asset_type, is_active FROM content_assets WHERE id=?", (asset_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, "内容资产不存在")
+        if row["asset_type"] != "template":
+            raise HTTPException(400, "目前只有内容模板支持停用")
+        conn.execute(
+            "UPDATE content_assets SET is_active=0, updated_at=? WHERE id=?",
+            (_now().isoformat(timespec="seconds"), asset_id),
+        )
+        conn.commit()
+        return {"id": asset_id, "is_active": False}
+
+    @app.post("/api/assets/{asset_id}/restore")
+    def restore_asset(asset_id: int):
+        conn = _g()["conn"]
+        row = conn.execute(
+            "SELECT asset_type FROM content_assets WHERE id=?", (asset_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, "内容资产不存在")
+        if row["asset_type"] != "template":
+            raise HTTPException(400, "目前只有内容模板支持恢复")
+        conn.execute(
+            "UPDATE content_assets SET is_active=1, updated_at=? WHERE id=?",
+            (_now().isoformat(timespec="seconds"), asset_id),
+        )
+        conn.commit()
+        return {"id": asset_id, "is_active": True}
 
     # --- 选题库来源（上传 / 远程 / 服务器路径）---
     @app.get("/api/kb/sources")
@@ -6747,7 +7918,7 @@ def _register_routes(app: FastAPI) -> None:
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
         except (FileNotFoundError, OSError) as e:
-            raise HTTPException(400, str(e)) from e
+            raise HTTPException(400, "本地选题库文件不可用，请检查文件路径与权限") from e
         return source
 
     @app.post("/api/kb/sources/server")
@@ -6760,7 +7931,7 @@ def _register_routes(app: FastAPI) -> None:
                 field_mapping=req.get("field_mapping") or None,
             )
         except FileNotFoundError as e:
-            raise HTTPException(404, str(e)) from e
+            raise HTTPException(404, "服务器选题库文件不存在或不可读，请检查服务端路径与权限") from e
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
 
@@ -6775,7 +7946,7 @@ def _register_routes(app: FastAPI) -> None:
                 field_mapping=req.get("field_mapping") or None,
             )
         except httpx.HTTPError as e:
-            raise HTTPException(502, f"远程地址请求失败：{redact(str(e))}") from e
+            raise HTTPException(502, "远程选题库请求失败，请检查地址、网络和访问权限") from e
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
 
@@ -6836,8 +8007,9 @@ def _register_routes(app: FastAPI) -> None:
             return kb_sources.preview_source(_g()["cfg"], source_id, limit=limit)
         except KeyError:
             raise HTTPException(404, "来源不存在")
-        except Exception as e:  # noqa: BLE001 — 预览失败返回可读原因
-            raise HTTPException(422, redact(str(e))) from e
+        except Exception as e:  # noqa: BLE001 — 预览错误可能含服务端路径或远程响应
+            logger.warning("选题库来源预览失败 source_id=%s error=%s", source_id, type(e).__name__)
+            raise HTTPException(422, "选题库来源预览失败，请检查来源配置与访问权限") from e
 
     # --- 选题库 schema 检查（兼容旧入口：读第一个服务器路径来源）---
     @app.get("/api/kb/inspect")
@@ -6875,12 +8047,43 @@ def _register_routes(app: FastAPI) -> None:
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
+    @app.delete("/api/presets/{key}")
+    def delete_custom_preset(key: str):
+        from src.core.industry_presets_repository import delete_custom_preset
+        try:
+            deleted = delete_custom_preset(_g()["conn"], key)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if not deleted:
+            raise HTTPException(404, "自定义行业模板不存在")
+        return {"key": key, "deleted": True}
+
+    @app.post("/api/presets/{key}/restore")
+    def restore_custom_preset(key: str):
+        from src.core.industry_presets_repository import restore_custom_preset as _restore
+        try:
+            item = _restore(_g()["conn"], key)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if item is None:
+            raise HTTPException(404, "行业模板不存在")
+        return item
+
+    @app.get("/api/presets/{key}/versions")
+    def get_preset_versions(key: str):
+        from src.core.industry_presets_repository import get_preset, list_preset_versions
+        if get_preset(_g()["conn"], key) is None:
+            raise HTTPException(404, "行业模板不存在")
+        return {"items": list_preset_versions(_g()["conn"], key)}
+
     @app.post("/api/presets/{key}/apply")
     def apply_preset(key: str):
         from src.core.industry_presets_repository import get_preset
         preset = get_preset(_g()["conn"], key)
         if preset is None:
             raise HTTPException(404, "行业模板不存在")
+        if not preset.get("is_active", True):
+            raise HTTPException(409, "该行业模板已归档，请先恢复后再应用")
         cfg = _g()["cfg"]
         updates = {
             "ultimate_goal.positioning": preset["positioning"],
@@ -6939,9 +8142,60 @@ def _register_routes(app: FastAPI) -> None:
             restored.append(row)
         return restored
 
+    def _hot_source_history_key(source: dict) -> str:
+        # 只持久化不可逆指纹；来源 URL 可能含 token，不得写入历史表。
+        identity = {
+            "name": str(source.get("name") or ""),
+            "type": str(source.get("type") or "aggregate"),
+            "platform": str(source.get("platform") or ""),
+            "platforms": sorted(str(v) for v in (source.get("platforms") or [])),
+            "url": str(source.get("url") or ""),
+        }
+        return hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+    def _latest_hot_source_test(source: dict):
+        row = _g()["conn"].execute(
+            "SELECT status, item_count, sample_titles_json, message, tested_at "
+            "FROM hot_source_test_history WHERE source_key=? ORDER BY id DESC LIMIT 1",
+            (_hot_source_history_key(source),),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            samples = json.loads(row["sample_titles_json"] or "[]")
+        except (TypeError, ValueError):
+            samples = []
+        return {
+            "status": row["status"], "item_count": int(row["item_count"] or 0),
+            "sample_titles": samples if isinstance(samples, list) else [],
+            "message": row["message"], "tested_at": row["tested_at"],
+        }
+
     @app.get("/api/hot_topics/sources")
     def hot_sources_list():
-        return {"items": _public_hot_sources(_g()["cfg"].hot_topics.sources)}
+        cfg_sources = _g()["cfg"].hot_topics.sources or []
+        public_items = _public_hot_sources(cfg_sources)
+        for index, item in enumerate(public_items):
+            item["last_test"] = _latest_hot_source_test(cfg_sources[index])
+        return {"items": public_items}
+
+    @app.get("/api/hot_topics/sources/history")
+    def hot_sources_test_history(limit: int = Query(100, ge=1, le=500)):
+        rows = _g()["conn"].execute(
+            "SELECT id, source_key, source_label, source_type, status, item_count, "
+            "sample_titles_json, message, tested_at FROM hot_source_test_history "
+            "ORDER BY id DESC LIMIT ?", (limit,),
+        ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["sample_titles"] = json.loads(item.pop("sample_titles_json") or "[]")
+            except (TypeError, ValueError):
+                item["sample_titles"] = []
+                item.pop("sample_titles_json", None)
+            items.append(item)
+        return {"items": items, "total": len(items)}
 
     @app.put("/api/hot_topics/sources")
     def hot_sources_update(req: dict):
@@ -6955,6 +8209,62 @@ def _register_routes(app: FastAPI) -> None:
         except (ConfigNotAllowedError, ConfigPatchError) as e:
             raise HTTPException(422, str(e)) from e
         return {"items": _public_hot_sources(cfg.hot_topics.sources)}
+
+    @app.post("/api/hot_topics/sources/{source_index}/test")
+    def test_hot_source(source_index: int):
+        """只试抓取指定 RSS/JSON 来源，不写入热点库、不触发全量采集。"""
+        cfg = _g()["cfg"]
+        sources = cfg.hot_topics.sources or []
+        if source_index < 0 or source_index >= len(sources):
+            raise HTTPException(404, "热点来源不存在")
+        source = sources[source_index]
+        source_type = str(source.get("type") or "aggregate")
+        if source_type not in ("rss", "json"):
+            raise HTTPException(400, "单来源试抓取仅支持 RSS / JSON 来源")
+        label = str(source.get("platform") or source.get("name") or "行业源")
+        collector = HotTopicCollector(cfg, _g()["conn"])
+        try:
+            rows = collector._fetch_custom(source, label)
+        except Exception as exc:  # noqa: BLE001 — 试抓取仅返回脱敏诊断，不影响其他来源
+            safe_error = redact(str(exc))
+            logger.warning("热点来源试抓取失败 %s: %s", redact(label), safe_error)
+            rows = None
+            fetch_error = safe_error
+        else:
+            fetch_error = None
+        if fetch_error:
+            result = {
+                "ok": False, "status": "failed", "source": redact(label),
+                "item_count": 0, "sample_titles": [], "message": fetch_error,
+            }
+        elif not rows:
+            result = {
+                "ok": False, "status": "empty", "source": redact(label),
+                "item_count": 0, "sample_titles": [], "message": "来源可访问，但未解析到有效标题",
+            }
+        else:
+            result = {
+                "ok": True, "status": "success", "source": redact(label),
+                "item_count": len(rows),
+                "sample_titles": [redact(str(row.get("title") or ""))[:300] for row in rows[:3]],
+                "message": "试抓取成功，未写入热点库",
+            }
+        # 保存诊断历史，但绝不写入 hot_topics；只存 URL 的 SHA-256 指纹。
+        conn = _g()["conn"]
+        conn.execute(
+            "INSERT INTO hot_source_test_history "
+            "(source_key, source_label, source_type, status, item_count, sample_titles_json, message, tested_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                _hot_source_history_key(source), redact(label)[:160], source_type,
+                result["status"], result["item_count"],
+                json.dumps(result["sample_titles"], ensure_ascii=False),
+                redact(result["message"])[:1000],
+                business_now(cfg).isoformat(timespec="seconds"),
+            ),
+        )
+        conn.commit()
+        return result
 
     # ============================================================
     # Dashboard 补齐（对比报告 3.1 🔴 后端真缺失）
@@ -6970,7 +8280,7 @@ def _register_routes(app: FastAPI) -> None:
         """
         conn = _g()["conn"]
         cfg = _g()["cfg"]
-        enabled_keys = set(cfg.platforms.enabled_keys())
+        platform_status = _platform_status_snapshot(cfg, conn)
         result = {}
         for p in [pl.value for pl in Platform]:
             # 各状态计数
@@ -6981,18 +8291,10 @@ def _register_routes(app: FastAPI) -> None:
             status_map = {r[0]: r[1] for r in status_rows}
             # 总数
             total = sum(status_map.values())
-            # 熔断状态（resolved_at IS NULL 即熔断中）
-            cb_row = conn.execute(
-                "SELECT COUNT(*) FROM circuit_breaker_events "
-                "WHERE platform=? AND resolved_at IS NULL",
-                (p,),
-            ).fetchone()
-            cb = cb_row[0] > 0
             result[p] = {
-                "enabled": p in enabled_keys,
+                **platform_status[p],
                 "total_drafts": total,
                 "status_breakdown": status_map,
-                "circuit_broken": cb,
             }
         return result
 
@@ -7306,7 +8608,9 @@ def _register_routes(app: FastAPI) -> None:
     def list_user_override(limit: int = Query(200, ge=1, le=2000)):
         conn = _g()["conn"]
         rows = conn.execute(
-            "SELECT * FROM user_override ORDER BY overridden_at DESC LIMIT ?", (limit,)
+            "SELECT u.*, r.round_number FROM user_override u "
+            "LEFT JOIN spiral_rounds r ON r.id = u.round_id "
+            "ORDER BY u.overridden_at DESC LIMIT ?", (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -7336,8 +8640,12 @@ def _register_routes(app: FastAPI) -> None:
 
     @app.get("/api/accounts")
     def list_accounts():
-        """四平台账号状态汇总（Accounts 页顶部四卡片用）。"""
-        return {"accounts": _get_all_accounts(data_dir=_interactive_login_data_dir())}
+        """四平台账号状态汇总；补充统一预检状态，不把本机凭证误报为会话已验证。"""
+        accounts = _get_all_accounts(data_dir=_interactive_login_data_dir())
+        snapshot = _platform_status_snapshot()
+        for item in accounts:
+            item.update(snapshot.get(item["platform"], {}))
+        return {"accounts": accounts}
 
 
     @app.get("/api/platform-accounts")
@@ -7457,11 +8765,11 @@ def _register_routes(app: FastAPI) -> None:
         """红线拦截历史：从 contents 表中 guard_outcome != 'pass' 的记录聚合"""
         conn = _g()["conn"]
         rows = conn.execute(
-            """SELECT id, round_id, platform, title, guard_outcome, guard_reason,
-                      created_at
-               FROM contents
-               WHERE guard_outcome IN ('warn', 'fail', 'error')
-               ORDER BY created_at DESC LIMIT ?""",
+            """SELECT c.id, c.round_id, r.round_number, c.platform, c.title,
+                      c.guard_outcome, c.guard_reason, c.created_at
+               FROM contents c LEFT JOIN spiral_rounds r ON r.id = c.round_id
+               WHERE c.guard_outcome IN ('warn', 'fail', 'error')
+               ORDER BY c.created_at DESC LIMIT ?""",
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]

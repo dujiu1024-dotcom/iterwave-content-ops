@@ -757,7 +757,7 @@ export default function Production() {
                       {plan.history.map((h, i) => (
                         <tr key={i}>
                           <td style={{ fontFamily: "monospace", fontSize: 11 }}>{h.plan_signature.slice(0, 16)}…</td>
-                          <td>{h.round_id != null ? `轮次 ${h.round_id}` : "母计划"}</td>
+                          <td>{h.round_number != null ? `第 ${h.round_number} 轮` : h.round_id != null ? "关联轮次已归档" : "母计划"}</td>
                           <td>{AUTHOR_LABEL[(h.author ?? "").split(":")[0]] ?? h.author ?? "—"}</td>
                           <td style={{ fontSize: 11 }}>{h.created_at}</td>
                         </tr>
@@ -779,7 +779,9 @@ export default function Production() {
               <div className="panel-title"><span className="icon">⌗</span>平台分项计划</div>
               <div className="panel-sub">
                 {currentRoundId
-                  ? `第 ${roundDetail?.round_number ?? currentRoundId} 轮的逐平台变体（每选题 × 每平台一篇）`
+                  ? roundDetail?.round_number != null
+                    ? `第 ${roundDetail.round_number} 轮的逐平台变体（每选题 × 每平台一篇）`
+                    : "正在加载轮次信息…"
                   : "选择一轮后展示逐平台变体"}
               </div>
             </div>

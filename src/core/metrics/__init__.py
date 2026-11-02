@@ -55,8 +55,11 @@ class Normalizer:
         if window_days is None:
             cfg = self.cfg
             if cfg is None:
-                from ..config import get_config
-                cfg = get_config()
+                from ..task_context import current_config
+                cfg = current_config()
+                if cfg is None:
+                    from ..config import get_config
+                    cfg = get_config()
             window_days = cfg.scoring.normalization_window_days
         # 可直接做 z-score 的比率指标
         rate_metrics = {

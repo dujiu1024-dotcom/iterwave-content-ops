@@ -155,7 +155,7 @@ export default function Activation() {
   };
 
   const deleteRun = async () => {
-    if (!runId || !window.confirm("将本次体验记录从历史中隐藏？今日体验额度和审计记录不会返还或删除；已保存样稿仍可在下方找回。")) return;
+    if (!runId || !window.confirm("将本次体验记录从历史中隐藏？审计记录不会删除；已保存样稿仍可在下方找回。")) return;
     setDeleting(true);
     try {
       await api.deleteActivationSamples(runId);
@@ -230,7 +230,7 @@ export default function Activation() {
           </div>
           <div className="panel-sub" style={{ marginTop: 10 }}>
             {status?.model_message || "正在检查模型服务"}
-            {status?.activation_limits && <span> · 今日剩余体验次数 {status.activation_limits.daily_runs_remaining}/{status.activation_limits.max_runs_per_day}</span>}
+            {status?.activation_limits && <span> · 今日已体验 {status.activation_limits.daily_runs_used} 次</span>}
             {!status?.model_ready && <span> · <button className="link-btn" onClick={() => navigate("settings")}>前往配置模型</button></span>}
           </div>
           <div className="panel-sub" style={{ marginTop: 6 }}>

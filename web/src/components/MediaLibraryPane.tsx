@@ -92,10 +92,11 @@ export default function MediaLibraryPane() {
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
+    const status = filter === "archived" ? "archived" : "active";
+    const reviewStatus = filter === "pending" ? "pending_review"
+      : filter === "approved" ? "approved"
+      : filter === "rejected" ? "rejected" : "all";
     try {
-      const status = filter === "archived" ? "archived" : "active";
-      const reviewStatus = filter === "pending" ? "pending_review"
-        : filter === "approved" ? "approved" : filter === "rejected" ? "rejected" : "all";
       const [result, targetResult, settingsResult] = await Promise.all([
         api.mediaAssets(query, status, reviewStatus, page, pageSize),
         api.mediaUsageTargets(), api.mediaGenerationSettings(),
@@ -142,7 +143,6 @@ export default function MediaLibraryPane() {
   const aiReady = Boolean(settings?.enabled && settings?.provider_configured);
   const aiBlockedReason = !settings ? "正在加载 AI 配图设置" : !settings.provider_configured
     ? "服务器尚未配置图片服务，请联系管理员" : !settings.enabled ? "AI 配图未启用，可在「AI 设置」中开启" : "";
-  
   const selectedTarget = targets.find((t) => t.id === selectedContentId);
 
   const togglePanel = (next: Panel) => setPanel((current) => (current === next ? "none" : next));
@@ -181,9 +181,8 @@ export default function MediaLibraryPane() {
             data_base64: await fileAsBase64(item),
           });
           if (result.duplicate) duplicates += 1; else succeeded += 1;
-        } catch (e) {
+        } catch {
           failedFiles.push(item);
-          console.error("media upload failed:", item.name, e);
         }
       }
       const parts = [`新增 ${succeeded} 张`];
@@ -276,6 +275,45 @@ export default function MediaLibraryPane() {
         await load();
       } catch (e) {
         showToast(e instanceof Error ? e.message : "归档失败", "error");
+      }
+    });
+  };
+
+  const rename = async (item: MediaAsset) => {
+    const nextTitle = window.prompt("修改素材名称", item.title);
+    if (nextTitle == null || !nextTitle.trim() || nextTitle.trim() === item.title) return;
+    await withPending(`media:rename:${item.id}`, async () => {
+      try {
+        await api.renameMediaAsset(item.id, nextTitle.trim());
+        showToast("素材名称已更新", "success");
+        await load();
+      } catch (e) {
+        showToast(e instanceof Error ? e.message : "改名失败", "error");
+      }
+    });
+  };
+
+  const restore = async (item: MediaAsset) => {
+    await withPending(`media:restore:${item.id}`, async () => {
+      try {
+        await api.restoreMediaAsset(item.id);
+        showToast("素材已恢复", "success");
+        await load();
+      } catch (e) {
+        showToast(e instanceof Error ? e.message : "恢复失败", "error");
+      }
+    });
+  };
+
+  const remove = async (item: MediaAsset) => {
+    if (!window.confirm(`永久删除「${item.title}」？仅允许删除已归档且没有内容引用的素材，此操作不可撤销。`)) return;
+    await withPending(`media:delete:${item.id}`, async () => {
+      try {
+        const result = await api.deleteMediaAsset(item.id);
+        showToast(result.file_removed ? "素材已永久删除" : "素材记录已删除，但文件清理失败", result.file_removed ? "success" : "error");
+        await load();
+      } catch (e) {
+        showToast(e instanceof Error ? e.message : "删除失败", "error");
       }
     });
   };
@@ -574,6 +612,7 @@ export default function MediaLibraryPane() {
                       </div>
                     )}
                     <div className="ml-card-actions">
+                      <button className="btn sm" onClick={() => void rename(item)} disabled={isPending(`media:rename:${item.id}`)}>改名</button>
                       {state === "pending" && (
                         <>
                           <button className="btn sm success" onClick={() => void review(item, "approved")} disabled={isPending("media:review:" + item.id)}>通过</button>
@@ -588,8 +627,13 @@ export default function MediaLibraryPane() {
                           <button className="btn sm" onClick={() => startEdit(item)} disabled={!aiReady} title={aiReady ? "基于这张图改图" : aiBlockedReason}>改图</button>
                         </>
                       )}
-                      {state !== "archived" && (
+                      {state !== "archived" ? (
                         <button className="btn sm ghost ml-more" onClick={() => void archive(item)} disabled={isPending(`media:archive:${item.id}`)}>归档</button>
+                      ) : (
+                        <>
+                          <button className="btn sm" onClick={() => void restore(item)} disabled={isPending(`media:restore:${item.id}`)}>恢复</button>
+                          <button className="btn sm danger" onClick={() => void remove(item)} disabled={isPending(`media:delete:${item.id}`)}>永久删除</button>
+                        </>
                       )}
                     </div>
                   </div>

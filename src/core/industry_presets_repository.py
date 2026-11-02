@@ -27,6 +27,8 @@ def _decode(row) -> dict[str, Any]:
         "platform_notes": json.loads(row["platform_notes_json"]),
         "is_builtin": bool(row["is_builtin"]),
         "version": int(row["version"]),
+        "is_active": bool(row["is_active"]),
+        "archived_at": row["archived_at"],
     }
 
 
@@ -75,7 +77,7 @@ def seed_builtins(conn) -> dict[str, int]:
 
 def list_presets(conn) -> list[dict[str, Any]]:
     rows = conn.execute(
-        "SELECT * FROM industry_presets ORDER BY is_builtin DESC, name, key"
+        "SELECT * FROM industry_presets ORDER BY is_active DESC, is_builtin DESC, name, key"
     ).fetchall()
     return [_decode(row) for row in rows]
 
@@ -116,6 +118,15 @@ def upsert_custom_preset(conn, item: dict[str, Any]) -> dict[str, Any]:
         if existing and existing["is_builtin"]:
             raise ValueError("内置模板不可覆盖")
         now = _now()
+        if existing:
+            previous = conn.execute("SELECT * FROM industry_presets WHERE key=?", (key,)).fetchone()
+            if previous is not None:
+                conn.execute(
+                    """INSERT OR IGNORE INTO industry_preset_versions(
+                        preset_key,version,snapshot_json,created_at
+                    ) VALUES(?,?,?,?)""",
+                    (key, int(previous["version"]), json.dumps(dict(previous), ensure_ascii=False, sort_keys=True), now),
+                )
         conn.execute(
             """INSERT INTO industry_presets(
                 key,name,description,positioning,persona_keywords_json,
@@ -147,3 +158,73 @@ def upsert_custom_preset(conn, item: dict[str, Any]) -> dict[str, Any]:
         if lock:
             lock.release()
     return get_preset(conn, key)
+
+
+def delete_custom_preset(conn, key: str) -> bool:
+    """Archive a custom preset instead of deleting versioned business data."""
+    lock = getattr(conn, "_lock", None)
+    if lock:
+        lock.acquire()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute("SELECT is_builtin, is_active FROM industry_presets WHERE key=?", (key,)).fetchone()
+        if existing is None:
+            conn.commit()
+            return False
+        if existing["is_builtin"]:
+            raise ValueError("内置模板不可删除")
+        if existing["is_active"]:
+            now = _now()
+            row = conn.execute("SELECT * FROM industry_presets WHERE key=?", (key,)).fetchone()
+            conn.execute(
+                "INSERT OR IGNORE INTO industry_preset_versions(preset_key,version,snapshot_json,created_at) VALUES(?,?,?,?)",
+                (key, int(row["version"]), json.dumps(dict(row), ensure_ascii=False, sort_keys=True), now),
+            )
+            conn.execute(
+                "UPDATE industry_presets SET is_active=0,archived_at=?,version=version+1,updated_at=? WHERE key=? AND is_builtin=0 AND is_active=1",
+                (now, now, key),
+            )
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        if lock:
+            lock.release()
+
+
+def restore_custom_preset(conn, key: str) -> dict[str, Any] | None:
+    lock = getattr(conn, "_lock", None)
+    if lock:
+        lock.acquire()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT is_builtin,is_active FROM industry_presets WHERE key=?", (key,)).fetchone()
+        if row is None:
+            conn.commit()
+            return None
+        if row["is_builtin"]:
+            raise ValueError("内置模板无需恢复")
+        if not row["is_active"]:
+            now = _now()
+            conn.execute(
+                "UPDATE industry_presets SET is_active=1,archived_at=NULL,version=version+1,updated_at=? WHERE key=? AND is_active=0",
+                (now, key),
+            )
+        conn.commit()
+        return get_preset(conn, key)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        if lock:
+            lock.release()
+
+
+def list_preset_versions(conn, key: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT version,snapshot_json,created_at FROM industry_preset_versions WHERE preset_key=? ORDER BY version DESC",
+        (key,),
+    ).fetchall()
+    return [{"version": int(row["version"]), "snapshot": json.loads(row["snapshot_json"]), "created_at": row["created_at"]} for row in rows]

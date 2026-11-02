@@ -4,7 +4,7 @@ import { useApp } from "../AppContext";
 import { navigate, useUrlTab } from "../nav";
 import {
   api, Platform, SystemStatus, AiCallRecord, UserOverrideRecord, RedlineRecord,
-  OrchestrationView, OrchestrationRun, DiagnoseResult, StepState, TenantSkillManifest,
+  OrchestrationView, OrchestrationRun, DiagnoseResult, StepState, TenantSkillManifest, BuiltinSkillManifest,
 } from "../api";
 
 const PLATFORM_LABEL: Record<string, string> = {
@@ -33,32 +33,6 @@ const ROUND_STATUS_LABEL: Record<string, string> = {
   created: "已创建", producing: "生产中", awaiting_publish: "待发布", collecting_metrics: "采集中",
   analyzing: "复盘中", completed: "已完成", partial_completed: "部分完成", failed: "失败", cancelled: "已取消",
 };
-
-const SKILLS = [
-  // 按「运营工作流」分组
-  { group: "内容生产", rows: [
-    { id: "topic_scoring",      name: "选题评分引擎",        src: "src/core/scoring/",                 status: "OK", note: "三模式自动切换" },
-    { id: "prompt_variants",    name: "四平台变体生成",      src: "src/core/content_pipeline.py",       status: "OK", note: "同选题 × 四风格" },
-    { id: "ultimate_goal_check",name: "终极目标检查（R2）", src: "src/core/guard/",                    status: "OK", note: "三入口 check_content/strategy/comment" },
-    { id: "image_card",         name: "图片卡片制作",        src: "src/core/content_pipeline.py",        status: "OK", note: "Pillow + OpenCV" },
-    { id: "draft_saver",        name: "Playwright 存草稿",  src: "src/adapters/",       status: "!", note: "R1：只点存草稿" },
-  ]},
-  { group: "运营与复盘", rows: [
-    { id: "circuit_breaker",    name: "熔断器（R6）",       src: "src/core/ops/circuit_breaker.py",   status: "OK", note: "5 信号 + 3 步恢复" },
-    { id: "rhythm_controller",  name: "节奏控制器",          src: "src/core/ops/rhythm.py",            status: "OK", note: "平台独立配额 + 时段窗口" },
-    { id: "ops_engine",         name: "运营引擎",           src: "src/core/ops/engine.py",            status: "!", note: "被动回复已接；主动评论/关注极低配额" },
-    { id: "spiral_engine",      name: "螺旋引擎 + 缺口分析", src: "src/core/spiral/",                  status: "OK", note: "三通道输出" },
-    { id: "zscore_normalize",   name: "跨平台归一化（R13）", src: "src/core/metrics/",                 status: "OK", note: "平台内 z-score" },
-  ]},
-  { group: "支撑层", rows: [
-    { id: "recovery_manager",  name: "断点恢复（R16）",    src: "src/core/recovery.py",              status: "OK", note: "任务记录持久化 + 幂等覆盖" },
-    { id: "autogrow",           name: "自动闭环（自生长）",   src: "src/core/autogrow.py",              status: "OK", note: "复盘→评分/文案，条件满足自动开下一轮" },
-    { id: "topic_pool",         name: "选题池",              src: "src/core/topic_pool.py",            status: "OK", note: "本地库 + 热点 + 手动，软删除可恢复" },
-    { id: "orchestration",      name: "编排与诊断",           src: "src/core/orchestration.py",         status: "OK", note: "步骤开关 / 依赖校验 / 自检清单" },
-    { id: "scheduler",          name: "定时任务调度（11 类）", src: "src/core/scheduler/",             status: "OK", note: "任务记录持久化到本地数据库" },
-    { id: "platform_readback",  name: "平台数据读回",        src: "src/vendor/easel/",                 status: "!", note: "account_stats / platform_readback 需登录态" },
-  ]},
-];
 
 export default function Agent() {
   const [tab, setTab] = useUrlTab<TabKey>(TABS.map((t) => t.key), "preview");
@@ -424,6 +398,7 @@ function inspectSkillManifest(skill: Pick<TenantSkillManifest, "skill_id" | "nam
 function SkillsPane() {
   const { showToast, withPending, isPending } = useApp();
   const [customSkills, setCustomSkills] = useState<TenantSkillManifest[]>([]);
+  const [builtinSkills, setBuiltinSkills] = useState<BuiltinSkillManifest[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [skillId, setSkillId] = useState("");
@@ -434,8 +409,12 @@ function SkillsPane() {
   const [skillInputsJson, setSkillInputsJson] = useState("[]");
   const [skillOutputsJson, setSkillOutputsJson] = useState("[]");
   const [skillPermissions, setSkillPermissions] = useState<string[]>([]);
+  const [editingSkillId, setEditingSkillId] = useState<string | null>(null);
+  const [editingSkillVersion, setEditingSkillVersion] = useState<number | null>(null);
   const [draftTest, setDraftTest] = useState<ReturnType<typeof inspectSkillManifest> | null>(null);
   const [savedTests, setSavedTests] = useState<Record<string, ReturnType<typeof inspectSkillManifest>>>({});
+  const [testingSkill, setTestingSkill] = useState<TenantSkillManifest | null>(null);
+
   const [testingSkill, setTestingSkill] = useState<TenantSkillManifest | null>(null);
 
   const load = async () => {
@@ -443,6 +422,7 @@ function SkillsPane() {
     try {
       const result = await api.tenantSkills();
       setCustomSkills(result.items ?? []);
+      setBuiltinSkills(result.builtin_items ?? []);
       setLoadError("");
     } catch (e: any) {
       setLoadError(e?.message ?? "加载自定义 Skills 失败");
@@ -453,7 +433,8 @@ function SkillsPane() {
   useEffect(() => { void load(); }, []);
 
   const register = async () => {
-    await withPending("skill:register", async () => {
+    const pendingKey = editingSkillId ? `skill:update:${editingSkillId}` : "skill:register";
+    await withPending(pendingKey, async () => {
       try {
         const inputs: unknown = JSON.parse(skillInputsJson);
         const outputs: unknown = JSON.parse(skillOutputsJson);
@@ -463,22 +444,40 @@ function SkillsPane() {
         if (!validSchemaList(inputs) || !validSchemaList(outputs)) {
           throw new Error("输入和输出 Schema 必须是最多 30 项的 JSON 对象数组");
         }
-        await api.registerTenantSkill({
-          skill_id: skillId.trim().toLowerCase(),
+        const manifest = {
           name: skillName.trim(),
           version: skillVersion.trim(),
           description: skillDescription.trim(),
           category: skillCategory.trim().toLowerCase() || "custom",
-          inputs,
-          outputs,
-          permissions: skillPermissions,
-        });
-        showToast("Skill manifest 已登记，默认停用且不会执行代码", "success");
+          inputs, outputs, permissions: skillPermissions,
+        };
+        if (editingSkillId && editingSkillVersion != null) {
+          await api.updateTenantSkill(editingSkillId, { ...manifest, manifest_version: editingSkillVersion });
+          showToast("Skill manifest 已更新", "success");
+        } else {
+          await api.registerTenantSkill({ skill_id: skillId.trim().toLowerCase(), ...manifest });
+          showToast("Skill manifest 已登记，默认停用且不会执行代码", "success");
+        }
         setSkillId(""); setSkillName(""); setSkillDescription(""); setSkillVersion("1.0.0");
         setSkillInputsJson("[]"); setSkillOutputsJson("[]"); setSkillPermissions([]);
+        setEditingSkillId(null); setEditingSkillVersion(null); setDraftTest(null);
         await load();
-      } catch (e: any) { showToast(`登记失败：${e?.message ?? e}`, "error"); }
+      } catch (e: any) { showToast(`${editingSkillId ? "更新" : "登记"}失败：${e?.message ?? e}`, "error"); }
     });
+  };
+
+  const editSkill = (skill: TenantSkillManifest) => {
+    setEditingSkillId(skill.skill_id);
+    setEditingSkillVersion(skill.manifest_version);
+    setSkillId(skill.skill_id);
+    setSkillName(skill.name);
+    setSkillVersion(skill.version);
+    setSkillDescription(skill.description);
+    setSkillCategory(skill.category);
+    setSkillInputsJson(JSON.stringify(skill.inputs, null, 2));
+    setSkillOutputsJson(JSON.stringify(skill.outputs, null, 2));
+    setSkillPermissions(skill.permissions);
+    setDraftTest(null);
   };
 
   const toggle = async (skill: TenantSkillManifest) => {
@@ -503,26 +502,32 @@ function SkillsPane() {
       <div className="panel">
         <div className="panel-head"><div>
           <div className="panel-title"><span className="icon">▧</span>系统内置 Skills</div>
-          <div className="panel-sub">{SKILLS.reduce((a, g) => a + g.rows.length, 0)} 个内置能力 · 只读元数据</div>
+          <div className="panel-sub">{builtinSkills.length} 个内置能力 · 元数据由后端统一注册表提供</div>
         </div></div>
-        {SKILLS.map((g) => (
-          <div key={g.group} style={{ marginBottom: 14 }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", marginBottom: 6 }}>{g.group}</div>
+        {Object.entries(builtinSkills.reduce<Record<string, BuiltinSkillManifest[]>>((groups, skill) => {
+          (groups[skill.group] ??= []).push(skill);
+          return groups;
+        }, {})).map(([group, skills]) => (
+          <div key={group} style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", marginBottom: 6 }}>{group}</div>
             <div className="table-wrap">
               <table>
-                <thead><tr><th>能力</th><th>状态</th><th>说明</th></tr></thead>
+                <thead><tr><th>能力</th><th>安装</th><th>启用</th><th>运行方式</th><th>能力状态 / 说明</th></tr></thead>
                 <tbody>
-                  {g.rows.map((skill) => (
-                    <tr key={skill.id}>
-                      <td title={skill.src}>
+                  {skills.map((skill) => (
+                    <tr key={skill.skill_id}>
+                      <td>
                         <strong>{skill.name.replace(/（R\d+）/g, "").replace("Playwright ", "")}</strong>
+                        <div className="tiny">{skill.skill_id}</div>
                         <details className="skill-manifest-preview">
                           <summary>预览能力定义</summary>
-                          <pre>{JSON.stringify({ schema_version: 1, skill_id: skill.id, name: skill.name, source: skill.src, status: skill.status === "OK" ? "available" : "limited", description: skill.note }, null, 2)}</pre>
+                          <pre>{JSON.stringify(skill, null, 2)}</pre>
                         </details>
                       </td>
-                      <td><span className={`tag ${skill.status === "OK" ? "green" : "orange"}`}>{skill.status === "OK" ? "正常" : "部分可用"}</span></td>
-                      <td style={{ fontSize: 12, color: "var(--muted)" }}>{skill.note.replace(/R\d+[：:]\s*/g, "")}</td>
+                      <td><span className="tag green">系统内置</span></td>
+                      <td><span className="tag">系统管理</span></td>
+                      <td>由可信工作流调用</td>
+                      <td><span className={`tag ${skill.capability_status === "normal" ? "green" : "orange"}`}>{skill.capability_status === "normal" ? "能力正常" : "能力受限"}</span><div className="tiny">{skill.description}</div></td>
                     </tr>
                   ))}
                 </tbody>
@@ -539,7 +544,7 @@ function SkillsPane() {
         </div>
         {loadError && <div className="note" style={{ color: "var(--red)" }}>加载失败：{loadError}</div>}
         <div className="skill-register-form">
-          <label>Skill ID<input className="field" value={skillId} onChange={(e) => setSkillId(e.target.value)} placeholder="例如 brand_voice_check" /></label>
+          <label>Skill ID<input className="field" disabled={Boolean(editingSkillId)} value={skillId} onChange={(e) => setSkillId(e.target.value)} placeholder="例如 brand_voice_check" /></label>
           <label>名称<input className="field" value={skillName} onChange={(e) => setSkillName(e.target.value)} maxLength={120} placeholder="能力名称" /></label>
           <label>版本<input className="field" value={skillVersion} onChange={(e) => setSkillVersion(e.target.value)} placeholder="1.0.0" /></label>
           <label>分类<input className="field" value={skillCategory} onChange={(e) => setSkillCategory(e.target.value)} placeholder="custom" /></label>
@@ -565,9 +570,10 @@ function SkillsPane() {
                 setDraftTest({ checks: [{ label: "JSON 语法", pass: false }], passed: 0, total: 1 });
               }
             }}>运行配置自检</button>
-            <button className="btn primary" disabled={!skillId.trim() || !skillName.trim() || isPending("skill:register")} onClick={register}>
-              {isPending("skill:register") ? "登记中…" : "登记 Skill"}
+            <button className="btn primary" disabled={!skillId.trim() || !skillName.trim() || isPending(editingSkillId ? `skill:update:${editingSkillId}` : "skill:register")} onClick={register}>
+              {isPending(editingSkillId ? `skill:update:${editingSkillId}` : "skill:register") ? "保存中…" : editingSkillId ? "保存 Skill 修改" : "登记 Skill"}
             </button>
+            {editingSkillId && <button className="btn" type="button" onClick={() => { setEditingSkillId(null); setEditingSkillVersion(null); setSkillId(""); setSkillName(""); setSkillVersion("1.0.0"); setSkillDescription(""); setSkillCategory("custom"); setSkillInputsJson("[]"); setSkillOutputsJson("[]"); setSkillPermissions([]); }}>取消编辑</button>}
           </div>
           {draftTest && <div className="note" role="status" style={{ marginTop: 8 }}>
             自检结果：{draftTest.passed}/{draftTest.total} 项通过。{draftTest.checks.map((item) => <span key={item.label} style={{ display: "inline-block", marginRight: 10, color: item.pass ? "var(--green)" : "var(--red)" }}>{item.pass ? "✓" : "✕"} {item.label}</span>)}
@@ -579,17 +585,20 @@ function SkillsPane() {
         ) : (
           <div className="table-wrap">
             <table>
-              <thead><tr><th>Skill</th><th>版本</th><th>分类</th><th>权限</th><th>状态</th><th>操作</th></tr></thead>
+              <thead><tr><th>Skill</th><th>版本</th><th>分类</th><th>权限</th><th>安装</th><th>启用</th><th>可运行</th><th>操作</th></tr></thead>
               <tbody>{customSkills.map((skill) => (
                 <tr key={skill.skill_id}>
                   <td><strong>{skill.name}</strong><div className="tiny">{skill.skill_id}</div><div className="tiny">{skill.description}</div><details className="skill-manifest-preview"><summary>预览 Manifest</summary><pre>{JSON.stringify(skill, null, 2)}</pre></details></td>
                   <td>{skill.version}</td>
                   <td>{skill.category}</td>
                   <td>{skill.permissions.length ? skill.permissions.join("、") : "无"}</td>
-                  <td><span className={skill.enabled ? "tag green" : "tag gray"}>{skill.enabled ? "已启用（仅登记）" : "已停用"}</span></td>
+                  <td><span className="tag">已登记</span></td>
+                  <td><span className={skill.enabled ? "tag green" : "tag gray"}>{skill.enabled ? "已启用" : "已停用"}</span></td>
+                  <td><span className="tag orange">不可运行（未配置沙箱）</span></td>
                   <td><div className="skill-row-actions">
+                    <button className="btn sm" type="button" onClick={() => editSkill(skill)}>编辑</button>
                     <button className="btn sm" type="button" onClick={() => setSavedTests((old) => ({ ...old, [skill.skill_id]: inspectSkillManifest(skill) }))}>配置自检</button>
-                    <button className="btn sm primary" type="button" onClick={() => { setTestingSkill(skill); setSavedTests((old) => ({ ...old, [skill.skill_id]: inspectSkillManifest(skill) })); }}>独立测试</button>
+                    <button className="btn sm primary" type="button" onClick={() => setTestingSkill(skill)}>独立测试</button>
                     <button className="btn sm" disabled={isPending(`skill:toggle:${skill.skill_id}`)} onClick={() => void toggle(skill)}>{skill.enabled ? "停用" : "启用"}</button>
                     <button className="btn sm" disabled={skill.enabled || isPending(`skill:delete:${skill.skill_id}`)} onClick={() => void remove(skill)}>删除</button>
                   </div>
@@ -632,8 +641,7 @@ function validateSkillSample(sample: unknown, schemas: Array<Record<string, unkn
       const enumValues = Array.isArray(schema.enum) ? schema.enum : null;
       const enumPass = !enumValues || enumValues.some((entry) => JSON.stringify(entry) === JSON.stringify(value));
       checks.push({
-        label: name,
-        pass: typePass && enumPass,
+        label: name, pass: typePass && enumPass,
         detail: !typePass ? `类型应为 ${expected}，实际为 ${actual}` : !enumPass ? "不在允许值范围内" : "类型与约束通过",
       });
       continue;
@@ -663,11 +671,10 @@ function SkillContractTester({ skill, onClose }: { skill: TenantSkillManifest; o
     try {
       const input = JSON.parse(inputSample);
       const output = JSON.parse(outputSample);
-      const result = [
+      setChecks([
         ...validateSkillSample(input, skill.inputs, "输入"),
         ...validateSkillSample(output, skill.outputs, "输出"),
-      ];
-      setChecks(result);
+      ]);
     } catch (e) {
       setChecks(null);
       setError(e instanceof Error ? `JSON 格式错误：${e.message}` : "JSON 格式错误");
@@ -692,7 +699,7 @@ function SkillContractTester({ skill, onClose }: { skill: TenantSkillManifest; o
       </div>
       <div className="flex wrap" style={{ alignItems: "center", gap: 10 }}>
         <button className="btn sm primary" type="button" onClick={run}>运行契约测试</button>
-        <span className="tiny">测试对象：{skill.skill_id} · v{skill.version} · Manifest #{skill.manifest_version}</span>
+        <span className="tiny">测试对象：{skill.name} · v{skill.version}</span>
       </div>
       {error && <div className="note" role="alert" style={{ color: "var(--red)" }}>{error}</div>}
       {checks && <div className="skill-contract-results" role="status">
@@ -832,7 +839,7 @@ function AuditPane() {
                     {overrides.slice((auditPage - 1) * auditPageSize, auditPage * auditPageSize).map((r) => (
                       <tr key={r.id}>
                         <td style={{ fontSize: 11, fontFamily: "monospace", color: "var(--subtle)" }}>{r.overridden_at}</td>
-                        <td>{r.round_id ? `#${r.round_id}` : <span style={{ color: "var(--subtle)" }}>—</span>}</td>
+                        <td>{r.round_number != null ? `第 ${r.round_number} 轮` : r.round_id ? "关联轮次已归档" : <span style={{ color: "var(--subtle)" }}>—</span>}</td>
                         <td style={{ fontFamily: "monospace", fontSize: 11 }}>{r.override_field ?? "—"}</td>
                         <td style={{ maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.original_value ?? "—"}</td>
                         <td style={{ maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.override_value ?? "—"}</td>
@@ -866,7 +873,7 @@ function AuditPane() {
                     {redlines.slice((auditPage - 1) * auditPageSize, auditPage * auditPageSize).map((r) => (
                       <tr key={r.id}>
                         <td style={{ fontSize: 11, fontFamily: "monospace", color: "var(--subtle)" }}>{r.created_at}</td>
-                        <td>{r.round_id ? `#${r.round_id}` : "—"}</td>
+                        <td>{r.round_number != null ? `第 ${r.round_number} 轮` : r.round_id ? "关联轮次已归档" : "—"}</td>
                         <td>{PLATFORM_LABEL[r.platform] ?? r.platform}</td>
                         <td style={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title}</td>
                         <td>

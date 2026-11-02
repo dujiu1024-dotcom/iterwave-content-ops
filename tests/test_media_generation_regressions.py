@@ -193,6 +193,7 @@ def test_recommendation_limit_can_return_more_than_eight_items(conn, seed, test_
         api_main._g_ctx.update(saved)
 
 
+
 def test_successful_image_generation_ignores_legacy_monthly_quota(
     conn, cfg, test_auth, monkeypatch, tmp_path
 ):
@@ -237,49 +238,6 @@ def test_successful_image_generation_ignores_legacy_monthly_quota(
         api_main._g_ctx.update(saved)
 
 
-def test_legacy_monthly_quota_does_not_block_additional_generation(
-    conn, cfg, test_auth, monkeypatch, tmp_path
-):
-    registry = TenantRegistry(tmp_path / "workspace")
-    registry.initialize()
-    conn.execute(
-        "INSERT INTO media_generation_settings (id, enabled, monthly_quota, prompt_prefix, model, size) "
-        "VALUES (1, 1, 1, '', 'test-model', '1024x1024') "
-        "ON CONFLICT(id) DO UPDATE SET enabled=1, monthly_quota=1, model='test-model', size='1024x1024'"
-    )
-    conn.execute(
-        "INSERT INTO media_generation_jobs (prompt, final_prompt, model, status, created_at) "
-        "VALUES ('previous', 'previous', 'test-model', 'succeeded', ?)",
-        (business_now(cfg).strftime("%Y-%m-%d %H:%M:%S"),),
-    )
-    conn.commit()
-
-    def fail_provider(*args, **kwargs):
-        raise media_generation.ImageGenerationError("provider unavailable")
-
-    monkeypatch.setattr(media_generation, "generate_image_bytes", fail_provider)
-    saved = dict(api_main._g_ctx)
-    api_main._g_ctx.clear()
-    api_main._g_ctx.update({
-        "conn": conn,
-        "cfg": cfg,
-        "tenant_registry": registry,
-        "runtime_tenant_id": "default",
-    })
-    try:
-        client = _client(test_auth)
-        response = client.post("/api/media/generate", json={"prompt": "another test image"})
-        assert response.status_code == 502
-        assert conn.execute(
-            "SELECT COUNT(*) FROM media_generation_jobs WHERE status = 'succeeded'"
-        ).fetchone()[0] == 1
-        assert conn.execute(
-            "SELECT COUNT(*) FROM media_generation_jobs WHERE status = 'failed'"
-        ).fetchone()[0] == 1
-    finally:
-        api_main._g_ctx.clear()
-        api_main._g_ctx.update(saved)
-
 
 def test_content_template_can_be_updated_without_changing_asset_type(conn, test_auth):
     saved = dict(api_main._g_ctx)
@@ -305,33 +263,3 @@ def test_content_template_can_be_updated_without_changing_asset_type(conn, test_
     finally:
         api_main._g_ctx.clear()
         api_main._g_ctx.update(saved)
-
-
-def test_media_library_returns_total_counts_and_offset_page(conn, test_auth):
-    for asset_id, review_status in ((101, "approved"), (102, "pending_review"), (103, "approved")):
-        conn.execute(
-            "INSERT INTO media_assets "
-            "(id, title, original_filename, stored_filename, mime_type, byte_size, sha256, alt_text, tags, source_type, width, height, status, review_status, created_at) "
-            "VALUES (?, ?, ?, ?, 'image/png', 10, ?, ?, '[]', 'upload', 100, 100, 'active', ?, '2026-11-01')",
-            (asset_id, f"分页素材 {asset_id}", f"{asset_id}.png", f"{asset_id}.png",
-             f"pagination-sha-{asset_id}", "测试素材", review_status),
-        )
-    conn.commit()
-    saved = dict(api_main._g_ctx)
-    api_main._g_ctx.clear()
-    api_main._g_ctx.update({"conn": conn, "runtime_tenant_id": "default"})
-    try:
-        response = _client(test_auth).get(
-            "/api/media?status=active&review_status=all&limit=1&offset=1"
-        )
-        assert response.status_code == 200
-        body = response.json()
-        assert len(body["items"]) == 1
-        assert body["total"] == 3
-        assert body["counts"]["all"] == 3
-        assert body["counts"]["approved"] == 2
-        assert body["counts"]["pending"] == 1
-    finally:
-        api_main._g_ctx.clear()
-        api_main._g_ctx.update(saved)
-

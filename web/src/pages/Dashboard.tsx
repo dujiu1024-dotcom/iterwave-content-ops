@@ -53,6 +53,7 @@ export default function Dashboard() {
   const [insights, setInsights] = useState<InsightItem[]>([]);
   const [progress, setProgress] = useState<Partial<Record<Platform, PlatformProgress>>>({});
   const [actions, setActions] = useState<ActionItem[]>([]);
+  const [todoTotal, setTodoTotal] = useState(0);
   const [cfg, setCfg] = useState<SystemConfigView | null>(null);
   const [loadedAt, setLoadedAt] = useState<Date | null>(null);
   const [loading, setLoading] = useState(true);
@@ -68,7 +69,7 @@ export default function Dashboard() {
       api.hotTopics(),
       api.insights(),
       api.platformProgress(),
-      api.actionItems(),
+      api.todos(1, 100),
       api.config(),
       api.goalsSummary(),
     ]);
@@ -77,7 +78,20 @@ export default function Dashboard() {
     if (r[2].status === "fulfilled") setHot(r[2].value.items ?? []);
     if (r[3].status === "fulfilled") setInsights(r[3].value.items ?? []);
     if (r[4].status === "fulfilled") setProgress(r[4].value ?? {});
-    if (r[5].status === "fulfilled") setActions(r[5].value.items ?? []);
+    if (r[5].status === "fulfilled") {
+      setTodoTotal(r[5].value.total ?? 0);
+      setActions((r[5].value.items ?? []).map((todo) => ({
+        id: todo.id,
+        type: todo.source,
+        title: todo.title,
+        detail: `${todo.tenant_name} · ${todo.detail}`,
+        priority: todo.severity,
+        source: todo.source_label,
+        created_at: todo.created_at,
+        target_page: todo.target_page,
+        target_tab: todo.target_tab,
+      })));
+    }
     if (r[6].status === "fulfilled") setCfg(r[6].value);
     if (r[7].status === "fulfilled") setSummary(r[7].value);
     const sourceLabels = ["轮次", "目标", "热点", "复盘", "平台进度", "待处理事项", "系统配置", "目标汇总"];
@@ -95,7 +109,7 @@ export default function Dashboard() {
 
   // ===== 派生（全部来自接口） =====
   const enabled = (status?.enabled_platforms ?? []) as Platform[];
-  const loggedIn = (status?.logged_in_platforms ?? []) as Platform[];
+  const credentialsPresent = (status?.credential_present_platforms ?? status?.logged_in_platforms ?? []) as Platform[];
   const broken = (status?.circuit_broken_platforms ?? []) as Platform[];
 
   const awaitingRounds = rounds.filter((r) => r.status === "awaiting_publish");
@@ -107,7 +121,6 @@ export default function Dashboard() {
   const weekAgo = Date.now() - 7 * 86400000;
   const insightsThisWeek = insights.filter((i) => new Date(i.analyzed_at).getTime() >= weekAgo);
   const insightsWithSamples = insightsThisWeek.filter((i) => (i.sample_count ?? 0) > 0);
-  const highActions = actions.filter((a) => a.priority === "high");
   const totalDrafts = Object.values(progress).reduce((s, p) => s + (p?.total_drafts ?? 0), 0);
   /** 已存草稿、等你手动发布确认的篇数（来自各平台状态分布） */
   const savedDrafts = Object.values(progress).reduce(
@@ -174,14 +187,10 @@ export default function Dashboard() {
         <Metric
           label="待你处理"
           icon="!"
-          value={failed.has("待处理事项") ? "—" : actions.length}
+          value={failed.has("待处理事项") ? "—" : todoTotal}
           unit="项"
           foot={[
-            failed.has("待处理事项")
-              ? <span key="h">优先级信息待加载</span>
-              : highActions.length
-                ? <span key="h" style={{ color: "var(--red)", fontWeight: 700 }}>{highActions.length} 项高优先级</span>
-                : <span key="h">无高优先级</span>,
+            <span key="h">与统一待办中心同一数据源</span>,
             <span key="a">{failed.has("轮次") ? "待发布轮次待加载" : `${awaitingRounds.length} 轮待确认发布`}</span>,
           ]}
         />
@@ -259,7 +268,10 @@ export default function Dashboard() {
                     {it.detail && <div className="task-desc">{it.detail}</div>}
                   </div>
                   <div className="task-actions">
-                    <button type="button" className="btn sm" onClick={() => go(actionTarget(it))}>处理</button>
+                    <button type="button" className="btn sm" onClick={() => {
+                      const target = actionTarget(it);
+                      go(target.page, target.tab);
+                    }}>处理</button>
                   </div>
                 </div>
               ))}
@@ -330,7 +342,7 @@ export default function Dashboard() {
         <div className="panel-head">
           <div>
             <div className="panel-title"><span className="icon" aria-hidden="true">▦</span>四个平台独立进度</div>
-            <div className="panel-sub">共用总体目标，但草稿进度、登录状态、阶段目标和复盘结论各自独立</div>
+            <div className="panel-sub">共用总体目标，但草稿进度、账号登记、登录态文件、阶段目标和复盘结论各自独立；登录态文件不代表平台会话有效</div>
           </div>
           <button type="button" className="btn sm" onClick={() => go("production")}>进入内容生产 →</button>
         </div>
@@ -340,7 +352,9 @@ export default function Dashboard() {
               key={p}
               platform={p}
               enabled={progress[p]?.enabled ?? enabled.includes(p)}
-              loggedIn={loggedIn.includes(p)}
+              credentialPresent={progress[p]?.credential_present ?? credentialsPresent.includes(p)}
+              accountRegistered={progress[p]?.account_registered ?? true}
+              accountActive={progress[p]?.account_active ?? true}
               broken={broken.includes(p) || !!progress[p]?.circuit_broken}
               progress={progress[p]}
               goal={goals.filter(isActiveGoal).find((g) => g.target_platform === p)}
@@ -446,8 +460,9 @@ function Metric({ label, icon, iconTone, value, unit, foot }: {
   );
 }
 
-function PlatformLane({ platform, enabled, loggedIn, broken, progress, goal, insight, onOpen }: {
-  platform: Platform; enabled: boolean; loggedIn: boolean; broken: boolean;
+function PlatformLane({ platform, enabled, credentialPresent, accountRegistered, accountActive, broken, progress, goal, insight, onOpen }: {
+  platform: Platform; enabled: boolean; credentialPresent: boolean;
+  accountRegistered: boolean; accountActive: boolean; broken: boolean;
   progress?: PlatformProgress; goal?: Goal; insight?: InsightItem; onOpen: (page: string) => void;
 }) {
   const m = platformMeta(platform);
@@ -459,15 +474,21 @@ function PlatformLane({ platform, enabled, loggedIn, broken, progress, goal, ins
 
   const state = !enabled
     ? { cls: "gray", text: "未启用" }
+    : progress?.configured === false ? { cls: "orange", text: "配置缺失" }
     : broken ? { cls: "red", text: "熔断冷却" }
-    : !loggedIn ? { cls: "orange", text: "未登录" }
-    : total > 0 ? { cls: "green", text: "运行中" }
+    : !accountRegistered ? { cls: "orange", text: "账号未登记" }
+    : !accountActive ? { cls: "gray", text: "账号已停用" }
+    : !credentialPresent ? { cls: "orange", text: "未配置登录态" }
+    : total > 0 ? { cls: "green", text: "已有草稿" }
     : { cls: "blue", text: "待开始" };
 
   const failed = (breakdown.failed ?? 0) + (breakdown.expired ?? 0);
   const next = !enabled ? "在系统设置中启用该平台"
+    : progress?.configured === false ? "检查平台基础配置"
     : broken ? "到运营控制台执行熔断恢复验证"
-    : !loggedIn ? "扫码登录后才能保存草稿"
+    : !accountRegistered ? "到账号与登录登记平台账号昵称和标识"
+    : !accountActive ? "到账号与登录启用该账号登记"
+    : !credentialPresent ? "扫码登录并生成本机登录态文件"
     : (breakdown.draft_saved ?? 0) > 0 ? `${breakdown.draft_saved} 篇草稿待你确认发布`
     : total === 0 ? "等待新一轮生产"
     : "等待数据采集";
@@ -502,8 +523,8 @@ function PlatformLane({ platform, enabled, loggedIn, broken, progress, goal, ins
       <div className="lane-foot">
         <small>下一动作：{next}</small>
         <div className="flex">
-          {enabled && !loggedIn && (
-            <button type="button" className="btn sm soft" onClick={() => onOpen("accounts")}>去登录</button>
+          {enabled && (!accountRegistered || !accountActive || !credentialPresent) && (
+            <button type="button" className="btn sm soft" onClick={() => onOpen("accounts")}>账号设置</button>
           )}
           <button type="button" className="btn sm" onClick={() => onOpen(broken ? "operations" : "production")}>查看任务</button>
         </div>
@@ -559,8 +580,9 @@ function byPriority(a: ActionItem, b: ActionItem) {
 function priorityTone(p?: string) {
   return p === "high" ? "red" : p === "low" ? "blue" : "";
 }
-function actionTarget(it: ActionItem): string {
-  if (it.type === "goal_strategy") return "goals";
-  if (it.type === "publish_decision") return "production";
-  return "operations";
+function actionTarget(it: ActionItem): { page: string; tab?: string } {
+  if (it.target_page) return { page: it.target_page, tab: it.target_tab ?? undefined };
+  if (it.type === "goal_strategy") return { page: "goals" };
+  if (it.type === "publish_decision") return { page: "production", tab: "review" };
+  return { page: "operations" };
 }

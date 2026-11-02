@@ -18,8 +18,24 @@ def _seed_tenant_db(db_path: Path, title: str, platform: str = "xhs") -> None:
         CREATE TABLE drafts (id TEXT PRIMARY KEY, platform TEXT, status TEXT);
         CREATE TABLE media_assets (id INTEGER PRIMARY KEY, status TEXT);
         CREATE TABLE media_asset_usages (id INTEGER PRIMARY KEY);
+        CREATE TABLE task_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_type TEXT NOT NULL,
+            biz_id TEXT,
+            status TEXT NOT NULL,
+            error_msg TEXT,
+            started_at TEXT,
+            finished_at TEXT,
+            created_at TEXT
+        );
     """)
-    conn.execute("INSERT INTO contents VALUES (?, ?, ?)", (title, platform, datetime.now().isoformat(sep=" ")))
+    now = datetime.now().isoformat(sep=" ")
+    conn.execute("INSERT INTO contents VALUES (?, ?, ?)", (title, platform, now))
+    conn.execute(
+        "INSERT INTO task_runs(task_type, biz_id, status, started_at, finished_at, created_at) "
+        "VALUES ('round_pipeline', ?, 'success', ?, ?, ?)",
+        ("round-" + title, now, now, now),
+    )
     conn.execute("INSERT INTO drafts VALUES (?, ?, 'draft_saved')", ("draft-" + title, platform))
     conn.execute("INSERT INTO media_assets VALUES (1, 'active')")
     conn.execute("INSERT INTO media_asset_usages VALUES (1)")
@@ -53,6 +69,9 @@ def test_global_monitor_aggregates_tenant_dbs_read_only(tmp_path, test_auth):
         assert body["totals"]["media_active"] == 2
         assert body["platform_totals"]["xhs"]["contents"] == 1
         assert body["platform_totals"]["douyin"]["contents"] == 1
+        for tenant in body["tenants"]:
+            assert tenant["recent_execution"]["task_type"] == "round_pipeline"
+            assert tenant["recent_execution"]["status"] == "success"
         assert body["account_count_note"]
     finally:
         api_main._g_ctx.clear()

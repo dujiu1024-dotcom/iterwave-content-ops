@@ -8,6 +8,7 @@ from src.adapters.base import Platform
 from src.core import login_manager
 from src.core.task_queue import GlobalTaskQueue
 from src.core.task_worker import GlobalTaskWorker
+from src.core.task_context import current_config
 
 
 def test_worker_uses_task_tenant_context_not_active_login_directory(tmp_path):
@@ -111,16 +112,18 @@ def test_worker_executes_queued_scheduler_job_in_its_tenant_context(tmp_path):
     class FakeScheduler:
         async def _job_daily_ops(self):
             observed["login_path"] = login_manager._platform_state_path(Platform.XHS)
+            observed["config"] = current_config()
             return None
 
         def shutdown(self):
             return None
 
+    tenant_cfg = SimpleNamespace(
+        paths=SimpleNamespace(data_dir=str(tmp_path / "tenant-b" / "data")),
+        resolve_path=lambda value: value,
+    )
     context = {
-        "cfg": SimpleNamespace(
-            paths=SimpleNamespace(data_dir=str(tmp_path / "tenant-b" / "data")),
-            resolve_path=lambda value: value,
-        ),
+        "cfg": tenant_cfg,
         "scheduler": FakeScheduler(),
         "conn": SimpleNamespace(close=lambda: None),
     }
@@ -129,6 +132,7 @@ def test_worker_executes_queued_scheduler_job_in_its_tenant_context(tmp_path):
 
     assert result == {"completed": True}
     assert observed["login_path"] == tmp_path / "tenant-b" / "data" / "login_states" / "xhs.json"
+    assert observed["config"] is tenant_cfg
     saved = queue.get(task.task_id)
     assert saved is not None and saved.status == "running"
 
@@ -535,7 +539,11 @@ def test_worker_reconciles_interrupted_round_tasks_on_startup(tmp_path, monkeypa
 
     observed = []
     worker = GlobalTaskWorker(queue, lambda tenant_id: {})
-    monkeypatch.setattr(worker, "_reconcile_round_failure", lambda item, reason: observed.append((item.task_id, item.tenant_id, reason)))
+    def reconcile(item, reason):
+        observed.append((item.task_id, item.tenant_id, reason))
+        return True
+
+    monkeypatch.setattr(worker, "_reconcile_round_failure", reconcile)
     worker._sync_terminal_rounds()
 
     assert observed == [(task.task_id, "tenant-kill", "模拟进程意外退出")]
@@ -585,3 +593,357 @@ def test_worker_reconciles_interrupted_rounds_beyond_first_500_queue_rows():
     assert calls == [1, 2]
     assert len(reconciled) == 501
     assert len(set(reconciled)) == 501
+
+
+
+def test_queued_scheduler_job_binds_and_finishes_task_run_audit_context(tmp_path):
+    import sqlite3
+    from src.core.task_context import current_task_run_id
+
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    task, _ = queue.enqueue(
+        task_type="scheduler_job", tenant_id="tenant-a",
+        aggregate_id="_job_daily_ops",
+        payload={"method": "_job_daily_ops", "args": []},
+    )
+    claimed = queue.claim_next("worker-a")
+    assert claimed is not None
+
+    audit_conn = sqlite3.connect(":memory:")
+    audit_conn.row_factory = sqlite3.Row
+    audit_conn.execute(
+        "CREATE TABLE task_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_type TEXT, "
+        "biz_id TEXT, status TEXT, attempt INTEGER, started_at TEXT, finished_at TEXT, "
+        "error_msg TEXT, created_at TEXT)"
+    )
+    audit_conn.commit()
+    observed = {}
+
+    class FakeScheduler:
+        async def _job_daily_ops(self):
+            observed["task_run_id"] = current_task_run_id()
+            return None
+
+        def shutdown(self):
+            return None
+
+    class ConnectionProxy:
+        def execute(self, *args):
+            return audit_conn.execute(*args)
+
+        def commit(self):
+            audit_conn.commit()
+
+        def close(self):
+            # Keep the in-memory connection available for assertions after _run_task.
+            return None
+
+    context = {
+        "cfg": SimpleNamespace(
+            paths=SimpleNamespace(data_dir=str(tmp_path / "tenant-a" / "data")),
+            resolve_path=lambda value: value,
+        ),
+        "scheduler": FakeScheduler(),
+        "conn": ConnectionProxy(),
+    }
+    worker = GlobalTaskWorker(queue, lambda tenant_id: context)
+    result = asyncio.run(worker._run_task(claimed))
+
+    assert result == {"completed": True}
+    assert observed["task_run_id"] is not None
+    row = audit_conn.execute(
+        "SELECT task_type, biz_id, status, finished_at FROM task_runs WHERE id=?",
+        (observed["task_run_id"],),
+    ).fetchone()
+    assert row["task_type"] == "daily_ops"
+    assert row["biz_id"].startswith("scheduler:_job_daily_ops:")
+    assert row["status"] == "success"
+    assert row["finished_at"]
+    assert current_task_run_id() is None
+    audit_conn.close()
+
+
+def test_worker_marks_structured_failed_round_report_as_queue_failure(tmp_path):
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    task, _ = queue.enqueue(
+        task_type="round_run", tenant_id="tenant-a", aggregate_id="round-501",
+        payload={"round_id": 501, "operation": "run"},
+    )
+    claimed = queue.claim_next("worker-failed-report")
+    assert claimed is not None
+
+    class EmptyCursor:
+        def fetchone(self):
+            return None
+
+    class FakeConnection:
+        def execute(self, *args, **kwargs):
+            return EmptyCursor()
+
+        def commit(self):
+            return None
+
+        def close(self):
+            return None
+
+    class FailedExecutor:
+        async def run(self, round_id, **kwargs):
+            return {
+                "round_id": round_id,
+                "final_status": "failed",
+                "errors": ["模型服务未配置"],
+            }
+
+    context = {
+        "cfg": SimpleNamespace(
+            paths=SimpleNamespace(data_dir=str(tmp_path / "tenant-a" / "data")),
+            resolve_path=lambda value: value,
+        ),
+        "executor": FailedExecutor(),
+        "scheduler": SimpleNamespace(shutdown=lambda: None),
+        "conn": FakeConnection(),
+    }
+    worker = GlobalTaskWorker(queue, lambda tenant_id: context)
+    worker.owner = "worker-failed-report"
+    worker._reconcile_round_failure = lambda task, reason: None
+
+    asyncio.run(worker._execute(claimed))
+
+    saved = queue.get(task.task_id)
+    assert saved is not None
+    assert saved.status == "failed"
+    assert saved.error_code == "task_execution_failed"
+    assert "模型服务未配置" in (saved.error_message or "")
+
+
+def test_worker_marks_scheduler_task_run_failed_for_structured_failure_report(tmp_path):
+    import sqlite3
+    from src.core.task_context import current_task_run_id
+
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    queue.enqueue(
+        task_type="scheduler_job", tenant_id="tenant-a",
+        aggregate_id="_job_daily_ops",
+        payload={"method": "_job_daily_ops", "args": []},
+    )
+    claimed = queue.claim_next("worker-scheduler-failed")
+    assert claimed is not None
+
+    audit_conn = sqlite3.connect(":memory:")
+    audit_conn.row_factory = sqlite3.Row
+    audit_conn.execute(
+        "CREATE TABLE task_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_type TEXT, "
+        "biz_id TEXT, status TEXT, attempt INTEGER, started_at TEXT, finished_at TEXT, "
+        "error_msg TEXT, created_at TEXT)"
+    )
+    audit_conn.commit()
+    observed = {}
+
+    class ConnectionProxy:
+        def execute(self, *args):
+            return audit_conn.execute(*args)
+
+        def commit(self):
+            audit_conn.commit()
+
+        def close(self):
+            return None
+
+    class FailedScheduler:
+        async def _job_daily_ops(self):
+            observed["task_run_id"] = current_task_run_id()
+            return {"final_status": "failed", "errors": ["运营配置读取失败"]}
+
+        def shutdown(self):
+            return None
+
+    context = {
+        "cfg": SimpleNamespace(
+            paths=SimpleNamespace(data_dir=str(tmp_path / "tenant-a" / "data")),
+            resolve_path=lambda value: value,
+        ),
+        "scheduler": FailedScheduler(),
+        "conn": ConnectionProxy(),
+    }
+    worker = GlobalTaskWorker(queue, lambda tenant_id: context)
+    result = asyncio.run(worker._run_task(claimed))
+
+    assert result["final_status"] == "failed"
+    row = audit_conn.execute(
+        "SELECT task_type, status, error_msg FROM task_runs WHERE id=?",
+        (observed["task_run_id"],),
+    ).fetchone()
+    assert row["task_type"] == "daily_ops"
+    assert row["status"] == "failed"
+    assert "运营配置读取失败" in row["error_msg"]
+    audit_conn.close()
+
+
+def test_worker_dispatches_hot_topic_refresh_as_a_tracked_scheduler_job(tmp_path):
+    import sqlite3
+
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    task, _ = queue.enqueue(
+        task_type="scheduler_job", tenant_id="tenant-a",
+        aggregate_id="_job_hot_topics_refresh",
+        payload={"method": "_job_hot_topics_refresh", "args": []},
+    )
+    claimed = queue.claim_next("worker-hot-topics")
+    assert claimed is not None and claimed.task_id == task.task_id
+
+    audit_conn = sqlite3.connect(":memory:")
+    audit_conn.row_factory = sqlite3.Row
+    audit_conn.execute(
+        "CREATE TABLE task_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_type TEXT, "
+        "biz_id TEXT, status TEXT, attempt INTEGER, started_at TEXT, finished_at TEXT, "
+        "error_msg TEXT, created_at TEXT)"
+    )
+    audit_conn.commit()
+
+    class ConnectionProxy:
+        def execute(self, *args):
+            return audit_conn.execute(*args)
+
+        def commit(self):
+            audit_conn.commit()
+
+        def close(self):
+            return None
+
+    class FakeScheduler:
+        async def _job_hot_topics_refresh(self):
+            return {"final_status": "failed", "errors": ["有 1 个热点来源采集失败"]}
+
+        def shutdown(self):
+            return None
+
+    context = {
+        "cfg": SimpleNamespace(
+            paths=SimpleNamespace(data_dir=str(tmp_path / "tenant-a" / "data")),
+            resolve_path=lambda value: value,
+        ),
+        "scheduler": FakeScheduler(),
+        "conn": ConnectionProxy(),
+    }
+    worker = GlobalTaskWorker(queue, lambda tenant_id: context)
+    result = asyncio.run(worker._run_task(claimed))
+
+    assert result["final_status"] == "failed"
+    row = audit_conn.execute(
+        "SELECT task_type, status, error_msg FROM task_runs"
+    ).fetchone()
+    assert row["task_type"] == "hot_topics_refresh"
+    assert row["status"] == "failed"
+    assert "热点来源采集失败" in row["error_msg"]
+    audit_conn.close()
+
+
+def test_scheduler_exception_audit_uses_safe_message(tmp_path):
+    import sqlite3
+    import pytest
+
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    queue.enqueue(
+        task_type="scheduler_job", tenant_id="tenant-a",
+        aggregate_id="_job_daily_ops",
+        payload={"method": "_job_daily_ops", "args": []},
+    )
+    claimed = queue.claim_next("worker-scheduler-exception")
+    assert claimed is not None
+
+    audit_conn = sqlite3.connect(":memory:")
+    audit_conn.row_factory = sqlite3.Row
+    audit_conn.execute(
+        "CREATE TABLE task_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_type TEXT, "
+        "biz_id TEXT, status TEXT, attempt INTEGER, started_at TEXT, finished_at TEXT, "
+        "error_msg TEXT, created_at TEXT)"
+    )
+    audit_conn.commit()
+
+    class ConnectionProxy:
+        def execute(self, *args):
+            return audit_conn.execute(*args)
+        def commit(self):
+            audit_conn.commit()
+        def close(self):
+            return None
+
+    class BrokenScheduler:
+        async def _job_daily_ops(self):
+            raise RuntimeError("https://internal.example/private?token=secret")
+        def shutdown(self):
+            return None
+
+    context = {
+        "cfg": SimpleNamespace(
+            business_timezone="Asia/Shanghai",
+            paths=SimpleNamespace(data_dir=str(tmp_path / "tenant-a" / "data")),
+            resolve_path=lambda value: value,
+        ),
+        "scheduler": BrokenScheduler(),
+        "conn": ConnectionProxy(),
+    }
+    worker = GlobalTaskWorker(queue, lambda tenant_id: context)
+    with pytest.raises(RuntimeError, match="internal.example"):
+        asyncio.run(worker._run_task(claimed))
+
+    row = audit_conn.execute("SELECT error_msg FROM task_runs").fetchone()
+    assert row["error_msg"] == "定时任务执行异常，请检查服务端运行日志"
+    assert "internal.example" not in row["error_msg"]
+    assert "secret" not in row["error_msg"]
+    audit_conn.close()
+
+
+def test_interrupted_round_reconciliation_retries_after_transient_context_failure(tmp_path, monkeypatch):
+    """一次性上下文/数据库故障不能让进程内缓存永久跳过 interrupted 对账。"""
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    task, _ = queue.enqueue(
+        task_type="round_run", tenant_id="tenant-a", aggregate_id="25",
+        payload={"round_id": 25, "operation": "run"},
+    )
+    claimed = queue.claim_next("worker-reconcile")
+    assert claimed is not None
+    assert queue.interrupt(task.task_id, "worker-reconcile")
+
+    calls = {"build": 0, "round": 0, "plan": 0}
+
+    class FakeConnection:
+        def close(self):
+            pass
+
+    def build_context(_tenant_id):
+        calls["build"] += 1
+        if calls["build"] == 1:
+            raise OSError("temporary tenant database unavailable")
+        return {
+            "conn": FakeConnection(),
+            "scheduler": SimpleNamespace(shutdown=lambda: None),
+        }
+
+    monkeypatch.setattr(
+        GlobalTaskWorker, "_mark_round_failed",
+        staticmethod(lambda *_args: calls.__setitem__("round", calls["round"] + 1) or True),
+    )
+    monkeypatch.setattr(
+        GlobalTaskWorker, "_mark_content_plan_failed",
+        staticmethod(lambda *_args: calls.__setitem__("plan", calls["plan"] + 1)),
+    )
+    worker = GlobalTaskWorker(queue, build_context)
+
+    worker._sync_terminal_rounds()
+    assert task.task_id not in worker._reconciled_interrupted_task_ids
+    assert calls == {"build": 1, "round": 0, "plan": 0}
+
+    worker._sync_terminal_rounds()
+    assert task.task_id in worker._reconciled_interrupted_task_ids
+    assert calls == {"build": 2, "round": 1, "plan": 1}
+
+    # 对账成功后不重复执行数据库修复。
+    worker._sync_terminal_rounds()
+    assert calls == {"build": 2, "round": 1, "plan": 1}
