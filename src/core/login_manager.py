@@ -93,9 +93,9 @@ async def get_or_create_context(browser: Browser, platform: Platform) -> Browser
     state_path = _platform_state_path(platform)
     if state_path.exists():
         logger.info("从 storage_state 恢复 %s 登录态", platform.value)
-        return await browser.new_context(storage_state=str(state_path))
+        return await browser.new_context(storage_state=str(state_path), service_workers="block")
     logger.warning("⚠️ %s 无登录态，会弹扫码窗口。请先运行 `login_with_qr` 登录。", platform.value)
-    return await browser.new_context()
+    return await browser.new_context(service_workers="block")
 
 
 def save_context_state(context: BrowserContext, platform: Platform) -> Path:

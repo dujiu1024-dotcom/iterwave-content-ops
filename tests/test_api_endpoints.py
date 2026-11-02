@@ -3165,3 +3165,110 @@ def test_production_pause_is_separate_from_operations_pause(client):
     assert tc.get("/api/production/pause").json()["paused"] is True
     ops = conn.execute("SELECT value FROM app_settings WHERE key='ops_paused'").fetchone()
     assert ops is None or str(ops[0]).lower() not in ("1", "true", "yes", "on")
+
+
+
+def test_goal_patch_preserves_two_level_parent_hierarchy(client):
+    tc, _, _ = client
+
+    def create_goal(*, level="platform", parent=None):
+        payload = {
+            "goal_text": "审查回归目标",
+            "target_metric": "followers",
+            "target_value": 1000,
+            "metric_scope": "total",
+            "baseline_value": 100,
+            "baseline_at": "2026-11-01T00:00:00+08:00",
+            "metric_period_start": "2026-11-01",
+            "metric_period_end": "2026-11-30",
+            "data_source": "manual",
+            "goal_level": level,
+            "parent_goal_id": parent,
+            "target_platform": "xhs" if level == "platform" else None,
+        }
+        response = tc.post("/api/goals", json=payload)
+        assert response.status_code == 200, response.text
+        return response.json()["id"]
+
+    root_id = create_goal(level="north_star")
+    child_id = create_goal(parent=root_id)
+    other_child_id = create_goal(parent=root_id)
+
+    missing_parent = tc.patch(
+        f"/api/goals/{child_id}", json={"parent_goal_id": "missing-goal"}
+    )
+    assert missing_parent.status_code == 422
+
+    promote_attached_child = tc.patch(
+        f"/api/goals/{child_id}", json={"goal_level": "north_star"}
+    )
+    assert promote_attached_child.status_code == 422
+
+    nested_child = tc.patch(
+        f"/api/goals/{child_id}", json={"parent_goal_id": other_child_id}
+    )
+    assert nested_child.status_code == 422
+
+    self_parent = tc.patch(
+        f"/api/goals/{root_id}", json={"parent_goal_id": root_id}
+    )
+    assert self_parent.status_code == 422
+
+    stored = tc.get("/api/goals")
+    assert stored.status_code == 200
+    goals = {item["id"]: item for item in stored.json()}
+    assert goals[child_id]["parent_goal_id"] == root_id
+    assert goals[child_id]["goal_level"] == "platform"
+
+
+
+def test_goal_patch_blocks_demoting_north_star_with_children_and_clears_platform(client):
+    tc, _, _ = client
+
+    def create_goal(*, level="platform", parent=None):
+        payload = {
+            "goal_text": "层级降级回归目标",
+            "target_metric": "followers",
+            "target_value": 1000,
+            "metric_scope": "total",
+            "baseline_value": 100,
+            "baseline_at": "2026-11-01",
+            "metric_period_start": "2026-11-01",
+            "metric_period_end": "2026-11-30",
+            "data_source": "manual",
+            "goal_level": level,
+            "parent_goal_id": parent,
+            "target_platform": "xhs" if level == "platform" else None,
+        }
+        response = tc.post("/api/goals", json=payload)
+        assert response.status_code == 200, response.text
+        return response.json()["id"]
+
+    root_id = create_goal(level="north_star")
+    other_root_id = create_goal(level="north_star")
+    child_id = create_goal(parent=root_id)
+    loose_id = create_goal()
+
+    # 有子目标的总目标不能降级，也不能挂到其它总目标下（会形成三级）。
+    assert tc.patch(f"/api/goals/{root_id}", json={"goal_level": "platform"}).status_code == 422
+    assert tc.patch(
+        f"/api/goals/{root_id}", json={"goal_level": "platform", "parent_goal_id": other_root_id}
+    ).status_code == 422
+    # 显式 null 的 goal_level 不得写入。
+    assert tc.patch(f"/api/goals/{loose_id}", json={"goal_level": None}).status_code == 422
+
+    # 合法迁移：子目标换到另一个总目标、脱离父目标、独立目标升级为总目标。
+    moved = tc.patch(f"/api/goals/{child_id}", json={"parent_goal_id": other_root_id})
+    assert moved.status_code == 200, moved.text
+    assert moved.json()["parent_goal_id"] == other_root_id
+    detached = tc.patch(f"/api/goals/{child_id}", json={"parent_goal_id": "  "})
+    assert detached.status_code == 200, detached.text
+    assert detached.json()["parent_goal_id"] is None
+    promoted = tc.patch(f"/api/goals/{loose_id}", json={"goal_level": "north_star"})
+    assert promoted.status_code == 200, promoted.text
+    assert promoted.json()["goal_level"] == "north_star"
+    assert promoted.json()["target_platform"] is None
+
+    # 根目标已无子目标后允许降级。
+    demoted = tc.patch(f"/api/goals/{root_id}", json={"goal_level": "platform"})
+    assert demoted.status_code == 200, demoted.text
