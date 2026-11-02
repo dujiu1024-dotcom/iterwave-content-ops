@@ -12,7 +12,6 @@ export default function IndustryPresetPicker({ onApplied }: { onApplied: () => v
   const [showEditor, setShowEditor] = useState(false);
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [key, setKey] = useState("");
-  const [editingKey, setEditingKey] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [positioning, setPositioning] = useState("");
