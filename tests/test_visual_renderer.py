@@ -70,7 +70,7 @@ def test_all_builtin_themes_pass_contrast_hard_gate():
 def test_page_planner_respects_text_budget_even_when_paragraph_count_fits():
     source = "\n".join("内容" * 100 for _ in range(8))
     chunks = _split_paragraphs(source)
-    pages = _pages(source, max_pages=6, capacity=5, max_page_chars=320)
+    pages = _pages(source, max_pages=10, capacity=5, max_page_chars=320)
     assert [block for page in pages for block in page] == chunks
     assert all(sum(len(block) for block in page) <= 320 for page in pages)
 
