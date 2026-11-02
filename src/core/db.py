@@ -459,6 +459,9 @@ class LockedConnection:
         object.__setattr__(self, "_conn", conn)
         object.__setattr__(self, "_lock", _threading.RLock())
         object.__setattr__(self, "_transaction_owner", None)
+        object.__setattr__(self, "_context_owner", None)
+        object.__setattr__(self, "_context_depth", 0)
+        object.__setattr__(self, "_rollback_only", False)
 
     @property
     def raw(self) -> sqlite3.Connection:
@@ -513,8 +516,11 @@ class LockedConnection:
         return _LockedCursor(self)
 
     def commit(self) -> None:
-        self._lock.acquire()
         owner = _threading.get_ident()
+        if self._context_owner == owner and self._context_depth > 0:
+            # 请求/业务事务中的 commit 延迟到最外层 with conn 正常退出。
+            return
+        self._lock.acquire()
         release_retained = False
         try:
             self._conn.commit()
@@ -527,8 +533,11 @@ class LockedConnection:
             self._lock.release()
 
     def rollback(self) -> None:
-        self._lock.acquire()
         owner = _threading.get_ident()
+        if self._context_owner == owner and self._context_depth > 0:
+            object.__setattr__(self, "_rollback_only", True)
+            return
+        self._lock.acquire()
         release_retained = False
         try:
             self._conn.rollback()
@@ -555,26 +564,61 @@ class LockedConnection:
 
     def __enter__(self):
         self._lock.acquire()
-        try:
-            self._conn.__enter__()
-        except BaseException:
+        owner = _threading.get_ident()
+        context_owner = self._context_owner
+        if context_owner is None:
+            object.__setattr__(self, "_context_owner", owner)
+            object.__setattr__(self, "_context_depth", 1)
+            object.__setattr__(self, "_rollback_only", False)
+        elif context_owner == owner:
+            object.__setattr__(self, "_context_depth", self._context_depth + 1)
+        else:
+            # 其他线程应被 RLock 阻塞，不能与当前上下文同时进入。
             self._lock.release()
-            raise
+            raise RuntimeError("SQLite 事务上下文所有权异常")
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, exc_type, exc_value, traceback):
         owner = _threading.get_ident()
+        if self._context_owner != owner or self._context_depth < 1:
+            self._lock.release()
+            raise RuntimeError("SQLite 事务上下文退出线程不匹配")
+
+        if exc_type is not None:
+            object.__setattr__(self, "_rollback_only", True)
+        depth = self._context_depth - 1
+        object.__setattr__(self, "_context_depth", depth)
+        if depth > 0:
+            # 内层上下文不提交；任一层失败都会让最外层整体回滚。
+            self._lock.release()
+            return False
+
         release_retained = False
         try:
-            result = self._conn.__exit__(*exc)
-            if not self._conn.in_transaction and self._transaction_owner == owner:
-                object.__setattr__(self, "_transaction_owner", None)
-                release_retained = True
-            return result
+            if self._rollback_only:
+                self._conn.rollback()
+            else:
+                self._conn.commit()
+        except BaseException:
+            try:
+                self._conn.rollback()
+            except sqlite3.Error:
+                pass
+            raise
         finally:
+            try:
+                if not self._conn.in_transaction and self._transaction_owner == owner:
+                    object.__setattr__(self, "_transaction_owner", None)
+                    release_retained = True
+            except sqlite3.Error:
+                pass
+            object.__setattr__(self, "_context_owner", None)
+            object.__setattr__(self, "_context_depth", 0)
+            object.__setattr__(self, "_rollback_only", False)
             if release_retained:
                 self._lock.release()
             self._lock.release()
+        return False
 
     def __getattr__(self, name):
         return getattr(self._conn, name)
