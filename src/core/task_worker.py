@@ -346,7 +346,6 @@ class GlobalTaskWorker:
         return reconciled
 
     @staticmethod
-    @staticmethod
     def _mark_content_plan_failed(conn, round_id: int, cfg=None) -> None:
         """原子标记关联计划失败；拒绝覆盖已取消、已完成等终态计划。"""
         if conn is None or not callable(getattr(conn, "execute", None)):
