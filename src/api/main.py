@@ -847,14 +847,29 @@ def _build_app() -> FastAPI:
                     except Exception:
                         pass
 
-        # 全局消费者独立于当前活动账号组；每个任务按 tenant_id 构造专属运行时。
+        # 多消费者跨账号组并行；队列确保同一账号组同时最多一个运行任务。
+        try:
+            task_worker_count = int(os.getenv("ITERWAVE_TASK_WORKERS", "4"))
+        except (TypeError, ValueError):
+            task_worker_count = 4
+        task_worker_count = max(1, min(task_worker_count, 8))
         task_worker_stop = asyncio.Event()
-        task_worker = GlobalTaskWorker(_task_queue, lambda tenant_id: _build_tenant_runtime_context(
-            tenant_registry, tenant_id,
-        ))
-        task_worker_task = asyncio.create_task(
-            task_worker.run(task_worker_stop), name="global-tenant-task-worker",
-        )
+        task_workers = [
+            GlobalTaskWorker(
+                _task_queue,
+                lambda tenant_id: _build_tenant_runtime_context(tenant_registry, tenant_id),
+                reconcile_terminal_rounds=(index == 0),
+            )
+            for index in range(task_worker_count)
+        ]
+        task_worker_tasks = [
+            asyncio.create_task(
+                worker.run(task_worker_stop),
+                name=f"global-tenant-task-worker-{index + 1}",
+            )
+            for index, worker in enumerate(task_workers)
+        ]
+        logger.info("全局任务消费者已启动 count=%d（同租户串行、跨租户并行）", task_worker_count)
 
         # 热点服务是独立资源池；后台线程持有启动时的账号组配置和独立数据库连接。
         from ..core import hot_topic_service
@@ -869,10 +884,13 @@ def _build_app() -> FastAPI:
             yield
         finally:
             task_worker_stop.set()
-            try:
-                await task_worker_task
-            except Exception:
-                logger.exception("全局任务消费者关闭异常")
+            worker_results = await asyncio.gather(*task_worker_tasks, return_exceptions=True)
+            for index, result in enumerate(worker_results, 1):
+                if isinstance(result, BaseException):
+                    logger.error(
+                        "全局任务消费者关闭异常 worker=%d error=%s",
+                        index, type(result).__name__, exc_info=result,
+                    )
             # 停止所有账号组常驻调度器并释放各自的数据库连接。
             for tenant_id, context in list(_tenant_runtime_contexts.items()):
                 try:
