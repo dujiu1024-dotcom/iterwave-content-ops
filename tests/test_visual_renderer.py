@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from src.core.visual_renderer import _document, _pages, _split_paragraphs, _validate_theme_contrast
+from src.core.visual_renderer import _document, _ocr_expected_texts, _pages, _split_paragraphs, _validate_theme_contrast
 from src.core.visual_specs import build_infographic_components
 
 
@@ -125,3 +125,8 @@ def test_document_rejects_invalid_brand_color_tokens():
             theme="knowledge_infographic", cover=False, width=1080, height=1440,
             palette_override={"accent": "red; background:url(javascript:alert(1))"},
         )
+
+
+
+def test_ocr_expectations_exclude_decorative_subtitle_and_footer():
+    assert _ocr_expected_texts("标题", [["正文一", "正文二"]]) == ["标题", "标题正文一正文二"]

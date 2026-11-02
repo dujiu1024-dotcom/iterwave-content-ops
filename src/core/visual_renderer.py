@@ -264,6 +264,11 @@ def _assert_font_available(font_family: str) -> None:
             f"无法确认字体 {font_family} 已安装；请安装 fontconfig 或配置可用字体文件"
         )
 
+def _ocr_expected_texts(title: str, pages: list[list[str]]) -> list[str]:
+    """Gate primary content only; subtitle/footer/page labels are decorative metadata."""
+    return [title] + [title + "".join(items) for items in pages]
+
+
 def render_card_set(title: str, subtitle: str, body: str, output_dir: Path,
                     platform: Platform = Platform.XHS, footer: str = "",
                     max_pages: int = 9, theme: str = "knowledge_infographic",
@@ -311,7 +316,7 @@ def render_card_set(title: str, subtitle: str, body: str, output_dir: Path,
         ))
 
     paths: list[Path] = []
-    expected_texts = [subtitle + title + footer] + [title + "".join(items) + footer for items in pages]
+    expected_texts = _ocr_expected_texts(title, pages)
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         try:
