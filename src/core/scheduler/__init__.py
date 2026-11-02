@@ -198,12 +198,12 @@ class SchedulerEngine:
         try:
             now = business_now(self.cfg).isoformat()
             identity = json.dumps(args, ensure_ascii=False, default=str)[:300]
-            cur = self.conn.execute(
-                "INSERT INTO task_runs (task_type, biz_id, status, attempt, started_at, created_at) "
-                "VALUES (?, ?, 'running', 1, ?, ?)",
-                (task_type, f"scheduler:{method_name}:{identity}", now, now),
-            )
-            self.conn.commit()
+            with self.conn:
+                cur = self.conn.execute(
+                    "INSERT INTO task_runs (task_type, biz_id, status, attempt, started_at, created_at) "
+                    "VALUES (?, ?, 'running', 1, ?, ?)",
+                    (task_type, f"scheduler:{method_name}:{identity}", now, now),
+                )
             return int(cur.lastrowid)
         except Exception:  # noqa: BLE001 — audit failure must not prevent scheduler work
             logger.exception("[APS] task_runs 起始留痕失败 method=%s", method_name)
@@ -215,11 +215,11 @@ class SchedulerEngine:
         if self.conn is None or task_run_id is None:
             return
         try:
-            self.conn.execute(
-                "UPDATE task_runs SET status = ?, finished_at = ?, error_msg = ? WHERE id = ?",
-                (status, business_now(self.cfg).isoformat(), error_msg, task_run_id),
-            )
-            self.conn.commit()
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE task_runs SET status = ?, finished_at = ?, error_msg = ? WHERE id = ?",
+                    (status, business_now(self.cfg).isoformat(), error_msg, task_run_id),
+                )
         except Exception:  # noqa: BLE001 — do not mask scheduler outcome
             logger.exception("[APS] task_runs 收尾留痕失败 id=%s", task_run_id)
 
@@ -305,20 +305,20 @@ class SchedulerEngine:
         now = confirmed_at or business_now(self.cfg)
         # 原子条件更新：并发的手动确认与平台轮询只能有一个调用赢得状态迁移，
         # 只有赢家才注册一次性采集任务，避免两个请求都读到 draft_saved 后重复排程。
-        cur = self.conn.execute(
-            "UPDATE drafts SET status='user_published', user_confirmed_at=? "
-            "WHERE id=? AND status IN ('draft_saved', 'draft_pending')",
-            (now.isoformat(), draft_id),
-        )
-        if cur.rowcount != 1:
-            return False
-        self.conn.commit()
-        if note_url:
-            self.conn.execute(
-                "UPDATE drafts SET platform_note_url = COALESCE(platform_note_url, ?) WHERE id = ?",
-                (note_url, draft_id),
+        with self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            cur = self.conn.execute(
+                "UPDATE drafts SET status='user_published', user_confirmed_at=? "
+                "WHERE id=? AND status IN ('draft_saved', 'draft_pending')",
+                (now.isoformat(), draft_id),
             )
-            self.conn.commit()
+            if cur.rowcount != 1:
+                return False
+            if note_url:
+                self.conn.execute(
+                    "UPDATE drafts SET platform_note_url = COALESCE(platform_note_url, ?) WHERE id = ?",
+                    (note_url, draft_id),
+                )
         delay = self.cfg.timeouts.metrics_initial_delay_hours
         self.schedule_data_fetch(draft_id, now + timedelta(hours=delay))
         row = self.conn.execute(
@@ -506,23 +506,23 @@ class SchedulerEngine:
                     # 审核驳回不能抹掉平台已经发生的真实发布；记录为观察到的例外，
                     # 继续采集数据，同时让后续复盘能追溯到驳回原因。
                     try:
-                        self.conn.execute(
-                            "INSERT INTO user_override (round_id, override_field, original_value, "
-                            "override_value, reason, overridden_by, overridden_at) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                            (
-                                row["round_id"], "publish_review_rejection_observed",
-                                json.dumps({
-                                    "review_rejected": True,
-                                    "review_rejection_reason": row["review_rejection_reason"],
-                                }, ensure_ascii=False)[:500],
-                                json.dumps({"status": "user_published", "via": "platform_polling"}, ensure_ascii=False),
-                                "系统在平台侧检测到已发布作品，为保留真实运营数据继续采集",
-                                "publish-polling",
-                                business_now(self.cfg).strftime("%Y-%m-%d %H:%M:%S"),
-                            ),
-                        )
-                        self.conn.commit()
+                        with self.conn:
+                            self.conn.execute(
+                                "INSERT INTO user_override (round_id, override_field, original_value, "
+                                "override_value, reason, overridden_by, overridden_at) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                (
+                                    row["round_id"], "publish_review_rejection_observed",
+                                    json.dumps({
+                                        "review_rejected": True,
+                                        "review_rejection_reason": row["review_rejection_reason"],
+                                    }, ensure_ascii=False)[:500],
+                                    json.dumps({"status": "user_published", "via": "platform_polling"}, ensure_ascii=False),
+                                    "系统在平台侧检测到已发布作品，为保留真实运营数据继续采集",
+                                    "publish-polling",
+                                    business_now(self.cfg).strftime("%Y-%m-%d %H:%M:%S"),
+                                ),
+                            )
                     except Exception:  # noqa: BLE001 — 实际发布已发生，审计失败不能中断采集
                         logger.exception("[APS] 发布驳回例外审计写入失败 draft=%s", row["id"])
                 # 即使自动识别到了真实发布，也记录平台实际版本与当前本地版本是否一致。
@@ -541,29 +541,29 @@ class SchedulerEngine:
                         else "stale"
                     )
                     if sync_state != "matched":
-                        self.conn.execute(
-                            "INSERT INTO user_override (round_id, override_field, original_value, "
-                            "override_value, reason, overridden_by, overridden_at) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                            (
-                                row["round_id"], "platform_content_sync_observed",
-                                json.dumps({
-                                    "state": sync_state,
-                                    "saved_content_hash": saved_hash,
-                                    "current_content_hash": current_hash,
-                                    "platform_title": row["poll_title"],
-                                    "local_title": row["local_title"],
-                                }, ensure_ascii=False)[:500],
-                                json.dumps({
-                                    "status": "user_published",
-                                    "via": "platform_polling",
-                                }, ensure_ascii=False),
-                                f"系统已在平台侧确认作品发布；平台内容版本状态为 {sync_state}，保留真实发布并继续采集",
-                                "publish-polling",
-                                business_now(self.cfg).strftime("%Y-%m-%d %H:%M:%S"),
-                            ),
-                        )
-                        self.conn.commit()
+                        with self.conn:
+                            self.conn.execute(
+                                "INSERT INTO user_override (round_id, override_field, original_value, "
+                                "override_value, reason, overridden_by, overridden_at) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                (
+                                    row["round_id"], "platform_content_sync_observed",
+                                    json.dumps({
+                                        "state": sync_state,
+                                        "saved_content_hash": saved_hash,
+                                        "current_content_hash": current_hash,
+                                        "platform_title": row["poll_title"],
+                                        "local_title": row["local_title"],
+                                    }, ensure_ascii=False)[:500],
+                                    json.dumps({
+                                        "status": "user_published",
+                                        "via": "platform_polling",
+                                    }, ensure_ascii=False),
+                                    f"系统已在平台侧确认作品发布；平台内容版本状态为 {sync_state}，保留真实发布并继续采集",
+                                    "publish-polling",
+                                    business_now(self.cfg).strftime("%Y-%m-%d %H:%M:%S"),
+                                ),
+                            )
                 except Exception:  # noqa: BLE001 — 已确认发布不应因审计问题中断采集
                     logger.exception("[APS] 平台版本观察审计写入失败 draft=%s", row["id"])
 
@@ -628,46 +628,47 @@ class SchedulerEngine:
 
         # 落库 metrics（R3：解析不到的字段保持 NULL，绝不补 0）
         # R16 幂等：draft_id + platform + 采集日期当天只覆盖一次（当天已有记录 → UPDATE 而非 INSERT）
-        today = business_now(self.cfg).strftime("%Y-%m-%d")
-        prev = self.conn.execute(
-            "SELECT id, attempt FROM metrics WHERE draft_id = ? AND platform = ? "
-            "AND substr(COALESCE(fetched_at, ''), 1, 10) = ?",
-            (draft_id, platform.value, today),
-        ).fetchone()
-        if prev:
-            # 注意：这里的 metrics_attempt 是「当天第几次采集」，与作业重试 attempt 无关
-            metrics_attempt = int(prev["attempt"] or 0) + 1
-            self.conn.execute(
-                "UPDATE metrics SET fetch_status = ?, fetched_at = ?, attempt = ?, "
-                "raw_response = ?, error_msg = ?, likes = ?, collects = ?, comments = ?, shares = ?, "
-                "views = ?, new_followers = ?, like_rate = ?, collect_rate = ?, "
-                "interaction_rate = ?, follower_efficiency = ? WHERE id = ?",
-                (
-                    snap.fetch_status.value, business_now(self.cfg).isoformat(), metrics_attempt,
-                    snap.raw_response, snap.error_msg, snap.likes, snap.collects, snap.comments,
-                    snap.shares, snap.views, snap.new_followers,
-                    snap.like_rate, snap.collect_rate, snap.interaction_rate,
-                    snap.follower_efficiency, prev["id"],
-                ),
-            )
-            logger.info("[APS] data_fetch 当天重复采集 → 覆盖 metrics id=%s（第 %d 次）",
-                        prev["id"], metrics_attempt)
-        else:
-            self.conn.execute(
-                "INSERT INTO metrics (draft_id, content_id, platform, fetch_status, fetched_at, "
-                "attempt, raw_response, error_msg, likes, collects, comments, shares, views, new_followers, "
-                "like_rate, collect_rate, interaction_rate, follower_efficiency) "
-                "VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    draft_id, row["content_id"], platform.value, snap.fetch_status.value,
-                    business_now(self.cfg).isoformat(), snap.raw_response, snap.error_msg,
-                    snap.likes, snap.collects, snap.comments, snap.shares, snap.views,
-                    snap.new_followers,
-                    snap.like_rate, snap.collect_rate, snap.interaction_rate,
-                    snap.follower_efficiency,
-                ),
-            )
-        self.conn.commit()
+        with self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            today = business_now(self.cfg).strftime("%Y-%m-%d")
+            prev = self.conn.execute(
+                "SELECT id, attempt FROM metrics WHERE draft_id = ? AND platform = ? "
+                "AND substr(COALESCE(fetched_at, ''), 1, 10) = ?",
+                (draft_id, platform.value, today),
+            ).fetchone()
+            if prev:
+                # 注意：这里的 metrics_attempt 是「当天第几次采集」，与作业重试 attempt 无关
+                metrics_attempt = int(prev["attempt"] or 0) + 1
+                self.conn.execute(
+                    "UPDATE metrics SET fetch_status = ?, fetched_at = ?, attempt = ?, "
+                    "raw_response = ?, error_msg = ?, likes = ?, collects = ?, comments = ?, shares = ?, "
+                    "views = ?, new_followers = ?, like_rate = ?, collect_rate = ?, "
+                    "interaction_rate = ?, follower_efficiency = ? WHERE id = ?",
+                    (
+                        snap.fetch_status.value, business_now(self.cfg).isoformat(), metrics_attempt,
+                        snap.raw_response, snap.error_msg, snap.likes, snap.collects, snap.comments,
+                        snap.shares, snap.views, snap.new_followers,
+                        snap.like_rate, snap.collect_rate, snap.interaction_rate,
+                        snap.follower_efficiency, prev["id"],
+                    ),
+                )
+                logger.info("[APS] data_fetch 当天重复采集 → 覆盖 metrics id=%s（第 %d 次）",
+                            prev["id"], metrics_attempt)
+            else:
+                self.conn.execute(
+                    "INSERT INTO metrics (draft_id, content_id, platform, fetch_status, fetched_at, "
+                    "attempt, raw_response, error_msg, likes, collects, comments, shares, views, new_followers, "
+                    "like_rate, collect_rate, interaction_rate, follower_efficiency) "
+                    "VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        draft_id, row["content_id"], platform.value, snap.fetch_status.value,
+                        business_now(self.cfg).isoformat(), snap.raw_response, snap.error_msg,
+                        snap.likes, snap.collects, snap.comments, snap.shares, snap.views,
+                        snap.new_followers,
+                        snap.like_rate, snap.collect_rate, snap.interaction_rate,
+                        snap.follower_efficiency,
+                    ),
+                )
 
         # R21：采集成功后刷新关联目标进度（任一指标 NULL 时保持 NULL）
         if self.goal_progress is not None:
@@ -687,11 +688,11 @@ class SchedulerEngine:
         else:
             logger.warning("[APS] data_fetch 采集未成功 draft=%s status=%s err=%s (attempt=%d)",
                            draft_id, snap.fetch_status.value, snap.error_msg, attempt)
-            self.conn.execute(
-                "UPDATE drafts SET error_msg = ? WHERE id = ?",
-                (snap.error_msg, draft_id),
-            )
-            self.conn.commit()
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE drafts SET error_msg = ? WHERE id = ?",
+                    (snap.error_msg, draft_id),
+                )
 
             retry_times, interval_min = self._metrics_retry_params()
             if attempt < retry_times:
@@ -948,26 +949,26 @@ class SchedulerEngine:
         if self.conn is None:
             return None
         now = business_now(self.cfg).isoformat()
-        cur = self.conn.execute(
-            "INSERT INTO task_runs (task_type, biz_id, platform, status, attempt, "
-            "started_at, finished_at, error_msg, created_at) "
-            "VALUES ('daily_ops', ?, ?, ?, 1, ?, ?, ?, ?)",
-            (
-                target, platform.value, status,
-                now if status == "running" else None,
-                now if status != "running" else None,
-                error_msg, now,
-            ),
-        )
-        self.conn.commit()
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO task_runs (task_type, biz_id, platform, status, attempt, "
+                "started_at, finished_at, error_msg, created_at) "
+                "VALUES ('daily_ops', ?, ?, ?, 1, ?, ?, ?, ?)",
+                (
+                    target, platform.value, status,
+                    now if status == "running" else None,
+                    now if status != "running" else None,
+                    error_msg, now,
+                ),
+            )
         return int(cur.lastrowid)
 
     def _finish_task_run(self, task_run_id: int, status: str, error_msg: Optional[str]) -> None:
-        self.conn.execute(
-            "UPDATE task_runs SET status = ?, finished_at = ?, error_msg = ? WHERE id = ?",
-            (status, business_now(self.cfg).isoformat(), error_msg, task_run_id),
-        )
-        self.conn.commit()
+        with self.conn:
+            self.conn.execute(
+                "UPDATE task_runs SET status = ?, finished_at = ?, error_msg = ? WHERE id = ?",
+                (status, business_now(self.cfg).isoformat(), error_msg, task_run_id),
+            )
 
     def _last_op_outcome(
         self, platform, action_type: str, target: str, *, task_run_id: Optional[int] = None,
@@ -1147,24 +1148,25 @@ class SchedulerEngine:
                 return {"final_status": "failed", "errors": [f"选题库读取失败：{type(exc).__name__}"]}
 
         inserted = 0
-        for it in items:
-            exists = self.conn.execute(
-                "SELECT 1 FROM topic_index WHERE id = ?", (it.id,),
-            ).fetchone()
-            if exists:
-                continue
-            self.conn.execute(
-                "INSERT INTO topic_index (id, title, dimension, source, date, first_seen_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    it.id, it.title, it.dimension,
-                    getattr(it, "source", "kb"),
-                    getattr(it, "date", None),
-                    business_now(self.cfg).strftime("%Y-%m-%d %H:%M:%S"),
-                ),
-            )
-            inserted += 1
-        self.conn.commit()
+        with self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            for it in items:
+                exists = self.conn.execute(
+                    "SELECT 1 FROM topic_index WHERE id = ?", (it.id,),
+                ).fetchone()
+                if exists:
+                    continue
+                self.conn.execute(
+                    "INSERT INTO topic_index (id, title, dimension, source, date, first_seen_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        it.id, it.title, it.dimension,
+                        getattr(it, "source", "kb"),
+                        getattr(it, "date", None),
+                        business_now(self.cfg).strftime("%Y-%m-%d %H:%M:%S"),
+                    ),
+                )
+                inserted += 1
         after = self.conn.execute("SELECT COUNT(*) FROM topic_index").fetchone()[0]
         logger.info(
             "📚 [APS] kb_scan — 选题库 %d → %d，新增 %d 条", before, after, inserted,
@@ -1217,6 +1219,7 @@ class SchedulerEngine:
                 self.conn,
                 retention_days=self.cfg.hot_topics.retention_days,
                 max_rows=self.cfg.hot_topics.max_rows,
+                cfg=self.cfg,
             )
         except Exception as exc:  # noqa: BLE001 — 继续执行其它保留清理，但不能把部分失败记为成功
             try:
@@ -1238,32 +1241,32 @@ class SchedulerEngine:
                     file_path.unlink()
                     deleted_files += 1
 
-        cutoff_raw = (
-            business_now(self.cfg) - timedelta(days=cfg.raw_response_days)
-        ).isoformat(timespec="seconds")
-        cur = self.conn.execute(
-            "UPDATE metrics SET raw_response = NULL WHERE fetched_at < ? AND raw_response IS NOT NULL",
-            (cutoff_raw,),
-        )
-        cleaned_raw = cur.rowcount
+        with self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            cutoff_raw = (
+                business_now(self.cfg) - timedelta(days=cfg.raw_response_days)
+            ).isoformat(timespec="seconds")
+            cur = self.conn.execute(
+                "UPDATE metrics SET raw_response = NULL WHERE fetched_at < ? AND raw_response IS NOT NULL",
+                (cutoff_raw,),
+            )
+            cleaned_raw = cur.rowcount
 
-        cutoff_ops = (
-            business_now(self.cfg) - timedelta(days=cfg.ops_logs_days)
-        ).isoformat(timespec="seconds")
-        cur = self.conn.execute(
-            "DELETE FROM ops_logs WHERE executed_at < ?", (cutoff_ops,)
-        )
-        cleaned_ops = cur.rowcount
+            cutoff_ops = (
+                business_now(self.cfg) - timedelta(days=cfg.ops_logs_days)
+            ).isoformat(timespec="seconds")
+            cur = self.conn.execute(
+                "DELETE FROM ops_logs WHERE executed_at < ?", (cutoff_ops,)
+            )
+            cleaned_ops = cur.rowcount
 
-        cutoff_ai = (
-            business_now(self.cfg) - timedelta(days=cfg.ai_calls_detail_days)
-        ).isoformat(timespec="seconds")
-        cur = self.conn.execute(
-            "DELETE FROM ai_calls WHERE called_at < ?", (cutoff_ai,)
-        )
-        cleaned_ai = cur.rowcount
-
-        self.conn.commit()
+            cutoff_ai = (
+                business_now(self.cfg) - timedelta(days=cfg.ai_calls_detail_days)
+            ).isoformat(timespec="seconds")
+            cur = self.conn.execute(
+                "DELETE FROM ai_calls WHERE called_at < ?", (cutoff_ai,)
+            )
+            cleaned_ai = cur.rowcount
         logger.info(
             "🧹 [APS] data_retention_cleanup 完成 — 截图 %d / raw_response %d / ops_logs %d / ai_calls %d",
             deleted_files, cleaned_raw, cleaned_ops, cleaned_ai,
@@ -1379,22 +1382,23 @@ class SchedulerEngine:
             if status == "awaiting_publish":
                 # 整轮计时从首次进入 awaiting_publish 开始，但草稿可分批保存/恢复。
                 # 只要还存在未到单篇 timeout+grace 的 draft_saved，就不能先取消整轮。
-                waiting = self.conn.execute(
-                    "SELECT COUNT(*) FROM drafts d JOIN contents c ON d.content_id = c.id "
-                    "WHERE c.round_id = ? AND d.status = 'draft_saved'",
-                    (row["id"],),
-                ).fetchone()[0]
-                if waiting:
-                    logger.info(
-                        "[APS] 轮次 %s awaiting_publish 阶段超时暂缓：%d 篇平台草稿尚未到单篇过期时间",
-                        row["id"], waiting,
+                with self.conn:
+                    self.conn.execute("BEGIN IMMEDIATE")
+                    waiting = self.conn.execute(
+                        "SELECT COUNT(*) FROM drafts d JOIN contents c ON d.content_id = c.id "
+                        "WHERE c.round_id = ? AND d.status = 'draft_saved'",
+                        (row["id"],),
+                    ).fetchone()[0]
+                    if waiting:
+                        logger.info(
+                            "[APS] 轮次 %s awaiting_publish 阶段超时暂缓：%d 篇平台草稿尚未到单篇过期时间",
+                            row["id"], waiting,
+                        )
+                        continue
+                    self.conn.execute(
+                        "UPDATE spiral_rounds SET awaiting_publish_ended_at = ? WHERE id = ?",
+                        (now.isoformat(timespec="seconds"), row["id"]),
                     )
-                    continue
-                self.conn.execute(
-                    "UPDATE spiral_rounds SET awaiting_publish_ended_at = ? WHERE id = ?",
-                    (now.isoformat(timespec="seconds"), row["id"]),
-                )
-                self.conn.commit()
 
             if status == "collecting_metrics":
                 # 未发布的 draft_saved 仍可由用户在平台发布；在其单篇确认超时前
@@ -1545,10 +1549,30 @@ class SchedulerEngine:
         }
 
     async def _job_autogrow_next_round(self) -> dict:
-        """自动闭环：满足条件时开下一轮并生成草稿（发布仍需用户确认）。"""
+        """自动闭环：满足条件时开下一轮并生成草稿（发布仍需用户确认）。
+
+        必须把 autogrow.tick() 的结构化报告返回给全局任务队列；否则失败报告会被
+        Worker 当成 None/成功处理，运营中心无法准确呈现自动开轮失败。
+        """
         if self.autogrow is None:
             return {"final_status": "skipped", "reason": "自动闭环控制器未启用"}
-        await self.autogrow.tick()
+        report = await self.autogrow.tick()
+        if not isinstance(report, dict):
+            return {
+                "final_status": "failed",
+                "errors": ["自动闭环返回了无效执行报告"],
+            }
+        normalized = dict(report)
+        # autogrow 使用 action 表达业务结果；全局 Worker 统一识别 final_status。
+        if normalized.get("action") == "failed":
+            normalized["final_status"] = "failed"
+            reason = str(normalized.get("reason") or "自动闭环执行失败")
+            errors = normalized.get("errors")
+            normalized["errors"] = list(errors) if isinstance(errors, list) else [reason]
+        else:
+            normalized.setdefault("final_status", "success")
+            normalized.setdefault("errors", [])
+        return normalized
 
     async def _job_cb_recovery(self) -> dict:
         """熔断恢复 3 步验证（冷却到期 + test_login + test_lightweight_action，R6）。"""

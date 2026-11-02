@@ -53,6 +53,8 @@ import httpx
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.routing import APIRoute
+import inspect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -98,6 +100,37 @@ from src.adapters.base import Platform
 from src.adapters import get_adapters
 
 logger = logging.getLogger(__name__)
+
+
+class TransactionalAPIRoute(APIRoute):
+    """为同步写 API 提供请求级事务边界，异常时自动回滚并释放连接锁。
+
+    认证端点不依赖租户数据库，异步端点因可能跨线程 await 而单独审查，
+    不在此处自动包裹。
+    """
+
+    def __init__(self, path: str, endpoint, **kwargs):
+        methods = {str(method).upper() for method in (kwargs.get("methods") or [])}
+        if (
+            methods.intersection({"POST", "PUT", "PATCH", "DELETE"})
+            and not path.startswith("/api/auth/")
+            and not inspect.iscoroutinefunction(endpoint)
+        ):
+            original = endpoint
+
+            def transactional_endpoint(*args, **call_kwargs):
+                conn = _g_ctx.get("conn")
+                if conn is None:
+                    return original(*args, **call_kwargs)
+                with conn:
+                    return original(*args, **call_kwargs)
+
+            transactional_endpoint.__name__ = getattr(original, "__name__", "transactional_endpoint")
+            transactional_endpoint.__doc__ = getattr(original, "__doc__", None)
+            transactional_endpoint.__annotations__ = getattr(original, "__annotations__", {})
+            transactional_endpoint.__signature__ = inspect.signature(original)
+            endpoint = transactional_endpoint
+        super().__init__(path, endpoint, **kwargs)
 
 # =====================================================================
 # 全局单例（启动时初始化一次）
@@ -317,12 +350,12 @@ def _build_tenant_runtime_context(
         )
         from src.core.config_store import overrides_path
         try:
-            legacy_result = import_legacy_overrides(conn, overrides_path(cfg))
+            legacy_result = import_legacy_overrides(conn, overrides_path(cfg), cfg=cfg)
             if legacy_result["imported"] or legacy_result["rejected"]:
                 logger.info("账号组旧配置回填 tenant=%s imported=%d rejected=%d",
                             tenant_id, legacy_result["imported"], legacy_result["rejected"])
             # 与启动迁移保持一致：热切换进入任一账号组时清除历史危险路径配置。
-            purge_disallowed_settings(conn, {"topic_kb.path"})
+            purge_disallowed_settings(conn, {"topic_kb.path"}, cfg=cfg)
             persisted_settings = read_settings(conn)
         except Exception as exc:
             logger.exception("账号组 SQLite 配置回填失败，回退旧 JSON tenant=%s error=%s",
@@ -360,11 +393,11 @@ def _build_tenant_runtime_context(
         adapters = get_adapters(cfg, conn)
         cb = CircuitBreakerEngine(cfg, conn, adapters)
         rhythm = RhythmController(cfg)
-        sm_round = RoundStateMachine(conn)
-        sm_draft = DraftStateMachine(conn)
+        sm_round = RoundStateMachine(conn, cfg=cfg)
+        sm_draft = DraftStateMachine(conn, cfg=cfg)
         scoring = ScoringEngine(cfg, conn)
         guard = UltimateGoalChecker(cfg)
-        normalizer = Normalizer(conn)
+        normalizer = Normalizer(conn, cfg)
         spiral = SpiralEngine(cfg, conn)
         scheduler = SchedulerEngine(cfg, cfg.resolve_path(cfg.paths.db_file))
         ops = OperationsEngine(cfg, conn, adapters, cb, rhythm)
@@ -427,6 +460,7 @@ def _build_tenant_runtime_context(
 
 async def _switch_tenant_runtime(tenant_id: str) -> dict:
     """只切换前台运行时引用；所有账号组后台调度器和连接继续常驻。"""
+    global _g_ctx
     registry = _g_ctx.get("tenant_registry")
     if registry is None:
         raise HTTPException(503, "账号组注册表尚未初始化")
@@ -502,10 +536,9 @@ async def _switch_tenant_runtime(tenant_id: str) -> dict:
         # 账号组切换不终止任何租户的扫码登录；登录子进程按租户与平台分别管理。
         selected = registry.select_active(tenant_id)
         set_active_notifier(new_context["notifier"])
-        _g_ctx.clear()
-        _g_ctx.update(new_context)
-        # 活动账号组缓存直接引用前台字典；切走时会先快照，避免配置更新后缓存陈旧。
-        _tenant_runtime_contexts[tenant_id] = _g_ctx
+        # 原子替换前台上下文引用；不就地清空/改写正在被后台读取的共享字典。
+        _g_ctx = new_context
+        _tenant_runtime_contexts[tenant_id] = new_context
         with _dedupe_lock:
             _dedupe_cache.clear()
         logger.info("账号组前台工作空间切换成功 from=%s to=%s", old_tenant_id, tenant_id)
@@ -519,9 +552,8 @@ async def _switch_tenant_runtime(tenant_id: str) -> dict:
         try:
             registry.select_active(old_tenant_id)
             set_active_notifier(old_context["notifier"])
-            _g_ctx.clear()
-            _g_ctx.update(old_context)
-            _tenant_runtime_contexts[old_tenant_id] = _g_ctx
+            _g_ctx = old_context
+            _tenant_runtime_contexts[old_tenant_id] = old_context
         except Exception as rollback_exc:
             logger.exception("账号组前台切换回滚失败")
             raise TenantRuntimeRollbackError(
@@ -717,8 +749,8 @@ def _build_app() -> FastAPI:
         adapters = get_adapters(cfg, conn)
         cb = CircuitBreakerEngine(cfg, conn, adapters)
         rhythm = RhythmController(cfg)
-        sm_round = RoundStateMachine(conn)
-        sm_draft = DraftStateMachine(conn)
+        sm_round = RoundStateMachine(conn, cfg=cfg)
+        sm_draft = DraftStateMachine(conn, cfg=cfg)
         scoring = ScoringEngine(cfg, conn)
         guard = UltimateGoalChecker(cfg)
         normalizer = Normalizer(conn)
@@ -815,14 +847,29 @@ def _build_app() -> FastAPI:
                     except Exception:
                         logger.warning("后台上下文数据库连接清理异常", exc_info=True)
 
-        # 全局消费者独立于当前活动账号组；每个任务按 tenant_id 构造专属运行时。
+        # 多消费者跨账号组并行；队列确保同一账号组同时最多一个运行任务。
+        try:
+            task_worker_count = int(os.getenv("ITERWAVE_TASK_WORKERS", "4"))
+        except (TypeError, ValueError):
+            task_worker_count = 4
+        task_worker_count = max(1, min(task_worker_count, 8))
         task_worker_stop = asyncio.Event()
-        task_worker = GlobalTaskWorker(_task_queue, lambda tenant_id: _build_tenant_runtime_context(
-            tenant_registry, tenant_id,
-        ))
-        task_worker_task = asyncio.create_task(
-            task_worker.run(task_worker_stop), name="global-tenant-task-worker",
-        )
+        task_workers = [
+            GlobalTaskWorker(
+                _task_queue,
+                lambda tenant_id: _build_tenant_runtime_context(tenant_registry, tenant_id),
+                reconcile_terminal_rounds=(index == 0),
+            )
+            for index in range(task_worker_count)
+        ]
+        task_worker_tasks = [
+            asyncio.create_task(
+                worker.run(task_worker_stop),
+                name=f"global-tenant-task-worker-{index + 1}",
+            )
+            for index, worker in enumerate(task_workers)
+        ]
+        logger.info("全局任务消费者已启动 count=%d（同租户串行、跨租户并行）", task_worker_count)
 
         # 热点服务是独立资源池；后台线程持有启动时的账号组配置和独立数据库连接。
         from ..core import hot_topic_service
@@ -837,10 +884,13 @@ def _build_app() -> FastAPI:
             yield
         finally:
             task_worker_stop.set()
-            try:
-                await task_worker_task
-            except Exception:
-                logger.exception("全局任务消费者关闭异常")
+            worker_results = await asyncio.gather(*task_worker_tasks, return_exceptions=True)
+            for index, result in enumerate(worker_results, 1):
+                if isinstance(result, BaseException):
+                    logger.error(
+                        "全局任务消费者关闭异常 worker=%d error=%s",
+                        index, type(result).__name__, exc_info=result,
+                    )
             # 停止所有账号组常驻调度器并释放各自的数据库连接。
             for tenant_id, context in list(_tenant_runtime_contexts.items()):
                 try:
@@ -862,6 +912,8 @@ def _build_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+    # 所有同步写 API 在同一线程内持有事务锁；异常离开路由时由连接上下文自动回滚。
+    app.router.route_class = TransactionalAPIRoute
     _register_routes(app)
 
     @app.exception_handler(RequestValidationError)
@@ -918,18 +970,18 @@ def _build_app() -> FastAPI:
                 pass
             else:
                 cookie_token = request.cookies.get(auth.COOKIE_NAME)
-                client_ip = request.client.host if request.client else "unknown"
-                has_token_header = bool(request.headers.get("x-access-token")) or (
-                    (request.headers.get("authorization") or "").lower().startswith("bearer ")
+                client_ip = auth.client_ip(request)
+                # PBKDF2-HMAC-SHA256 是 CPU 密集型同步计算，不能在 ASGI 事件循环内执行。
+                authenticated, rate_limited = await asyncio.to_thread(
+                    auth.authenticate_request, cookie_token, request.headers, ip=client_ip,
                 )
-                limited_before = has_token_header and auth.is_rate_limited(client_ip)
-                if not auth.is_authenticated(cookie_token, request.headers, ip=client_ip):
+                if not authenticated:
                     return JSONResponse(
                         {
-                            "detail": "认证尝试次数过多，请 10 分钟后再试" if limited_before else "需要登录",
-                            "code": "auth_rate_limited" if limited_before else "auth_required",
+                            "detail": "认证尝试次数过多，请 10 分钟后再试" if rate_limited else "需要登录",
+                            "code": "auth_rate_limited" if rate_limited else "auth_required",
                         },
-                        status_code=429 if limited_before else 401,
+                        status_code=429 if rate_limited else 401,
                     )
 
         # Content-Length 可被省略或伪造；已通过认证的写请求还要按实际流量限额，
@@ -1522,7 +1574,9 @@ def _unscheduled_drafts(conn) -> list[dict]:
     rows = conn.execute(
         "SELECT d.id, d.platform, d.status, c.title, c.round_id "
         "FROM drafts d JOIN contents c ON d.content_id = c.id "
+        "LEFT JOIN draft_save_verifications v ON v.draft_id=d.id "
         "WHERE d.scheduled_publish_at IS NULL AND d.status IN ('draft_pending','draft_saved') "
+        "AND COALESCE(v.status, '') != 'pending_verify' "
         "ORDER BY d.created_at DESC LIMIT 50"
     ).fetchall()
     return [dict(r) for r in rows]
@@ -1815,18 +1869,6 @@ def _register_routes(app: FastAPI) -> None:
         if not idempotency_key or len(idempotency_key) > 100:
             raise HTTPException(422, "请求标识无效，请刷新后重试")
         conn = _g()["conn"]
-        existing = conn.execute(
-            "SELECT id, status FROM sample_runs WHERE tenant_id=? AND idempotency_key=?",
-            (tenant_id, idempotency_key),
-        ).fetchone()
-        if existing:
-            return {"sample_run_id": existing["id"], "status": existing["status"], "deduplicated": True}
-        active = conn.execute(
-            "SELECT COUNT(*) FROM sample_runs WHERE tenant_id=? AND status IN ('created','generating','quality_check')",
-            (tenant_id,),
-        ).fetchone()[0]
-        if active:
-            raise HTTPException(409, "已有快速体验任务正在执行，请等待完成后再试")
         run_id = uuid.uuid4().hex
         now = _now().isoformat(sep=" ", timespec="seconds")
         from src.core.content_pipeline import _llm_available
@@ -1835,23 +1877,37 @@ def _register_routes(app: FastAPI) -> None:
         error_code = None if model_ready else "model_not_configured"
         error_message = None if model_ready else "尚未配置可用模型，请先到系统设置接入自己的模型"
         try:
-            conn.execute(
-                "INSERT INTO sample_runs "
-                "(id, tenant_id, platform, account_description, status, model_mode, error_code, error_message_safe, "
-                "idempotency_key, created_at, completed_at) VALUES (?, ?, ?, ?, ?, 'byok', ?, ?, ?, ?, ?)",
-                (run_id, tenant_id, platform, description, initial_status, error_code, error_message,
-                 idempotency_key, now, None if model_ready else now),
-            )
-            conn.commit()
+            # Async routes are excluded from TransactionalAPIRoute; admission must lock
+            # idempotency lookup, active-run check and insertion as one transaction.
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                existing = conn.execute(
+                    "SELECT id, status FROM sample_runs WHERE tenant_id=? AND idempotency_key=?",
+                    (tenant_id, idempotency_key),
+                ).fetchone()
+                if existing:
+                    return {"sample_run_id": existing["id"], "status": existing["status"], "deduplicated": True}
+                active = conn.execute(
+                    "SELECT COUNT(*) FROM sample_runs WHERE tenant_id=? AND status IN ('created','generating','quality_check')",
+                    (tenant_id,),
+                ).fetchone()[0]
+                if active:
+                    raise HTTPException(409, "已有快速体验任务正在执行，请等待完成后再试")
+                conn.execute(
+                    "INSERT INTO sample_runs "
+                    "(id, tenant_id, platform, account_description, status, model_mode, error_code, error_message_safe, "
+                    "idempotency_key, created_at, completed_at) VALUES (?, ?, ?, ?, ?, 'byok', ?, ?, ?, ?, ?)",
+                    (run_id, tenant_id, platform, description, initial_status, error_code, error_message,
+                     idempotency_key, now, None if model_ready else now),
+                )
         except sqlite3.IntegrityError as exc:
-            conn.rollback()
             duplicate = conn.execute(
                 "SELECT id, status FROM sample_runs WHERE tenant_id=? AND idempotency_key=?",
                 (tenant_id, idempotency_key),
             ).fetchone()
             if duplicate:
                 return {"sample_run_id": duplicate["id"], "status": duplicate["status"], "deduplicated": True}
-            raise HTTPException(409, "已有快速体验任务正在执行，请等待完成后再试") from exc
+            raise HTTPException(409, "已有快速体验任务正在执行，请稍后重试") from exc
         _record_content_event("sample_generation_started", sample_run_id=run_id,
                               idempotency_key=f"sample-start:{run_id}")
         if not model_ready:
@@ -1867,24 +1923,24 @@ def _register_routes(app: FastAPI) -> None:
         cfg_bg = _g()["cfg"]
 
         def record_sample_event(event_type: str, metadata: dict, event_key: str) -> None:
-            conn_bg.execute(
-                "INSERT OR IGNORE INTO content_events "
-                "(id, tenant_id, sample_run_id, event_type, event_at, source, metadata_json, idempotency_key) "
-                "VALUES (?, ?, ?, ?, ?, 'web', ?, ?)",
-                (uuid.uuid4().hex, tenant_id, run_id, event_type,
-                 business_now(cfg_bg).isoformat(sep=" ", timespec="seconds"),
-                 json.dumps(metadata, ensure_ascii=False), event_key),
-            )
-            conn_bg.commit()
+            with conn_bg:
+                conn_bg.execute(
+                    "INSERT OR IGNORE INTO content_events "
+                    "(id, tenant_id, sample_run_id, event_type, event_at, source, metadata_json, idempotency_key) "
+                    "VALUES (?, ?, ?, ?, ?, 'web', ?, ?)",
+                    (uuid.uuid4().hex, tenant_id, run_id, event_type,
+                     business_now(cfg_bg).isoformat(sep=" ", timespec="seconds"),
+                     json.dumps(metadata, ensure_ascii=False), event_key),
+                )
 
         async def generate_samples():
             from src.core.content_pipeline import ContentGenerationError, generate_copy_content
             from src.adapters.base import Platform as PlatformEnum
             try:
                 started = business_now(cfg_bg).isoformat(sep=" ", timespec="seconds")
-                conn_bg.execute("UPDATE sample_runs SET status='generating', started_at=? WHERE id=?",
-                                (started, run_id))
-                conn_bg.commit()
+                with conn_bg:
+                    conn_bg.execute("UPDATE sample_runs SET status='generating', started_at=? WHERE id=?",
+                                    (started, run_id))
                 base_cfg = cfg_bg
                 sample_goal = base_cfg.ultimate_goal.model_copy(update={
                     "positioning": description,
@@ -1916,11 +1972,11 @@ def _register_routes(app: FastAPI) -> None:
                                         "本次体验已达到模型调用安全上限，请调整定位后重新体验",
                                     )
                                 model_call_count += 1
-                                conn_bg.execute(
-                                    "UPDATE sample_runs SET attempt_count=? WHERE id=?",
-                                    (model_call_count, run_id),
-                                )
-                                conn_bg.commit()
+                                with conn_bg:
+                                    conn_bg.execute(
+                                        "UPDATE sample_runs SET attempt_count=? WHERE id=?",
+                                        (model_call_count, run_id),
+                                    )
                                 title, body, tags = await asyncio.to_thread(
                                     generate_copy_content,
                                     f"{description}：{angle}",
@@ -1977,24 +2033,23 @@ def _register_routes(app: FastAPI) -> None:
                             "quality_rejected", "样稿多次未通过质量检查：" + "、".join(findings),
                         )
                     results.append((angle, title, body, tags, findings))
-                conn_bg.execute("UPDATE sample_runs SET status='quality_check' WHERE id=?", (run_id,))
-                conn_bg.commit()
                 now_done = business_now(cfg_bg).isoformat(sep=" ", timespec="seconds")
-                for angle, title, body, tags, findings in results:
+                with conn_bg:
+                    conn_bg.execute("UPDATE sample_runs SET status='quality_check' WHERE id=?", (run_id,))
+                    for angle, title, body, tags, findings in results:
+                        conn_bg.execute(
+                            "INSERT INTO sample_contents "
+                            "(id, sample_run_id, tenant_id, platform, angle, title, body, hashtags_json, "
+                            "quality_status, quality_findings_json, created_at, updated_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pass', ?, ?, ?)",
+                            (uuid.uuid4().hex, run_id, tenant_id, platform, angle, title, body,
+                             json.dumps(tags, ensure_ascii=False), json.dumps(findings, ensure_ascii=False),
+                             now_done, now_done),
+                        )
                     conn_bg.execute(
-                        "INSERT INTO sample_contents "
-                        "(id, sample_run_id, tenant_id, platform, angle, title, body, hashtags_json, "
-                        "quality_status, quality_findings_json, created_at, updated_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pass', ?, ?, ?)",
-                        (uuid.uuid4().hex, run_id, tenant_id, platform, angle, title, body,
-                         json.dumps(tags, ensure_ascii=False), json.dumps(findings, ensure_ascii=False),
-                         now_done, now_done),
+                        "UPDATE sample_runs SET status='ready', completed_at=? WHERE id=?",
+                        (now_done, run_id),
                     )
-                conn_bg.execute(
-                    "UPDATE sample_runs SET status='ready', completed_at=? WHERE id=?",
-                    (now_done, run_id),
-                )
-                conn_bg.commit()
                 try:
                     record_sample_event("sample_generation_succeeded", {"sample_count": 3},
                                          f"sample-ready:{run_id}")
@@ -2012,14 +2067,13 @@ def _register_routes(app: FastAPI) -> None:
                     code = "sample_generation_failed"
                     safe_message = "样稿生成失败，请检查模型配置后重试"
                 try:
-                    conn_bg.rollback()
+                    with conn_bg:
+                        conn_bg.execute(
+                            "UPDATE sample_runs SET status='failed', error_code=?, error_message_safe=?, completed_at=? WHERE id=?",
+                            (code, safe_message[:300], business_now(cfg_bg).isoformat(sep=" ", timespec="seconds"), run_id),
+                        )
                 except Exception:
-                    logger.exception("快速体验失败事务回滚异常 run=%s", run_id)
-                conn_bg.execute(
-                    "UPDATE sample_runs SET status='failed', error_code=?, error_message_safe=?, completed_at=? WHERE id=?",
-                    (code, safe_message[:300], business_now(cfg_bg).isoformat(sep=" ", timespec="seconds"), run_id),
-                )
-                conn_bg.commit()
+                    logger.exception("快速体验失败状态收口失败 run=%s", run_id)
                 record_sample_event("sample_generation_failed", {"error_code": code},
                                     f"sample-failed:{run_id}")
         
@@ -4008,7 +4062,7 @@ def _register_routes(app: FastAPI) -> None:
             provided = str((payload or {}).get("bootstrap_token") or "")
             if not local_direct:
                 client_ip = request.client.host if request.client else "unknown"
-                if auth.is_rate_limited(client_ip):
+                if not auth.reserve_auth_attempt(client_ip):
                     raise HTTPException(
                         status_code=429,
                         detail="引导口令尝试次数过多，请 10 分钟后再试",
@@ -4016,7 +4070,6 @@ def _register_routes(app: FastAPI) -> None:
                     )
                 valid_bootstrap = bool(bootstrap and provided) and hmac.compare_digest(provided, bootstrap)
                 if not valid_bootstrap:
-                    auth.record_failure(client_ip)
                     raise HTTPException(
                         status_code=403,
                         detail="首次设置口令需本机访问，或先在服务器配置 ITERWAVE_BOOTSTRAP_TOKEN 后提交引导口令",
@@ -4433,6 +4486,11 @@ def _register_routes(app: FastAPI) -> None:
     @app.post("/api/rounds")
     def create_round(req: CreateRoundRequest):
         conn = _g()["conn"]
+        active_subplans = int(conn.execute(
+            "SELECT COUNT(*) FROM sub_plans WHERE status NOT IN ('archived','cancelled')"
+        ).fetchone()[0])
+        if active_subplans:
+            raise HTTPException(409, "当前账号组已启用平台子计划；请从对应子计划阶段创建生产轮次")
         key = "round:" + hashlib.sha256(req.model_dump_json().encode()).hexdigest()
 
         def _produce() -> dict:  # G-11：10s 内相同请求只落一条
@@ -4481,8 +4539,10 @@ def _register_routes(app: FastAPI) -> None:
         # 附带 drafts 列表
         drafts = conn.execute(
             "SELECT d.*, c.review_rejected AS review_rejected, "
-            "c.review_rejection_reason AS review_rejection_reason "
-            "FROM drafts d JOIN contents c ON c.id = d.content_id WHERE c.round_id = ?",
+            "c.review_rejection_reason AS review_rejection_reason, "
+            "v.status AS save_verification_status "
+            "FROM drafts d JOIN contents c ON c.id = d.content_id "
+            "LEFT JOIN draft_save_verifications v ON v.draft_id=d.id WHERE c.round_id = ?",
             (round_id,),
         ).fetchall()
         result = dict(row)
@@ -4492,6 +4552,9 @@ def _register_routes(app: FastAPI) -> None:
         round_drafts = []
         for draft in drafts:
             item = dict(draft)
+            if item.get("save_verification_status") == "pending_verify":
+                item["status"] = "pending_verify"
+            item.pop("save_verification_status", None)
             item["review_rejected"] = bool(item.get("review_rejected"))
             round_drafts.append(item)
         result["drafts"] = round_drafts
@@ -4504,11 +4567,62 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(503, "全局任务队列尚未初始化")
         runtime_context = _g()
         tenant_id = runtime_context.get("runtime_tenant_id", "default")
+        from src.core.subplan_production import production_paused
+        if production_paused(runtime_context["conn"]):
+            raise HTTPException(409, "内容生产已暂停")
         round_row = runtime_context["conn"].execute(
-            "SELECT id, status FROM spiral_rounds WHERE id=?", (round_id,),
+            "SELECT id, status, sub_plan_id, sub_plan_version_id, sub_plan_stage_id FROM spiral_rounds WHERE id=?",
+            (round_id,),
         ).fetchone()
         if round_row is None:
             raise HTTPException(404, "当前账号组不存在该生产轮次")
+        active_subplans = int(runtime_context["conn"].execute(
+            "SELECT COUNT(*) FROM sub_plans WHERE status NOT IN ('archived','cancelled')"
+        ).fetchone()[0])
+        if active_subplans and not all((
+            round_row["sub_plan_id"], round_row["sub_plan_version_id"],
+            round_row["sub_plan_stage_id"],
+        )):
+            raise HTTPException(409, "新体系下生产轮次必须绑定已审核子计划版本和阶段")
+        effective_topic_count = req.topic_count
+        effective_platforms = req.platforms
+        if round_row["sub_plan_id"]:
+            stage_row = runtime_context["conn"].execute(
+                """SELECT p.platform,p.status AS subplan_status,s.status,s.target_count,
+                          s.start_date,s.end_date,
+                          COALESCE(stats.confirmed_published_count,0) AS published_count
+                   FROM sub_plans p JOIN sub_plan_stages s ON s.id=?
+                   LEFT JOIN sub_plan_stage_publish_stats stats ON stats.stage_id=s.id
+                   WHERE p.id=? AND s.sub_plan_version_id=?""",
+                (round_row["sub_plan_stage_id"], round_row["sub_plan_id"],
+                 round_row["sub_plan_version_id"]),
+            ).fetchone()
+            if (stage_row is None or stage_row["subplan_status"] != "active"
+                    or stage_row["status"] in ("paused", "completed", "cancelled")):
+                raise HTTPException(409, "生产轮次对应子计划或阶段已暂停/完成")
+            from src.core.timezone import business_now
+            business_date = business_now(runtime_context["cfg"]).date().isoformat()
+            if stage_row["start_date"] and business_date < stage_row["start_date"]:
+                raise HTTPException(409, "生产轮次对应阶段尚未到执行日期")
+            if stage_row["end_date"] and business_date > stage_row["end_date"]:
+                raise HTTPException(409, "生产轮次对应阶段执行窗口已结束")
+            broken = runtime_context["conn"].execute(
+                "SELECT 1 FROM circuit_breaker_events WHERE platform=? AND resolved_at IS NULL LIMIT 1",
+                (stage_row["platform"],),
+            ).fetchone()
+            if broken:
+                raise HTTPException(409, "子计划所属平台处于熔断状态，不能开轮")
+            remaining = max(0, int(stage_row["target_count"]) - int(stage_row["published_count"]))
+            if remaining <= 0:
+                raise HTTPException(409, "当前阶段用户确认发布目标已达成")
+            effective_topic_count = min(
+                int(req.topic_count or runtime_context["cfg"].autogrow.topic_count), remaining,
+            )
+            if req.topic_count and int(req.topic_count) > remaining:
+                raise HTTPException(422, f"本阶段仅剩 {remaining} 篇待确认发布目标，不能超量生产")
+            if req.platforms and set(req.platforms) != {stage_row["platform"]}:
+                raise HTTPException(422, "该轮次只能生产其绑定子计划所属平台")
+            effective_platforms = [stage_row["platform"]]
         # 仅允许新建轮次入队。producing 及后续状态不能再次启动，
         # 防止已进入发布/采集/复盘或终态的轮次被重复生产。
         # 并发重复请求仍由全局队列的 aggregate 去重负责（状态尚未推进时）。
@@ -4541,15 +4655,15 @@ def _register_routes(app: FastAPI) -> None:
                 aggregate_id=str(round_id),
                 payload={
                     "round_id": round_id,
-                    "topic_count": req.topic_count,
-                    "platforms": req.platforms,
+                    "topic_count": effective_topic_count,
+                    "platforms": effective_platforms,
                     "save_drafts": req.save_drafts,
                     "template_snapshot": template_snapshot,
                     "execution_snapshot": _build_task_execution_snapshot(
                         tenant_id, round_id, {
                             "round_id": round_id,
-                            "topic_count": req.topic_count,
-                            "platforms": req.platforms,
+                            "topic_count": effective_topic_count,
+                            "platforms": effective_platforms,
                             "save_drafts": req.save_drafts,
                             "template_snapshot": template_snapshot,
                         }, runtime_context=runtime_context,
@@ -4618,18 +4732,37 @@ def _register_routes(app: FastAPI) -> None:
             queued = await run_round(round_id, RunRoundRequest(
                 topic_count=int(plan["planned_count"]), platforms=platforms, save_drafts=True,
             ))
-        except HTTPException:
+        except Exception as exc:
+            # 入队失败时 Worker 尚未开始执行；计划和未启动轮次必须一起补偿。
+            try:
+                from src.core.timezone import business_now
+                with conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute(
+                        "UPDATE content_plans SET status='failed',version=version+1,updated_at=? "
+                        "WHERE id=? AND status='generating'",
+                        (business_now(_g()["cfg"]).isoformat(timespec="seconds"), plan_id),
+                    )
+                    conn.execute(
+                        "UPDATE spiral_rounds SET status='cancelled' "
+                        "WHERE id=? AND status='created'",
+                        (round_id,),
+                    )
+            except Exception as compensation_error:
+                logger.exception(
+                    "内容计划启动失败后的轮次补偿失败 plan_id=%s round_id=%s",
+                    plan_id, round_id,
+                )
+                raise HTTPException(503, "计划启动失败，且状态补偿未完成，请检查计划和轮次状态") from compensation_error
+            if isinstance(exc, HTTPException):
+                raise
+            logger.exception("内容计划加入全局队列失败 plan_id=%s round_id=%s", plan_id, round_id)
+            raise HTTPException(503, "计划加入生产队列失败，已回滚本次启动状态") from exc
+        with conn:
             conn.execute(
-                "UPDATE content_plans SET status='failed',version=version+1,updated_at=? WHERE id=? AND status='generating'",
-                (_now().isoformat(timespec="seconds"), plan_id),
+                "UPDATE content_plan_rounds SET task_id=? WHERE plan_id=? AND round_id=?",
+                (queued["task_id"], plan_id, round_id),
             )
-            conn.commit()
-            raise
-        conn.execute(
-            "UPDATE content_plan_rounds SET task_id=? WHERE plan_id=? AND round_id=?",
-            (queued["task_id"], plan_id, round_id),
-        )
-        conn.commit()
         return {"plan_id": plan_id, "round_id": round_id, "task_id": queued["task_id"],
                 "status": queued["status"], "queued": queued["queued"]}
 
@@ -4776,7 +4909,9 @@ def _register_routes(app: FastAPI) -> None:
                 # cancelled 轮次里仍可恢复存平台的 draft_pending 记录。
                 pending = conn.execute(
                     "SELECT d.id FROM drafts d JOIN contents c ON c.id = d.content_id "
-                    "WHERE c.round_id = ? AND d.status = 'draft_pending'",
+                    "WHERE c.round_id = ? AND d.status = 'draft_pending' "
+                    "AND NOT EXISTS (SELECT 1 FROM draft_save_verifications v "
+                    "                WHERE v.draft_id=d.id AND v.status='pending_verify')",
                     (round_id,),
                 ).fetchall()
                 for item in pending:
@@ -4805,13 +4940,17 @@ def _register_routes(app: FastAPI) -> None:
             "c.visual_status AS visual_status, c.visual_reason AS visual_reason, "
             "c.platform as cfg_platform, c.guard_outcome AS guard_outcome, c.guard_reason AS guard_reason, "
             "c.review_rejected AS review_rejected, "
-            "c.review_rejection_reason AS review_rejection_reason "
-            "FROM drafts d LEFT JOIN contents c ON d.content_id = c.id"
+            "c.review_rejection_reason AS review_rejection_reason, "
+            "v.status AS save_verification_status "
+            "FROM drafts d LEFT JOIN contents c ON d.content_id = c.id "
+            "LEFT JOIN draft_save_verifications v ON v.draft_id = d.id"
         )
         where: list[str] = []
         params: list = []
-        if status:
-            where.append("d.status = ?")
+        if status == "pending_verify":
+            where.append("v.status = 'pending_verify'")
+        elif status:
+            where.append("d.status = ? AND COALESCE(v.status, '') != 'pending_verify'")
             params.append(status)
         if platform:
             where.append("d.platform = ?")
@@ -4819,7 +4958,10 @@ def _register_routes(app: FastAPI) -> None:
         if draft_id:
             where.append("d.id = ?")
             params.append(draft_id)
-        count_sql = "SELECT COUNT(*) FROM drafts d LEFT JOIN contents c ON d.content_id = c.id"
+        count_sql = (
+            "SELECT COUNT(*) FROM drafts d LEFT JOIN contents c ON d.content_id = c.id "
+            "LEFT JOIN draft_save_verifications v ON v.draft_id = d.id"
+        )
         if where:
             where_sql = " WHERE " + " AND ".join(where)
             count_sql += where_sql
@@ -4837,6 +4979,8 @@ def _register_routes(app: FastAPI) -> None:
         from src.core.content_version import content_version_hash, parse_json_list
         for item in rows:
             result = dict(item)
+            if result.get("save_verification_status") == "pending_verify":
+                result["status"] = "pending_verify"
             outcome = result.get("guard_outcome")
             result["review_rejected"] = bool(result.get("review_rejected"))
             result["guard_confirmation_allowed"] = (
@@ -4863,6 +5007,7 @@ def _register_routes(app: FastAPI) -> None:
             # 尤其 image_paths 可能是本机绝对路径，不能随便随列表 API 下发。
             for internal_field in (
                 "body", "tags", "image_paths", "saved_content_hash", "saved_platform_title",
+                "save_verification_status",
             ):
                 result.pop(internal_field, None)
             items.append(result)
@@ -4874,6 +5019,80 @@ def _register_routes(app: FastAPI) -> None:
             "page": page,
             "page_size": page_size,
             "pages": (total + page_size - 1) // page_size,
+        }
+
+    @app.post("/api/drafts/{draft_id}/verify_save")
+    def verify_draft_save(draft_id: str, payload: dict):
+        """人工核实平台草稿保存结果；不确定结果不得直接终结为 failed。"""
+        saved = payload.get("saved") if isinstance(payload, dict) else None
+        note = str((payload or {}).get("note") or "").strip() if isinstance(payload, dict) else ""
+        if not isinstance(saved, bool) or len(note) < 3 or len(note) > 500:
+            raise HTTPException(422, "必须提供 saved 布尔值及至少 3 个字符的核实说明")
+
+        conn = _g()["conn"]
+        row = conn.execute(
+            "SELECT d.status, d.platform, d.content_id, c.round_id, c.title, c.body, "
+            "c.tags, c.image_paths, v.status AS verification_status, "
+            "v.platform_draft_id FROM drafts d JOIN contents c ON c.id=d.content_id "
+            "LEFT JOIN draft_save_verifications v ON v.draft_id=d.id WHERE d.id=?",
+            (draft_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, f"草稿 {draft_id} 不存在")
+        if row["verification_status"] != "pending_verify":
+            if saved and row["status"] == "draft_saved" and row["verification_status"] == "verified_saved":
+                return {"draft_id": draft_id, "status": "draft_saved", "already_verified": True}
+            raise HTTPException(409, f"草稿核实状态为 {row['verification_status'] or 'none'}，不是待核实状态")
+        if row["status"] != "draft_pending":
+            raise HTTPException(409, f"待核实草稿的本地状态异常：{row['status']}")
+
+        if saved:
+            from src.core.content_version import content_version_hash, parse_json_list
+            stored_images = parse_json_list(row["image_paths"])
+            payload_images = [str(stored_images[0])] if stored_images and stored_images[0] else []
+            saved_hash = content_version_hash(
+                row["title"], row["body"], parse_json_list(row["tags"]), payload_images,
+            )
+            if not _g()["sm_draft"].transition(
+                draft_id, "draft_saved",
+                reason=f"人工核实平台存草稿结果：已保存；{note}",
+                extra_updates={
+                    "draft_id": row["platform_draft_id"],
+                    "saved_content_hash": saved_hash,
+                    "saved_platform_title": row["title"],
+                    "error_msg": None,
+                },
+            ):
+                raise HTTPException(409, "草稿状态更新失败，请刷新后重试")
+            target = "draft_saved"
+            verification_status = "verified_saved"
+        else:
+            conn.execute(
+                "UPDATE drafts SET draft_id=NULL, error_msg=NULL WHERE id=? AND status='draft_pending'",
+                (draft_id,),
+            )
+            target = "draft_pending"
+            verification_status = "verified_missing"
+
+        conn.execute(
+            "UPDATE draft_save_verifications SET status=?, verified_at=?, note=? WHERE draft_id=? AND status='pending_verify'",
+            (
+                verification_status, _now().strftime("%Y-%m-%d %H:%M:%S"),
+                note, draft_id,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO user_override (round_id, override_field, original_value, "
+            "override_value, reason, overridden_by, overridden_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                row["round_id"], "draft_save_verify", "pending_verify", target,
+                note, "web-ui", _now().strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        )
+        return {
+            "draft_id": draft_id, "status": target,
+            "message": "已记录人工核实结果；未保存的草稿已恢复为待存状态" if not saved else "已确认平台草稿存在",
         }
 
     @app.post("/api/drafts/{draft_id}/publish_confirm")
@@ -5188,6 +5407,11 @@ def _register_routes(app: FastAPI) -> None:
         row = conn.execute("SELECT status FROM drafts WHERE id = ?", (draft_id,)).fetchone()
         if not row:
             raise HTTPException(404, "草稿不存在")
+        verification = conn.execute(
+            "SELECT status FROM draft_save_verifications WHERE draft_id=?", (draft_id,),
+        ).fetchone()
+        if verification and verification["status"] == "pending_verify":
+            raise HTTPException(409, "平台保存结果尚待人工核实；核实前不能取消或删除该草稿")
         ok = _g()["sm_draft"].transition(draft_id, "cancelled", reason="用户取消发布")
         if not ok:
             raise HTTPException(400, f"状态迁移失败（当前 {row['status']}）")
@@ -5228,7 +5452,7 @@ def _register_routes(app: FastAPI) -> None:
         active = conn.execute(
             "SELECT id, round_number, status, plan_signature FROM spiral_rounds "
             "WHERE status IN ('created','producing','awaiting_publish') "
-            "AND plan_signature IS NOT NULL"
+            "AND plan_signature IS NOT NULL AND sub_plan_id IS NULL"
         ).fetchall()
         stale = [dict(r) for r in active if r["plan_signature"] != signature]
 
@@ -5242,13 +5466,17 @@ def _register_routes(app: FastAPI) -> None:
             "stale_rounds": stale,
         }
 
+    @app.get("/api/plans/versions")
+    def list_plan_versions(limit: int = Query(100, ge=1, le=500)):
+        from src.core.plan_version_store import PlanVersionStore
+        return {"items": PlanVersionStore(_g()["conn"]).list_master_versions(limit)}
+
     @app.post("/api/plans")
     def update_plan(req: UpdatePlanRequest):
-        """保存母计划 → 新签名 + signature_history + 下游失效（R18）。"""
+        """创建母计划草稿；只有显式审核通过后才切换生效版本。"""
+        from src.core.plan_version_store import PlanVersionStore, PlanVersionError
         pvm = _g()["plan_version_manager"]
         cfg = _g()["cfg"]
-        _, previous_signature, _, _ = pvm.load_plan()
-
         platforms = req.enabled_platforms or cfg.platforms.enabled_keys()
         plan = pvm.build_plan(
             topic_count_per_platform=req.topic_count_per_platform,
@@ -5261,43 +5489,108 @@ def _register_routes(app: FastAPI) -> None:
         alloc_total = sum(req.dimension_allocation.values())
         if alloc_total > req.topic_count_per_platform:
             raise HTTPException(400, f"维度分配合计 {alloc_total} 条，超过每平台选题数 {req.topic_count_per_platform}")
-        result = pvm.save_plan(plan, author="web-ui")
-        result["previous_signature"] = previous_signature
-        result["changed"] = previous_signature != result["signature"]
-        return result
+        active = _g()["conn"].execute(
+            "SELECT id FROM master_plan_versions WHERE status='effective'"
+        ).fetchone()
+        try:
+            draft = PlanVersionStore(_g()["conn"]).create_master_draft(
+                plan, author="web-ui", source="user",
+                based_on_version_id=int(active["id"]) if active else None,
+                change_note="母计划人工编辑草稿",
+            )
+        except PlanVersionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"draft": draft, "requires_review": True, "effective": False}
+
+    @app.post("/api/plans/{version_id}/review")
+    def review_master_plan(version_id: int, req: dict):
+        from src.core.plan_version_store import PlanVersionStore, PlanVersionError
+        action = (req or {}).get("action", "approve")
+        if action == "reject":
+            conn = _g()["conn"]
+            reason = str((req or {}).get("reason") or "人工审核未通过")[:500]
+            cur = conn.execute(
+                """UPDATE master_plan_versions
+                   SET status='archived',reviewed_at=CURRENT_TIMESTAMP,reviewed_by='user',
+                       change_note=COALESCE(change_note,'') || ?
+                   WHERE id=? AND status='draft'""",
+                ("；审核拒绝：" + reason, version_id),
+            )
+            if cur.rowcount != 1:
+                raise HTTPException(409, "只有草稿版本可以拒绝")
+            conn.commit()
+            return {"version_id": version_id, "status": "archived", "effective": False,
+                    "reason": reason}
+        if action != "approve":
+            raise HTTPException(422, "action 只能是 approve 或 reject")
+        try:
+            result = PlanVersionStore(_g()["conn"]).activate_master_version(
+                version_id, reviewer="user",
+            )
+            return {"version": result, "effective": True}
+        except PlanVersionError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @app.post("/api/plan_adjustments/adopt")
     def adopt_plan_adjustments(req: dict):
-        """复盘「采纳建议」→ 把缺口维度写回母计划（R18：签名变化自动失效下游）。"""
+        """复盘采纳只为已存在的平台子计划创建新草稿版本，不写入生效母计划。"""
+        from src.core.plan_version_store import PlanVersionStore, PlanVersionError
         raw = (req or {}).get("dimensions") or []
         dims = list(dict.fromkeys(str(d).strip() for d in raw if str(d).strip()))
         if not dims:
             raise HTTPException(400, "dimensions 不能为空")
-        pvm = _g()["plan_version_manager"]
-        cfg = _g()["cfg"]
-        plan, previous_signature, _, _ = pvm.load_plan()
-
-        allocation = dict(plan.get("dimension_allocation") or {})
-        for d in dims:
-            allocation[d] = int(allocation.get(d) or 0) + 1
-
-        new_plan = pvm.build_plan(
-            topic_count_per_platform=plan.get("topic_count_per_platform") or 5,
-            platforms=plan.get("enabled_platforms") or cfg.platforms.enabled_keys(),
-            dimension_allocation=allocation,
-            content_format=plan.get("content_format") or "image_text",
-            per_platform=plan.get("per_platform"),
-            cadence=plan.get("cadence"),
-        )
-        if sum(allocation.values()) > new_plan["topic_count_per_platform"]:
-            new_plan["topic_count_per_platform"] = min(50, sum(allocation.values()))
-        result = pvm.save_plan(new_plan, author="web-ui:adopt-gaps")
-        result.update({
-            "previous_signature": previous_signature,
+        conn = _g()["conn"]
+        rows = conn.execute(
+            """SELECT p.id,p.platform,p.master_plan_version_id,p.current_version_id,
+                      v.snapshot_json
+               FROM sub_plans p JOIN sub_plan_versions v ON v.id=p.current_version_id
+               WHERE p.status IN ('active','paused') AND v.status='effective'
+               ORDER BY p.platform,p.id"""
+        ).fetchall()
+        if not rows:
+            raise HTTPException(409, "当前没有已审核的平台子计划；请先创建并审核子计划")
+        store = PlanVersionStore(conn)
+        drafts = []
+        for row in rows:
+            try:
+                snapshot = json.loads(row["snapshot_json"])
+            except (TypeError, ValueError):
+                raise HTTPException(409, f"子计划 {row['id']} 的生效快照损坏")
+            prior_adoptions = snapshot.get("review_adoptions")
+            adoption = list(prior_adoptions) if isinstance(prior_adoptions, list) else []
+            adoption.append({
+                "dimensions": dims,
+                "created_at": _now().isoformat(timespec="seconds"),
+                "source": "review_adoption",
+                "status": "suggestion",
+            })
+            snapshot["review_adoptions"] = adoption
+            stages = [dict(stage) for stage in conn.execute(
+                "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order",
+                (row["current_version_id"],),
+            ).fetchall()]
+            for stage in stages:
+                for key in ("id", "sub_plan_version_id", "created_at", "updated_at"):
+                    stage.pop(key, None)
+            try:
+                draft = store.create_subplan_version(
+                    row["id"], snapshot,
+                    master_plan_version_id=int(row["master_plan_version_id"]),
+                    author="review_adoption", stages=stages,
+                    based_on_version_id=int(row["current_version_id"]),
+                    change_note="复盘建议采纳草稿：" + "、".join(dims),
+                )
+                drafts.append({
+                    "sub_plan_id": row["id"], "platform": row["platform"],
+                    "draft_version": draft, "effective": False,
+                })
+            except PlanVersionError as exc:
+                raise HTTPException(409, str(exc)) from exc
+        return {
+            "drafts": drafts, "effective": False, "requires_human_review": True,
             "adopted_dimensions": dims,
-            "dimension_allocation": allocation,
-        })
-        return result
+            "message": "复盘建议已生成平台子计划草稿；修改并审核通过后才会生效",
+        }
 
     @app.post("/api/plans/suggest_from_goal")
     def plan_suggest_from_goal(req: dict):
@@ -5328,7 +5621,7 @@ def _register_routes(app: FastAPI) -> None:
         from src.core.topic_pool import add_manual_topic
         try:
             return add_manual_topic(_g()["conn"], title=req.title, dimension=req.dimension,
-                                    summary=req.summary, link=req.link)
+                                    summary=req.summary, link=req.link, cfg=_g()["cfg"])
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
@@ -5557,64 +5850,74 @@ def _register_routes(app: FastAPI) -> None:
     def update_content(content_id: str, req: UpdateContentRequest):
         """人工编辑未发布文案 → 写 user_override 留痕；已发布内容保持不可变。"""
         conn = _g()["conn"]
-        row = _content_row(conn, content_id)
-        _ensure_content_round_idle(row, "编辑内容")
-        published = conn.execute(
-            "SELECT status FROM drafts WHERE content_id = ? "
-            "AND (user_confirmed_at IS NOT NULL "
-            "     OR status IN ('user_published', 'data_fetching', 'published')) "
-            "ORDER BY rowid DESC LIMIT 1",
-            (content_id,),
-        ).fetchone()
-        if published:
-            raise HTTPException(
-                409,
-                "该内容已确认发布或已进入数据采集，不能原地修改历史记录；请新建一篇修订内容",
+        with conn:
+            row = _content_row(conn, content_id)
+            _ensure_content_round_idle(row, "编辑内容")
+            pending_verify = conn.execute(
+                "SELECT 1 FROM draft_save_verifications v JOIN drafts d ON d.id=v.draft_id "
+                "WHERE d.content_id = ? AND v.status = 'pending_verify' LIMIT 1",
+                (content_id,),
+            ).fetchone()
+            if pending_verify:
+                raise HTTPException(
+                    409, "该内容的存草稿结果尚待人工核实，核实前不能修改文案，以免版本指纹失真",
+                )
+            published = conn.execute(
+                "SELECT status FROM drafts WHERE content_id = ? "
+                "AND (user_confirmed_at IS NOT NULL "
+                "     OR status IN ('user_published', 'data_fetching', 'published')) "
+                "ORDER BY rowid DESC LIMIT 1",
+                (content_id,),
+            ).fetchone()
+            if published:
+                raise HTTPException(
+                    409,
+                    "该内容已确认发布或已进入数据采集，不能原地修改历史记录；请新建一篇修订内容",
+                )
+    
+            title = req.title if req.title is not None else row["title"]
+            body = req.body if req.body is not None else row["body"]
+            tags_json = (
+                json.dumps(req.tags, ensure_ascii=False)
+                if req.tags is not None else row["tags"]
             )
-
-        title = req.title if req.title is not None else row["title"]
-        body = req.body if req.body is not None else row["body"]
-        tags_json = (
-            json.dumps(req.tags, ensure_ascii=False)
-            if req.tags is not None else row["tags"]
-        )
-        changed = (
-            title != row["title"] or body != row["body"] or tags_json != row["tags"]
-        )
-
-        if changed:
-            # G2 结果绑定的是具体文案版本。修改标题/正文/标签后，旧的 PASS 不能继续显示为有效。
-            conn.execute(
-                "UPDATE contents SET title = ?, body = ?, tags = ?, word_count = ?, "
-                "guard_outcome = NULL, guard_reason = NULL WHERE id = ?",
-                (title, body, tags_json, len(body or ""), content_id),
+            changed = (
+                title != row["title"] or body != row["body"] or tags_json != row["tags"]
             )
-        else:
-            conn.execute(
-                "UPDATE contents SET title = ?, body = ?, tags = ?, word_count = ? WHERE id = ?",
-                (title, body, tags_json, len(body or ""), content_id),
-            )
-        if changed:
-            conn.execute(
-                "INSERT INTO user_override (round_id, override_field, original_value, "
-                "override_value, reason, overridden_by, overridden_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    row["round_id"], "content",
-                    json.dumps({"title": row["title"], "body_len": len(row["body"] or "")},
-                               ensure_ascii=False)[:500],
-                    json.dumps({"title": title, "body_len": len(body or "")},
-                               ensure_ascii=False)[:500],
-                    req.reason or "UI 编辑", "web-ui",
-                    _now().strftime("%Y-%m-%d %H:%M:%S"),
-                ),
-            )
-        conn.commit()
-        return {
-            "id": content_id, "changed": changed, "title": title, "body": body,
-            "tags": json.loads(tags_json) if tags_json else [],
-        }
-
+    
+            if changed:
+                # G2 结果绑定的是具体文案版本。修改标题/正文/标签后，旧的 PASS 不能继续显示为有效。
+                conn.execute(
+                    "UPDATE contents SET title = ?, body = ?, tags = ?, word_count = ?, "
+                    "guard_outcome = NULL, guard_reason = NULL WHERE id = ?",
+                    (title, body, tags_json, len(body or ""), content_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE contents SET title = ?, body = ?, tags = ?, word_count = ? WHERE id = ?",
+                    (title, body, tags_json, len(body or ""), content_id),
+                )
+            if changed:
+                conn.execute(
+                    "INSERT INTO user_override (round_id, override_field, original_value, "
+                    "override_value, reason, overridden_by, overridden_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        row["round_id"], "content",
+                        json.dumps({"title": row["title"], "body_len": len(row["body"] or "")},
+                                   ensure_ascii=False)[:500],
+                        json.dumps({"title": title, "body_len": len(body or "")},
+                                   ensure_ascii=False)[:500],
+                        req.reason or "UI 编辑", "web-ui",
+                        _now().strftime("%Y-%m-%d %H:%M:%S"),
+                    ),
+                )
+            conn.commit()
+            return {
+                "id": content_id, "changed": changed, "title": title, "body": body,
+                "tags": json.loads(tags_json) if tags_json else [],
+            }
+    
     @app.post("/api/contents/{content_id}/cards")
     def regenerate_cards(content_id: str):
         """按当前标题/正文重新出图（封面 + 正文分页），补上历史内容的「只有文没有图」。"""
@@ -6475,8 +6778,12 @@ def _register_routes(app: FastAPI) -> None:
 
         sql = (
             "SELECT d.id, d.platform, d.status, d.scheduled_publish_at, d.saved_at, "
-            "       c.title, c.round_id "
+            "       c.title, c.round_id, r.master_plan_version_id, r.sub_plan_id, "
+            "       r.sub_plan_version_id, r.sub_plan_stage_id, s.stage_order, s.title AS stage_title, "
+            "       s.start_date AS stage_start_date, s.end_date AS stage_end_date "
             "FROM drafts d JOIN contents c ON d.content_id = c.id "
+            "LEFT JOIN spiral_rounds r ON r.id = c.round_id "
+            "LEFT JOIN sub_plan_stages s ON s.id = r.sub_plan_stage_id "
             "WHERE (d.scheduled_publish_at IS NOT NULL "
             "        AND DATE(d.scheduled_publish_at) BETWEEN ? AND ?) "
             "   OR (d.scheduled_publish_at IS NULL "
@@ -6503,6 +6810,14 @@ def _register_routes(app: FastAPI) -> None:
                 "platform": row["platform"],
                 "status": row["status"],
                 "round_id": row["round_id"],
+                "master_plan_version_id": row["master_plan_version_id"],
+                "sub_plan_id": row["sub_plan_id"],
+                "sub_plan_version_id": row["sub_plan_version_id"],
+                "sub_plan_stage_id": row["sub_plan_stage_id"],
+                "stage_order": row["stage_order"],
+                "stage_title": row["stage_title"],
+                "stage_start_date": row["stage_start_date"],
+                "stage_end_date": row["stage_end_date"],
                 "scheduled": row["scheduled_publish_at"],
                 "saved_at": row["saved_at"],
                 "day": day,
@@ -7053,7 +7368,7 @@ def _register_routes(app: FastAPI) -> None:
             step_key, step_index = validate_onboarding_progress(req)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
-        return set_onboarding_progress(_g()["conn"], step_key, step_index, by="web-ui")
+        return set_onboarding_progress(_g()["conn"], step_key, step_index, by="web-ui", cfg=_g()["cfg"])
 
     # --- 通知通道自检（不落 notifications 表）---
     @app.post("/api/notify/test")
@@ -7909,7 +8224,7 @@ def _register_routes(app: FastAPI) -> None:
         from src.core.ops_targets_repository import load_ops_targets, replace_targets
         conn = _g()["conn"]
         try:
-            items = replace_targets(conn, req)
+            items = replace_targets(conn, req, cfg=_g()["cfg"])
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         _g()["cfg"].ops_targets = load_ops_targets(conn)
@@ -7925,7 +8240,7 @@ def _register_routes(app: FastAPI) -> None:
     def save_custom_preset(key: str, req: dict):
         from src.core.industry_presets_repository import upsert_custom_preset
         try:
-            return upsert_custom_preset(_g()["conn"], {**req, "key": key})
+            return upsert_custom_preset(_g()["conn"], {**req, "key": key}, cfg=_g()["cfg"])
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -7933,7 +8248,7 @@ def _register_routes(app: FastAPI) -> None:
     def delete_custom_preset(key: str):
         from src.core.industry_presets_repository import delete_custom_preset
         try:
-            deleted = delete_custom_preset(_g()["conn"], key)
+            deleted = delete_custom_preset(_g()["conn"], key, cfg=_g()["cfg"])
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
         if not deleted:
@@ -7944,7 +8259,7 @@ def _register_routes(app: FastAPI) -> None:
     def restore_custom_preset(key: str):
         from src.core.industry_presets_repository import restore_custom_preset as _restore
         try:
-            item = _restore(_g()["conn"], key)
+            item = _restore(_g()["conn"], key, cfg=_g()["cfg"])
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
         if item is None:
@@ -8662,6 +8977,10 @@ def _register_routes(app: FastAPI) -> None:
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
+    
+    # Platform subplan APIs use the same tenant-scoped runtime as all existing routes.
+    from src.api.subplans import register_subplan_routes
+    register_subplan_routes(app, _g)
 
 
 # ============================================================
@@ -8683,7 +9002,6 @@ CREATE TABLE IF NOT EXISTS notify_rules (
 CREATE UNIQUE INDEX IF NOT EXISTS ux_notify_rules_scenario_channel
     ON notify_rules (scenario, channel);
 """
-
 
 
 def _find_round_for_draft(conn, draft_id: str) -> Optional[int]:

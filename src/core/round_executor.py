@@ -105,11 +105,17 @@ class RoundExecutor:
         自动从最近复盘构建 —— 手动轮与自动轮都吃复盘结论，闭环不依赖谁来开轮。
         """
         round_row = self.conn.execute(
-            "SELECT status, goal_id, round_number FROM spiral_rounds WHERE id = ?",
+            """SELECT status,goal_id,round_number,plan_signature,master_plan_version_id,
+                      sub_plan_id,sub_plan_version_id,sub_plan_stage_id,
+                      sub_plan_snapshot,sub_plan_stage_snapshot
+               FROM spiral_rounds WHERE id = ?""",
             (round_id,),
         ).fetchone()
         if not round_row:
             raise RoundPreconditionError(f"轮次 {round_id} 不存在")
+        from .subplan_production import production_paused
+        if production_paused(self.conn):
+            raise RoundPreconditionError("内容生产已暂停，拒绝执行轮次")
         current_status = round_row["status"]
         if current_status == "failed":
             # 只允许没有产生任何内容/草稿的失败轮次重试，避免重复生成或覆盖已有交付物。
@@ -135,13 +141,76 @@ class RoundExecutor:
             detail = pool_report.get("kb_error") or "选题库当前没有可用选题"
             raise RoundPreconditionError(f"运行前检查未通过：{detail}。请先补充或恢复选题，再运行本轮")
 
-        # 母计划 v2：未显式传参时按母计划执行（选题数 / 平台 / 维度配额 / 平台分项篇数）
+        # 计划来源：子计划轮次严格读取创建时绑定的主计划/子计划/阶段快照。
         self._pvm = PlanVersionManager(self.cfg, self.conn)
         self._plan, self._plan_sig, _at, self._plan_source = self._pvm.load_plan()
-        if topic_count is None:
-            topic_count = int(self._plan.get("topic_count_per_platform") or self.cfg.plan_suggestion.default_topic_count)
-        if platform_values is None and self._plan_source == "plan_settings":
-            platform_values = list(self._plan.get("enabled_platforms") or []) or None
+        self._subplan_context = None
+        if round_row["sub_plan_id"]:
+            master = self.conn.execute(
+                "SELECT plan_signature,plan_snapshot FROM master_plan_versions WHERE id=?",
+                (round_row["master_plan_version_id"],),
+            ).fetchone()
+            identity = self.conn.execute(
+                "SELECT platform,status FROM sub_plans WHERE id=?",
+                (round_row["sub_plan_id"],),
+            ).fetchone()
+            stage_row = self.conn.execute(
+                """SELECT s.*,COALESCE(stats.confirmed_published_count,0) AS published_count
+                   FROM sub_plan_stages s
+                   LEFT JOIN sub_plan_stage_publish_stats stats ON stats.stage_id=s.id
+                   WHERE s.id=? AND s.sub_plan_version_id=?""",
+                (round_row["sub_plan_stage_id"], round_row["sub_plan_version_id"]),
+            ).fetchone()
+            if (master is None or master["plan_signature"] != round_row["plan_signature"]
+                    or identity is None or identity["status"] != "active" or stage_row is None
+                    or stage_row["status"] in ("paused", "completed", "cancelled")):
+                raise RoundPreconditionError("轮次绑定的子计划授权或阶段快照无效")
+            business_date = business_now(self.cfg).date().isoformat()
+            if stage_row["start_date"] and business_date < stage_row["start_date"]:
+                raise RoundPreconditionError("轮次绑定阶段尚未到执行日期")
+            if stage_row["end_date"] and business_date > stage_row["end_date"]:
+                raise RoundPreconditionError("轮次绑定阶段执行窗口已结束")
+            broken = self.conn.execute(
+                "SELECT 1 FROM circuit_breaker_events WHERE platform=? AND resolved_at IS NULL LIMIT 1",
+                (identity["platform"],),
+            ).fetchone()
+            if broken:
+                raise RoundPreconditionError("轮次绑定平台已触发熔断，拒绝继续生产")
+            try:
+                self._plan = json.loads(master["plan_snapshot"])
+                sub_snapshot = json.loads(round_row["sub_plan_snapshot"])
+                stage_snapshot = json.loads(round_row["sub_plan_stage_snapshot"])
+            except (TypeError, ValueError):
+                raise RoundPreconditionError("轮次绑定的计划快照损坏")
+            if not isinstance(self._plan, dict) or not isinstance(sub_snapshot, dict) or not isinstance(stage_snapshot, dict):
+                raise RoundPreconditionError("轮次绑定的计划快照格式无效")
+            remaining = max(0, int(stage_row["target_count"]) - int(stage_row["published_count"] or 0))
+            if remaining <= 0:
+                raise RoundPreconditionError("阶段用户确认发布目标已达成，拒绝继续生产")
+            topic_count = min(
+                int(topic_count or self._plan.get("topic_count_per_platform")
+                    or self.cfg.plan_suggestion.default_topic_count),
+                remaining,
+            )
+            if platform_values and set(platform_values) != {identity["platform"]}:
+                raise RoundPreconditionError("轮次只能执行其绑定子计划所属平台")
+            platform_values = [identity["platform"]]
+            self._plan_source = "subplan_version"
+            self._plan_sig = round_row["plan_signature"]
+            self._subplan_context = {
+                "sub_plan_id": round_row["sub_plan_id"],
+                "sub_plan_version_id": round_row["sub_plan_version_id"],
+                "stage_id": round_row["sub_plan_stage_id"],
+                "platform": identity["platform"],
+                "subplan": sub_snapshot,
+                "stage": stage_snapshot,
+                "remaining_count": remaining,
+            }
+        else:
+            if topic_count is None:
+                topic_count = int(self._plan.get("topic_count_per_platform") or self.cfg.plan_suggestion.default_topic_count)
+            if platform_values is None and self._plan_source == "plan_settings":
+                platform_values = list(self._plan.get("enabled_platforms") or []) or None
         # Agent 编排：存草稿 / 出图 / 自动排期按编排开关运行
         self._orch = Orchestration.load(self.conn)
         if save_drafts is None:
@@ -183,6 +252,10 @@ class RoundExecutor:
             "platforms": [p.value for p in platforms],
             "topic_count_requested": topic_count,
             "plan_source": self._plan_source,
+            "sub_plan_id": (self._subplan_context or {}).get("sub_plan_id"),
+            "sub_plan_version_id": (self._subplan_context or {}).get("sub_plan_version_id"),
+            "stage_id": (self._subplan_context or {}).get("stage_id"),
+            "stage_title": ((self._subplan_context or {}).get("stage") or {}).get("title"),
             "orchestration": [s["id"] for s in self._orch.steps if s["enabled"]],
             "steps": [],
             "contents_created": 0,
@@ -207,6 +280,32 @@ class RoundExecutor:
             # 复盘反馈也属于执行流程；若读取/解析异常，必须进入统一失败收尾，
             # 不能让轮次停在 producing 且 task_run 永远保持 running。
             self._feedback = self._resolve_feedback(round_id, feedback, report)
+            if self._subplan_context:
+                from .autogrow import StrategyFeedback
+                if self._feedback is None:
+                    self._feedback = StrategyFeedback()
+                stage = self._subplan_context["stage"]
+                subplan = self._subplan_context["subplan"]
+                context_lines = [
+                    "已审核平台子计划执行约束：内容必须符合当前子计划和阶段方向。",
+                    f"子计划：{subplan.get('title') or ''}",
+                    f"阶段：{stage.get('title') or ''}",
+                    f"阶段方向：{stage.get('direction') or ''}",
+                    f"阶段完成条件：{stage.get('completion_condition') or ''}",
+                ]
+                for key in ("positioning", "audience", "content_strategy", "tone", "key_points"):
+                    value = subplan.get(key)
+                    if value:
+                        context_lines.append(f"{key}: {json.dumps(value, ensure_ascii=False)}")
+                self._feedback.copy_hints.setdefault(self._subplan_context["platform"], []).append(
+                    "\n".join(context_lines)
+                )
+                report["steps"].append({
+                    "step": "subplan_stage_context",
+                    "sub_plan_id": self._subplan_context["sub_plan_id"],
+                    "stage_id": self._subplan_context["stage_id"],
+                    "direction": stage.get("direction") or "",
+                })
 
             # ① + ② 选题读取与评分（G 节点）
             scored = self._select_topics(topic_count, report)
@@ -340,6 +439,8 @@ class RoundExecutor:
             "c.review_rejection_reason "
             "FROM drafts d JOIN contents c ON c.id = d.content_id "
             "WHERE c.round_id = ? AND d.status = 'draft_pending' "
+            "AND NOT EXISTS (SELECT 1 FROM draft_save_verifications v "
+            "                WHERE v.draft_id = d.id AND v.status = 'pending_verify') "
             "ORDER BY c.rowid, d.rowid",
             (round_id,),
         ).fetchall()
@@ -532,6 +633,18 @@ class RoundExecutor:
         platforms: list[Platform], scored: list, report: dict,
     ) -> None:
         try:
+            bound = self.conn.execute(
+                "SELECT plan_signature,sub_plan_id FROM spiral_rounds WHERE id=?",
+                (round_id,),
+            ).fetchone()
+            if bound and bound["sub_plan_id"]:
+                report["plan_signature"] = bound["plan_signature"]
+                report["steps"].append({
+                    "step": "plan_signature",
+                    "signature": str(bound["plan_signature"] or "")[:12],
+                    "source": "immutable_subplan_round_binding",
+                })
+                return
             allocation: dict[str, int] = {}
             for s in scored:
                 dim = s.topic.dimension or "未分类"
@@ -847,6 +960,16 @@ class RoundExecutor:
             })
         card_first = bool(orch and orch.card_before_gate and make_cards)
         for rank, st in enumerate(scored):
+            if self._subplan_context:
+                confirmed = int(self.conn.execute(
+                    "SELECT confirmed_published_count FROM sub_plan_stage_publish_stats WHERE stage_id=?",
+                    (self._subplan_context["stage_id"],),
+                ).fetchone()[0])
+                stage_target = int(self._subplan_context["stage"].get("target_count") or 0)
+                # 当前轮已生成数量只作为本轮生产上限的临时占位，不计入阶段进度。
+                if confirmed + int(report["contents_created"]) >= stage_target:
+                    report["errors"].append("阶段确认发布目标已达成，本轮停止继续生成")
+                    break
             topic = st.topic
             # 第二道独立防线：进入内容生产前再次检查原始选题标题。
             sensitive_hits = _sensitive_topic_hits(topic.title)
@@ -986,6 +1109,16 @@ class RoundExecutor:
                             body_page_count - body_ai_count
                         )
 
+                # ⑥ 写 contents；在长耗时模型/出图步骤后再核对一次阶段发布配额。
+                if self._subplan_context:
+                    confirmed = int(self.conn.execute(
+                        "SELECT confirmed_published_count FROM sub_plan_stage_publish_stats WHERE stage_id=?",
+                        (self._subplan_context["stage_id"],),
+                    ).fetchone()[0])
+                    stage_target = int(self._subplan_context["stage"].get("target_count") or 0)
+                    if confirmed + int(report["contents_created"]) >= stage_target:
+                        report["errors"].append("生成期间阶段确认发布目标已达成，丢弃当前候选内容")
+                        continue
                 # ⑥ 写 contents（DB CHECK 只允许 degraded/media_asset/generated）
                 has_ai = bool(cover_path) or body_ai_count > 0
                 visual_status = "generated" if has_ai else "degraded"
@@ -1142,6 +1275,16 @@ class RoundExecutor:
                         "saved_platform_title": payload.title,
                     },
                 )
+                from src.core.timezone import business_now
+                self.conn.execute(
+                    "UPDATE draft_save_verifications SET status='verified_saved', verified_at=?, "
+                    "platform_draft_id=?, error_msg=NULL WHERE draft_id=? AND status='verified_missing'",
+                    (
+                        business_now(self.cfg).isoformat(timespec="seconds"),
+                        result.platform_draft_id, row["draft_id"],
+                    ),
+                )
+                self.conn.commit()
                 report["drafts_saved"] += 1
                 saved_draft_ids.append(row["draft_id"])
                 if self.notifier:
@@ -1151,15 +1294,25 @@ class RoundExecutor:
                         draft_id=row["draft_id"], round_id=round_id,
                     )
             elif result.needs_human_verify:
-                # —— R17 / P0-3 新增：按钮点了但无成功证据，需人工核实 ——
-                self.sm_draft.transition(
-                    row["draft_id"], "failed",
-                    reason="needs_human_verify: 存草稿后未检测到平台成功信号",
-                    extra_updates={"error_msg": result.error_msg or "needs_human_verify"},
+                # 不确定保存结果单独记账，drafts.status 保持 draft_pending，
+                # 但待存查询会排除此记录，避免自动重试造成平台重复草稿。
+                from src.core.timezone import business_now
+                self.conn.execute(
+                    "INSERT INTO draft_save_verifications "
+                    "(draft_id, status, attempted_at, platform_draft_id, error_msg) "
+                    "VALUES (?, 'pending_verify', ?, ?, ?) "
+                    "ON CONFLICT(draft_id) DO UPDATE SET "
+                    "status='pending_verify', attempted_at=excluded.attempted_at, "
+                    "verified_at=NULL, platform_draft_id=excluded.platform_draft_id, "
+                    "error_msg=excluded.error_msg, note=NULL",
+                    (
+                        row["draft_id"], business_now(self.cfg).isoformat(timespec="seconds"),
+                        result.platform_draft_id, result.error_msg or "needs_human_verify",
+                    ),
                 )
+                self.conn.commit()
                 report.setdefault("drafts_needs_human_verify", 0)
                 report["drafts_needs_human_verify"] += 1
-                report["drafts_failed"] += 1
                 logger.warning(
                     "存草稿 needs_human_verify platform=%s draft=%s draft_id_missing=%s",
                     platform.value, row["draft_id"], result.platform_draft_id_missing,

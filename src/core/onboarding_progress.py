@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from src.core.timezone import business_now
 from typing import Optional
 
 _KEY = "onboarding_progress"
@@ -53,13 +53,14 @@ def validate_onboarding_progress(req: Optional[dict]) -> tuple[str, int]:
     return step_key, step_index
 
 
-def set_onboarding_progress(conn, step_key: str, step_index: int, by: str = "web-ui") -> dict:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    conn.execute(
-        "INSERT INTO app_settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, ?) "
-        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
-        "updated_at = excluded.updated_at, updated_by = excluded.updated_by",
-        (_KEY, json.dumps({"step_key": step_key, "step_index": step_index}, ensure_ascii=False), now, by),
-    )
-    conn.commit()
+def set_onboarding_progress(conn, step_key: str, step_index: int, by: str = "web-ui", cfg=None) -> dict:
+    now = business_now(cfg).strftime("%Y-%m-%d %H:%M:%S")
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT INTO app_settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+            "updated_at = excluded.updated_at, updated_by = excluded.updated_by",
+            (_KEY, json.dumps({"step_key": step_key, "step_index": step_index}, ensure_ascii=False), now, by),
+        )
     return {"step_key": step_key, "step_index": step_index, "updated_at": now}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -263,3 +264,59 @@ def test_webhook_allows_official_host_via_safe_transport(monkeypatch) -> None:
     assert notifier._send_webhook("feishu", "TEST_FEISHU_WEBHOOK", "title", "body") is True
     assert len(calls) == 1
     assert calls[0][0].startswith("https://open.feishu.cn/")
+
+def test_auth_failure_rate_limit_state_is_thread_safe_and_bounded(tmp_path, monkeypatch):
+    monkeypatch.setenv("ITERWAVE_ENV_FILE", str(tmp_path / ".env"))
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(auth.record_failure, ["198.51.100.1"] * 64))
+    # 共享 SQLite 存储串行化写入，并发失败记录不得互相覆盖或丢失。
+    assert len(auth._recent_failures("198.51.100.1")) == 64
+    assert auth.is_rate_limited("198.51.100.1")
+
+
+
+def test_valid_script_password_can_recover_after_operator_clears_ip_failures(tmp_path, monkeypatch):
+    monkeypatch.setenv("ITERWAVE_ENV_FILE", str(tmp_path / ".env"))
+    password = "Strong-Access-Password-2026!"
+    auth.set_password(password)
+    client_ip = "198.51.100.77"
+    for _ in range(auth.LOGIN_MAX_FAILURES):
+        auth.record_failure(client_ip)
+    assert auth.is_rate_limited(client_ip)
+
+    # 达到阈值后即使口令正确也先被限速拦下（PBKDF2 不执行）。
+    assert not auth.is_authenticated(None, {"x-access-token": password}, ip=client_ip)
+    # 运维显式清空该 IP 失败记录后恢复。
+    auth.clear_failures(client_ip)
+    assert auth.is_authenticated(None, {"x-access-token": password}, ip=client_ip)
+
+
+
+def test_auth_failure_window_expires_on_wall_clock(tmp_path, monkeypatch):
+    monkeypatch.setenv("ITERWAVE_ENV_FILE", str(tmp_path / ".env"))
+    now = [100.0]
+    monkeypatch.setattr(auth.time, "time", lambda: now[0])
+    auth.record_failure("198.51.100.88")
+    assert auth._recent_failures("198.51.100.88") == [100.0]
+
+    now[0] += auth.LOGIN_WINDOW_SECONDS + 1
+    assert not auth.is_rate_limited("198.51.100.88")
+    assert auth._recent_failures("198.51.100.88") == []
+
+
+
+def test_repeated_invalid_script_tokens_are_counted_once_per_attempt(tmp_path, monkeypatch):
+    monkeypatch.setenv("ITERWAVE_ENV_FILE", str(tmp_path / ".env"))
+    monkeypatch.setattr(auth, "password_configured", lambda: True)
+    monkeypatch.setattr(auth, "_session_valid", lambda token: False)
+    monkeypatch.setattr(auth, "verify_password", lambda candidate: False)
+    headers = {"x-access-token": "not-the-access-password"}
+    client_ip = "198.51.100.99"
+
+    for _ in range(auth.LOGIN_MAX_FAILURES + 3):
+        assert not auth.is_authenticated(None, headers, ip=client_ip)
+
+    assert auth.is_rate_limited(client_ip)
+    # 阈值后请求在 PBKDF2 前被拒绝，不再继续累加记录。
+    assert len(auth._recent_failures(client_ip)) == auth.LOGIN_MAX_FAILURES

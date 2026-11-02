@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from datetime import datetime, timedelta
 
 import pytest
@@ -48,6 +50,65 @@ def client(cfg, conn, seed, test_auth):
 
 
 # ---------------------------------------------------------------- R-2 采纳缺口
+def test_auth_middleware_runs_password_verification_off_event_loop(client, monkeypatch):
+    tc, _, _ = client
+    observed = {}
+    original_to_thread = asyncio.to_thread
+
+    def fake_authenticate(cookie_token, headers, ip=None):
+        observed["worker_thread"] = threading.get_ident()
+        return True, False
+
+    async def recording_to_thread(func, *args, **kwargs):
+        caller_thread = threading.get_ident()
+        result = await original_to_thread(func, *args, **kwargs)
+        observed["event_loop_thread"] = caller_thread
+        return result
+
+    monkeypatch.setattr(api_main.auth, "password_configured", lambda: True)
+    monkeypatch.setattr(api_main.auth, "is_trusted_local_setup", lambda request: False)
+    monkeypatch.setattr(api_main.auth, "authenticate_request", fake_authenticate)
+    monkeypatch.setattr(api_main.asyncio, "to_thread", recording_to_thread)
+
+    response = tc.get("/api/ops/pause")
+    assert response.status_code == 200
+    assert observed["worker_thread"] != observed["event_loop_thread"]
+
+def test_activation_samples_reject_second_active_run_and_replay_idempotently(client, monkeypatch):
+    tc, conn, _ = client
+    from src.core import content_pipeline
+
+    monkeypatch.setattr(content_pipeline, "_llm_available", lambda _cfg: False)
+    now = datetime.now().isoformat(sep=" ", timespec="seconds")
+    conn.execute(
+        "INSERT INTO sample_runs "
+        "(id, tenant_id, platform, account_description, status, model_mode, "
+        "idempotency_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("active-sample", "default", "xhs", "职场AI效率提升方法", "generating",
+         "byok", "request-active", now),
+    )
+    conn.commit()
+
+    # 相同幂等键必须返回原任务，不应被活动任务互斥规则误拒绝。
+    replay = tc.post("/api/activation/samples", json={
+        "platform": "xhs", "account_description": "职场AI效率提升方法",
+        "idempotency_key": "request-active",
+    })
+    assert replay.status_code == 202
+    assert replay.json()["sample_run_id"] == "active-sample"
+    assert replay.json()["deduplicated"] is True
+
+    # 不同幂等键不能绕过同一账号组的活动任务限制。
+    conflict = tc.post("/api/activation/samples", json={
+        "platform": "douyin", "account_description": "职场AI效率提升方法",
+        "idempotency_key": "request-another",
+    })
+    assert conflict.status_code == 409
+    assert conn.execute(
+        "SELECT COUNT(*) FROM sample_runs WHERE tenant_id='default' "
+        "AND status IN ('created','generating','quality_check')"
+    ).fetchone()[0] == 1
+
 def test_rhythm_config_exposes_quota_slots_for_all_supported_platforms(client):
     tc, _, _ = client
     response = tc.get("/api/rhythm")
@@ -124,21 +185,18 @@ def test_adopt_gaps_rejects_empty(client):
     assert tc.post("/api/plan_adjustments/adopt", json={"dimensions": []}).status_code == 400
 
 
-def test_adopt_gaps_writes_plan_and_changes_signature(client):
+def test_adopt_gaps_requires_existing_approved_subplan(client):
     tc, conn, _ = client
-    pvm = PlanVersionManager(api_main._g_ctx["cfg"], conn)
-    before = pvm.load_plan()[1]
-
+    before = conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective'"
+    ).fetchone()
     r = tc.post("/api/plan_adjustments/adopt", json={"dimensions": ["政策解读", "家庭场景"]})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["adopted_dimensions"] == ["政策解读", "家庭场景"]
-    assert body["dimension_allocation"]["政策解读"] == 1
-    assert body["signature"] != before
-
-    # 签名已持久化到 signature_history（R18 审计追溯）
-    rows = conn.execute("SELECT COUNT(*) FROM signature_history").fetchone()[0]
-    assert rows >= 1
+    assert r.status_code == 409
+    assert "已审核的平台子计划" in r.text
+    after = conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective'"
+    ).fetchone()
+    assert (before[0] if before else None) == (after[0] if after else None)
 
 
 # ---------------------------------------------------------------- R-3 热点入库
@@ -1315,6 +1373,76 @@ def test_content_plan_start_enqueues_global_task_and_cancel_only_cancels_queued_
         "SELECT status FROM content_plans WHERE id=?", (plan_id,)
     ).fetchone()["status"] == "cancelled"
 
+
+def test_content_plan_start_cancels_unqueued_round_when_snapshot_admission_fails(client, tmp_path, monkeypatch):
+    tc, conn, _ = client
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    monkeypatch.setattr(api_main, "_task_queue", queue)
+
+    from src.core.task_snapshot import StaleTaskSnapshot
+
+    def reject_snapshot(*args, **kwargs):
+        raise StaleTaskSnapshot("计划执行快照已过期")
+
+    monkeypatch.setattr(api_main, "_build_task_execution_snapshot", reject_snapshot)
+    created = tc.post("/api/content-plans", json={
+        "title": "启动失败补偿计划", "scheduled_date": "2026-11-07",
+        "platforms": ["xhs"], "planned_count": 1,
+    })
+    assert created.status_code == 200
+    plan_id = created.json()["id"]
+
+    started = tc.post(f"/api/content-plans/{plan_id}/start")
+    assert started.status_code == 409
+
+    plan = conn.execute(
+        "SELECT status FROM content_plans WHERE id=?", (plan_id,),
+    ).fetchone()
+    relation = conn.execute(
+        "SELECT round_id,task_id FROM content_plan_rounds WHERE plan_id=?",
+        (plan_id,),
+    ).fetchone()
+    assert plan["status"] == "failed"
+    assert relation is not None and relation["task_id"] is None
+    assert conn.execute(
+        "SELECT status FROM spiral_rounds WHERE id=?", (relation["round_id"],),
+    ).fetchone()["status"] == "cancelled"
+    assert queue.list_page(scope="history", page=1, page_size=20)[1] == 0
+
+def test_content_plan_start_compensates_unexpected_queue_failure(client, tmp_path, monkeypatch):
+    tc, conn, _ = client
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    monkeypatch.setattr(api_main, "_task_queue", queue)
+    monkeypatch.setattr(api_main, "_build_task_execution_snapshot", lambda *args, **kwargs: {"test_snapshot": True})
+
+    def fail_enqueue(*args, **kwargs):
+        raise RuntimeError("injected queue adapter failure")
+
+    monkeypatch.setattr(queue, "enqueue", fail_enqueue)
+    created = tc.post("/api/content-plans", json={
+        "title": "意外入队异常补偿", "scheduled_date": "2026-11-10",
+        "platforms": ["xhs"], "planned_count": 1,
+    })
+    assert created.status_code == 200
+    plan_id = created.json()["id"]
+
+    started = tc.post(f"/api/content-plans/{plan_id}/start")
+    assert started.status_code == 503
+
+    plan = conn.execute(
+        "SELECT status FROM content_plans WHERE id=?", (plan_id,),
+    ).fetchone()
+    relation = conn.execute(
+        "SELECT round_id,task_id FROM content_plan_rounds WHERE plan_id=?",
+        (plan_id,),
+    ).fetchone()
+    assert plan["status"] == "failed"
+    assert relation is not None and relation["task_id"] is None
+    assert conn.execute(
+        "SELECT status FROM spiral_rounds WHERE id=?", (relation["round_id"],),
+    ).fetchone()["status"] == "cancelled"
 
 def test_worker_result_links_round_drafts_and_updates_plan_status(client):
     tc, conn, seed = client
@@ -2829,3 +2957,118 @@ def test_global_task_queue_exposes_business_round_number_not_db_id(client, cfg, 
     assert items[save.task_id]["round_number"] == 7
     assert items[missing.task_id]["round_number"] is None
     assert tc.get(f"/api/task-queue/{run.task_id}").json()["round_number"] == 7
+
+
+
+def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client):
+    from src.core.plan_version_store import PlanVersionStore
+
+    tc, conn, _ = client
+    store = PlanVersionStore(conn)
+    active = conn.execute(
+        "SELECT id,plan_snapshot FROM master_plan_versions WHERE status='effective' ORDER BY version_no DESC LIMIT 1"
+    ).fetchone()
+    if active is None:
+        plan, *_ = PlanVersionManager(api_main._g_ctx["cfg"], conn).load_plan()
+        plan["enabled_platforms"] = list(dict.fromkeys([*(plan.get("enabled_platforms") or []), "xhs"]))
+        draft = store.create_master_draft(plan)
+        active_id = store.activate_master_version(draft["id"], reviewer="test")["id"]
+    else:
+        active_id = int(active["id"])
+        snapshot = json.loads(active["plan_snapshot"])
+        if "xhs" not in (snapshot.get("enabled_platforms") or []):
+            snapshot["enabled_platforms"] = list(dict.fromkeys([*(snapshot.get("enabled_platforms") or []), "xhs"]))
+            draft = store.create_master_draft(snapshot, based_on_version_id=active_id)
+            active_id = store.activate_master_version(draft["id"], reviewer="test")["id"]
+
+    created = tc.post("/api/subplans", json={
+        "master_plan_version_id": active_id,
+        "platform": "xhs",
+        "title": "API 子计划",
+        "snapshot": {"title": "API 子计划", "platform": "xhs"},
+        "stages": [{"title": "第一阶段", "direction": "AI 教育", "target_count": 2}],
+    })
+    assert created.status_code == 201, created.text
+    body = created.json()
+    sub_id = body["subplan"]["id"]
+    version_id = body["draft"]["id"]
+    assert body["draft"]["status"] == "draft"
+
+    invalid_target = tc.post("/api/subplans", json={
+        "master_plan_version_id": active_id, "platform": "xhs",
+        "title": "非法阶段目标", "stages": [{"title": "不允许为零", "target_count": 0}],
+    })
+    assert invalid_target.status_code == 422
+    platform_mutation = tc.patch(f"/api/subplans/{sub_id}", json={
+        "based_on_version_id": version_id, "expected_version_no": 1,
+        "snapshot": {"title": "错误平台", "platform": "douyin"},
+    })
+    assert platform_mutation.status_code == 422
+    missing_version = tc.post(f"/api/subplans/{sub_id}/stages", json={
+        "based_on_version_id": version_id, "stage": {"title": "缺少并发版本号"},
+    })
+    assert missing_version.status_code == 428
+    stale_version = tc.post(f"/api/subplans/{sub_id}/stages", json={
+        "based_on_version_id": version_id, "expected_version_no": 99,
+        "stage": {"title": "过期版本"},
+    })
+    assert stale_version.status_code == 409
+
+    before = tc.get(f"/api/subplans/{sub_id}/progress")
+    assert before.status_code == 200
+    assert before.json()["stages"] == []
+
+    reviewed = tc.post(f"/api/subplans/{sub_id}/review", json={
+        "version_id": version_id, "action": "approve",
+    })
+    assert reviewed.status_code == 200, reviewed.text
+    assert reviewed.json()["authorization"] == "active"
+    invalid_reorder = tc.post(f"/api/subplans/{sub_id}/stages/reorder", json={
+        "based_on_version_id": version_id, "expected_version_no": 1, "stage_ids": [True],
+    })
+    assert invalid_reorder.status_code == 422
+
+    progress = tc.get(f"/api/subplans/{sub_id}/progress")
+    assert progress.status_code == 200
+    assert progress.json()["stages"][0]["target_count"] == 2
+    assert progress.json()["stages"][0]["confirmed_published_count"] == 0
+
+    master_before = conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective'"
+    ).fetchone()[0]
+    adopted = tc.post("/api/plan_adjustments/adopt", json={"dimensions": ["AI教育"]})
+    assert adopted.status_code == 200, adopted.text
+    assert adopted.json()["requires_human_review"] is True
+    assert adopted.json()["drafts"][0]["effective"] is False
+    assert conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective'"
+    ).fetchone()[0] == master_before
+    assert conn.execute(
+        "SELECT current_version_id FROM sub_plans WHERE id=?", (sub_id,)
+    ).fetchone()[0] == version_id
+
+    invalid_round_count = tc.post(f"/api/subplans/{sub_id}/rounds", json={"topic_count": 0})
+    assert invalid_round_count.status_code == 422
+    round_response = tc.post(f"/api/subplans/{sub_id}/rounds", json={
+        "request_id": "api-first-round", "topic_count": 1,
+    })
+    assert round_response.status_code == 201, round_response.text
+    round_id = round_response.json()["round_id"]
+    row = conn.execute(
+        "SELECT sub_plan_id,sub_plan_version_id,sub_plan_stage_id,plan_attribution_status "
+        "FROM spiral_rounds WHERE id=?", (round_id,),
+    ).fetchone()
+    assert row["sub_plan_id"] == sub_id
+    assert row["sub_plan_version_id"] == version_id
+    assert row["sub_plan_stage_id"] == progress.json()["stages"][0]["id"]
+    assert row["plan_attribution_status"] == "resolved"
+
+
+def test_production_pause_is_separate_from_operations_pause(client):
+    tc, conn, _ = client
+    paused = tc.post("/api/production/pause", json={"paused": True})
+    assert paused.status_code == 200
+    assert paused.json()["paused"] is True
+    assert tc.get("/api/production/pause").json()["paused"] is True
+    ops = conn.execute("SELECT value FROM app_settings WHERE key='ops_paused'").fetchone()
+    assert ops is None or str(ops[0]).lower() not in ("1", "true", "yes", "on")
