@@ -107,8 +107,21 @@ class RoundStateMachine:
         elif target == "collecting_metrics":
             fields["collecting_metrics_started_at"] = now_str
 
-        sql = "UPDATE spiral_rounds SET " + ", ".join(f"{k} = ?" for k in fields) + " WHERE id = ?"
-        self.db.execute(sql, (*fields.values(), round_id))
+        # 比较并交换：状态和旧日志必须仍与读取时一致，防止并发迁移覆盖彼此的日志。
+        sql = (
+            "UPDATE spiral_rounds SET " + ", ".join(f"{k} = ?" for k in fields)
+            + " WHERE id = ? AND status = ? "
+            "AND COALESCE(transition_log, '') = COALESCE(?, '')"
+        )
+        cursor = self.db.execute(
+            sql, (*fields.values(), round_id, current, row[1] or ""),
+        )
+        if cursor.rowcount != 1:
+            logger.warning(
+                "轮次状态并发冲突，迁移未执行 round=%s expected=%s target=%s",
+                round_id, current, target,
+            )
+            return False
         self.db.commit()
         logger.info("🔄 轮次 %s: %s → %s (%s)", round_id, current, target, reason)
         return True
@@ -235,7 +248,17 @@ class DraftStateMachine:
 
         sets = ", ".join(f"{k} = ?" for k in update_fields)
         values = list(update_fields.values()) + [draft_id]
-        self.db.execute(f"UPDATE drafts SET {sets} WHERE id = ?", values)
+        # 条件更新保证并发迁移只有一个写入者成功，不允许旧状态覆盖新状态。
+        cursor = self.db.execute(
+            f"UPDATE drafts SET {sets} WHERE id = ? AND status = ?",
+            values + [current],
+        )
+        if cursor.rowcount != 1:
+            logger.warning(
+                "草稿状态并发冲突，迁移未执行 draft=%s expected=%s target=%s",
+                draft_id, current, target,
+            )
+            return False
         self.db.commit()
         logger.info("🔄 草稿 %s: %s → %s (%s)", draft_id, current, target, reason)
         return True
