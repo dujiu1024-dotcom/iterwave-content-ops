@@ -6,6 +6,7 @@ import pytest
 from src.core.visual_renderer import (
     THEMES,
     _document,
+    _assert_font_available,
     _validate_theme_contrast,
     render_single_page,
 )
@@ -83,3 +84,16 @@ def test_every_supported_platform_has_explicit_visual_spec():
         assert spec.width > 0 and spec.height > 0
         assert spec.output_format == "png"
         assert spec.max_pages >= 2
+
+
+def test_renderer_fails_closed_when_requested_font_resolves_to_fallback(monkeypatch):
+    from types import SimpleNamespace
+    import src.core.visual_renderer as renderer
+
+    monkeypatch.setattr(renderer.shutil, "which", lambda _name: "/usr/bin/fc-match")
+    monkeypatch.setattr(
+        renderer.subprocess, "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout="DejaVu Sans", returncode=0),
+    )
+    with pytest.raises(RuntimeError, match="视觉字体不可用"):
+        _assert_font_available("Noto Sans CJK SC")
