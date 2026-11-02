@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 
 from ..adapters.base import Platform
-from .visual_specs import get_visual_platform_spec
+from .visual_specs import build_infographic_components, get_visual_platform_spec
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +120,30 @@ def _document(*, title: str, subtitle: str, paragraphs: list[str], footer: str,
     safe_title = html.escape(title or "")
     safe_subtitle = html.escape(subtitle or "")
     safe_footer = html.escape(footer or "")
-    body = "".join(f"<p>{html.escape(p)}</p>" for p in paragraphs if p)
+    component_markup = []
+    for component in build_infographic_components(paragraphs):
+        safe_text = html.escape(component.text)
+        if component.kind == "step":
+            rest = component.text[len(component.label):].lstrip(" ：:、-")
+            component_markup.append(
+                f'<div class="visual-component visual-step"><span class="step-label">{html.escape(component.label)}</span>'
+                f'<p>{html.escape(rest or component.text)}</p></div>'
+            )
+        elif component.kind == "stat":
+            safe_value = html.escape(component.value)
+            highlighted = safe_text.replace(safe_value, f"<strong>{safe_value}</strong>", 1)
+            component_markup.append(
+                f'<div class="visual-component visual-stat"><p>{highlighted}</p></div>'
+            )
+        elif component.kind == "quote":
+            component_markup.append(
+                f'<blockquote class="visual-component visual-quote"><p>{safe_text}</p></blockquote>'
+            )
+        else:
+            component_markup.append(
+                f'<div class="visual-component visual-text"><p>{safe_text}</p></div>'
+            )
+    body = "".join(component_markup)
     overlay = (
         "rgba(8,14,24,.60),rgba(8,14,24,.68)"
         if theme == "business_poster"
