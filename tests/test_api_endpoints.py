@@ -1351,6 +1351,42 @@ def test_content_plan_start_enqueues_global_task_and_cancel_only_cancels_queued_
     ).fetchone()["status"] == "cancelled"
 
 
+def test_content_plan_start_cancels_unqueued_round_when_snapshot_admission_fails(client, tmp_path, monkeypatch):
+    tc, conn, _ = client
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    monkeypatch.setattr(api_main, "_task_queue", queue)
+
+    from src.core.task_snapshot import StaleTaskSnapshot
+
+    def reject_snapshot(*args, **kwargs):
+        raise StaleTaskSnapshot("计划执行快照已过期")
+
+    monkeypatch.setattr(api_main, "_build_task_execution_snapshot", reject_snapshot)
+    created = tc.post("/api/content-plans", json={
+        "title": "启动失败补偿计划", "scheduled_date": "2026-11-07",
+        "platforms": ["xhs"], "planned_count": 1,
+    })
+    assert created.status_code == 200
+    plan_id = created.json()["id"]
+
+    started = tc.post(f"/api/content-plans/{plan_id}/start")
+    assert started.status_code == 409
+
+    plan = conn.execute(
+        "SELECT status FROM content_plans WHERE id=?", (plan_id,),
+    ).fetchone()
+    relation = conn.execute(
+        "SELECT round_id,task_id FROM content_plan_rounds WHERE plan_id=?",
+        (plan_id,),
+    ).fetchone()
+    assert plan["status"] == "failed"
+    assert relation is not None and relation["task_id"] is None
+    assert conn.execute(
+        "SELECT status FROM spiral_rounds WHERE id=?", (relation["round_id"],),
+    ).fetchone()["status"] == "cancelled"
+    assert queue.list_page(scope="history", page=1, page_size=20)[1] == 0
+
 def test_content_plan_start_compensates_unexpected_queue_failure(client, tmp_path, monkeypatch):
     tc, conn, _ = client
     queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
