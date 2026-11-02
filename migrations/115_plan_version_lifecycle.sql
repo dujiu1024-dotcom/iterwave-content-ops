@@ -125,6 +125,11 @@ WHERE plan_signature IS NOT NULL
       WHERE v.plan_signature=spiral_rounds.plan_signature
   );
 
+-- Non-empty but unresolvable signatures are not silently guessed.
+UPDATE spiral_rounds
+SET plan_attribution_status='manual_review'
+WHERE plan_signature IS NOT NULL AND master_plan_version_id IS NULL;
+
 CREATE INDEX IF NOT EXISTS idx_round_master_plan_version
     ON spiral_rounds(master_plan_version_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_round_subplan_version
