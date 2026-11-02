@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import datetime
 from typing import Optional
 
 from .kb_sources import read_all
