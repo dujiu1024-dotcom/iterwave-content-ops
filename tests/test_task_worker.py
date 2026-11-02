@@ -1031,7 +1031,6 @@ def test_scheduler_task_run_audit_writes_use_connection_transaction_context():
     import sqlite3
     from src.core.task_worker import GlobalTaskWorker
     from src.core.timezone import DEFAULT_TIMEZONE
-    from zoneinfo import ZoneInfo
     from types import SimpleNamespace
 
     class TrackingConnection(sqlite3.Connection):
