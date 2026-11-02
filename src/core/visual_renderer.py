@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import html
 import logging
+import re
 import uuid
 from pathlib import Path
 
@@ -114,6 +115,9 @@ def _document(*, title: str, subtitle: str, paragraphs: list[str], footer: str,
               background_data_uri: str = "", palette_override: dict | None = None,
               font_family: str = "Noto Sans CJK SC") -> str:
     overrides = palette_override or {}
+    for color_key in ("bg", "fg", "accent", "muted"):
+        if color_key in overrides and not re.fullmatch(r"#[0-9A-Fa-f]{6}", str(overrides[color_key])):
+            raise ValueError(f"品牌配色 {color_key} 必须为 #RRGGBB")
     component_style = str(overrides.get("component_style") or "card")
     if component_style not in {"card", "minimal", "editorial"}:
         raise ValueError("不支持的组件样式")
