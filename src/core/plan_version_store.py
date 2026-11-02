@@ -378,6 +378,12 @@ class PlanVersionStore:
         if master is None:
             raise PlanVersionError("轮次绑定的主计划版本不存在")
 
+        existing_round = self.conn.execute(
+            """SELECT master_plan_version_id,sub_plan_id,sub_plan_version_id,sub_plan_stage_id
+               FROM spiral_rounds WHERE id=?""", (round_id,)
+        ).fetchone()
+        if existing_round is None:
+            raise PlanVersionError("轮次不存在")
         sub_snapshot = stage_snapshot = None
         if any(value is not None for value in (sub_plan_id, sub_plan_version_id, sub_plan_stage_id)):
             if not all(value is not None for value in (sub_plan_id, sub_plan_version_id, sub_plan_stage_id)):
@@ -402,6 +408,10 @@ class PlanVersionStore:
             sub_snapshot = version["snapshot_json"]
             stage_snapshot = json.dumps(dict(stage), ensure_ascii=False, sort_keys=True)
 
+        desired_binding = (master_plan_version_id, sub_plan_id, sub_plan_version_id, sub_plan_stage_id)
+        existing_binding = tuple(existing_round)
+        if any(value is not None for value in existing_binding) and existing_binding != desired_binding:
+            raise PlanVersionError("轮次版本归属不可覆盖；历史轮次必须保留原始绑定")
         cur = self.conn.execute(
             """UPDATE spiral_rounds SET master_plan_version_id=?,sub_plan_id=?,
                    sub_plan_version_id=?,sub_plan_stage_id=?,sub_plan_snapshot=?,
@@ -484,6 +494,85 @@ class PlanVersionStore:
                 )
             self.conn.commit()
             return {"acquired": True, "status": "reserved", "round_id": None, "lease_until": lease_until}
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def create_round_once(
+        self,
+        idempotency_key: str,
+        *,
+        goal_id: Optional[str] = None,
+        round_number: Optional[int] = None,
+        topic_ids: Optional[list[str]] = None,
+        content_variants: Optional[list[dict[str, Any]]] = None,
+    ) -> dict[str, Any]:
+        """Atomically create, bind and complete one leased round.
+
+        A crash before commit leaves no round; a crash after commit can safely retry
+        and receives the already-created round_id from the durable idempotency row.
+        """
+        now = _now()
+        self._begin()
+        try:
+            lock = self.conn.execute(
+                "SELECT * FROM round_open_idempotency WHERE idempotency_key=?",
+                (idempotency_key,),
+            ).fetchone()
+            if lock is None:
+                raise PlanVersionError("自动开轮租约不存在")
+            if lock["status"] == "created":
+                self.conn.commit()
+                return {"status": "created", "round_id": lock["round_id"], "deduped": True}
+            if lock["status"] != "reserved" or not lock["lease_until"] or lock["lease_until"] <= now:
+                raise PlanVersionError("自动开轮租约已失效")
+            version = self.conn.execute(
+                """SELECT v.snapshot_json,v.master_plan_version_id,v.sub_plan_id,
+                          p.status AS subplan_status,m.plan_signature,m.status AS master_status
+                   FROM sub_plan_versions v
+                   JOIN sub_plans p ON p.id=v.sub_plan_id
+                   JOIN master_plan_versions m ON m.id=v.master_plan_version_id
+                   WHERE v.id=? AND v.sub_plan_id=?""",
+                (lock["sub_plan_version_id"], lock["sub_plan_id"]),
+            ).fetchone()
+            stage = self.conn.execute(
+                """SELECT * FROM sub_plan_stages
+                   WHERE id=? AND sub_plan_version_id=?""",
+                (lock["sub_plan_stage_id"], lock["sub_plan_version_id"]),
+            ).fetchone()
+            if (version is None or stage is None
+                    or version["master_plan_version_id"] != lock["master_plan_version_id"]
+                    or version["master_status"] != "effective"
+                    or version["subplan_status"] != "active"
+                    or stage["status"] not in ("pending", "in_progress")):
+                raise PlanVersionError("自动开轮的主计划/子计划/阶段授权已失效")
+            if round_number is None:
+                round_number = int(self.conn.execute(
+                    "SELECT COALESCE(MAX(round_number),0)+1 FROM spiral_rounds"
+                ).fetchone()[0])
+            stage_snapshot = json.dumps(dict(stage), ensure_ascii=False, sort_keys=True)
+            topics_json = json.dumps(topic_ids or [], ensure_ascii=False)
+            variants_json = json.dumps(content_variants or [], ensure_ascii=False)
+            cur = self.conn.execute(
+                """INSERT INTO spiral_rounds(
+                    goal_id,round_number,status,topic_ids,content_variants,
+                    master_plan_version_id,sub_plan_id,sub_plan_version_id,sub_plan_stage_id,
+                    sub_plan_snapshot,sub_plan_stage_snapshot,plan_signature,plan_attribution_status
+                ) VALUES(?,?,'created',?,?,?,?,?,?,?,?,?,'resolved')""",
+                (goal_id, round_number, topics_json, variants_json,
+                 lock["master_plan_version_id"], lock["sub_plan_id"],
+                 lock["sub_plan_version_id"], lock["sub_plan_stage_id"],
+                 version["snapshot_json"], stage_snapshot, version["plan_signature"]),
+            )
+            round_id = int(cur.lastrowid)
+            self.conn.execute(
+                """UPDATE round_open_idempotency
+                   SET status='created',round_id=?,lease_until=NULL,updated_at=?
+                   WHERE idempotency_key=? AND status='reserved'""",
+                (round_id, now, idempotency_key),
+            )
+            self.conn.commit()
+            return {"status": "created", "round_id": round_id, "deduped": False}
         except Exception:
             self.conn.rollback()
             raise
