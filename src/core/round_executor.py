@@ -1036,15 +1036,19 @@ class RoundExecutor:
                         draft_id=row["draft_id"], round_id=round_id,
                     )
             elif result.needs_human_verify:
-                # —— R17 / P0-3 新增：按钮点了但无成功证据，需人工核实 ——
+                # 平台保存结果不确定不是失败：保留可恢复状态，禁止自动重试以免重复建草稿。
+                verify_updates = {
+                    "error_msg": result.error_msg or "needs_human_verify",
+                }
+                if result.platform_draft_id:
+                    verify_updates["draft_id"] = result.platform_draft_id
                 self.sm_draft.transition(
-                    row["draft_id"], "failed",
+                    row["draft_id"], "pending_verify",
                     reason="needs_human_verify: 存草稿后未检测到平台成功信号",
-                    extra_updates={"error_msg": result.error_msg or "needs_human_verify"},
+                    extra_updates=verify_updates,
                 )
                 report.setdefault("drafts_needs_human_verify", 0)
                 report["drafts_needs_human_verify"] += 1
-                report["drafts_failed"] += 1
                 logger.warning(
                     "存草稿 needs_human_verify platform=%s draft=%s draft_id_missing=%s",
                     platform.value, row["draft_id"], result.platform_draft_id_missing,
