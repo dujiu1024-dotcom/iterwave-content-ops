@@ -1,7 +1,7 @@
 """全局任务队列消费者。
 
 消费者独立于前台活动账号组。每个任务按自身 tenant_id 构造运行时，并在异步上下文中
-绑定对应登录态目录。生产轮次与账号组定时作业统一由全局单消费者执行。
+绑定对应登录态目录。生产轮次与账号组定时作业由多个消费者跨账号组并行执行，同一账号组保持串行。
 """
 from __future__ import annotations
 
@@ -40,6 +40,7 @@ class GlobalTaskWorker:
         lease_seconds: int = 90,
         heartbeat_seconds: float = 20,
         shutdown_grace_seconds: float | None = None,
+        reconcile_terminal_rounds: bool = True,
     ):
         self.queue = queue
         self.build_tenant_context = build_tenant_context
@@ -52,17 +53,21 @@ class GlobalTaskWorker:
             except (TypeError, ValueError):
                 shutdown_grace_seconds = 30.0
         self.shutdown_grace_seconds = max(0.0, min(float(shutdown_grace_seconds), 300.0))
+        self.reconcile_terminal_rounds = bool(reconcile_terminal_rounds)
         self.owner = uuid.uuid4().hex
         self._reconciled_interrupted_task_ids: set[str] = set()
 
     async def run(self, stop_event: asyncio.Event) -> None:
         logger.info("全局任务消费者启动 worker=%s", self.owner[:8])
-        self._sync_terminal_rounds()
+        if self.reconcile_terminal_rounds:
+            self._sync_terminal_rounds()
         try:
             while not stop_event.is_set():
                 try:
-                    self.queue.recover_expired()
-                    self._sync_terminal_rounds()
+                    recovered = self.queue.recover_expired()
+                    # 哪个 worker 回收了过期任务，哪个 worker 就负责对账。
+                    if recovered.get("interrupted", 0):
+                        self._sync_terminal_rounds()
                     task = self.queue.claim_next(self.owner, lease_seconds=self.lease_seconds)
                 except Exception:
                     logger.exception("全局任务队列读取失败")
