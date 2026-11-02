@@ -305,20 +305,20 @@ class SchedulerEngine:
         now = confirmed_at or business_now(self.cfg)
         # 原子条件更新：并发的手动确认与平台轮询只能有一个调用赢得状态迁移，
         # 只有赢家才注册一次性采集任务，避免两个请求都读到 draft_saved 后重复排程。
-        cur = self.conn.execute(
-            "UPDATE drafts SET status='user_published', user_confirmed_at=? "
-            "WHERE id=? AND status IN ('draft_saved', 'draft_pending')",
-            (now.isoformat(), draft_id),
-        )
-        if cur.rowcount != 1:
-            return False
-        self.conn.commit()
-        if note_url:
-            self.conn.execute(
-                "UPDATE drafts SET platform_note_url = COALESCE(platform_note_url, ?) WHERE id = ?",
-                (note_url, draft_id),
+        with self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            cur = self.conn.execute(
+                "UPDATE drafts SET status='user_published', user_confirmed_at=? "
+                "WHERE id=? AND status IN ('draft_saved', 'draft_pending')",
+                (now.isoformat(), draft_id),
             )
-            self.conn.commit()
+            if cur.rowcount != 1:
+                return False
+            if note_url:
+                self.conn.execute(
+                    "UPDATE drafts SET platform_note_url = COALESCE(platform_note_url, ?) WHERE id = ?",
+                    (note_url, draft_id),
+                )
         delay = self.cfg.timeouts.metrics_initial_delay_hours
         self.schedule_data_fetch(draft_id, now + timedelta(hours=delay))
         row = self.conn.execute(
