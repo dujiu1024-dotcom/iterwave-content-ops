@@ -18,6 +18,7 @@ SQLite 连接管理 + schema 迁移。
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import shutil
 import sqlite3
@@ -102,9 +103,22 @@ class Database:
         # 不能用 MAX(version) 推断所有较小版本都已执行：并行分支晚合入的
         # 低编号迁移必须仍能执行。以 schema_version 中的实际记录为准。
         applied_versions = self._get_applied_versions()
-        pending = [m for m in migrations if m.version not in applied_versions]
+        # 相同 SQL 内容只执行一次。历史上 027/030 存在逐字重复迁移，
+        # 若只补齐缺失版本号，重复执行可能再次 ALTER/CREATE 并导致启动失败。
+        seen_checksums: set[str] = set()
+        pending: list[Migration] = []
+        duplicate_aliases: list[Migration] = []
+        for migration in migrations:
+            checksum = hashlib.sha256(migration.path.read_bytes()).hexdigest()
+            if migration.version in applied_versions:
+                seen_checksums.add(checksum)
+            elif checksum in seen_checksums:
+                duplicate_aliases.append(migration)
+            else:
+                pending.append(migration)
+                seen_checksums.add(checksum)
 
-        if not pending:
+        if not pending and not duplicate_aliases:
             logger.info("数据库已对齐最新 schema，无需迁移")
             return
 
@@ -120,7 +134,14 @@ class Database:
                     self._preflight_platform_account_singleton(conn)
                 self._run_migration(conn, mig)
 
-            logger.info("数据库迁移完成，最新版本 = %d", pending[-1].version)
+            for alias in duplicate_aliases:
+                self._record_migration_alias(conn, alias)
+
+            latest_version = max(
+                [migration.version for migration in pending + duplicate_aliases],
+                default=current_version,
+            )
+            logger.info("数据库迁移完成，最新版本 = %d", latest_version)
         except Exception:
             logger.exception("数据库迁移失败")
             conn.rollback()
@@ -147,6 +168,22 @@ class Database:
             return int(row[0]) if row else 0
         finally:
             conn.close()
+
+    @staticmethod
+    def _record_migration_alias(conn: sqlite3.Connection, mig: "Migration") -> None:
+        """为内容完全重复的迁移登记版本号，但不重复执行 SQL。"""
+        description = f"{mig.name} (duplicate migration content; already applied)"
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_version (version, description) VALUES (?, ?)",
+                (int(mig.version), description),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        logger.info("迁移 %d 内容与已执行迁移相同，仅登记版本号", mig.version)
 
     def _get_applied_versions(self) -> set[int]:
         """读取实际已登记的迁移版本，避免较小编号的晚合入迁移被静默跳过。"""
