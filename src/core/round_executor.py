@@ -892,7 +892,10 @@ class RoundExecutor:
         font = profile.get("font_family")
         if font not in fonts:
             font = "Noto Sans CJK SC"
-        return {"theme": style, "brand_palette": {**colors, "component_style": profile.get("component_style", "card")}, "font_family": font}
+        component_style = profile.get("component_style", "card")
+        if component_style not in {"card", "minimal", "editorial"}:
+            component_style = "card"
+        return {"theme": style, "brand_palette": {**colors, "component_style": component_style}, "font_family": font}
 
     async def _produce_contents(
         self, round_id: int, scored: list, platforms: list[Platform], report: dict,
