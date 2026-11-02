@@ -393,7 +393,8 @@ class PlanVersionStore:
                    JOIN sub_plans p ON p.id=v.sub_plan_id
                    JOIN master_plan_versions m ON m.id=v.master_plan_version_id
                    WHERE v.id=? AND v.sub_plan_id=? AND v.master_plan_version_id=?
-                     AND v.status='effective' AND p.status='active' AND m.status='effective'""",
+                     AND v.status='effective' AND p.status='active'
+                     AND p.current_version_id=v.id AND m.status='effective'""",
                 (sub_plan_version_id, sub_plan_id, master_plan_version_id),
             ).fetchone()
             if version is None:
@@ -446,7 +447,8 @@ class PlanVersionStore:
                JOIN sub_plans p ON p.id=v.sub_plan_id
                JOIN master_plan_versions m ON m.id=v.master_plan_version_id
                WHERE v.id=? AND v.sub_plan_id=? AND v.master_plan_version_id=?
-                 AND v.status='effective' AND p.status='active' AND m.status='effective'""",
+                 AND v.status='effective' AND p.status='active'
+                 AND p.current_version_id=v.id AND m.status='effective'""",
             (sub_plan_version_id, sub_plan_id, master_plan_version_id),
         ).fetchone()
         stage = self.conn.execute(
@@ -532,7 +534,8 @@ class PlanVersionStore:
                    FROM sub_plan_versions v
                    JOIN sub_plans p ON p.id=v.sub_plan_id
                    JOIN master_plan_versions m ON m.id=v.master_plan_version_id
-                   WHERE v.id=? AND v.sub_plan_id=?""",
+                   WHERE v.id=? AND v.sub_plan_id=? AND v.status='effective'
+                     AND p.current_version_id=v.id""",
                 (lock["sub_plan_version_id"], lock["sub_plan_id"]),
             ).fetchone()
             stage = self.conn.execute(
