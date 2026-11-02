@@ -272,10 +272,18 @@ def test_plan_versions_are_isolated_by_tenant_database_file(tmp_path):
     a = store_a.create_master_draft(_plan(5), author="tenant-a")
     b = store_b.create_master_draft(_plan(9), author="tenant-b")
     assert a["id"] == b["id"]  # local integer IDs may overlap safely
+    store_a.activate_master_version(a["id"], reviewer="tenant-a")
+    store_b.activate_master_version(b["id"], reviewer="tenant-b")
+    store_a.create_subplan("same-local-id", master_plan_version_id=a["id"],
+                           platform="xhs", title="Tenant A 子计划")
+    store_b.create_subplan("same-local-id", master_plan_version_id=b["id"],
+                           platform="xhs", title="Tenant B 子计划")
     assert store_a.list_master_versions()[0]["created_by"] == "tenant-a"
     assert store_b.list_master_versions()[0]["created_by"] == "tenant-b"
     assert json.loads(store_a.list_master_versions()[0]["plan_snapshot"])["topic_count_per_platform"] == 5
     assert json.loads(store_b.list_master_versions()[0]["plan_snapshot"])["topic_count_per_platform"] == 9
+    assert store_a.conn.execute("SELECT title FROM sub_plans").fetchone()[0] == "Tenant A 子计划"
+    assert store_b.conn.execute("SELECT title FROM sub_plans").fetchone()[0] == "Tenant B 子计划"
     tenant_a.close()
     tenant_b.close()
 
