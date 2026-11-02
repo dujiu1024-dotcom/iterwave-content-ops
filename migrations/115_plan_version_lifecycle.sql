@@ -60,11 +60,16 @@ WHERE ps.id=1
         AND v.plan_snapshot=ps.plan_snapshot
   );
 
+-- Recompute the one current version from the exact legacy settings snapshot.
+UPDATE master_plan_versions SET status='archived';
 UPDATE master_plan_versions
 SET status='effective', effective_at=COALESCE(effective_at,created_at)
 WHERE id=(
     SELECT v.id FROM master_plan_versions v
-    JOIN plan_settings ps ON ps.id=1 AND ps.plan_signature=v.plan_signature
+    JOIN plan_settings ps
+      ON ps.id=1
+     AND ps.plan_signature=v.plan_signature
+     AND ps.plan_snapshot=v.plan_snapshot
     ORDER BY v.version_no DESC LIMIT 1
 );
 
