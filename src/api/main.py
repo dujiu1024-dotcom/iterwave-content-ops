@@ -5089,16 +5089,17 @@ def _register_routes(app: FastAPI) -> None:
         conn = _g()["conn"]
         row = conn.execute(
             "SELECT d.status, d.platform, d.content_id, c.round_id, c.title, c.body, "
-            "c.tags, c.image_paths FROM drafts d JOIN contents c ON c.id=d.content_id "
-            "WHERE d.id=?",
+            "c.tags, c.image_paths, v.status AS verification_status, "
+            "v.platform_draft_id FROM drafts d JOIN contents c ON c.id=d.content_id "
+            "LEFT JOIN draft_save_verifications v ON v.draft_id=d.id WHERE d.id=?",
             (draft_id,),
         ).fetchone()
         if row is None:
             raise HTTPException(404, f"草稿 {draft_id} 不存在")
-        if row["status"] != "pending_verify":
-            if saved and row["status"] == "draft_saved":
+        if row["verification_status"] != "pending_verify":
+            if saved and row["status"] == "draft_saved" and row["verification_status"] == "verified_saved":
                 return {"draft_id": draft_id, "status": "draft_saved", "already_verified": True}
-            raise HTTPException(409, f"草稿当前状态为 {row['status']}，不是待核实状态")
+            raise HTTPException(409, f"草稿核实状态为 {row['verification_status'] or 'none'}，不是待核实状态")
 
         if saved:
             from src.core.content_version import content_version_hash, parse_json_list
@@ -5107,23 +5108,34 @@ def _register_routes(app: FastAPI) -> None:
             saved_hash = content_version_hash(
                 row["title"], row["body"], parse_json_list(row["tags"]), payload_images,
             )
+            if not _g()["sm_draft"].transition(
+                draft_id, "draft_saved",
+                reason=f"人工核实平台存草稿结果：已保存；{note}",
+                extra_updates={
+                    "draft_id": row["platform_draft_id"],
+                    "saved_content_hash": saved_hash,
+                    "saved_platform_title": row["title"],
+                    "error_msg": None,
+                },
+            ):
+                raise HTTPException(409, "草稿状态更新失败，请刷新后重试")
             target = "draft_saved"
-            extra_updates = {
-                "saved_content_hash": saved_hash,
-                "saved_platform_title": row["title"],
-                "error_msg": None,
-            }
+            verification_status = "verified_saved"
         else:
+            conn.execute(
+                "UPDATE drafts SET draft_id=NULL, error_msg=NULL WHERE id=? AND status='draft_pending'",
+                (draft_id,),
+            )
             target = "draft_pending"
-            extra_updates = {"draft_id": None, "error_msg": None}
+            verification_status = "verified_missing"
 
-        if not _g()["sm_draft"].transition(
-            draft_id, target,
-            reason=f"人工核实平台存草稿结果：{'已保存' if saved else '未保存'}；{note}",
-            extra_updates=extra_updates,
-        ):
-            raise HTTPException(409, "草稿核实状态更新失败，请刷新后重试")
-
+        conn.execute(
+            "UPDATE draft_save_verifications SET status=?, verified_at=?, note=? WHERE draft_id=? AND status='pending_verify'",
+            (
+                verification_status, _now().strftime("%Y-%m-%d %H:%M:%S"),
+                note, draft_id,
+            ),
+        )
         conn.execute(
             "INSERT INTO user_override (round_id, override_field, original_value, "
             "override_value, reason, overridden_by, overridden_at) "
@@ -5823,7 +5835,8 @@ def _register_routes(app: FastAPI) -> None:
             row = _content_row(conn, content_id)
             _ensure_content_round_idle(row, "编辑内容")
             pending_verify = conn.execute(
-                "SELECT 1 FROM drafts WHERE content_id = ? AND status = 'pending_verify' LIMIT 1",
+                "SELECT 1 FROM draft_save_verifications v JOIN drafts d ON d.id=v.draft_id "
+                "WHERE d.content_id = ? AND v.status = 'pending_verify' LIMIT 1",
                 (content_id,),
             ).fetchone()
             if pending_verify:
