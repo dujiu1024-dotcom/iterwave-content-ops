@@ -53,6 +53,8 @@ import httpx
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.routing import APIRoute
+import inspect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -98,6 +100,37 @@ from src.adapters.base import Platform
 from src.adapters import get_adapters
 
 logger = logging.getLogger(__name__)
+
+
+class TransactionalAPIRoute(APIRoute):
+    """为同步写 API 提供请求级事务边界，异常时自动回滚并释放连接锁。
+
+    认证端点不依赖租户数据库，异步端点因可能跨线程 await 而单独审查，
+    不在此处自动包裹。
+    """
+
+    def __init__(self, path: str, endpoint, **kwargs):
+        methods = {str(method).upper() for method in (kwargs.get("methods") or [])}
+        if (
+            methods.intersection({"POST", "PUT", "PATCH", "DELETE"})
+            and not path.startswith("/api/auth/")
+            and not inspect.iscoroutinefunction(endpoint)
+        ):
+            original = endpoint
+
+            def transactional_endpoint(*args, **call_kwargs):
+                conn = _g_ctx.get("conn")
+                if conn is None:
+                    return original(*args, **call_kwargs)
+                with conn:
+                    return original(*args, **call_kwargs)
+
+            transactional_endpoint.__name__ = getattr(original, "__name__", "transactional_endpoint")
+            transactional_endpoint.__doc__ = getattr(original, "__doc__", None)
+            transactional_endpoint.__annotations__ = getattr(original, "__annotations__", {})
+            transactional_endpoint.__signature__ = inspect.signature(original)
+            endpoint = transactional_endpoint
+        super().__init__(path, endpoint, **kwargs)
 
 # =====================================================================
 # 全局单例（启动时初始化一次）
@@ -862,6 +895,8 @@ def _build_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+    # 所有同步写 API 在同一线程内持有事务锁；异常离开路由时由连接上下文自动回滚。
+    app.router.route_class = TransactionalAPIRoute
     _register_routes(app)
 
     @app.exception_handler(RequestValidationError)
