@@ -178,12 +178,12 @@ class GlobalTaskWorker:
                                 template_data=task.payload.get("template_snapshot"),
                             )
                         except asyncio.CancelledError:
-                            self._mark_content_plan_failed(context["conn"], round_id)
+                            self._mark_content_plan_failed(context["conn"], round_id, cfg=context["cfg"])
                             raise
                         except Exception:
-                            self._mark_content_plan_failed(context["conn"], round_id)
+                            self._mark_content_plan_failed(context["conn"], round_id, cfg=context["cfg"])
                             raise
-                        self._complete_content_plan(context["conn"], round_id, report)
+                        self._complete_content_plan(context["conn"], round_id, report, cfg=context["cfg"])
                         return report
                     raise ValueError(f"不支持的轮次任务操作：{operation}")
 
@@ -317,7 +317,7 @@ class GlobalTaskWorker:
         try:
             conn = context.get("conn")
             self._mark_round_failed(conn, round_id, reason, cfg=context.get("cfg"))
-            self._mark_content_plan_failed(conn, round_id)
+            self._mark_content_plan_failed(conn, round_id, cfg=context.get("cfg"))
             reconciled = True
         except Exception:
             logger.exception(
@@ -340,7 +340,7 @@ class GlobalTaskWorker:
         return reconciled
 
     @staticmethod
-    def _mark_content_plan_failed(conn, round_id: int) -> None:
+    def _mark_content_plan_failed(conn, round_id: int, cfg=None) -> None:
         """生产异常时将关联计划标记失败，允许用户修复后重试。"""
         if conn is None or not callable(getattr(conn, "execute", None)):
             return
@@ -351,14 +351,15 @@ class GlobalTaskWorker:
             ).fetchone()
             if relation is None:
                 return
+            from src.core.timezone import business_now
             conn.execute(
                 "UPDATE content_plans SET status='failed',version=version+1,updated_at=? "
                 "WHERE id=? AND status='generating'",
-                (datetime.now().astimezone().isoformat(timespec="seconds"), relation["plan_id"]),
+                (business_now(cfg).isoformat(timespec="seconds"), relation["plan_id"]),
             )
 
     @staticmethod
-    def _complete_content_plan(conn, round_id: int, report: Any) -> None:
+    def _complete_content_plan(conn, round_id: int, report: Any, cfg=None) -> None:
         """生产完成后把轮次产出的草稿关联回计划，并推进计划状态。"""
         if conn is None or not callable(getattr(conn, "execute", None)):
             return
@@ -370,7 +371,8 @@ class GlobalTaskWorker:
             if relation is None:
                 return
             plan_id = relation["plan_id"]
-            now = datetime.now().astimezone().isoformat(timespec="seconds")
+            from src.core.timezone import business_now
+            now = business_now(cfg).isoformat(timespec="seconds")
             drafts = conn.execute(
                 "SELECT d.id FROM drafts d JOIN contents c ON c.id=d.content_id WHERE c.round_id=?",
                 (round_id,),
