@@ -48,6 +48,31 @@ def client(cfg, conn, seed, test_auth):
 
 
 # ---------------------------------------------------------------- R-2 采纳缺口
+def test_auth_middleware_runs_password_verification_off_event_loop(client, monkeypatch):
+    tc, _, _ = client
+    observed = {}
+    original_to_thread = asyncio.to_thread
+
+    def fake_is_authenticated(cookie_token, headers, ip=None):
+        observed["worker_thread"] = threading.get_ident()
+        return True
+
+    async def recording_to_thread(func, *args, **kwargs):
+        caller_thread = threading.get_ident()
+        result = await original_to_thread(func, *args, **kwargs)
+        observed["event_loop_thread"] = caller_thread
+        return result
+
+    monkeypatch.setattr(api_main.auth, "password_configured", lambda: True)
+    monkeypatch.setattr(api_main.auth, "is_trusted_local_setup", lambda request: False)
+    monkeypatch.setattr(api_main.auth, "is_rate_limited", lambda ip: False)
+    monkeypatch.setattr(api_main.auth, "is_authenticated", fake_is_authenticated)
+    monkeypatch.setattr(api_main.asyncio, "to_thread", recording_to_thread)
+
+    response = tc.get("/api/ops/pause")
+    assert response.status_code == 200
+    assert observed["worker_thread"] != observed["event_loop_thread"]
+
 def test_activation_samples_reject_second_active_run_and_replay_idempotently(client, monkeypatch):
     tc, conn, _ = client
     from src.core import content_pipeline
