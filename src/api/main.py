@@ -397,7 +397,7 @@ def _build_tenant_runtime_context(
         sm_draft = DraftStateMachine(conn, cfg=cfg)
         scoring = ScoringEngine(cfg, conn)
         guard = UltimateGoalChecker(cfg)
-        normalizer = Normalizer(conn)
+        normalizer = Normalizer(conn, cfg)
         spiral = SpiralEngine(cfg, conn)
         scheduler = SchedulerEngine(cfg, cfg.resolve_path(cfg.paths.db_file))
         ops = OperationsEngine(cfg, conn, adapters, cb, rhythm)
