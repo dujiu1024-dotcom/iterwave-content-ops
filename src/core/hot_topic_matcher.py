@@ -29,6 +29,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from .timezone import business_now
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -245,7 +246,7 @@ class HotTopicMatcher:
             "match_method=?, match_version=?, matched_at=?, forbidden_hit=? WHERE id=?",
             (res.get("score"), res.get("dimension") or None, res.get("angle") or None,
              res.get("reason") or None, method, self.version,
-             datetime.now().isoformat(timespec="seconds"),
+             business_now(self.cfg).isoformat(timespec="seconds"),
              1 if res.get("forbidden") else 0, row["id"]),
         )
 
