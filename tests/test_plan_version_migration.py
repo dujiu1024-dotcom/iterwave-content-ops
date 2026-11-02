@@ -36,6 +36,8 @@ def _legacy_db():
         CREATE TABLE drafts(id TEXT PRIMARY KEY, content_id TEXT, user_confirmed_at TEXT);
         INSERT INTO signature_history(plan_signature,plan_snapshot,round_id,created_at,author)
         VALUES('sig-a','{"topic_count_per_platform":5,"dimension_allocation":{"AI教育":5},"enabled_platforms":["xhs"],"content_format":"image_text"}',1,'2026-01-01','legacy');
+        INSERT INTO signature_history(plan_signature,plan_snapshot,round_id,created_at,author)
+        VALUES('sig-a','{"topic_count_per_platform":5,"dimension_allocation":{"AI教育":5},"enabled_platforms":["xhs"],"content_format":"image_text"}',NULL,'2026-01-02','legacy-repeat');
         INSERT INTO plan_settings(id,plan_snapshot,plan_signature,updated_at,updated_by)
         VALUES(1,'{"topic_count_per_platform":5,"dimension_allocation":{"AI教育":5},"enabled_platforms":["xhs"],"content_format":"image_text"}','sig-a','2026-01-01','legacy');
         INSERT INTO spiral_rounds(id,round_number,status,plan_signature,created_at)
@@ -56,16 +58,19 @@ def test_migration_restores_history_and_marks_missing_round_signature_pending():
     restored = conn.execute(
         "SELECT plan_signature,status,legacy_history_id FROM master_plan_versions"
     ).fetchall()
-    assert len(restored) == 1
-    assert restored[0]["plan_signature"] == "sig-a"
-    assert restored[0]["status"] == "effective"
-    assert restored[0]["legacy_history_id"] == 1
+    assert len(restored) == 2
+    assert {row["legacy_history_id"] for row in restored} == {1, 2}
+    assert {row["status"] for row in restored} == {"archived", "effective"}
+    assert all(row["plan_signature"] == "sig-a" for row in restored)
 
     round_one = conn.execute(
         "SELECT master_plan_version_id,plan_attribution_status FROM spiral_rounds WHERE id=1"
     ).fetchone()
-    assert round_one["master_plan_version_id"] is not None
+    assert round_one["master_plan_version_id"] == 1
     assert round_one["plan_attribution_status"] == "resolved"
+    assert conn.execute(
+        "SELECT active_version_id FROM plan_settings WHERE id=1"
+    ).fetchone()[0] == 2
     round_two = conn.execute(
         "SELECT master_plan_version_id,plan_attribution_status FROM spiral_rounds WHERE id=2"
     ).fetchone()
@@ -88,7 +93,7 @@ def test_migration_is_safe_to_reapply_with_column_skipper():
     conn.executescript("BEGIN IMMEDIATE;\n" + first + "\nCOMMIT;")
     second = Database._skip_existing_columns(conn, migration_sql)
     conn.executescript("BEGIN IMMEDIATE;\n" + second + "\nCOMMIT;")
-    assert conn.execute("SELECT COUNT(*) FROM master_plan_versions").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM master_plan_versions").fetchone()[0] == 2
     assert conn.execute("SELECT COUNT(*) FROM sub_plans").fetchone()[0] == 0
     conn.close()
 
