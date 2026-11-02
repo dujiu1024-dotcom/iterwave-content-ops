@@ -661,12 +661,28 @@ class PlanVersionStore:
                 AND v.master_plan_version_id=r.master_plan_version_id
                LEFT JOIN sub_plan_stages s
                  ON s.id=r.sub_plan_stage_id AND s.sub_plan_version_id=r.sub_plan_version_id
-               WHERE r.sub_plan_id IS NOT NULL
-                 AND (v.id IS NULL OR s.id IS NULL)"""
+               WHERE (r.sub_plan_id IS NULL AND
+                      (r.sub_plan_version_id IS NOT NULL OR r.sub_plan_stage_id IS NOT NULL))
+                  OR (r.sub_plan_id IS NOT NULL AND
+                      (v.id IS NULL OR s.id IS NULL OR r.sub_plan_snapshot IS NULL
+                       OR r.sub_plan_stage_snapshot IS NULL))"""
         ).fetchall()
         if bad_subplan_links:
             issues.append({"code": "round_subplan_stage_mismatch",
                            "round_ids": [int(r["id"]) for r in bad_subplan_links]})
+
+        bad_subplan_pointers = self.conn.execute(
+            """SELECT p.id FROM sub_plans p
+               LEFT JOIN sub_plan_versions v ON v.id=p.current_version_id
+               WHERE p.status='active'
+                 AND (v.id IS NULL OR v.sub_plan_id!=p.id OR v.status!='effective'
+                      OR v.master_plan_version_id!=p.master_plan_version_id)"""
+        ).fetchall()
+        if bad_subplan_pointers:
+            issues.append({
+                "code": "subplan_current_version_mismatch",
+                "sub_plan_ids": [r["id"] for r in bad_subplan_pointers],
+            })
 
         pending = self.conn.execute(
             """SELECT id FROM spiral_rounds
