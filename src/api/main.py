@@ -4827,18 +4827,37 @@ def _register_routes(app: FastAPI) -> None:
             queued = await run_round(round_id, RunRoundRequest(
                 topic_count=int(plan["planned_count"]), platforms=platforms, save_drafts=True,
             ))
-        except HTTPException:
+        except Exception as exc:
+            # 入队失败时 Worker 尚未开始执行；计划和未启动轮次必须一起补偿。
+            try:
+                from src.core.timezone import business_now
+                with conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute(
+                        "UPDATE content_plans SET status='failed',version=version+1,updated_at=? "
+                        "WHERE id=? AND status='generating'",
+                        (business_now(_g()["cfg"]).isoformat(timespec="seconds"), plan_id),
+                    )
+                    conn.execute(
+                        "UPDATE spiral_rounds SET status='cancelled' "
+                        "WHERE id=? AND status='created'",
+                        (round_id,),
+                    )
+            except Exception as compensation_error:
+                logger.exception(
+                    "内容计划启动失败后的轮次补偿失败 plan_id=%s round_id=%s",
+                    plan_id, round_id,
+                )
+                raise HTTPException(503, "计划启动失败，且状态补偿未完成，请检查计划和轮次状态") from compensation_error
+            if isinstance(exc, HTTPException):
+                raise
+            logger.exception("内容计划加入全局队列失败 plan_id=%s round_id=%s", plan_id, round_id)
+            raise HTTPException(503, "计划加入生产队列失败，已回滚本次启动状态") from exc
+        with conn:
             conn.execute(
-                "UPDATE content_plans SET status='failed',version=version+1,updated_at=? WHERE id=? AND status='generating'",
-                (_now().isoformat(timespec="seconds"), plan_id),
+                "UPDATE content_plan_rounds SET task_id=? WHERE plan_id=? AND round_id=?",
+                (queued["task_id"], plan_id, round_id),
             )
-            conn.commit()
-            raise
-        conn.execute(
-            "UPDATE content_plan_rounds SET task_id=? WHERE plan_id=? AND round_id=?",
-            (queued["task_id"], plan_id, round_id),
-        )
-        conn.commit()
         return {"plan_id": plan_id, "round_id": round_id, "task_id": queued["task_id"],
                 "status": queued["status"], "queued": queued["queued"]}
 
