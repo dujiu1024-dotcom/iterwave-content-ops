@@ -27,6 +27,7 @@ import json
 import logging
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from .config import PROJECT_ROOT
@@ -850,7 +851,48 @@ class RoundExecutor:
 
     def _card_footer(self, platform: Platform) -> str:
         from .content_pipeline import card_footer
-        return card_footer(self.cfg, platform)
+        from .task_context import current_config
+        base = card_footer(self.cfg, platform)
+        profile = self._visual_brand_profile()
+        configured = " · ".join(
+            str(profile.get(key) or "").strip() for key in ("brand_name", "footer")
+            if str(profile.get(key) or "").strip()
+        )
+        return " · ".join(item for item in (base, configured) if item)
+
+    def _visual_brand_profile(self) -> dict:
+        tenant_id = getattr(self, "tenant_id", None)
+        if not tenant_id:
+            return {}
+        try:
+            row = self.conn.execute(
+                "SELECT profile_json FROM visual_brand_profiles WHERE tenant_id=?",
+                (str(tenant_id),),
+            ).fetchone()
+            import json
+            value = json.loads(row["profile_json"]) if row else {}
+            return value if isinstance(value, dict) else {}
+        except Exception:
+            logger.exception("读取账号组视觉品牌配置失败 tenant=%s", tenant_id)
+            return {}
+
+    def _visual_render_options(self) -> dict:
+        profile = self._visual_brand_profile()
+        styles = {"knowledge_infographic", "editorial_magazine", "business_poster", "lifestyle"}
+        forbidden = set(profile.get("forbidden_styles") or [])
+        style = profile.get("style_key", "knowledge_infographic")
+        if style not in styles or style in forbidden:
+            style = "knowledge_infographic"
+        colors = {}
+        for key, source in (("accent", "primary_color"), ("muted", "secondary_color")):
+            value = profile.get(source)
+            if isinstance(value, str) and __import__("re").fullmatch(r"#[0-9A-Fa-f]{6}", value):
+                colors[key] = value
+        fonts = {"Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", "Arial"}
+        font = profile.get("font_family")
+        if font not in fonts:
+            font = "Noto Sans CJK SC"
+        return {"theme": style, "brand_palette": colors, "font_family": font}
 
     async def _produce_contents(
         self, round_id: int, scored: list, platforms: list[Platform], report: dict,
@@ -912,6 +954,8 @@ class RoundExecutor:
                 accepted = None
                 image_paths: list = []
                 reject_reason: Optional[str] = None
+                visual_generation_attempts: list[dict] = []
+                visual_background_cache: dict[str, dict] = {}
                 for attempt in range(self.cfg.copy_generation.max_guard_retries + 1):
                     # LLM 为阻塞调用，放到线程池避免卡住事件循环。
                     # 仅对明确可重试的网络/超时/限流/临时服务错误执行有限指数退避。
@@ -942,10 +986,37 @@ class RoundExecutor:
                             })
                             await asyncio.sleep(delay)
                     if card_first:
-                        # 编排把出图排在质量门之前：每个候选版本都先出图再质检
+                        # 编排把出图排在质量门之前：每个候选版本都先出图再质检。
+                        # AI 背景默认关闭；启用时仅生成无文字装饰底图。
+                        visual_asset = visual_background_cache.get(title)
+                        if visual_asset is None:
+                            visual_asset = {"status": "disabled", "path": None}
+                            try:
+                                from .visual_generation import generate_visual_background
+                                visual_asset = await asyncio.to_thread(
+                                    generate_visual_background, title=title, topic=topic.dimension,
+                                    output_dir=output_dir, cfg=self.cfg,
+                                )
+                            except Exception:
+                                logger.exception("AI 视觉背景生成失败，回退到纯排版 platform=%s", platform.value)
+                                visual_asset = {"status": "failed_fallback", "path": None}
+                            visual_background_cache[title] = visual_asset
+                            visual_generation_attempts.append({
+                                k: visual_asset.get(k) for k in
+                                ("status", "model", "elapsed_ms", "bytes")
+                            })
+                        else:
+                            visual_generation_attempts.append({
+                                "status": "reused", "model": visual_asset.get("model"),
+                                "elapsed_ms": 0, "bytes": 0,
+                            })
+                        render_kwargs = (
+                            {"background_path": visual_asset["path"]}
+                            if visual_asset.get("path") else {}
+                        )
                         image_paths = await asyncio.to_thread(
                             make_card_set, title, topic.dimension, body, output_dir, platform,
-                            self._card_footer(platform),
+                            self._card_footer(platform), **self._visual_render_options(), **render_kwargs,
                         )
 
                     try:
@@ -995,10 +1066,113 @@ class RoundExecutor:
                 if not card_first:
                     image_paths = []
                     if make_cards:
+                        visual_asset = {"status": "disabled", "path": None}
+                        try:
+                            from .visual_generation import generate_visual_background
+                            visual_asset = await asyncio.to_thread(
+                                generate_visual_background, title=title, topic=topic.dimension,
+                                output_dir=output_dir, cfg=self.cfg,
+                            )
+                        except Exception:
+                            logger.exception("AI 视觉背景生成失败，回退到纯排版 platform=%s", platform.value)
+                            visual_asset = {"status": "failed_fallback", "path": None}
+                        visual_background_cache[title] = visual_asset
+                        render_kwargs = (
+                            {"background_path": visual_asset["path"]}
+                            if visual_asset.get("path") else {}
+                        )
+                        visual_generation_attempts.append({k: visual_asset.get(k) for k in ("status", "model", "elapsed_ms", "bytes")})
                         image_paths = await asyncio.to_thread(
                             make_card_set, title, topic.dimension, body, output_dir, platform,
-                            self._card_footer(platform),
+                            self._card_footer(platform), **self._visual_render_options(), **render_kwargs,
                         )
+
+                # 视觉硬门结果与生图用量写入轮次报告，缺失报告绝不视为通过。
+                visual_ocr = {"status": "not_run", "gate": "not_passed"}
+                if image_paths:
+                    try:
+                        from .visual_ocr import load_ocr_report
+                        visual_ocr = load_ocr_report(image_paths)
+                    except Exception:
+                        logger.exception("读取视觉 OCR 报告失败 platform=%s", platform.value)
+                        visual_ocr = {"status": "unavailable", "reason": "ocr_report_read_failed", "gate": "not_passed"}
+                # AI 语义审美是软评估；不可用时明确标记，不阻断硬门或伪造分数。
+                visual_review = {"status": "not_evaluated", "reason": "no_images", "score": None}
+                if image_paths:
+                    try:
+                        from .visual_review import assess_visual_pages
+                        visual_review = await asyncio.to_thread(assess_visual_pages, image_paths)
+                    except Exception:
+                        logger.exception("AI 视觉审美评估失败 platform=%s", platform.value)
+                        visual_review = {"status": "not_evaluated", "reason": "review_adapter_error", "score": None}
+                visual_asset = (
+                    visual_background_cache.get(accepted[0], {"status": "not_generated"})
+                    if accepted else {"status": "not_generated"}
+                )
+                # 软门低于 80 分时最多优化一次；重渲染后必须重新执行 OCR 硬门和视觉复评。
+                if (visual_review.get("status") == "evaluated"
+                        and float(visual_review.get("score") or 0) < 80
+                        and visual_asset.get("path") and image_paths):
+                    try:
+                        from .visual_generation import revise_visual_background
+                        revision = await asyncio.to_thread(
+                            revise_visual_background,
+                            source_path=Path(visual_asset["path"]),
+                            feedback=visual_review.get("feedback", []),
+                            output_dir=output_dir,
+                            cfg=self.cfg,
+                        )
+                        visual_generation_attempts.append({
+                            k: revision.get(k) for k in
+                            ("status", "model", "elapsed_ms", "bytes")
+                        })
+                        if revision.get("status") == "revised" and revision.get("path"):
+                            revised_paths = await asyncio.to_thread(
+                                make_card_set, title, topic.dimension, body, output_dir,
+                                platform, self._card_footer(platform), **self._visual_render_options(),
+                                background_path=Path(revision["path"]),
+                            )
+                            image_paths = revised_paths
+                            visual_asset = {**visual_asset, **revision}
+                            visual_ocr = load_ocr_report(image_paths)
+                            visual_review = await asyncio.to_thread(
+                                assess_visual_pages, image_paths
+                            )
+                            visual_review["revision_attempted"] = True
+                            visual_review["revision_status"] = "revised"
+                        else:
+                            visual_review["revision_attempted"] = True
+                            visual_review["revision_status"] = revision.get("status", "not_revised")
+                    except Exception:
+                        logger.exception("单次 AI 视觉优化失败 platform=%s", platform.value)
+                        visual_review["revision_attempted"] = True
+                        visual_review["revision_status"] = "failed"
+                report.setdefault("visual_usage", []).append({
+                    "topic_id": topic.id, "platform": platform.value,
+                    "status": visual_asset.get("status"), "model": visual_asset.get("model"),
+                    "attempts": visual_generation_attempts,
+                    "generation_count": sum(1 for item in visual_generation_attempts if item.get("status") in {"generated", "revised"}),
+                    "elapsed_ms": sum(int(item.get("elapsed_ms") or 0) for item in visual_generation_attempts),
+                    "bytes": sum(int(item.get("bytes") or 0) for item in visual_generation_attempts),
+                    "ocr_status": visual_ocr.get("status"),
+                    "ocr_gate": visual_ocr.get("gate", "not_passed"),
+                    "review_status": visual_review.get("status"),
+                    "review_score": visual_review.get("score"),
+                    "review_dimensions": visual_review.get("dimensions", {}),
+                    "review_feedback": visual_review.get("feedback", []),
+                    "review_model": visual_review.get("model"),
+                    "review_elapsed_ms": visual_review.get("elapsed_ms"),
+                    "review_revision_attempted": visual_review.get("revision_attempted", False),
+                    "review_revision_status": visual_review.get("revision_status"),
+                })
+                report["steps"].append({
+                    "step": "visual_quality_gate", "topic_id": topic.id,
+                    "platform": platform.value, "ocr_status": visual_ocr.get("status"),
+                    "ocr_gate": visual_ocr.get("gate", "not_passed"),
+                    "reason": visual_ocr.get("reason"),
+                    "ai_review_status": visual_review.get("status"),
+                    "ai_review_score": visual_review.get("score"),
+                })
 
                 # ⑥ 写 contents；在长耗时模型/出图步骤后再核对一次阶段发布配额。
                 if self._subplan_context:
@@ -1021,12 +1195,73 @@ class RoundExecutor:
                         json.dumps(tags, ensure_ascii=False),
                         json.dumps([str(p) for p in image_paths], ensure_ascii=False),
                         len(body), "knowledge", outcome.result.value, outcome.reason,
-                        "仅使用本地模板卡片的文字排版与渐变背景，尚未选用正式视觉素材",
+                        ("已使用 Chromium 确定性文字排版；OCR 校验通过，AI 语义审美评估结果已记录，仍需人工审核" if visual_ocr.get("status") == "passed" else "已使用 Chromium 确定性文字排版；OCR 校验未通过或不可用，禁止自动判定视觉通过，需人工复核"),
                         template_data["id"] if template_data else None,
                         template_data["version"] if template_data else None,
                         json.dumps(template_data, ensure_ascii=False) if template_data else None,
                     ),
                 )
+
+                # 视觉版本与逐页任务留痕。版本绑定最终正文哈希，单页任务可独立追踪。
+                if image_paths:
+                    try:
+                        from .visual_persistence import (
+                            compute_content_hash, create_visual_page_job, create_visual_version,
+                            transition_visual_job,
+                        )
+                        content_hash = compute_content_hash(title, body)
+                        visual_version_id = create_visual_version(
+                            self.conn, content_id=content_id, content_hash=content_hash,
+                            renderer="chromium_v2", style_key=self._visual_render_options()["theme"],
+                            design={
+                                "platform": platform.value,
+                                "title": title,
+                                "subtitle": topic.dimension,
+                                "body": body,
+                                "footer": self._card_footer(platform),
+                                "render_options": self._visual_render_options(),
+                                "background_path": visual_asset.get("path"),
+                                "pages": [
+                                    {"page_index": index, "image_path": str(path), "background_path": visual_asset.get("path")}
+                                    for index, path in enumerate(image_paths)
+                                ],
+                                "ocr": visual_ocr,
+                                "review": visual_review,
+                                "generation": visual_generation_attempts,
+                            },
+                        )
+                        version_status = (
+                            "rendered" if visual_ocr.get("status") == "passed"
+                            else "review_required"
+                        )
+                        self.conn.execute(
+                            "UPDATE visual_design_versions SET status=? WHERE id=?",
+                            (version_status, visual_version_id),
+                        )
+                        for page_index, image_path in enumerate(image_paths):
+                            job_id = create_visual_page_job(
+                                self.conn, content_id=content_id,
+                                visual_version_id=visual_version_id,
+                                page_index=page_index, job_type="generate",
+                                input_data={"platform": platform.value},
+                            )
+                            transition_visual_job(
+                                self.conn, job_id=job_id,
+                                expected_status="queued", new_status="running",
+                            )
+                            transition_visual_job(
+                                self.conn, job_id=job_id,
+                                expected_status="running", new_status="succeeded",
+                                output_data={"image_path": str(image_path)},
+                            )
+                    except Exception:
+                        logger.exception(
+                            "视觉版本留痕写入失败 content=%s platform=%s",
+                            content_id, platform.value,
+                        )
+                        report.setdefault("errors", []).append(
+                            f"视觉版本留痕写入失败：{platform.value}/{topic.id}"
+                        )
 
                 # 写 drafts（幂等：同 content 不会重复，UNIQUE(content_id, platform)）
                 draft_id = f"draft-{uuid.uuid4().hex[:12]}"
