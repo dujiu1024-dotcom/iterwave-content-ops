@@ -5998,10 +5998,8 @@ def _register_routes(app: FastAPI) -> None:
                 "status": "revised", "model": result.get("model"),
                 "elapsed_ms": result.get("elapsed_ms"), "bytes": result.get("bytes"),
             }]
-            import hashlib
-            content_hash = hashlib.sha256(
-                (str(row["title"]) + "\\0" + str(row["body"])).encode("utf-8")
-            ).hexdigest()
+            from src.core.visual_persistence import compute_content_hash
+            content_hash = compute_content_hash(str(row["title"]), str(row["body"]))
             with conn:
                 new_version_id = create_visual_version(
                     conn, content_id=content_id, content_hash=content_hash,
