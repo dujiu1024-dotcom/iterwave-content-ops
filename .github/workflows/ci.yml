@@ -46,6 +46,9 @@ jobs:
       - name: Install dependencies
         working-directory: web
         run: npm ci
-      - name: Build
+      - name: Build production app
         working-directory: web
         run: npm run build
+      - name: Build isolated offline demo
+        working-directory: web
+        run: npm run build:demo
