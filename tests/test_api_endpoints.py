@@ -2869,7 +2869,7 @@ def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client
     })
     assert invalid_target.status_code == 422
     platform_mutation = tc.patch(f"/api/subplans/{sub_id}", json={
-        "based_on_version_id": version_id,
+        "based_on_version_id": version_id, "expected_version_no": 1,
         "snapshot": {"title": "错误平台", "platform": "douyin"},
     })
     assert platform_mutation.status_code == 422
@@ -2884,7 +2884,7 @@ def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client
     assert reviewed.status_code == 200, reviewed.text
     assert reviewed.json()["authorization"] == "active"
     invalid_reorder = tc.post(f"/api/subplans/{sub_id}/stages/reorder", json={
-        "based_on_version_id": version_id, "stage_ids": [True],
+        "based_on_version_id": version_id, "expected_version_no": 1, "stage_ids": [True],
     })
     assert invalid_reorder.status_code == 422
 
