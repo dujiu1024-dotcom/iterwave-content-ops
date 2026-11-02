@@ -52,7 +52,7 @@ def _db(path=None):
         );
         CREATE TABLE spiral_rounds (
             id INTEGER PRIMARY KEY, goal_id TEXT, round_number INTEGER, status TEXT,
-            topic_ids TEXT, content_variants TEXT,
+            topic_ids TEXT, content_variants TEXT, trigger_source TEXT, applied_feedback TEXT,
             master_plan_version_id INTEGER, sub_plan_id TEXT, sub_plan_version_id INTEGER,
             sub_plan_stage_id INTEGER, sub_plan_snapshot TEXT, sub_plan_stage_snapshot TEXT,
             plan_signature TEXT, plan_attribution_status TEXT
