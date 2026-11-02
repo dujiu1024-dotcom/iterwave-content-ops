@@ -1214,6 +1214,14 @@ export interface RegisteredPlatformAccount {
   updated_at?: string;
 }
 
+export interface AccountIdentity {
+  platform: Platform;
+  logged_in: boolean;
+  name: string;
+  avatar_url: string | null;
+  error: string | null;
+}
+
 export interface LoginStatus {
   platform: Platform;
   platform_display: string;
@@ -2235,6 +2243,8 @@ export const api = {
   startLogin: (platform: Platform, restart = false) =>
     fetchJson<LoginStatus>(`/api/accounts/${platform}/login${restart ? "?restart=true" : ""}`, { method: "POST" }),
   loginStatus: (platform: Platform) => fetchJson<LoginStatus>(`/api/accounts/${platform}/login_status`),
+  /** 只读校验平台登录态并读取昵称、头像。 */
+  accountIdentity: (platform: Platform) => fetchJson<AccountIdentity>(`/api/accounts/${platform}/identity`),
   logout: (platform: Platform) =>
     fetchJson<{ status: string; platform: string }>(`/api/accounts/${platform}/logout`, { method: "POST" }),
   /** 短信验证码回填（登录进入 sms_required 时） */
