@@ -948,26 +948,26 @@ class SchedulerEngine:
         if self.conn is None:
             return None
         now = business_now(self.cfg).isoformat()
-        cur = self.conn.execute(
-            "INSERT INTO task_runs (task_type, biz_id, platform, status, attempt, "
-            "started_at, finished_at, error_msg, created_at) "
-            "VALUES ('daily_ops', ?, ?, ?, 1, ?, ?, ?, ?)",
-            (
-                target, platform.value, status,
-                now if status == "running" else None,
-                now if status != "running" else None,
-                error_msg, now,
-            ),
-        )
-        self.conn.commit()
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO task_runs (task_type, biz_id, platform, status, attempt, "
+                "started_at, finished_at, error_msg, created_at) "
+                "VALUES ('daily_ops', ?, ?, ?, 1, ?, ?, ?, ?)",
+                (
+                    target, platform.value, status,
+                    now if status == "running" else None,
+                    now if status != "running" else None,
+                    error_msg, now,
+                ),
+            )
         return int(cur.lastrowid)
 
     def _finish_task_run(self, task_run_id: int, status: str, error_msg: Optional[str]) -> None:
-        self.conn.execute(
-            "UPDATE task_runs SET status = ?, finished_at = ?, error_msg = ? WHERE id = ?",
-            (status, business_now(self.cfg).isoformat(), error_msg, task_run_id),
-        )
-        self.conn.commit()
+        with self.conn:
+            self.conn.execute(
+                "UPDATE task_runs SET status = ?, finished_at = ?, error_msg = ? WHERE id = ?",
+                (status, business_now(self.cfg).isoformat(), error_msg, task_run_id),
+            )
 
     def _last_op_outcome(
         self, platform, action_type: str, target: str, *, task_run_id: Optional[int] = None,
