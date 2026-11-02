@@ -375,3 +375,22 @@ def test_legacy_round_manual_attribution_requires_audited_reason_and_cannot_be_o
         store.attribute_legacy_round(
             1, master["id"], reviewer="operator", reason="不允许再次改绑",
         )
+
+
+
+def test_subplan_stage_rejects_zero_target_and_rolls_back_partial_version():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    master = _active_master(store)
+    store.create_subplan(
+        "sub-xhs", master_plan_version_id=master["id"],
+        platform="xhs", title="小红书子计划",
+    )
+    with pytest.raises(PlanVersionError, match="目标篇数"):
+        store.create_subplan_version(
+            "sub-xhs", {"title": "invalid"}, master_plan_version_id=master["id"],
+            stages=[{"title": "阶段一", "target_count": 0}],
+        )
+    assert conn.execute(
+        "SELECT COUNT(*) FROM sub_plan_versions WHERE sub_plan_id='sub-xhs'"
+    ).fetchone()[0] == 0
