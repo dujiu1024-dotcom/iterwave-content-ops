@@ -1240,32 +1240,32 @@ class SchedulerEngine:
                     file_path.unlink()
                     deleted_files += 1
 
-        cutoff_raw = (
-            business_now(self.cfg) - timedelta(days=cfg.raw_response_days)
-        ).isoformat(timespec="seconds")
-        cur = self.conn.execute(
-            "UPDATE metrics SET raw_response = NULL WHERE fetched_at < ? AND raw_response IS NOT NULL",
-            (cutoff_raw,),
-        )
-        cleaned_raw = cur.rowcount
+        with self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            cutoff_raw = (
+                business_now(self.cfg) - timedelta(days=cfg.raw_response_days)
+            ).isoformat(timespec="seconds")
+            cur = self.conn.execute(
+                "UPDATE metrics SET raw_response = NULL WHERE fetched_at < ? AND raw_response IS NOT NULL",
+                (cutoff_raw,),
+            )
+            cleaned_raw = cur.rowcount
 
-        cutoff_ops = (
-            business_now(self.cfg) - timedelta(days=cfg.ops_logs_days)
-        ).isoformat(timespec="seconds")
-        cur = self.conn.execute(
-            "DELETE FROM ops_logs WHERE executed_at < ?", (cutoff_ops,)
-        )
-        cleaned_ops = cur.rowcount
+            cutoff_ops = (
+                business_now(self.cfg) - timedelta(days=cfg.ops_logs_days)
+            ).isoformat(timespec="seconds")
+            cur = self.conn.execute(
+                "DELETE FROM ops_logs WHERE executed_at < ?", (cutoff_ops,)
+            )
+            cleaned_ops = cur.rowcount
 
-        cutoff_ai = (
-            business_now(self.cfg) - timedelta(days=cfg.ai_calls_detail_days)
-        ).isoformat(timespec="seconds")
-        cur = self.conn.execute(
-            "DELETE FROM ai_calls WHERE called_at < ?", (cutoff_ai,)
-        )
-        cleaned_ai = cur.rowcount
-
-        self.conn.commit()
+            cutoff_ai = (
+                business_now(self.cfg) - timedelta(days=cfg.ai_calls_detail_days)
+            ).isoformat(timespec="seconds")
+            cur = self.conn.execute(
+                "DELETE FROM ai_calls WHERE called_at < ?", (cutoff_ai,)
+            )
+            cleaned_ai = cur.rowcount
         logger.info(
             "🧹 [APS] data_retention_cleanup 完成 — 截图 %d / raw_response %d / ops_logs %d / ai_calls %d",
             deleted_files, cleaned_raw, cleaned_ops, cleaned_ai,
