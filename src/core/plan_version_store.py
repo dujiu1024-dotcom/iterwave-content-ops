@@ -674,9 +674,11 @@ class PlanVersionStore:
         bad_subplan_pointers = self.conn.execute(
             """SELECT p.id FROM sub_plans p
                LEFT JOIN sub_plan_versions v ON v.id=p.current_version_id
+               LEFT JOIN master_plan_versions m ON m.id=p.master_plan_version_id
                WHERE p.status='active'
                  AND (v.id IS NULL OR v.sub_plan_id!=p.id OR v.status!='effective'
-                      OR v.master_plan_version_id!=p.master_plan_version_id)"""
+                      OR v.master_plan_version_id!=p.master_plan_version_id
+                      OR m.id IS NULL OR m.status!='effective')"""
         ).fetchall()
         if bad_subplan_pointers:
             issues.append({
