@@ -718,6 +718,67 @@ class PlanVersionStore:
             },
         }
 
+    def attribute_legacy_round(
+        self,
+        round_id: int,
+        master_plan_version_id: int,
+        *,
+        reviewer: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Manually resolve a legacy round only with an explicit audit reason."""
+        reviewer = str(reviewer or "").strip()
+        reason = str(reason or "").strip()
+        if not reviewer or not reason:
+            raise PlanVersionError("人工归属必须记录审核人和原因")
+        self._begin()
+        try:
+            round_row = self.conn.execute(
+                """SELECT plan_signature,master_plan_version_id,plan_attribution_status
+                   FROM spiral_rounds WHERE id=?""", (round_id,)
+            ).fetchone()
+            if round_row is None:
+                raise PlanVersionError("轮次不存在")
+            if round_row["master_plan_version_id"] is not None:
+                raise PlanVersionError("轮次已经归属版本，禁止覆盖")
+            if round_row["plan_attribution_status"] not in ("pending", "manual_review"):
+                raise PlanVersionError("当前轮次不在待人工归属状态")
+            version = self.conn.execute(
+                "SELECT plan_signature FROM master_plan_versions WHERE id=?",
+                (master_plan_version_id,),
+            ).fetchone()
+            if version is None:
+                raise PlanVersionError("待归属的主计划版本不存在")
+            old_signature = round_row["plan_signature"]
+            if old_signature and old_signature != version["plan_signature"]:
+                raise PlanVersionError("所选版本签名与轮次已有签名不一致")
+            self.conn.execute(
+                """UPDATE spiral_rounds
+                   SET master_plan_version_id=?,plan_signature=?,plan_attribution_status='resolved'
+                   WHERE id=? AND master_plan_version_id IS NULL""",
+                (master_plan_version_id, version["plan_signature"], round_id),
+            )
+            self.conn.execute(
+                """INSERT INTO user_override(
+                    round_id,override_field,original_value,override_value,
+                    reason,overridden_by,overridden_at
+                ) VALUES(?,?,?,?,?,?,?)""",
+                (round_id, "legacy_plan_attribution",
+                 json.dumps({"plan_signature": old_signature,
+                             "status": round_row["plan_attribution_status"]}, ensure_ascii=False),
+                 json.dumps({"master_plan_version_id": master_plan_version_id,
+                             "plan_signature": version["plan_signature"]}, ensure_ascii=False),
+                 reason[:1000], reviewer, _now()),
+            )
+            self.conn.commit()
+            return dict(self.conn.execute(
+                """SELECT id,master_plan_version_id,plan_signature,plan_attribution_status
+                   FROM spiral_rounds WHERE id=?""", (round_id,)
+            ).fetchone())
+        except Exception:
+            self.conn.rollback()
+            raise
+
     def list_pending_round_attribution(self, limit: int = 500) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 2000))
         return [dict(row) for row in self.conn.execute(
