@@ -124,6 +124,7 @@ class TransactionalAPIRoute(APIRoute):
             methods.intersection({"POST", "PUT", "PATCH", "DELETE"})
             and not path.startswith("/api/auth/")
             and not inspect.iscoroutinefunction(endpoint)
+            and not getattr(endpoint, "_manages_own_transaction", False)
         ):
             original = endpoint
 
@@ -140,6 +141,16 @@ class TransactionalAPIRoute(APIRoute):
             transactional_endpoint.__signature__ = inspect.signature(original)
             endpoint = transactional_endpoint
         super().__init__(path, endpoint, **kwargs)
+
+
+def manages_own_transaction(func):
+    """标记同步写路由自行分段管理事务（例如中途调用外部模型/浏览器数十秒），
+
+    不被 TransactionalAPIRoute 包进请求级事务；路由内必须用短 ``with conn:`` 分段提交，
+    调外部服务期间不得持有写事务。
+    """
+    func._manages_own_transaction = True
+    return func
 
 
 _g_ctx: dict = {}
@@ -5892,6 +5903,7 @@ def _register_routes(app: FastAPI) -> None:
 
 
     @app.post("/api/contents/{content_id}/visual-versions/{version_id}/pages/{page_index}/revise")
+    @manages_own_transaction
     def revise_visual_version_page(content_id: str, version_id: int, page_index: int, req: dict | None = None):
         """Regenerate one page only; create a new immutable version and preserve all other page files."""
         ctx = _g()
@@ -6220,6 +6232,7 @@ def _register_routes(app: FastAPI) -> None:
             }
     
     @app.post("/api/contents/{content_id}/cards")
+    @manages_own_transaction
     def regenerate_cards(content_id: str):
         """按当前标题/正文重新出图（封面 + 正文分页），补上历史内容的「只有文没有图」。"""
         conn = _g()["conn"]
