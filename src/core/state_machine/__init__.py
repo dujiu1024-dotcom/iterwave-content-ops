@@ -16,6 +16,8 @@ import json
 import logging
 import uuid
 from datetime import datetime
+
+from src.core.timezone import business_now
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -49,8 +51,13 @@ ROUND_TRANSITIONS: dict[str, set[str]] = {
 class RoundStateMachine:
     """轮次状态机（spiral_rounds.status）。"""
 
-    def __init__(self, db_conn):
+    def __init__(self, db_conn, cfg=None):
         self.db = db_conn
+        self.cfg = cfg
+
+    def _business_now(self) -> datetime:
+        """使用该状态机所属账号组的业务时区。"""
+        return business_now(self.cfg)
 
     # ------------------------------------------------------------------
     def can_transition(self, round_id: int, target: str) -> tuple[bool, str]:
@@ -93,12 +100,12 @@ class RoundStateMachine:
             log.append({
                 "from": current,
                 "to": target,
-                "at": datetime.now().isoformat(),
+                "at": self._business_now().isoformat(),
                 "reason": reason,
             })
 
             # R8：阶段起点独立落库，供 round_timeout_sweeper 分阶段判定超时
-            now_str = datetime.now().isoformat(timespec="seconds")
+            now_str = self._business_now().isoformat(timespec="seconds")
             fields: dict = {
                 "status": target,
                 "transition_log": json.dumps(log, ensure_ascii=False),
@@ -287,7 +294,7 @@ class DraftStateMachine:
             started = datetime.fromisoformat(row[1])
         except ValueError:
             return False
-        return (now or datetime.now()) - started > timedelta(hours=timeout_hours)
+        return (now or self._business_now()) - started > timedelta(hours=timeout_hours)
 
     def check_expired_drafts(
         self, now: Optional[datetime] = None,
@@ -299,7 +306,7 @@ class DraftStateMachine:
         grace_hours），与轮次阶段超时互相独立；R9：按各自 saved_at 独立计时。
         """
         from datetime import timedelta
-        now = now or datetime.now()
+        now = now or self._business_now()
         cursor = self.db.execute(
             "SELECT id, saved_at, created_at FROM drafts WHERE status = 'draft_saved'"
         )
