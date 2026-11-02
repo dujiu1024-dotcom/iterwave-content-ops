@@ -294,6 +294,126 @@ class PlanVersionStore:
             raise PlanVersionError("轮次不存在")
         self.conn.commit()
 
+    def update_stage_status(self, stage_id: int, status: str) -> dict[str, Any]:
+        allowed = {"pending", "in_progress", "completed", "paused", "cancelled"}
+        if status not in allowed:
+            raise PlanVersionError("无效的阶段状态")
+        row = self.conn.execute(
+            "SELECT status FROM content_plan_stages WHERE id=?", (stage_id,)
+        ).fetchone()
+        if row is None:
+            raise PlanVersionError("阶段不存在")
+        transitions = {
+            "pending": {"pending", "in_progress", "paused", "cancelled"},
+            "in_progress": {"in_progress", "completed", "paused", "cancelled"},
+            "paused": {"paused", "in_progress", "cancelled"},
+            "completed": {"completed"},
+            "cancelled": {"cancelled"},
+        }
+        if status not in transitions[row["status"]]:
+            raise PlanVersionError(f"阶段状态不允许从 {row['status']} 变更为 {status}")
+        self.conn.execute(
+            "UPDATE content_plan_stages SET status=?,updated_at=? WHERE id=?",
+            (status, _now(), stage_id),
+        )
+        self.conn.commit()
+        return dict(self.conn.execute(
+            "SELECT * FROM content_plan_stages WHERE id=?", (stage_id,)
+        ).fetchone())
+
+    def get_stage_publish_stats(self, stage_id: int) -> dict[str, Any]:
+        row = self.conn.execute(
+            "SELECT * FROM content_plan_stage_publish_stats WHERE stage_id=?",
+            (stage_id,),
+        ).fetchone()
+        if row is None:
+            raise PlanVersionError("阶段发布统计不存在")
+        return dict(row)
+
+    def validate_integrity(self) -> dict[str, Any]:
+        """Read-only consistency audit for version links and legacy attribution."""
+        issues: list[dict[str, Any]] = []
+        fk_errors = self.conn.execute("PRAGMA foreign_key_check").fetchall()
+        if fk_errors:
+            issues.append({"code": "foreign_key_violation", "count": len(fk_errors)})
+
+        versions = self.conn.execute(
+            "SELECT id,plan_signature,plan_snapshot FROM master_plan_versions"
+        ).fetchall()
+        invalid_signatures = []
+        for row in versions:
+            try:
+                snapshot = json.loads(row["plan_snapshot"])
+                actual = self._signer.compute_signature(snapshot)
+            except (TypeError, ValueError):
+                actual = None
+            if actual != row["plan_signature"]:
+                invalid_signatures.append(int(row["id"]))
+        if invalid_signatures:
+            issues.append({
+                "code": "master_plan_signature_mismatch",
+                "version_ids": invalid_signatures,
+            })
+
+        mismatched_rounds = self.conn.execute(
+            """SELECT id FROM spiral_rounds
+               WHERE master_plan_version_id IS NOT NULL
+                 AND (plan_signature IS NULL OR plan_signature != (
+                     SELECT plan_signature FROM master_plan_versions v
+                     WHERE v.id=spiral_rounds.master_plan_version_id
+                 ))"""
+        ).fetchall()
+        if mismatched_rounds:
+            issues.append({
+                "code": "round_master_version_mismatch",
+                "round_ids": [int(r["id"]) for r in mismatched_rounds],
+            })
+
+        unresolved = self.conn.execute(
+            """SELECT id,plan_signature,plan_attribution_status
+               FROM spiral_rounds
+               WHERE master_plan_version_id IS NULL
+                  OR plan_attribution_status!='resolved'"""
+        ).fetchall()
+        if unresolved:
+            issues.append({
+                "code": "round_attribution_pending",
+                "round_ids": [int(r["id"]) for r in unresolved],
+            })
+
+        bad_stage_links = self.conn.execute(
+            """SELECT r.id FROM spiral_rounds r
+               LEFT JOIN content_plan_stages s
+                 ON s.id=r.content_plan_stage_id
+                AND s.content_plan_version_id=r.content_plan_version_id
+               WHERE r.content_plan_stage_id IS NOT NULL AND s.id IS NULL"""
+        ).fetchall()
+        if bad_stage_links:
+            issues.append({
+                "code": "round_subplan_stage_mismatch",
+                "round_ids": [int(r["id"]) for r in bad_stage_links],
+            })
+
+        effective_master_count = int(self.conn.execute(
+            "SELECT COUNT(*) FROM master_plan_versions WHERE status='effective'"
+        ).fetchone()[0])
+        if effective_master_count > 1:
+            issues.append({
+                "code": "multiple_effective_master_versions",
+                "count": effective_master_count,
+            })
+
+        return {
+            "ok": not issues,
+            "issues": issues,
+            "counts": {
+                "master_plan_versions": len(versions),
+                "rounds_pending_attribution": len(unresolved),
+                "foreign_key_violations": len(fk_errors),
+                "effective_master_versions": effective_master_count,
+            },
+        }
+
     def list_pending_round_attribution(self, limit: int = 500) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 2000))
         rows = self.conn.execute(
