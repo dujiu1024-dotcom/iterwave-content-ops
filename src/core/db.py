@@ -446,42 +446,112 @@ class _LockedCursor:
 
 
 class LockedConnection:
-    """线程安全的 sqlite3.Connection 代理（接口与原连接一致）。"""
+    """线程安全的 sqlite3.Connection 代理，并将隐式事务锁保持到 commit/rollback。
+
+    SQLite 在第一次 DML 后会开启隐式事务。若只在 execute() 单条语句期间加锁，
+    另一个线程仍可能调用 commit() 提交前一个线程的半截业务写入。这里在事务开启时
+    保留一层 RLock，直到事务结束；其他线程的 execute/commit/rollback 都会等待。
+    对「先 SELECT 校验、再 UPDATE」的关键业务操作，仍应使用 with conn: 显式包住
+    整个读-校验-写流程。
+    """
 
     def __init__(self, conn: sqlite3.Connection):
         object.__setattr__(self, "_conn", conn)
         object.__setattr__(self, "_lock", _threading.RLock())
+        object.__setattr__(self, "_transaction_owner", None)
 
     @property
     def raw(self) -> sqlite3.Connection:
         return self._conn
 
+    def _run_locked(self, operation):
+        self._lock.acquire()
+        owner = _threading.get_ident()
+        retain_current = False
+        release_retained = False
+        try:
+            return operation()
+        finally:
+            # 发生 SQL 异常时也必须依据真实连接状态决定是否继续持锁。
+            try:
+                in_transaction = self._conn.in_transaction
+            except sqlite3.Error:
+                in_transaction = False
+            transaction_owner = self._transaction_owner
+            if in_transaction:
+                if transaction_owner is None:
+                    object.__setattr__(self, "_transaction_owner", owner)
+                    retain_current = True
+                elif transaction_owner != owner:
+                    # 正常情况下其他线程无法到达这里，因为事务持有 RLock。
+                    raise RuntimeError("SQLite 事务连接所有权异常")
+            elif transaction_owner == owner:
+                object.__setattr__(self, "_transaction_owner", None)
+                release_retained = True
+            if release_retained:
+                self._lock.release()
+            if not retain_current:
+                self._lock.release()
+
     def execute(self, sql, params=()):
-        with self._lock:
-            return _BufferedCursor(self._conn.execute(sql, params))
+        return self._run_locked(
+            lambda: _BufferedCursor(self._conn.execute(sql, params))
+        )
 
     def executemany(self, sql, seq):
-        with self._lock:
-            return _BufferedCursor(self._conn.executemany(sql, seq))
+        return self._run_locked(
+            lambda: _BufferedCursor(self._conn.executemany(sql, seq))
+        )
 
     def executescript(self, script):
-        with self._lock:
-            return _BufferedCursor(self._conn.executescript(script))
+        # sqlite3.executescript 会先提交已有事务；_run_locked 会在事务结束后释放保留锁。
+        return self._run_locked(
+            lambda: _BufferedCursor(self._conn.executescript(script))
+        )
 
     def cursor(self):
         return _LockedCursor(self)
 
     def commit(self) -> None:
-        with self._lock:
+        self._lock.acquire()
+        owner = _threading.get_ident()
+        release_retained = False
+        try:
             self._conn.commit()
+            if not self._conn.in_transaction and self._transaction_owner == owner:
+                object.__setattr__(self, "_transaction_owner", None)
+                release_retained = True
+        finally:
+            if release_retained:
+                self._lock.release()
+            self._lock.release()
 
     def rollback(self) -> None:
-        with self._lock:
+        self._lock.acquire()
+        owner = _threading.get_ident()
+        release_retained = False
+        try:
             self._conn.rollback()
+            if not self._conn.in_transaction and self._transaction_owner == owner:
+                object.__setattr__(self, "_transaction_owner", None)
+                release_retained = True
+        finally:
+            if release_retained:
+                self._lock.release()
+            self._lock.release()
 
     def close(self) -> None:
-        with self._lock:
+        self._lock.acquire()
+        owner = _threading.get_ident()
+        release_retained = self._transaction_owner == owner
+        try:
             self._conn.close()
+            if release_retained:
+                object.__setattr__(self, "_transaction_owner", None)
+        finally:
+            if release_retained:
+                self._lock.release()
+            self._lock.release()
 
     def __enter__(self):
         self._lock.acquire()
@@ -493,9 +563,17 @@ class LockedConnection:
         return self
 
     def __exit__(self, *exc):
+        owner = _threading.get_ident()
+        release_retained = False
         try:
-            return self._conn.__exit__(*exc)
+            result = self._conn.__exit__(*exc)
+            if not self._conn.in_transaction and self._transaction_owner == owner:
+                object.__setattr__(self, "_transaction_owner", None)
+                release_retained = True
+            return result
         finally:
+            if release_retained:
+                self._lock.release()
             self._lock.release()
 
     def __getattr__(self, name):
