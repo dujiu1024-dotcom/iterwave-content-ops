@@ -1853,18 +1853,6 @@ def _register_routes(app: FastAPI) -> None:
         if not idempotency_key or len(idempotency_key) > 100:
             raise HTTPException(422, "请求标识无效，请刷新后重试")
         conn = _g()["conn"]
-        existing = conn.execute(
-            "SELECT id, status FROM sample_runs WHERE tenant_id=? AND idempotency_key=?",
-            (tenant_id, idempotency_key),
-        ).fetchone()
-        if existing:
-            return {"sample_run_id": existing["id"], "status": existing["status"], "deduplicated": True}
-        active = conn.execute(
-            "SELECT COUNT(*) FROM sample_runs WHERE tenant_id=? AND status IN ('created','generating','quality_check')",
-            (tenant_id,),
-        ).fetchone()[0]
-        if active:
-            raise HTTPException(409, "已有快速体验任务正在执行，请等待完成后再试")
         run_id = uuid.uuid4().hex
         now = _now().isoformat(sep=" ", timespec="seconds")
         from src.core.content_pipeline import _llm_available
@@ -1873,23 +1861,37 @@ def _register_routes(app: FastAPI) -> None:
         error_code = None if model_ready else "model_not_configured"
         error_message = None if model_ready else "尚未配置可用模型，请先到系统设置接入自己的模型"
         try:
-            conn.execute(
-                "INSERT INTO sample_runs "
-                "(id, tenant_id, platform, account_description, status, model_mode, error_code, error_message_safe, "
-                "idempotency_key, created_at, completed_at) VALUES (?, ?, ?, ?, ?, 'byok', ?, ?, ?, ?, ?)",
-                (run_id, tenant_id, platform, description, initial_status, error_code, error_message,
-                 idempotency_key, now, None if model_ready else now),
-            )
-            conn.commit()
+            # Async routes are excluded from TransactionalAPIRoute; admission must lock
+            # idempotency lookup, active-run check and insertion as one transaction.
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                existing = conn.execute(
+                    "SELECT id, status FROM sample_runs WHERE tenant_id=? AND idempotency_key=?",
+                    (tenant_id, idempotency_key),
+                ).fetchone()
+                if existing:
+                    return {"sample_run_id": existing["id"], "status": existing["status"], "deduplicated": True}
+                active = conn.execute(
+                    "SELECT COUNT(*) FROM sample_runs WHERE tenant_id=? AND status IN ('created','generating','quality_check')",
+                    (tenant_id,),
+                ).fetchone()[0]
+                if active:
+                    raise HTTPException(409, "已有快速体验任务正在执行，请等待完成后再试")
+                conn.execute(
+                    "INSERT INTO sample_runs "
+                    "(id, tenant_id, platform, account_description, status, model_mode, error_code, error_message_safe, "
+                    "idempotency_key, created_at, completed_at) VALUES (?, ?, ?, ?, ?, 'byok', ?, ?, ?, ?, ?)",
+                    (run_id, tenant_id, platform, description, initial_status, error_code, error_message,
+                     idempotency_key, now, None if model_ready else now),
+                )
         except sqlite3.IntegrityError as exc:
-            conn.rollback()
             duplicate = conn.execute(
                 "SELECT id, status FROM sample_runs WHERE tenant_id=? AND idempotency_key=?",
                 (tenant_id, idempotency_key),
             ).fetchone()
             if duplicate:
                 return {"sample_run_id": duplicate["id"], "status": duplicate["status"], "deduplicated": True}
-            raise HTTPException(409, "已有快速体验任务正在执行，请等待完成后再试") from exc
+            raise HTTPException(409, "已有快速体验任务正在执行，请稍后重试") from exc
         _record_content_event("sample_generation_started", sample_run_id=run_id,
                               idempotency_key=f"sample-start:{run_id}")
         if not model_ready:
