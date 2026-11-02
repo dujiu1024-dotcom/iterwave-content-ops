@@ -947,3 +947,80 @@ def test_interrupted_round_reconciliation_retries_after_transient_context_failur
     # 对账成功后不重复执行数据库修复。
     worker._sync_terminal_rounds()
     assert calls == {"build": 2, "round": 1, "plan": 1}
+
+
+
+def test_worker_content_plan_completion_is_atomic_on_late_failure():
+    import sqlite3
+    from src.core.task_worker import GlobalTaskWorker
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE content_plan_rounds (round_id INTEGER, plan_id TEXT);
+        CREATE TABLE content_plans (id TEXT PRIMARY KEY, status TEXT, version INTEGER, updated_at TEXT);
+        CREATE TABLE contents (id TEXT PRIMARY KEY, round_id INTEGER);
+        CREATE TABLE drafts (id TEXT PRIMARY KEY, content_id TEXT);
+        CREATE TABLE content_plan_drafts (
+            plan_id TEXT, draft_id TEXT, round_id INTEGER, created_at TEXT,
+            PRIMARY KEY(plan_id, draft_id)
+        );
+        INSERT INTO content_plan_rounds VALUES (7, 'plan-7');
+        INSERT INTO content_plans VALUES ('plan-7', 'generating', 1, NULL);
+        INSERT INTO contents VALUES ('content-7', 7);
+        INSERT INTO drafts VALUES ('draft-7', 'content-7');
+        CREATE TRIGGER reject_plan_completion
+        BEFORE UPDATE ON content_plans
+        BEGIN SELECT RAISE(ABORT, 'simulated plan status write failure'); END;
+    """)
+
+    try:
+        GlobalTaskWorker._complete_content_plan(
+            conn, 7, {"final_status": "completed"},
+        )
+    except sqlite3.IntegrityError:
+        pass
+    else:
+        raise AssertionError("expected simulated plan status failure")
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM content_plan_drafts WHERE plan_id='plan-7'"
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT status, version FROM content_plans WHERE id='plan-7'"
+    ).fetchone() == ("generating", 1)
+    conn.close()
+
+
+def test_worker_content_plan_completion_commits_links_and_status_together():
+    import sqlite3
+    from src.core.task_worker import GlobalTaskWorker
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE content_plan_rounds (round_id INTEGER, plan_id TEXT);
+        CREATE TABLE content_plans (id TEXT PRIMARY KEY, status TEXT, version INTEGER, updated_at TEXT);
+        CREATE TABLE contents (id TEXT PRIMARY KEY, round_id INTEGER);
+        CREATE TABLE drafts (id TEXT PRIMARY KEY, content_id TEXT);
+        CREATE TABLE content_plan_drafts (
+            plan_id TEXT, draft_id TEXT, round_id INTEGER, created_at TEXT,
+            PRIMARY KEY(plan_id, draft_id)
+        );
+        INSERT INTO content_plan_rounds VALUES (8, 'plan-8');
+        INSERT INTO content_plans VALUES ('plan-8', 'generating', 3, NULL);
+        INSERT INTO contents VALUES ('content-8', 8);
+        INSERT INTO drafts VALUES ('draft-8', 'content-8');
+    """)
+
+    GlobalTaskWorker._complete_content_plan(
+        conn, 8, {"final_status": "completed"},
+    )
+
+    assert conn.execute(
+        "SELECT plan_id, draft_id, round_id FROM content_plan_drafts"
+    ).fetchone() == ("plan-8", "draft-8", 8)
+    assert conn.execute(
+        "SELECT status, version FROM content_plans WHERE id='plan-8'"
+    ).fetchone() == ("generated", 4)
+    conn.close()
