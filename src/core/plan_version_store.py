@@ -553,6 +553,8 @@ class PlanVersionStore:
         round_number: Optional[int] = None,
         topic_ids: Optional[list[str]] = None,
         content_variants: Optional[list[dict[str, Any]]] = None,
+        trigger_source: str = "auto",
+        applied_feedback: Optional[str] = None,
     ) -> dict[str, Any]:
         """Atomically create, bind and complete one leased round.
 
@@ -605,16 +607,20 @@ class PlanVersionStore:
             variants_json = json.dumps(content_variants or [], ensure_ascii=False)
             cur = self.conn.execute(
                 """INSERT INTO spiral_rounds(
-                    goal_id,round_number,status,topic_ids,content_variants,
+                    goal_id,round_number,status,topic_ids,content_variants,trigger_source,applied_feedback,
                     master_plan_version_id,sub_plan_id,sub_plan_version_id,sub_plan_stage_id,
                     sub_plan_snapshot,sub_plan_stage_snapshot,plan_signature,plan_attribution_status
-                ) VALUES(?,?,'created',?,?,?,?,?,?,?,?,?,'resolved')""",
-                (goal_id, round_number, topics_json, variants_json,
+                ) VALUES(?,?,'created',?,?,?,?,?,?,?,?,?,?,?,'resolved')""",
+                (goal_id, round_number, topics_json, variants_json, trigger_source, applied_feedback,
                  lock["master_plan_version_id"], lock["sub_plan_id"],
                  lock["sub_plan_version_id"], lock["sub_plan_stage_id"],
                  version["snapshot_json"], stage_snapshot, version["plan_signature"]),
             )
             round_id = int(cur.lastrowid)
+            self.conn.execute(
+                "UPDATE sub_plans SET updated_at=? WHERE id=?",
+                (now, lock["sub_plan_id"]),
+            )
             self.conn.execute(
                 """UPDATE round_open_idempotency
                    SET status='created',round_id=?,lease_until=NULL,updated_at=?
