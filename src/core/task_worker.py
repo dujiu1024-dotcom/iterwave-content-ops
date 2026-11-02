@@ -288,6 +288,7 @@ class GlobalTaskWorker:
         from src.core.state_machine import RoundStateMachine
 
         with conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT status FROM spiral_rounds WHERE id=?", (round_id,),
             ).fetchone()
@@ -346,6 +347,7 @@ class GlobalTaskWorker:
             return
         transaction = conn if callable(getattr(conn, "__enter__", None)) else nullcontext()
         with transaction:
+            conn.execute("BEGIN IMMEDIATE")
             relation = conn.execute(
                 "SELECT plan_id FROM content_plan_rounds WHERE round_id=?", (round_id,),
             ).fetchone()
@@ -365,6 +367,7 @@ class GlobalTaskWorker:
             return
         transaction = conn if callable(getattr(conn, "__enter__", None)) else nullcontext()
         with transaction:
+            conn.execute("BEGIN IMMEDIATE")
             relation = conn.execute(
                 "SELECT plan_id FROM content_plan_rounds WHERE round_id=?", (round_id,),
             ).fetchone()
