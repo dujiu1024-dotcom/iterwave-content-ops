@@ -918,7 +918,7 @@ def _build_app() -> FastAPI:
                 pass
             else:
                 cookie_token = request.cookies.get(auth.COOKIE_NAME)
-                client_ip = request.client.host if request.client else "unknown"
+                client_ip = auth.client_ip(request)
                 has_token_header = bool(request.headers.get("x-access-token")) or (
                     (request.headers.get("authorization") or "").lower().startswith("bearer ")
                 )
