@@ -285,15 +285,18 @@ class PlanVersionStore:
                             datetime.strptime(str(date_value), "%Y-%m-%d")
                         except ValueError as exc:
                             raise PlanVersionError(f"{field_name} 必须为 YYYY-MM-DD") from exc
+                stage_status = str(stage.get("status") or "pending")
+                if stage_status not in {"pending", "in_progress", "completed", "paused", "cancelled"}:
+                    raise PlanVersionError("阶段状态无效")
                 self.conn.execute(
                     """INSERT INTO sub_plan_stages(
                         sub_plan_version_id,stage_order,title,direction,target_count,
                         start_date,end_date,completion_condition,status,notes,created_at,updated_at
-                    ) VALUES(?,?,?,?,?,?,?,?, 'pending',?,?,?)""",
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (version_id, stage_order, title,
                      str(stage.get("direction") or ""), target_count,
                      start_date, end_date, str(stage.get("completion_condition") or ""),
-                     str(stage.get("notes") or ""), now, now),
+                     stage_status, str(stage.get("notes") or ""), now, now),
                 )
             row = dict(self.conn.execute(
                 "SELECT * FROM sub_plan_versions WHERE id=?", (version_id,)
