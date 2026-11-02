@@ -150,3 +150,22 @@ def test_stage_publish_stats_count_only_user_confirmed_drafts():
         "SELECT status FROM sub_plan_stages WHERE id=?", (stage_id,)
     ).fetchone()[0] == "completed"
     conn.close()
+
+
+def test_round_metadata_migration_adds_origin_and_feedback_columns():
+    conn = _legacy_db()
+    db = Database.__new__(Database)
+    db._run_migration(conn, Migration(115, MIGRATION, "plan_version_lifecycle"))
+    migration = Path(__file__).resolve().parents[1] / "migrations" / "116_subplan_round_metadata.sql"
+    db._run_migration(conn, Migration(116, migration, "subplan_round_metadata"))
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(spiral_rounds)")}
+    assert {"trigger_source", "applied_feedback"} <= columns
+    conn.execute(
+        "INSERT INTO spiral_rounds(id,round_number,status) VALUES(9,9,'created')"
+    )
+    row = conn.execute(
+        "SELECT trigger_source,applied_feedback FROM spiral_rounds WHERE id=9"
+    ).fetchone()
+    assert row["trigger_source"] == "manual"
+    assert row["applied_feedback"] is None
+    conn.close()
