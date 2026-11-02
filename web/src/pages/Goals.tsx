@@ -415,7 +415,7 @@ export default function Goals() {
         <div className="grid four" style={{ gap: 10 }}>
           <div>
             <label className="form-label">目标描述 *</label>
-            <input className="field" placeholder="如：小红书涨粉 500"
+            <textarea className="field" rows={2} placeholder="如：小红书涨粉 500；可按回车分行补充目标说明"
               value={newGoal.goal_text}
               onChange={(e) => {
                 const text = e.target.value;
@@ -426,7 +426,8 @@ export default function Goals() {
                   // 用户没手动改过平台时，按描述里的平台名自动选中
                   target_platform: !platformTouched && detected ? detected : g.target_platform,
                 }));
-              }} />
+              }}
+              style={{ width: "100%", resize: "vertical" }} />
           </div>
           <div>
             <label className="form-label">指标 *</label>
@@ -543,8 +544,9 @@ export default function Goals() {
           <div className="grid four" style={{ gap: 10 }}>
             <div>
               <label className="form-label">目标描述 *</label>
-              <input className="field" value={editing.goal_text}
-                onChange={(e) => setEditing({ ...editing, goal_text: e.target.value })} />
+              <textarea className="field" rows={2} value={editing.goal_text}
+                onChange={(e) => setEditing({ ...editing, goal_text: e.target.value })}
+                style={{ width: "100%", resize: "vertical" }} />
             </div>
             <div>
               <label className="form-label">指标 *</label>
