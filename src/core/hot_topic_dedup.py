@@ -83,12 +83,20 @@ def backfill(conn) -> int:
     return merged
 
 
-def mark_cross_platform(conn, *, threshold: float, window_hours: int, length_prefilter_ratio: float | None = None) -> int:
-    """规则 2：时间窗内跨平台同一事件 → duplicate_of 主条目。返回被标记为重复的行数。"""
+def mark_cross_platform(
+    conn, *, threshold: float, window_hours: int,
+    length_prefilter_ratio: float | None = None, cfg=None,
+) -> int:
+    """规则 2：时间窗内跨平台同一事件 → duplicate_of 主条目。缺少租户配置时失败关闭。"""
+    if cfg is None:
+        from .task_context import current_config
+        cfg = current_config()
+    if cfg is None:
+        raise RuntimeError("mark_cross_platform 必须显式传入账号组配置或绑定任务配置")
     if length_prefilter_ratio is None:
-        from .config import get_config
-        length_prefilter_ratio = get_config().hot_topics.dedup.length_prefilter_ratio
-    since = (datetime.now() - timedelta(hours=window_hours)).isoformat(timespec="seconds")
+        length_prefilter_ratio = cfg.hot_topics.dedup.length_prefilter_ratio
+    from .timezone import business_now
+    since = (business_now(cfg) - timedelta(hours=window_hours)).isoformat(timespec="seconds")
     rows = conn.execute(
         "SELECT id, platform, title_norm, discovered_at FROM hot_topics "
         "WHERE evidence_status = 'collected' AND title_norm IS NOT NULL AND title_norm != '' "
