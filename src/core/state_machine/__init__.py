@@ -125,6 +125,12 @@ class RoundStateMachine:
                 sql, (*fields.values(), round_id, current, row[1] or ""),
             )
             if cursor.rowcount != 1:
+                latest = self.db.execute(
+                    "SELECT status FROM spiral_rounds WHERE id = ?", (round_id,)
+                ).fetchone()
+                # 其他请求已完成相同目标状态时视为幂等；不同目标则拒绝覆盖。
+                if latest and latest[0] == target:
+                    return True
                 logger.warning(
                     "轮次状态并发冲突，迁移未执行 round=%s expected=%s target=%s",
                     round_id, current, target,
@@ -268,6 +274,12 @@ class DraftStateMachine:
                 values + [current],
             )
             if cursor.rowcount != 1:
+                latest = self.db.execute(
+                    "SELECT status FROM drafts WHERE id = ?", (draft_id,)
+                ).fetchone()
+                # 其他请求已完成相同目标状态时视为幂等；不同目标则拒绝覆盖。
+                if latest and latest[0] == target:
+                    return True
                 logger.warning(
                     "草稿状态并发冲突，迁移未执行 draft=%s expected=%s target=%s",
                     draft_id, current, target,
