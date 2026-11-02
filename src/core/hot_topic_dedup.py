@@ -50,36 +50,36 @@ def similarity(a: str, b: str) -> float:
 
 
 def backfill(conn) -> int:
-    """迁移前的旧行补 platform / title_norm，并按规则 1 合并历史重复（保留最近在榜的一行）。"""
-    rows = conn.execute(
-        "SELECT id, source, title, discovered_at, last_seen_at FROM hot_topics "
-        "WHERE evidence_status = 'collected' AND (title_norm IS NULL OR platform IS NULL)"
-    ).fetchall()
-    for r in rows:
-        source = r["source"] or ""
-        platform = source.rsplit("/", 1)[-1] if "/" in source else source
-        conn.execute("UPDATE hot_topics SET platform = ?, title_norm = ? WHERE id = ?",
-                     (platform, normalize_title(r["title"] or ""), r["id"]))
-    merged = 0
-    groups = conn.execute(
-        "SELECT platform, title_norm, COUNT(*) AS n FROM hot_topics WHERE evidence_status = 'collected' "
-        "AND title_norm IS NOT NULL GROUP BY platform, title_norm HAVING n > 1"
-    ).fetchall()
-    for g in groups:
-        dup = conn.execute(
-            "SELECT id, discovered_at, seen_count FROM hot_topics WHERE platform = ? AND title_norm = ? "
-            "AND evidence_status = 'collected' ORDER BY last_seen_at DESC",
-            (g["platform"], g["title_norm"]),
+    """原子补齐旧行 platform / title_norm，并合并历史重复。"""
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            "SELECT id, source, title, discovered_at, last_seen_at FROM hot_topics "
+            "WHERE evidence_status = 'collected' AND (title_norm IS NULL OR platform IS NULL)"
         ).fetchall()
-        keep, rest = dup[0], dup[1:]
-        first_seen = min(d["discovered_at"] or "" for d in dup) or keep["discovered_at"]
-        seen = sum(d["seen_count"] or 1 for d in dup)
-        conn.execute("UPDATE hot_topics SET discovered_at = ?, seen_count = ? WHERE id = ?",
-                     (first_seen, seen, keep["id"]))
-        conn.executemany("DELETE FROM hot_topics WHERE id = ?", [(d["id"],) for d in rest])
-        merged += len(rest)
-    if rows or merged:
-        conn.commit()
+        for r in rows:
+            source = r["source"] or ""
+            platform = source.rsplit("/", 1)[-1] if "/" in source else source
+            conn.execute("UPDATE hot_topics SET platform = ?, title_norm = ? WHERE id = ?",
+                         (platform, normalize_title(r["title"] or ""), r["id"]))
+        merged = 0
+        groups = conn.execute(
+            "SELECT platform, title_norm, COUNT(*) AS n FROM hot_topics WHERE evidence_status = 'collected' "
+            "AND title_norm IS NOT NULL GROUP BY platform, title_norm HAVING n > 1"
+        ).fetchall()
+        for g in groups:
+            dup = conn.execute(
+                "SELECT id, discovered_at, seen_count FROM hot_topics WHERE platform = ? AND title_norm = ? "
+                "AND evidence_status = 'collected' ORDER BY last_seen_at DESC",
+                (g["platform"], g["title_norm"]),
+            ).fetchall()
+            keep, rest = dup[0], dup[1:]
+            first_seen = min(d["discovered_at"] or "" for d in dup) or keep["discovered_at"]
+            seen = sum(d["seen_count"] or 1 for d in dup)
+            conn.execute("UPDATE hot_topics SET discovered_at = ?, seen_count = ? WHERE id = ?",
+                         (first_seen, seen, keep["id"]))
+            conn.executemany("DELETE FROM hot_topics WHERE id = ?", [(d["id"],) for d in rest])
+            merged += len(rest)
     return merged
 
 
@@ -97,31 +97,32 @@ def mark_cross_platform(
         length_prefilter_ratio = cfg.hot_topics.dedup.length_prefilter_ratio
     from .timezone import business_now
     since = (business_now(cfg) - timedelta(hours=window_hours)).isoformat(timespec="seconds")
-    rows = conn.execute(
-        "SELECT id, platform, title_norm, discovered_at FROM hot_topics "
-        "WHERE evidence_status = 'collected' AND title_norm IS NOT NULL AND title_norm != '' "
-        "AND last_seen_at >= ? ORDER BY discovered_at ASC, id ASC",
-        (since,),
-    ).fetchall()
-    canon: list[dict] = []          # 主条目（按首次发现先后）
-    assign: dict[str, str | None] = {}
-    for r in rows:
-        norm = r["title_norm"]
-        target = None
-        for c in canon:
-            if c["platform"] == r["platform"]:
-                continue        # 同平台已由规则 1 去重，不同标题视为不同话题
-            if abs(len(c["title_norm"]) - len(norm)) > max(len(norm), len(c["title_norm"])) * length_prefilter_ratio:
-                continue
-            if similarity(c["title_norm"], norm) >= threshold:
-                target = c["id"]
-                break
-        assign[r["id"]] = target
-        if target is None:
-            canon.append(dict(r))
-    conn.executemany("UPDATE hot_topics SET duplicate_of = ? WHERE id = ?",
-                     [(v, k) for k, v in assign.items()])
-    conn.commit()
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            "SELECT id, platform, title_norm, discovered_at FROM hot_topics "
+            "WHERE evidence_status = 'collected' AND title_norm IS NOT NULL AND title_norm != '' "
+            "AND last_seen_at >= ? ORDER BY discovered_at ASC, id ASC",
+            (since,),
+        ).fetchall()
+        canon: list[dict] = []          # 主条目（按首次发现先后）
+        assign: dict[str, str | None] = {}
+        for r in rows:
+            norm = r["title_norm"]
+            target = None
+            for c in canon:
+                if c["platform"] == r["platform"]:
+                    continue        # 同平台已由规则 1 去重，不同标题视为不同话题
+                if abs(len(c["title_norm"]) - len(norm)) > max(len(norm), len(c["title_norm"])) * length_prefilter_ratio:
+                    continue
+                if similarity(c["title_norm"], norm) >= threshold:
+                    target = c["id"]
+                    break
+            assign[r["id"]] = target
+            if target is None:
+                canon.append(dict(r))
+        conn.executemany("UPDATE hot_topics SET duplicate_of = ? WHERE id = ?",
+                         [(v, k) for k, v in assign.items()])
     return sum(1 for v in assign.values() if v)
 
 
