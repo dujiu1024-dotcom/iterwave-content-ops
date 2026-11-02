@@ -22,7 +22,8 @@ def test_autogrow_scheduler_propagates_failed_execution_report():
 
     actual = asyncio.run(engine._job_autogrow_next_round())
 
-    assert actual is expected
+    assert actual is not expected
+    assert actual["reason"] == expected["reason"]
     assert actual["action"] == "failed"
     assert actual["final_status"] == "failed"
     assert actual["errors"] == ["内容生成失败"]
