@@ -52,6 +52,12 @@ def _db():
             content_plan_stage_id INTEGER, plan_signature TEXT,
             plan_attribution_status TEXT
         );
+        CREATE TABLE round_open_idempotency (
+            idempotency_key TEXT PRIMARY KEY, request_hash TEXT NOT NULL,
+            master_plan_version_id INTEGER NOT NULL, status TEXT NOT NULL,
+            round_id INTEGER UNIQUE, lease_until TEXT, created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL, error_message TEXT
+        );
     """)
     conn.execute("INSERT INTO content_plans(id,version) VALUES('cp-1',1)")
     conn.execute("INSERT INTO spiral_rounds(id,round_number,status) VALUES(1,1,'created')")
@@ -153,3 +159,24 @@ def test_round_cannot_bind_stage_from_another_subplan_version():
             1, master_plan_version_id=master["id"],
             content_plan_version_id=two["id"], content_plan_stage_id=stage_one,
         )
+
+def test_durable_round_open_lock_is_idempotent_and_rejects_key_reuse():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    master = store.create_master_draft(_plan())
+    store.activate_master_version(master["id"], reviewer="reviewer")
+
+    first = store.reserve_round_open("auto:2026-11-02T10:00", "hash-a", master["id"])
+    duplicate = store.reserve_round_open("auto:2026-11-02T10:00", "hash-a", master["id"])
+    assert first["acquired"] is True
+    assert duplicate["acquired"] is False
+    assert duplicate["status"] == "in_progress"
+
+    with pytest.raises(PlanVersionError, match="不同开轮请求"):
+        store.reserve_round_open("auto:2026-11-02T10:00", "hash-b", master["id"])
+
+    store.bind_round(1, master_plan_version_id=master["id"])
+    completed = store.complete_round_open("auto:2026-11-02T10:00", 1)
+    assert completed == {"status": "created", "round_id": 1}
+    retry = store.reserve_round_open("auto:2026-11-02T10:00", "hash-a", master["id"])
+    assert retry == {"acquired": False, "status": "created", "round_id": 1}
