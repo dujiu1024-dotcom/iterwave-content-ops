@@ -1147,24 +1147,25 @@ class SchedulerEngine:
                 return {"final_status": "failed", "errors": [f"选题库读取失败：{type(exc).__name__}"]}
 
         inserted = 0
-        for it in items:
-            exists = self.conn.execute(
-                "SELECT 1 FROM topic_index WHERE id = ?", (it.id,),
-            ).fetchone()
-            if exists:
-                continue
-            self.conn.execute(
-                "INSERT INTO topic_index (id, title, dimension, source, date, first_seen_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    it.id, it.title, it.dimension,
-                    getattr(it, "source", "kb"),
-                    getattr(it, "date", None),
-                    business_now(self.cfg).strftime("%Y-%m-%d %H:%M:%S"),
-                ),
-            )
-            inserted += 1
-        self.conn.commit()
+        with self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            for it in items:
+                exists = self.conn.execute(
+                    "SELECT 1 FROM topic_index WHERE id = ?", (it.id,),
+                ).fetchone()
+                if exists:
+                    continue
+                self.conn.execute(
+                    "INSERT INTO topic_index (id, title, dimension, source, date, first_seen_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        it.id, it.title, it.dimension,
+                        getattr(it, "source", "kb"),
+                        getattr(it, "date", None),
+                        business_now(self.cfg).strftime("%Y-%m-%d %H:%M:%S"),
+                    ),
+                )
+                inserted += 1
         after = self.conn.execute("SELECT COUNT(*) FROM topic_index").fetchone()[0]
         logger.info(
             "📚 [APS] kb_scan — 选题库 %d → %d，新增 %d 条", before, after, inserted,
@@ -1217,6 +1218,7 @@ class SchedulerEngine:
                 self.conn,
                 retention_days=self.cfg.hot_topics.retention_days,
                 max_rows=self.cfg.hot_topics.max_rows,
+                cfg=self.cfg,
             )
         except Exception as exc:  # noqa: BLE001 — 继续执行其它保留清理，但不能把部分失败记为成功
             try:
