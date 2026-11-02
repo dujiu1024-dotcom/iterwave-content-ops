@@ -50,7 +50,10 @@ jobs:
       - name: Install dependencies
         working-directory: web
         run: npm ci
-      - name: Build production frontend
+      - name: Run frontend unit tests
+        working-directory: web
+        run: npm test
+      - name: Build production app
         working-directory: web
         run: npm run build
       - name: Ensure demo mock API is excluded from production bundle

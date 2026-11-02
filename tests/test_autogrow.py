@@ -109,7 +109,10 @@ def test_scoring_applies_bias(cfg, conn):
 def test_hint_block():
     assert build_hint_block(None) == ""
     block = build_hint_block(["标题 13-18 字", " "])
-    assert "上一轮复盘要点" in block and "- 标题 13-18 字" in block and "红线" in block
+    payload = json.loads(block.splitlines()[2])
+    assert "上一轮复盘要点" in block
+    assert payload["hints"] == ["标题 13-18 字"]
+    assert "红线" in block
 
 
 # ---------------- 自动开轮的判定 ----------------

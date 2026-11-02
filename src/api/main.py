@@ -37,6 +37,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import inspect
 import io
 import json
 import os
@@ -52,9 +53,8 @@ from typing import Callable, Literal, Optional
 import httpx
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.routing import APIRoute
-import inspect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -66,11 +66,16 @@ from starlette.responses import Response
 from src.core.config import load_config, get_config, DEFAULT_ENV_PATH
 from src.core.timezone import business_now
 from src.core.config import PROJECT_ROOT
+from src.api.response_utils import (
+    api_datetime as _api_datetime,
+    friendly_validation_messages as _friendly_validation_messages,
+)
+# Keep NotifyRuleRequest in this module namespace: FastAPI resolves the wrapped route signature here.
+from src.api.notify_rules import NotifyRuleRequest, build_notify_rules_router  # noqa: F401
 from src.core.tenant_registry import TenantRegistry, TenantError
 from src.core.task_queue import GlobalTaskQueue, TaskQueueError
-from src.core.task_worker import GlobalTaskWorker
 from src.core.tenant_switch_gate import TenantSwitchGate, TenantSwitchInProgress
-from src.core.db import Database
+from src.core.db import Database, connection_transaction
 from src.core.state_machine import RoundStateMachine, DraftStateMachine
 from src.core.scoring.topic_eval import ScoringEngine, TopicItem
 from src.core.guard.ultimate_goal_checker import UltimateGoalChecker
@@ -102,6 +107,10 @@ from src.adapters import get_adapters
 logger = logging.getLogger(__name__)
 
 
+# =====================================================================
+# 全局单例（启动时初始化一次）
+# =====================================================================
+
 class TransactionalAPIRoute(APIRoute):
     """为同步写 API 提供请求级事务边界，异常时自动回滚并释放连接锁。
 
@@ -132,9 +141,6 @@ class TransactionalAPIRoute(APIRoute):
             endpoint = transactional_endpoint
         super().__init__(path, endpoint, **kwargs)
 
-# =====================================================================
-# 全局单例（启动时初始化一次）
-# =====================================================================
 
 _g_ctx: dict = {}
 _task_queue: GlobalTaskQueue | None = None
@@ -578,57 +584,6 @@ async def _switch_tenant_runtime(tenant_id: str) -> dict:
         ) from exc
 
 
-_VALIDATION_FIELD_LABELS = {
-    "platform": "平台标识", "usage_role": "图片用途", "limit": "数量",
-    "tenant_id": "账号组标识", "name": "名称", "path": "文件位置",
-    "email": "邮箱", "url": "链接", "content_id": "内容标识",
-}
-
-
-def _api_datetime(value, *, naive_timezone=timezone.utc):
-    """API 时间统一携带时区；默认历史数据库时间按 UTC 解释，租户目录时间显式传业务时区。"""
-    if not value or not isinstance(value, str):
-        return value
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return value
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=naive_timezone)
-    return parsed.isoformat()
-
-
-def _friendly_validation_messages(errors: list[dict]) -> list[str]:
-    """将 Pydantic 默认英文校验信息转换为稳定的中文提示，不回显校验器原文。"""
-    messages: list[str] = []
-    for error in errors:
-        loc = error.get("loc") or ()
-        field = str(loc[-1]) if loc else ""
-        label = _VALIDATION_FIELD_LABELS.get(field, "请求参数")
-        kind = str(error.get("type") or "")
-        ctx = error.get("ctx") or {}
-        if kind == "missing":
-            reason = "不能为空"
-        elif kind in ("string_pattern_mismatch", "string_type"):
-            reason = "格式不符合要求"
-        elif kind in ("int_parsing", "int_type", "float_parsing", "float_type"):
-            reason = "类型或格式不正确"
-        elif kind in ("greater_than_equal", "greater_than"):
-            bound = ctx.get("ge", ctx.get("gt", "允许范围"))
-            reason = f"不能小于 {bound}" if "ge" in ctx else f"必须大于 {bound}"
-        elif kind in ("less_than_equal", "less_than"):
-            bound = ctx.get("le", ctx.get("lt", "允许范围"))
-            reason = f"不能大于 {bound}" if "le" in ctx else f"必须小于 {bound}"
-        elif kind == "string_too_short":
-            reason = "长度不足"
-        elif kind == "string_too_long":
-            reason = "长度超出限制"
-        else:
-            reason = "内容不符合要求"
-        messages.append(f"{label}：{reason}")
-    return messages or ["请求参数不符合要求"]
-
-
 def _persist_activation_sample_results(
     conn, run_id: str, tenant_id: str, platform: str, results: list[tuple],
     completed_at: str,
@@ -674,8 +629,10 @@ def _build_app() -> FastAPI:
         _task_queue = GlobalTaskQueue(tenant_registry.system_db_file)
         _task_queue.initialize()
         _tenant_runtime_contexts.clear()
-        # 当前部署约束为单 Uvicorn worker；启动时上一进程已退出，可立即回收遗留 running。
-        _task_queue.recover_orphaned_running()
+        # 不得无条件清理 running 租约：独立 Worker 需要先检测旧父进程退出。
+        active_tasks, _active_total = _task_queue.list_page(scope="active", page=1, page_size=500)
+        if any(task.status == "running" for task in active_tasks):
+            await asyncio.sleep(2.0)
         _task_queue.recover_expired()
         active_tenant_id = tenant_registry.active_id()
         active_tenant = tenant_registry.get(active_tenant_id)
@@ -875,30 +832,6 @@ def _build_app() -> FastAPI:
                     except Exception:
                         logger.warning("后台上下文数据库连接清理异常", exc_info=True)
 
-        # 多消费者跨账号组并行；队列确保同一账号组同时最多一个运行任务。
-        try:
-            task_worker_count = int(os.getenv("ITERWAVE_TASK_WORKERS", "4"))
-        except (TypeError, ValueError):
-            task_worker_count = 4
-        task_worker_count = max(1, min(task_worker_count, 8))
-        task_worker_stop = asyncio.Event()
-        task_workers = [
-            GlobalTaskWorker(
-                _task_queue,
-                lambda tenant_id: _build_tenant_runtime_context(tenant_registry, tenant_id),
-                reconcile_terminal_rounds=(index == 0),
-            )
-            for index in range(task_worker_count)
-        ]
-        task_worker_tasks = [
-            asyncio.create_task(
-                worker.run(task_worker_stop),
-                name=f"global-tenant-task-worker-{index + 1}",
-            )
-            for index, worker in enumerate(task_workers)
-        ]
-        logger.info("全局任务消费者已启动 count=%d（同租户串行、跨租户并行）", task_worker_count)
-
         # 热点服务是独立资源池；后台线程持有启动时的账号组配置和独立数据库连接。
         from ..core import hot_topic_service
         if cfg.hot_topics.enabled is not False and hot_topic_service.is_stale(cfg, conn):
@@ -908,17 +841,16 @@ def _build_app() -> FastAPI:
 
         logger.info("✅ FastAPI 应用启动完成，%d 个模块已加载", len(_g_ctx))
 
+        from src.core.task_worker_process_manager import TaskWorkerSupervisorProcess
+        task_worker_supervisor = TaskWorkerSupervisorProcess(project_root=PROJECT_ROOT)
         try:
+            task_worker_supervisor.start()
             yield
         finally:
-            task_worker_stop.set()
-            worker_results = await asyncio.gather(*task_worker_tasks, return_exceptions=True)
-            for index, result in enumerate(worker_results, 1):
-                if isinstance(result, BaseException):
-                    logger.error(
-                        "全局任务消费者关闭异常 worker=%d error=%s",
-                        index, type(result).__name__, exc_info=result,
-                    )
+            try:
+                await asyncio.to_thread(task_worker_supervisor.stop)
+            except Exception:
+                logger.exception("全局任务 Watchdog/Worker 进程关闭异常")
             # 停止所有账号组常驻调度器并释放各自的数据库连接。
             for tenant_id, context in list(_tenant_runtime_contexts.items()):
                 try:
@@ -1355,38 +1287,6 @@ class CreateRoundRequest(BaseModel):
     # 内容计划 ID/版本仅参与请求去重键，不改变生产配置来源。
     content_plan_id: Optional[str] = None
     content_plan_version: Optional[int] = None
-
-class NotifyRuleRequest(BaseModel):
-    scenario: str
-    channel: str
-    level: str
-    enabled: bool = True
-    condition: Optional[str] = None
-    notes: Optional[str] = None
-    platforms: Optional[list[str]] = None
-
-    @field_validator("scenario")
-    @classmethod
-    def _scenario_ok(cls, v: str) -> str:
-        text = v.strip()
-        if not text or len(text) > 64:
-            raise ValueError("scenario 必须是 1-64 字的场景标识")
-        return text
-
-    @field_validator("channel")
-    @classmethod
-    def _channel_enum(cls, v: str) -> str:
-        if v not in ("macos", "wecom", "feishu", "console"):
-            raise ValueError("channel 只能是 macos / wecom / feishu / console")
-        return v
-
-    @field_validator("level")
-    @classmethod
-    def _level_enum(cls, v: str) -> str:
-        if v not in ("info", "warning", "error", "critical"):
-            raise ValueError("level 只能是 info / warning / error / critical")
-        return v
-
 
 class PlatformStyleUpdate(BaseModel):
     """平台文案风格（platform_styles 表）：只提交改动字段。"""
@@ -4246,6 +4146,29 @@ def _register_routes(app: FastAPI) -> None:
         from ..core.persona import personas_view
         return personas_view(_g()["cfg"])
 
+    def _validate_goal_hierarchy(conn, goal_id, level, parent_id) -> None:
+        """两级目标约束：总目标(north_star)位于顶层；平台目标只能挂到顶层总目标下。"""
+        level = level or "platform"
+        if parent_id:
+            if level == "north_star":
+                raise HTTPException(422, "总目标不能再挂到其它总目标下")
+            if goal_id is not None and str(parent_id) == str(goal_id):
+                raise HTTPException(422, "目标不能挂到自身下面")
+            parent = conn.execute(
+                "SELECT goal_level, parent_goal_id FROM goals WHERE id = ?", (parent_id,),
+            ).fetchone()
+            if parent is None:
+                raise HTTPException(422, "所属总目标不存在")
+            if (parent["goal_level"] or "platform") != "north_star" or parent["parent_goal_id"]:
+                raise HTTPException(422, "只能挂到顶层总目标下面")
+        if goal_id is not None and (level != "north_star" or parent_id):
+            # 已有子目标的总目标不能降级或挂到别处，否则子目标会变成三级或挂在非总目标下。
+            child = conn.execute(
+                "SELECT 1 FROM goals WHERE parent_goal_id = ? LIMIT 1", (goal_id,),
+            ).fetchone()
+            if child is not None:
+                raise HTTPException(422, "该总目标下仍有子目标，请先移走子目标再修改层级")
+
     @app.post("/api/goals")
     def create_goal(req: CreateGoalRequest):
         """创建阶段目标（R21：6 个口径字段齐备才落库）。
@@ -4257,13 +4180,7 @@ def _register_routes(app: FastAPI) -> None:
         goal_id = f"goal-{uuid.uuid4().hex[:12]}"
         now = _now().isoformat(timespec="seconds")
         if req.parent_goal_id:
-            parent = conn.execute("SELECT goal_level FROM goals WHERE id = ?", (req.parent_goal_id,)).fetchone()
-            if not parent:
-                raise HTTPException(422, "所属总目标不存在")
-            if (parent["goal_level"] or "platform") != "north_star":
-                raise HTTPException(422, "只能挂到总目标下面")
-            if req.goal_level == "north_star":
-                raise HTTPException(422, "总目标不能再挂到其它总目标下")
+            _validate_goal_hierarchy(conn, None, req.goal_level or "platform", req.parent_goal_id)
         conn.execute(
             "INSERT INTO goals (id, goal_type, goal_text, target_metric, target_value,"
             " target_platform, metric_scope, baseline_value, baseline_at,"
@@ -4288,16 +4205,29 @@ def _register_routes(app: FastAPI) -> None:
     def update_goal(goal_id: str, req: "GoalUpdateRequest"):
         """编辑阶段目标口径 / 暂停或完成目标（current_value 只由采集回写）。"""
         conn = _g()["conn"]
-        row = conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone()
-        if not row:
-            raise HTTPException(404, "目标不存在")
         fields = req.model_dump(exclude_unset=True)
         if not fields:
             raise HTTPException(422, "没有需要更新的字段")
-        sets = ", ".join(f"{k} = ?" for k in fields)
-        conn.execute(f"UPDATE goals SET {sets} WHERE id = ?", (*fields.values(), goal_id))
-        conn.commit()
-        item = dict(conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone())
+        # 读取、层级校验与写入在同一个写事务内，防止并发 PATCH 绕过两级目标约束。
+        with connection_transaction(conn, immediate=True):
+            row = conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone()
+            if not row:
+                raise HTTPException(404, "目标不存在")
+            if "parent_goal_id" in fields:
+                raw_parent = fields["parent_goal_id"]
+                fields["parent_goal_id"] = (str(raw_parent).strip() or None) if raw_parent is not None else None
+            if "goal_level" in fields and fields["goal_level"] is None:
+                raise HTTPException(422, "goal_level 不能为空")
+            # 校验 PATCH 之后的完整层级，而不只是本次提交的字段。
+            next_level = fields.get("goal_level", row["goal_level"] or "platform")
+            next_parent_id = fields.get("parent_goal_id", row["parent_goal_id"])
+            _validate_goal_hierarchy(conn, goal_id, next_level, next_parent_id)
+            if next_level == "north_star":
+                # 与创建口径一致：总目标是跨平台汇总，不绑定单一平台。
+                fields["target_platform"] = None
+            sets = ", ".join(f"{k} = ?" for k in fields)
+            conn.execute(f"UPDATE goals SET {sets} WHERE id = ?", (*fields.values(), goal_id))
+            item = dict(conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone())
         item["achievement_rate"] = GoalProgressUpdater.rate_for(item)
         return item
 
@@ -5770,18 +5700,24 @@ def _register_routes(app: FastAPI) -> None:
         return diagnose(_g()["cfg"], _g()["conn"], cb=_g()["cb"], live_llm=req.live_llm)
 
     # --- 删除：已生产内容 / 轮次 ---
+    # 同步写路由由 TransactionalAPIRoute 包在请求级事务内，响应前才提交；
+    # 卡片图片清理登记为 BackgroundTasks，在事务提交、响应发出后执行，提交失败则不删文件。
     @app.post("/api/contents/delete")
-    def delete_content_ids(req: IdsRequest):
+    def delete_content_ids(req: IdsRequest, background_tasks: BackgroundTasks):
         from src.core.content_admin import delete_contents
-        return delete_contents(_g()["cfg"], _g()["conn"], req.ids)
+        return delete_contents(
+            _g()["cfg"], _g()["conn"], req.ids, after_commit=background_tasks.add_task,
+        )
 
     @app.delete("/api/contents/{content_id}")
-    def delete_content(content_id: str):
+    def delete_content(content_id: str, background_tasks: BackgroundTasks):
         conn = _g()["conn"]
         row = _content_row(conn, content_id)
         _ensure_content_round_idle(row, "删除内容")
         from src.core.content_admin import delete_contents
-        res = delete_contents(_g()["cfg"], conn, [content_id])
+        res = delete_contents(
+            _g()["cfg"], conn, [content_id], after_commit=background_tasks.add_task,
+        )
         if res["not_found"]:
             raise HTTPException(404, f"内容 {content_id} 不存在")
         if res["blocked"]:
@@ -5789,12 +5725,14 @@ def _register_routes(app: FastAPI) -> None:
         return res
 
     @app.delete("/api/rounds/{round_id}")
-    def delete_round_api(round_id: int):
+    def delete_round_api(round_id: int, background_tasks: BackgroundTasks):
         from src.core.content_admin import DeleteBlocked, delete_round
         if _round_task_active(_g().get("runtime_tenant_id", "default"), round_id):
             raise HTTPException(409, f"轮次 {round_id} 正在排队或执行，不能删除")
         try:
-            return delete_round(_g()["cfg"], _g()["conn"], round_id)
+            return delete_round(
+                _g()["cfg"], _g()["conn"], round_id, after_commit=background_tasks.add_task,
+            )
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
         except DeleteBlocked as exc:
@@ -6298,7 +6236,8 @@ def _register_routes(app: FastAPI) -> None:
                 "SELECT dimension FROM topics WHERE id = ?", (row["topic_id"],)
             ).fetchone()
             dimension = (topic["dimension"] if topic else "") or ""
-        except Exception:  # noqa: BLE001 — 维度只是装饰，取不到不影响出图
+        except sqlite3.Error:  # 维度只是装饰；仅数据库兼容/读取故障允许退回空值
+            logger.warning("重出图读取选题维度失败 content_id=%s", content_id, exc_info=True)
             dimension = ""
 
         from ..core.content_pipeline import (
@@ -9035,72 +8974,9 @@ def _register_routes(app: FastAPI) -> None:
     # Operations 补齐（对比报告 3.7 🔴 后端真缺失）
     # ============================================================
 
-    # --- 通知规则配置（目前规则硬编码在 notify 模块，补可编辑 CRUD）---
-    @app.get("/api/notify_rules")
-    def list_notify_rules():
-        conn = _g()["conn"]
-        try:
-            rows = conn.execute(
-                "SELECT * FROM notify_rules ORDER BY id ASC"
-            ).fetchall()
-        except sqlite3.OperationalError:
-            # 表不存在 — 自动建表（首次调用时 lazy create）
-            conn.executescript(_NOTIFY_RULES_SCHEMA)
-            conn.commit()
-            rows = []
-        return [dict(r) for r in rows]
-
-    @app.post("/api/notify_rules")
-    def create_notify_rule(req: NotifyRuleRequest):
-        conn = _g()["conn"]
-        try:
-            conn.execute("SELECT 1 FROM notify_rules LIMIT 1")
-        except sqlite3.OperationalError:
-            conn.executescript(_NOTIFY_RULES_SCHEMA); conn.commit()
-        now = _now().isoformat(timespec="seconds")  # R5：本地时区
-        # 同场景同通道只保留一条（唯一索引兜底；老库没有索引时这里先做 upsert）
-        existing = conn.execute(
-            "SELECT id FROM notify_rules WHERE scenario=? AND channel=?",
-            (req.scenario, req.channel),
-        ).fetchone()
-        if existing:
-            conn.execute(
-                """UPDATE notify_rules SET level=?, enabled=?, condition=?, notes=?,
-                          updated_at=? WHERE id=?""",
-                (req.level, 1 if req.enabled else 0, req.condition, req.notes,
-                 now, existing[0]),
-            )
-            conn.commit()
-            return {"id": existing[0], "message": "同场景同通道规则已存在，已更新"}
-        cur = conn.execute(
-            """INSERT INTO notify_rules (scenario, channel, level, enabled, condition, notes, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (req.scenario, req.channel, req.level, 1 if req.enabled else 0,
-             req.condition, req.notes, now),
-        )
-        conn.commit()
-        return {"id": cur.lastrowid, "message": "创建成功"}
-
-    @app.patch("/api/notify_rules/{rule_id}")
-    def update_notify_rule(rule_id: int, req: NotifyRuleRequest):
-        conn = _g()["conn"]
-        conn.execute(
-            """UPDATE notify_rules SET scenario=?, channel=?, level=?, enabled=?,
-                      condition=?, notes=?, updated_at=?
-               WHERE id=?""",
-            (req.scenario, req.channel, req.level, 1 if req.enabled else 0,
-             req.condition, req.notes,
-             _now().isoformat(timespec="seconds"), rule_id),
-        )
-        conn.commit()
-        return {"id": rule_id, "message": "更新成功"}
-
-    @app.delete("/api/notify_rules/{rule_id}")
-    def delete_notify_rule(rule_id: int):
-        conn = _g()["conn"]
-        conn.execute("DELETE FROM notify_rules WHERE id=?", (rule_id,))
-        conn.commit()
-        return {"message": "删除成功"}
+    app.include_router(build_notify_rules_router(
+        _g, _now, route_class=TransactionalAPIRoute,
+    ))
 
     # --- 平台文案风格（platform_styles 表，migrations/016）---
     @app.get("/api/platform_styles")
@@ -9396,24 +9272,6 @@ def _register_routes(app: FastAPI) -> None:
 # ============================================================
 # notify_rules 表 schema（lazy create，首次调用 get/post 时自动建立）
 # ============================================================
-_NOTIFY_RULES_SCHEMA = """
-CREATE TABLE IF NOT EXISTS notify_rules (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    scenario   TEXT NOT NULL,            -- 触发场景（circuit_broken / round_completed / ...）
-    channel    TEXT NOT NULL CHECK (channel IN ('macos', 'wecom', 'feishu', 'console')),
-    level      TEXT NOT NULL DEFAULT 'warning'
-               CHECK (level IN ('info', 'warning', 'error', 'critical')),
-    enabled    INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
-    condition  TEXT,                     -- 条件表达式（SQL fragment / JSON filter）
-    notes      TEXT,
-    created_at DATETIME,
-    updated_at DATETIME
-);
-CREATE UNIQUE INDEX IF NOT EXISTS ux_notify_rules_scenario_channel
-    ON notify_rules (scenario, channel);
-"""
-
-
 def _find_round_for_draft(conn, draft_id: str) -> Optional[int]:
     row = conn.execute(
         "SELECT c.round_id FROM drafts d JOIN contents c ON d.content_id = c.id WHERE d.id = ?",

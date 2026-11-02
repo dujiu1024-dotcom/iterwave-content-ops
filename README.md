@@ -77,7 +77,7 @@ uvicorn src.api.main:app --reload
 - 本机开发如需免引导口令完成首次设置，必须显式设置 `ITERWAVE_ALLOW_LOCAL_BOOTSTRAP=1`，且使用本机直连地址。默认情况下，本机也需引导口令。公网或反向代理部署前，先在服务端环境变量中设置强随机的 `ITERWAVE_BOOTSTRAP_TOKEN`，再通过首次设置页面提交该引导口令并设置正式访问口令。
 - 公网部署不要启用 `ITERWAVE_ALLOW_LOCAL_BOOTSTRAP=1`。不要把引导口令写进仓库、前端配置或日志；完成初始化后应从部署环境中移除引导口令。
 - 配置文件与数据库目录应限制为运行服务的操作系统用户可读写，并通过 HTTPS 访问管理界面。
-- 当前版本每个 Uvicorn 进程的应用生命周期都会启动账号组 APScheduler。部署仍应使用单个 Uvicorn worker；跨进程 APScheduler 选主尚未实现，不要配置 `--workers` 大于 1。全局任务队列可通过 `ITERWAVE_TASK_WORKERS` 配置 1–8 个进程内消费者，跨账号组并行、同账号组串行。
+- 当前版本每个 Uvicorn 进程的应用生命周期都会启动账号组 APScheduler。部署仍应使用单个 Uvicorn worker；跨进程 APScheduler 选主尚未实现，不要配置 `--workers` 大于 1。全局任务队列由 API 生命周期托管的独立 Watchdog 进程拉起独立 Worker 进程消费；默认 1 个消费者，严格按入队顺序全局 FIFO 串行。只有显式设置 `ITERWAVE_TASK_WORKERS`（2–8）才开启跨账号组并行（同账号组仍串行）；注意并行模式下硬超时会终止整个 Worker 进程，同进程内其他账号组的运行中任务也会被标记为中断。`ITERWAVE_TASK_HARD_TIMEOUT_SECONDS`（默认 1800，30–86400）为单任务墙钟硬超时；`ITERWAVE_TASK_SHUTDOWN_GRACE_SECONDS`（默认 30，最大 90）为停机宽限。被中断任务一律不自动重放，需人工核实平台侧结果后再恢复。
 - 多账号组即时热切换默认开启。部署环境如需关闭，设置 `ITERWAVE_ENABLE_TENANT_HOT_SWITCH=0` 后重启服务；关闭时，账号组选择只保存选择结果，需重启后才切换运行时。全局队列的跨账号组热切换验收必须在启用该能力并重启后进行，不能在任务执行期间通过重启来模拟切换，否则运行中任务会进入 `interrupted`，需要先核实业务结果。
 
 ### 前端
@@ -86,7 +86,15 @@ uvicorn src.api.main:app --reload
 cd web
 npm install
 npm run dev
+
+# 前端 API 错误提示单元测试（Node.js 内置 test runner，无额外测试依赖）
+npm test
+
+# 生产构建（TypeScript 类型检查 + Vite）
+npm run build
 ```
+
+前端 API 客户端的错误信息净化逻辑位于 `web/src/api-error.js`，通过 `web/tests/api-error.test.mjs` 覆盖安全业务提示透传、内部诊断信息隐藏和空响应兜底。
 
 ## 项目结构
 
@@ -160,7 +168,7 @@ IterWave 的部分平台适配器代码基于 [Easel](https://github.com/kaichen
 
 ### API 层
 
-`src/api/main.py` — FastAPI 路由入口，覆盖状态机、选题、评分、运营、熔断、配置、通知、账号组与任务队列等端点；同步写请求提供请求级事务边界，异步写路径单独定义事务范围。
+`src/api/main.py` — FastAPI 应用生命周期、事务路由和尚未迁移的业务端点入口。`src/api/notify_rules.py` 独立承载通知规则 CRUD、请求模型与可选表的惰性建表；`src/api/response_utils.py` 承载时间序列化与参数校验错误映射。同步事务路由暂留主入口，以保留 FastAPI 类型注解解析所需的全局命名空间；其余路由仍需按领域继续拆分，异步写路径单独定义事务范围。
 
 ### React 前端（web/）
 
