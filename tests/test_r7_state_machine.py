@@ -202,3 +202,82 @@ def test_each_timeout_is_used_independently(conn: sqlite3.Connection, seed) -> N
     assert sm.collect_metrics_phase_timeout(r) is True
     assert conn.execute("SELECT status FROM drafts WHERE id = ?", (d,)).fetchone()[0] \
         == "draft_saved"
+
+
+def test_draft_transition_does_not_overwrite_concurrent_status_change(conn, seed):
+    round_id = seed.round()
+    draft_id = seed.draft(
+        round_id, draft_status="draft_saved", fetch_status=None,
+    )
+
+    class RacingConnection:
+        def __init__(self, raw):
+            self.raw = raw
+            self.external = getattr(raw, 'raw', raw)
+            self.injected = False
+
+        def execute(self, sql, params=()):
+            result = self.raw.execute(sql, params)
+            if sql.startswith("SELECT status FROM drafts WHERE id = ?") and not self.injected:
+                self.injected = True
+                self.external.execute(
+                    "UPDATE drafts SET status='cancelled' WHERE id=?", (draft_id,),
+                )
+                self.external.commit()
+            return result
+
+        def __enter__(self):
+            self.raw.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self.raw.__exit__(*exc)
+
+        def commit(self):
+            self.raw.commit()
+
+    sm = DraftStateMachine(RacingConnection(conn))
+    assert sm.transition(draft_id, "expired", "timeout") is False
+    assert conn.execute(
+        "SELECT status FROM drafts WHERE id=?", (draft_id,)
+    ).fetchone()[0] == "cancelled"
+
+
+def test_round_transition_does_not_overwrite_concurrent_status_change(conn, seed):
+    round_id = seed.round(status="created")
+
+    class RacingConnection:
+        def __init__(self, raw):
+            self.raw = raw
+            self.external = getattr(raw, 'raw', raw)
+            self.injected = False
+
+        def execute(self, sql, params=()):
+            result = self.raw.execute(sql, params)
+            if sql.startswith(
+                "SELECT status, transition_log FROM spiral_rounds WHERE id = ?"
+            ) and not self.injected:
+                self.injected = True
+                self.external.execute(
+                    "UPDATE spiral_rounds SET status='failed' WHERE id=?", (round_id,),
+                )
+                self.external.commit()
+            return result
+
+        def __enter__(self):
+            self.raw.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self.raw.__exit__(*exc)
+
+        def commit(self):
+            self.raw.commit()
+
+    sm = RoundStateMachine(RacingConnection(conn))
+    assert sm.transition(round_id, "producing", "race") is False
+    assert conn.execute(
+        "SELECT status FROM spiral_rounds WHERE id=?", (round_id,)
+    ).fetchone()[0] == "failed"
+
+
