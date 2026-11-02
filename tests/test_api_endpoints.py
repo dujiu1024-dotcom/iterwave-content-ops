@@ -228,6 +228,99 @@ def test_hot_import_is_idempotent_by_source_title(client):
     assert row["dimension"] == "健康"
 
 
+def test_activation_sample_results_and_ready_transition_roll_back_together():
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript("""
+        CREATE TABLE sample_runs(
+            id TEXT PRIMARY KEY, tenant_id TEXT, status TEXT, completed_at TEXT
+        );
+        CREATE TABLE sample_contents(
+            id TEXT PRIMARY KEY, sample_run_id TEXT, tenant_id TEXT, platform TEXT,
+            angle TEXT, title TEXT, body TEXT, hashtags_json TEXT, quality_status TEXT,
+            quality_findings_json TEXT, created_at TEXT, updated_at TEXT
+        );
+        INSERT INTO sample_runs VALUES ('run-1', 'tenant-a', 'quality_check', NULL);
+        CREATE TRIGGER reject_sample_insert BEFORE INSERT ON sample_contents
+        BEGIN SELECT RAISE(ABORT, 'injected sample insert failure'); END;
+    """)
+
+    results = [("实用方法", "标题示例", "正文内容", ["标签"], [])]
+    with pytest.raises(sqlite3.IntegrityError, match="injected sample insert failure"):
+        api_main._persist_activation_sample_results(
+            conn, "run-1", "tenant-a", "xhs", results, "2026-11-02 10:00:00",
+        )
+
+    assert conn.execute("SELECT status FROM sample_runs WHERE id='run-1'").fetchone()[0] == "quality_check"
+    assert conn.execute("SELECT COUNT(*) FROM sample_contents").fetchone()[0] == 0
+    conn.close()
+
+
+def test_activation_sample_results_reject_late_write_after_run_state_changed():
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript("""
+        CREATE TABLE sample_runs(
+            id TEXT PRIMARY KEY, tenant_id TEXT, status TEXT, completed_at TEXT
+        );
+        CREATE TABLE sample_contents(
+            id TEXT PRIMARY KEY, sample_run_id TEXT, tenant_id TEXT, platform TEXT,
+            angle TEXT, title TEXT, body TEXT, hashtags_json TEXT, quality_status TEXT,
+            quality_findings_json TEXT, created_at TEXT, updated_at TEXT
+        );
+        INSERT INTO sample_runs VALUES ('run-2', 'tenant-a', 'failed', NULL);
+    """)
+
+    with pytest.raises(RuntimeError, match="状态已变化"):
+        api_main._persist_activation_sample_results(
+            conn, "run-2", "tenant-a", "xhs",
+            [("实用方法", "标题示例", "正文内容", [], [])],
+            "2026-11-02 10:00:00",
+        )
+
+    assert conn.execute("SELECT COUNT(*) FROM sample_contents").fetchone()[0] == 0
+    assert conn.execute("SELECT status FROM sample_runs WHERE id='run-2'").fetchone()[0] == "failed"
+    conn.close()
+
+
+def test_activation_samples_reject_second_active_run_and_replay_idempotently(client, monkeypatch):
+    tc, conn, _ = client
+    from src.core import content_pipeline
+
+    monkeypatch.setattr(content_pipeline, "_llm_available", lambda _cfg: False)
+    now = datetime.now().isoformat(sep=" ", timespec="seconds")
+    conn.execute(
+        "INSERT INTO sample_runs "
+        "(id, tenant_id, platform, account_description, status, model_mode, "
+        "idempotency_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("active-sample", "default", "xhs", "职场AI效率提升方法", "generating",
+         "byok", "request-active", now),
+    )
+    conn.commit()
+
+    # 相同幂等键必须返回原任务，不应被活动任务互斥规则误拒绝。
+    replay = tc.post("/api/activation/samples", json={
+        "platform": "xhs", "account_description": "职场AI效率提升方法",
+        "idempotency_key": "request-active",
+    })
+    assert replay.status_code == 202
+    assert replay.json()["sample_run_id"] == "active-sample"
+    assert replay.json()["deduplicated"] is True
+
+    # 不同幂等键不能绕过同一账号组的活动任务限制。
+    conflict = tc.post("/api/activation/samples", json={
+        "platform": "douyin", "account_description": "职场AI效率提升方法",
+        "idempotency_key": "request-another",
+    })
+    assert conflict.status_code == 409
+    assert conn.execute(
+        "SELECT COUNT(*) FROM sample_runs WHERE tenant_id='default' "
+        "AND status IN ('created','generating','quality_check')"
+    ).fetchone()[0] == 1
+
+
 # ---------------------------------------------------------------- R-6 全局暂停
 def test_ops_pause_roundtrip_persists(client):
     tc, conn, _ = client

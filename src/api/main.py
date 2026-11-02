@@ -627,6 +627,32 @@ def _friendly_validation_messages(errors: list[dict]) -> list[str]:
     return messages or ["请求参数不符合要求"]
 
 
+def _persist_activation_sample_results(
+    conn, run_id: str, tenant_id: str, platform: str, results: list[tuple],
+    completed_at: str,
+) -> int:
+    """原子保存三篇体验样稿并将任务从 quality_check 推进到 ready。"""
+    with conn:
+        for angle, title, body, tags, findings in results:
+            conn.execute(
+                "INSERT INTO sample_contents "
+                "(id, sample_run_id, tenant_id, platform, angle, title, body, hashtags_json, "
+                "quality_status, quality_findings_json, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pass', ?, ?, ?)",
+                (uuid.uuid4().hex, run_id, tenant_id, platform, angle, title, body,
+                 json.dumps(tags, ensure_ascii=False), json.dumps(findings, ensure_ascii=False),
+                 completed_at, completed_at),
+            )
+        cursor = conn.execute(
+            "UPDATE sample_runs SET status='ready', completed_at=? "
+            "WHERE id=? AND tenant_id=? AND status='quality_check'",
+            (completed_at, run_id, tenant_id),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("体验任务状态已变化，拒绝提交迟到的样稿结果")
+    return len(results)
+
+
 def _build_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -1939,8 +1965,13 @@ def _register_routes(app: FastAPI) -> None:
             try:
                 started = business_now(cfg_bg).isoformat(sep=" ", timespec="seconds")
                 with conn_bg:
-                    conn_bg.execute("UPDATE sample_runs SET status='generating', started_at=? WHERE id=?",
-                                    (started, run_id))
+                    cursor = conn_bg.execute(
+                        "UPDATE sample_runs SET status='generating', started_at=? "
+                        "WHERE id=? AND tenant_id=? AND status='created'",
+                        (started, run_id, tenant_id),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError("体验任务状态已变化，拒绝启动生成")
                 base_cfg = cfg_bg
                 sample_goal = base_cfg.ultimate_goal.model_copy(update={
                     "positioning": description,
@@ -2033,23 +2064,18 @@ def _register_routes(app: FastAPI) -> None:
                             "quality_rejected", "样稿多次未通过质量检查：" + "、".join(findings),
                         )
                     results.append((angle, title, body, tags, findings))
-                now_done = business_now(cfg_bg).isoformat(sep=" ", timespec="seconds")
                 with conn_bg:
-                    conn_bg.execute("UPDATE sample_runs SET status='quality_check' WHERE id=?", (run_id,))
-                    for angle, title, body, tags, findings in results:
-                        conn_bg.execute(
-                            "INSERT INTO sample_contents "
-                            "(id, sample_run_id, tenant_id, platform, angle, title, body, hashtags_json, "
-                            "quality_status, quality_findings_json, created_at, updated_at) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pass', ?, ?, ?)",
-                            (uuid.uuid4().hex, run_id, tenant_id, platform, angle, title, body,
-                             json.dumps(tags, ensure_ascii=False), json.dumps(findings, ensure_ascii=False),
-                             now_done, now_done),
-                        )
-                    conn_bg.execute(
-                        "UPDATE sample_runs SET status='ready', completed_at=? WHERE id=?",
-                        (now_done, run_id),
+                    cursor = conn_bg.execute(
+                        "UPDATE sample_runs SET status='quality_check' "
+                        "WHERE id=? AND tenant_id=? AND status='generating'",
+                        (run_id, tenant_id),
                     )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError("体验任务状态已变化，拒绝进入质量检查")
+                now_done = business_now(cfg_bg).isoformat(sep=" ", timespec="seconds")
+                _persist_activation_sample_results(
+                    conn_bg, run_id, tenant_id, platform, results, now_done,
+                )
                 try:
                     record_sample_event("sample_generation_succeeded", {"sample_count": 3},
                                          f"sample-ready:{run_id}")
@@ -2069,8 +2095,10 @@ def _register_routes(app: FastAPI) -> None:
                 try:
                     with conn_bg:
                         conn_bg.execute(
-                            "UPDATE sample_runs SET status='failed', error_code=?, error_message_safe=?, completed_at=? WHERE id=?",
-                            (code, safe_message[:300], business_now(cfg_bg).isoformat(sep=" ", timespec="seconds"), run_id),
+                            "UPDATE sample_runs SET status='failed', error_code=?, error_message_safe=?, completed_at=? "
+                            "WHERE id=? AND tenant_id=? AND status IN ('created','generating','quality_check')",
+                            (code, safe_message[:300], business_now(cfg_bg).isoformat(sep=" ", timespec="seconds"),
+                             run_id, tenant_id),
                         )
                 except Exception:
                     logger.exception("快速体验失败状态收口失败 run=%s", run_id)
