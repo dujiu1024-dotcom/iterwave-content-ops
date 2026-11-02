@@ -5566,7 +5566,7 @@ def _register_routes(app: FastAPI) -> None:
                 (row["current_version_id"],),
             ).fetchall()]
             for stage in stages:
-                for key in ("id", "sub_plan_version_id", "created_at", "updated_at", "status"):
+                for key in ("id", "sub_plan_version_id", "created_at", "updated_at"):
                     stage.pop(key, None)
             try:
                 draft = store.create_subplan_version(
