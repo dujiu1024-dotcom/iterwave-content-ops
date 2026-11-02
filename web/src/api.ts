@@ -1092,6 +1092,28 @@ export interface AutogrowStatus {
   recent_runs: { id: number; ran_at: string; action: string; reason: string; round_id: number | null }[];
 }
 
+export interface MasterPlanVersion {
+  id: number; version_no: number; status: string; plan_snapshot: string;
+  plan_signature: string; created_at: string; reviewed_at?: string | null;
+}
+export interface SubPlanStageRecord {
+  id: number; sub_plan_version_id: number; stage_key: string; stage_order: number; title: string;
+  direction: string; target_count: number; start_date: string | null; end_date: string | null;
+  completion_condition: string; status: "pending" | "in_progress" | "completed" | "paused" | "cancelled";
+  notes: string; confirmed_published_count?: number;
+}
+export interface SubPlanVersionRecord {
+  id: number; sub_plan_id: string; version_no: number; master_plan_version_id: number;
+  status: string; snapshot: Record<string, unknown>; stages: SubPlanStageRecord[];
+}
+export interface SubPlanRecord {
+  id: string; master_plan_version_id: number; platform: Platform; title: string;
+  status: string; current_version_id: number | null; current_version_no?: number | null;
+  current_version_status?: string | null; master_version_status?: string | null;
+}
+export interface SubPlanDetail {
+  subplan: SubPlanRecord; versions: SubPlanVersionRecord[];
+}
 export interface PlanSignatureHistory {
   plan_signature: string;
   plan_snapshot: MasterPlan | string;
@@ -1775,12 +1797,71 @@ export const api = {
   /** 待处理/阻塞事项（Dashboard KPI + 待我处理列表用） */
   actionItems: () =>
     fetchJson<{ items: ActionItem[]; total: number }>("/api/action_items"),
+  createPlanDraft: (plan: MasterPlan) =>
+    fetchJson<{ draft: MasterPlanVersion; requires_review: true; effective: false }>("/api/plans", {
+      method: "POST", body: JSON.stringify({
+        topic_count_per_platform: plan.topic_count_per_platform,
+        enabled_platforms: plan.enabled_platforms,
+        dimension_allocation: plan.dimension_allocation,
+        content_format: plan.content_format,
+        per_platform: plan.per_platform ?? {},
+        cadence: plan.cadence ?? {},
+      }),
+    }),
+  reviewMasterPlan: (versionId: number, action: "approve" | "reject", reason?: string) =>
+    fetchJson<{ version?: MasterPlanVersion; version_id?: number; status?: string; effective: boolean }>(
+      `/api/plans/${versionId}/review`, { method: "POST", body: JSON.stringify({ action, reason }) },
+    ),
+  planVersions: (limit = 100) =>
+    fetchJson<{ items: MasterPlanVersion[] }>(`/api/plans/versions?limit=${limit}`),
+  subplans: (params: { masterPlanVersionId?: number; platform?: Platform; status?: string; page?: number; pageSize?: number } = {}) => {
+    const query = new URLSearchParams();
+    if (params.masterPlanVersionId != null) query.set("master_plan_version_id", String(params.masterPlanVersionId));
+    if (params.platform) query.set("platform", params.platform);
+    if (params.status) query.set("status", params.status);
+    if (params.page != null) query.set("page", String(params.page));
+    if (params.pageSize != null) query.set("page_size", String(params.pageSize));
+    return fetchJson<{ items: SubPlanRecord[]; total: number; page: number; page_size: number; pages: number }>(
+      `/api/subplans${query.size ? `?${query.toString()}` : ""}`,
+    );
+  },
+  subplan: (id: string) => fetchJson<SubPlanDetail>(`/api/subplans/${encodeURIComponent(id)}`),
+  createSubplan: (data: { master_plan_version_id: number; platform: Platform; title: string; snapshot: Record<string, unknown>; stages: Array<Partial<SubPlanStageRecord> & { title: string; target_count: number }> }) =>
+    fetchJson<{ subplan: SubPlanRecord; draft: SubPlanVersionRecord }>("/api/subplans", {
+      method: "POST", body: JSON.stringify(data),
+    }),
+  updateSubplan: (id: string, data: { based_on_version_id: number; expected_version_no: number; snapshot: Record<string, unknown>; stages: Array<Partial<SubPlanStageRecord> & { title: string; target_count: number }>; change_note?: string }) =>
+    fetchJson<SubPlanVersionRecord>(`/api/subplans/${encodeURIComponent(id)}`, {
+      method: "PATCH", body: JSON.stringify(data),
+    }),
+  addSubplanStage: (id: string, data: { based_on_version_id: number; expected_version_no: number; stage: { title: string; direction?: string; target_count: number; start_date?: string | null; end_date?: string | null; completion_condition?: string; notes?: string } }) =>
+    fetchJson<SubPlanVersionRecord>(`/api/subplans/${encodeURIComponent(id)}/stages`, {
+      method: "POST", body: JSON.stringify(data),
+    }),
+  editSubplanStage: (id: string, stageId: number, data: { based_on_version_id: number; expected_version_no: number; stage: Partial<SubPlanStageRecord> }) =>
+    fetchJson<SubPlanVersionRecord>(`/api/subplans/${encodeURIComponent(id)}/stages/${stageId}`, {
+      method: "PATCH", body: JSON.stringify(data),
+    }),
+  deleteSubplanStage: (id: string, stageId: number, versionId: number, versionNo: number) =>
+    fetchJson<SubPlanVersionRecord>(`/api/subplans/${encodeURIComponent(id)}/stages/${stageId}?based_on_version_id=${versionId}&expected_version_no=${versionNo}`, {
+      method: "DELETE",
+    }),
+  reviewSubplan: (id: string, versionId: number, action: "approve" | "reject", reason?: string) =>
+    fetchJson<{ version: SubPlanVersionRecord; authorization: string }>(`/api/subplans/${encodeURIComponent(id)}/review`, {
+      method: "POST", body: JSON.stringify({ version_id: versionId, action, reason }),
+    }),
+  aiDraftSubplans: (masterPlanVersionId: number, platforms: Platform[]) =>
+    fetchJson<{ items: Array<{ subplan: SubPlanRecord; draft: SubPlanVersionRecord }>; effective: false; requires_human_review: true }>(
+      "/api/subplans/ai-draft", { method: "POST", body: JSON.stringify({ master_plan_version_id: masterPlanVersionId, platforms }) },
+    ),
   /** 复盘「采纳建议」：把缺口维度写回母计划（后端触发 R18 下游失效） */
   adoptGaps: (dimensions: string[]) =>
-    fetchJson<{ signature: string; adopted_dimensions: string[]; stale_rounds: number[] }>(
-      "/api/plan_adjustments/adopt",
-      { method: "POST", body: JSON.stringify({ dimensions }) },
-    ),
+    fetchJson<{
+      drafts: Array<{ sub_plan_id: string; platform: Platform; draft_version: SubPlanVersionRecord; effective: false }>;
+      effective: false; requires_human_review: true; adopted_dimensions: string[]; message: string;
+    }>("/api/plan_adjustments/adopt", {
+      method: "POST", body: JSON.stringify({ dimensions }),
+    }),
   /** 热点 → 选题库（R22：必须有 source + 原文链接） */
   importHotTopic: (payload: { title: string; source: string; url: string; dimension?: string; confirmed_by?: string }) =>
     fetchJson<{ id: string; imported: boolean; message?: string; manual_confirmation_recorded?: boolean }>("/api/hot_topics/import", {
