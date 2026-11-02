@@ -110,6 +110,9 @@ class RoundExecutor:
         ).fetchone()
         if not round_row:
             raise RoundPreconditionError(f"轮次 {round_id} 不存在")
+        from .subplan_production import production_paused
+        if production_paused(self.conn):
+            raise RoundPreconditionError("内容生产已暂停，拒绝执行轮次")
         current_status = round_row["status"]
         if current_status == "failed":
             # 只允许没有产生任何内容/草稿的失败轮次重试，避免重复生成或覆盖已有交付物。
@@ -159,6 +162,18 @@ class RoundExecutor:
                     or identity is None or identity["status"] != "active" or stage_row is None
                     or stage_row["status"] in ("paused", "completed", "cancelled")):
                 raise RoundPreconditionError("轮次绑定的子计划授权或阶段快照无效")
+            from .timezone import business_now
+            business_date = business_now(self.cfg).date().isoformat()
+            if stage_row["start_date"] and business_date < stage_row["start_date"]:
+                raise RoundPreconditionError("轮次绑定阶段尚未到执行日期")
+            if stage_row["end_date"] and business_date > stage_row["end_date"]:
+                raise RoundPreconditionError("轮次绑定阶段执行窗口已结束")
+            broken = self.conn.execute(
+                "SELECT 1 FROM circuit_breaker_events WHERE platform=? AND resolved_at IS NULL LIMIT 1",
+                (identity["platform"],),
+            ).fetchone()
+            if broken:
+                raise RoundPreconditionError("轮次绑定平台已触发熔断，拒绝继续生产")
             try:
                 self._plan = json.loads(master["plan_snapshot"])
                 sub_snapshot = json.loads(round_row["sub_plan_snapshot"])
