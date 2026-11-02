@@ -5647,7 +5647,7 @@ def _register_routes(app: FastAPI) -> None:
         from src.core.topic_pool import add_manual_topic
         try:
             return add_manual_topic(_g()["conn"], title=req.title, dimension=req.dimension,
-                                    summary=req.summary, link=req.link)
+                                    summary=req.summary, link=req.link, cfg=_g()["cfg"])
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
