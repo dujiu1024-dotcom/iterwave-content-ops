@@ -315,3 +315,30 @@ def test_subplan_can_rebase_to_new_master_without_rewriting_old_rounds():
     assert old_round["sub_plan_version_id"] == first_subplan["id"]
     assert old_round["sub_plan_snapshot"] == old_snapshot["sub_plan_snapshot"]
     assert old_round["sub_plan_stage_snapshot"] == old_snapshot["sub_plan_stage_snapshot"]
+
+
+
+def test_integrity_audit_detects_signature_drift_and_wrong_round_stage_link():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    master = _active_master(store)
+    subplan, stage_id = _active_subplan(store, master)
+    store.bind_round(
+        1, master_plan_version_id=master["id"],
+        sub_plan_id="sub-xhs", sub_plan_version_id=subplan["id"],
+        sub_plan_stage_id=stage_id,
+    )
+    assert store.validate_integrity()["ok"] is True
+
+    conn.execute(
+        "UPDATE spiral_rounds SET sub_plan_stage_id=999,sub_plan_stage_snapshot='{}' WHERE id=1"
+    )
+    conn.execute(
+        "UPDATE master_plan_versions SET plan_snapshot='{}' WHERE id=?", (master["id"],)
+    )
+    conn.commit()
+    report = store.validate_integrity()
+    assert report["ok"] is False
+    codes = {item["code"] for item in report["issues"]}
+    assert "master_plan_signature_mismatch" in codes
+    assert "round_subplan_stage_mismatch" in codes
