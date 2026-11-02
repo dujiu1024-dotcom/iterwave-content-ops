@@ -953,18 +953,17 @@ def _build_app() -> FastAPI:
             else:
                 cookie_token = request.cookies.get(auth.COOKIE_NAME)
                 client_ip = auth.client_ip(request)
-                limited_before = has_token_header and auth.is_rate_limited(client_ip)
                 # PBKDF2-HMAC-SHA256 是 CPU 密集型同步计算，不能在 ASGI 事件循环内执行。
-                authenticated = await asyncio.to_thread(
-                    auth.is_authenticated, cookie_token, request.headers, ip=client_ip,
+                authenticated, rate_limited = await asyncio.to_thread(
+                    auth.authenticate_request, cookie_token, request.headers, ip=client_ip,
                 )
                 if not authenticated:
                     return JSONResponse(
                         {
-                            "detail": "认证尝试次数过多，请 10 分钟后再试" if limited_before else "需要登录",
-                            "code": "auth_rate_limited" if limited_before else "auth_required",
+                            "detail": "认证尝试次数过多，请 10 分钟后再试" if rate_limited else "需要登录",
+                            "code": "auth_rate_limited" if rate_limited else "auth_required",
                         },
-                        status_code=429 if limited_before else 401,
+                        status_code=429 if rate_limited else 401,
                     )
 
         # Content-Length 可被省略或伪造；已通过认证的写请求还要按实际流量限额，
@@ -4209,7 +4208,7 @@ def _register_routes(app: FastAPI) -> None:
             provided = str((payload or {}).get("bootstrap_token") or "")
             if not local_direct:
                 client_ip = request.client.host if request.client else "unknown"
-                if auth.is_rate_limited(client_ip):
+                if not auth.reserve_auth_attempt(client_ip):
                     raise HTTPException(
                         status_code=429,
                         detail="引导口令尝试次数过多，请 10 分钟后再试",
@@ -4217,7 +4216,6 @@ def _register_routes(app: FastAPI) -> None:
                     )
                 valid_bootstrap = bool(bootstrap and provided) and hmac.compare_digest(provided, bootstrap)
                 if not valid_bootstrap:
-                    auth.record_failure(client_ip)
                     raise HTTPException(
                         status_code=403,
                         detail="首次设置口令需本机访问，或先在服务器配置 ITERWAVE_BOOTSTRAP_TOKEN 后提交引导口令",
