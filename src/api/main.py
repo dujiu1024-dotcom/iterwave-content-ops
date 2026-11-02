@@ -68,7 +68,6 @@ from src.core.timezone import business_now
 from src.core.config import PROJECT_ROOT
 from src.core.tenant_registry import TenantRegistry, TenantError
 from src.core.task_queue import GlobalTaskQueue, TaskQueueError
-from src.core.task_worker import GlobalTaskWorker
 from src.core.tenant_switch_gate import TenantSwitchGate, TenantSwitchInProgress
 from src.core.db import Database
 from src.core.state_machine import RoundStateMachine, DraftStateMachine
@@ -672,8 +671,10 @@ def _build_app() -> FastAPI:
         _task_queue = GlobalTaskQueue(tenant_registry.system_db_file)
         _task_queue.initialize()
         _tenant_runtime_contexts.clear()
-        # 当前部署约束为单 Uvicorn worker；启动时上一进程已退出，可立即回收遗留 running。
-        _task_queue.recover_orphaned_running()
+        # 不得无条件清理 running 租约：独立 Worker 需要先检测旧父进程退出。
+        active_tasks, _active_total = _task_queue.list_page(scope="active", page=1, page_size=500)
+        if any(task.status == "running" for task in active_tasks):
+            await asyncio.sleep(2.0)
         _task_queue.recover_expired()
         active_tenant_id = tenant_registry.active_id()
         active_tenant = tenant_registry.get(active_tenant_id)
@@ -873,30 +874,6 @@ def _build_app() -> FastAPI:
                     except Exception:
                         logger.warning("后台上下文数据库连接清理异常", exc_info=True)
 
-        # 多消费者跨账号组并行；队列确保同一账号组同时最多一个运行任务。
-        try:
-            task_worker_count = int(os.getenv("ITERWAVE_TASK_WORKERS", "4"))
-        except (TypeError, ValueError):
-            task_worker_count = 4
-        task_worker_count = max(1, min(task_worker_count, 8))
-        task_worker_stop = asyncio.Event()
-        task_workers = [
-            GlobalTaskWorker(
-                _task_queue,
-                lambda tenant_id: _build_tenant_runtime_context(tenant_registry, tenant_id),
-                reconcile_terminal_rounds=(index == 0),
-            )
-            for index in range(task_worker_count)
-        ]
-        task_worker_tasks = [
-            asyncio.create_task(
-                worker.run(task_worker_stop),
-                name=f"global-tenant-task-worker-{index + 1}",
-            )
-            for index, worker in enumerate(task_workers)
-        ]
-        logger.info("全局任务消费者已启动 count=%d（同租户串行、跨租户并行）", task_worker_count)
-
         # 热点服务是独立资源池；后台线程持有启动时的账号组配置和独立数据库连接。
         from ..core import hot_topic_service
         if cfg.hot_topics.enabled is not False and hot_topic_service.is_stale(cfg, conn):
@@ -906,17 +883,16 @@ def _build_app() -> FastAPI:
 
         logger.info("✅ FastAPI 应用启动完成，%d 个模块已加载", len(_g_ctx))
 
+        from src.core.task_worker_process_manager import TaskWorkerSupervisorProcess
+        task_worker_supervisor = TaskWorkerSupervisorProcess(project_root=PROJECT_ROOT)
         try:
+            task_worker_supervisor.start()
             yield
         finally:
-            task_worker_stop.set()
-            worker_results = await asyncio.gather(*task_worker_tasks, return_exceptions=True)
-            for index, result in enumerate(worker_results, 1):
-                if isinstance(result, BaseException):
-                    logger.error(
-                        "全局任务消费者关闭异常 worker=%d error=%s",
-                        index, type(result).__name__, exc_info=result,
-                    )
+            try:
+                await asyncio.to_thread(task_worker_supervisor.stop)
+            except Exception:
+                logger.exception("全局任务 Watchdog/Worker 进程关闭异常")
             # 停止所有账号组常驻调度器并释放各自的数据库连接。
             for tenant_id, context in list(_tenant_runtime_contexts.items()):
                 try:

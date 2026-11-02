@@ -52,7 +52,8 @@ class GlobalTaskWorker:
                 shutdown_grace_seconds = float(os.getenv("ITERWAVE_TASK_SHUTDOWN_GRACE_SECONDS", "30"))
             except (TypeError, ValueError):
                 shutdown_grace_seconds = 30.0
-        self.shutdown_grace_seconds = max(0.0, min(float(shutdown_grace_seconds), 300.0))
+        # 与独立 Watchdog 的等待上限（90s + 5s）保持一致，避免 Worker 尚在宽限期内即被 SIGKILL。
+        self.shutdown_grace_seconds = max(0.0, min(float(shutdown_grace_seconds), 90.0))
         self.reconcile_terminal_rounds = bool(reconcile_terminal_rounds)
         self.owner = uuid.uuid4().hex
         self._reconciled_interrupted_task_ids: set[str] = set()
