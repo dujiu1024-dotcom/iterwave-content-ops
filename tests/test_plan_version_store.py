@@ -402,3 +402,83 @@ def test_subplan_stage_rejects_zero_target_and_rolls_back_partial_version():
     assert conn.execute(
         "SELECT COUNT(*) FROM sub_plan_versions WHERE sub_plan_id='sub-xhs'"
     ).fetchone()[0] == 0
+
+
+
+def test_subplan_stage_resolver_advances_only_after_user_confirmed_publish():
+    from src.core.subplan_production import active_subplan_stage
+
+    conn = _db()
+    store = PlanVersionStore(conn)
+    master = _active_master(store)
+    store.create_subplan(
+        "sub-stage", master_plan_version_id=master["id"],
+        platform="xhs", title="阶段推进测试",
+    )
+    version = store.create_subplan_version(
+        "sub-stage", {"title": "阶段推进测试", "platform": "xhs"},
+        master_plan_version_id=master["id"],
+        stages=[
+            {"title": "阶段一", "target_count": 1},
+            {"title": "阶段二", "target_count": 2},
+        ],
+    )
+    store.activate_subplan_version(version["id"], reviewer="reviewer")
+    stage_rows = conn.execute(
+        "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order",
+        (version["id"],),
+    ).fetchall()
+    first_id, second_id = [int(row[0]) for row in stage_rows]
+
+    current = active_subplan_stage(conn, today="2026-11-02")
+    assert current["id"] == first_id
+    assert current["remaining_count"] == 1
+
+    conn.execute("INSERT INTO contents(id,round_id) VALUES('stage-content',1)")
+    conn.execute(
+        "UPDATE spiral_rounds SET master_plan_version_id=?,sub_plan_id=?,sub_plan_version_id=?,"
+        "sub_plan_stage_id=?,sub_plan_snapshot='{}',sub_plan_stage_snapshot='{}' WHERE id=1",
+        (master["id"], "sub-stage", version["id"], first_id),
+    )
+    conn.execute(
+        "INSERT INTO drafts(id,content_id,user_confirmed_at) VALUES('unpublished','stage-content',NULL)"
+    )
+    conn.commit()
+    # Generated/saved draft does not advance the phase.
+    assert active_subplan_stage(conn, today="2026-11-02")["id"] == first_id
+
+    conn.execute("UPDATE drafts SET user_confirmed_at='2026-11-02' WHERE id='unpublished'")
+    conn.commit()
+    # A read-only lookup reports the completed threshold but does not mutate state.
+    assert active_subplan_stage(conn, today="2026-11-02")["blocker"] == "stage_target_reached"
+    assert conn.execute(
+        "SELECT status FROM sub_plan_stages WHERE id=?", (first_id,)
+    ).fetchone()[0] == "pending"
+
+    next_stage = active_subplan_stage(conn, today="2026-11-02", advance=True)
+    assert next_stage["id"] == second_id
+    assert next_stage["status"] == "pending"
+    assert conn.execute(
+        "SELECT status FROM sub_plan_stages WHERE id=?", (first_id,)
+    ).fetchone()[0] == "completed"
+
+
+def test_create_round_once_persists_trigger_metadata():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    master = _active_master(store)
+    subplan, stage_id = _active_subplan(store, master)
+    store.reserve_round_open(
+        "metadata-key", "metadata-hash",
+        master_plan_version_id=master["id"], sub_plan_id="sub-xhs",
+        sub_plan_version_id=subplan["id"], sub_plan_stage_id=stage_id,
+    )
+    created = store.create_round_once(
+        "metadata-key", trigger_source="auto", applied_feedback='{"ok":true}',
+    )
+    row = conn.execute(
+        "SELECT trigger_source,applied_feedback FROM spiral_rounds WHERE id=?",
+        (created["round_id"],),
+    ).fetchone()
+    assert tuple(row) == ("auto", '{"ok":true}')
+
