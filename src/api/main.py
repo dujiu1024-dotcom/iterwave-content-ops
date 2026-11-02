@@ -6286,7 +6286,7 @@ def _register_routes(app: FastAPI) -> None:
         if theme not in styles or theme in forbidden:
             theme = "knowledge_infographic"
         colors = {}
-        for key, source in (("accent", "primary_color"), ("muted", "secondary_color")):
+        for key, source in (("accent", "primary_color"), ("muted", "secondary_color"), ("bg", "background_color"), ("fg", "text_color")):
             value = profile.get(source)
             if isinstance(value, str) and __import__("re").fullmatch(r"#[0-9A-Fa-f]{6}", value):
                 colors[key] = value
@@ -6302,7 +6302,7 @@ def _register_routes(app: FastAPI) -> None:
         output_dir = cfg.resolve_path(cfg.paths.output_dir)
         paths = make_card_set(
             title, dimension or "知识卡片", body, output_dir, platform, footer,
-            theme=theme, brand_palette=colors, font_family=font,
+            theme=theme, brand_palette={**colors, "component_style": profile.get("component_style", "card")}, font_family=font,
         )
         from src.core.visual_ocr import load_ocr_report
         from src.core.visual_persistence import (
