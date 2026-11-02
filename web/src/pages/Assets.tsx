@@ -15,6 +15,23 @@ import {
 
 type Tab = "topics" | "scoring" | "created" | "media" | "sources" | "voice" | "industry" | "templates" | "mapping";
 
+const ASSET_PAGE_SIZE = 20;
+
+function AssetPagination({ page, pages, total, onPageChange, pageSize }: {
+  page: number; pages: number; total: number; onPageChange: (p: number) => void; pageSize: number;
+}) {
+  if (total <= pageSize) return null;
+  return (
+    <div className="pagination">
+      {page > 1 && <button className="btn xs" onClick={() => onPageChange(page - 1)}>上一页</button>}
+      <span style={{ margin: "0 8px", fontSize: 12, color: "var(--subtle)" }}>
+        第 {page} / {pages} 页 · 共 {total} 条
+      </span>
+      {page < pages && <button className="btn xs" onClick={() => onPageChange(page + 1)}>下一页</button>}
+    </div>
+  );
+}
+
 const TABS: { key: Tab; label: string }[] = [
   { key: "topics", label: "选题池" },
   { key: "scoring", label: "选题评分" },
@@ -112,7 +129,7 @@ export default function Assets() {
     } finally {
       setLoading(false);
     }
-  }, [referencePage, voicePage, templatePage]);
+  }, [assetPages.reference, assetPages.voice, assetPages.template]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -300,8 +317,8 @@ export default function Assets() {
                   </tbody>
                 </table>
               </div>
-              <AssetPagination page={referencePage} pages={assetPages.reference} total={assetTotals.reference}
-                onPageChange={setReferencePage} pageSize={assetPageSize} />
+              <AssetPagination page={assetPages.reference} pages={assetPageCounts.reference} total={assetTotals.reference}
+                onPageChange={(p) => loadAssetPage("reference", p)} pageSize={ASSET_PAGE_SIZE} />
             </AsyncPanel>
           </div>
 
@@ -396,8 +413,8 @@ export default function Assets() {
                 ))}
               </div>
             )}
-            <AssetPagination page={voicePage} pages={assetPages.voice} total={assetTotals.voice}
-              onPageChange={setVoicePage} pageSize={assetPageSize} />
+            <AssetPagination page={assetPages.voice} pages={assetPageCounts.voice} total={assetTotals.voice}
+              onPageChange={(p) => loadAssetPage("voice", p)} pageSize={ASSET_PAGE_SIZE} />
           </div>
         </>
       )}
@@ -499,8 +516,8 @@ export default function Assets() {
                 })}
               </div>
             )}
-            <AssetPagination page={templatePage} pages={assetPages.template} total={assetTotals.template}
-              onPageChange={setTemplatePage} pageSize={assetPageSize} />
+            <AssetPagination page={assetPages.template} pages={assetPageCounts.template} total={assetTotals.template}
+              onPageChange={(p) => loadAssetPage("template", p)} pageSize={ASSET_PAGE_SIZE} />
           </div>
         </>
       )}
