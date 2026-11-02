@@ -928,7 +928,7 @@ def test_interrupted_round_reconciliation_retries_after_transient_context_failur
 
     monkeypatch.setattr(
         GlobalTaskWorker, "_mark_round_failed",
-        staticmethod(lambda *_args: calls.__setitem__("round", calls["round"] + 1) or True),
+        staticmethod(lambda *_args, **_kwargs: calls.__setitem__("round", calls["round"] + 1) or True),
     )
     monkeypatch.setattr(
         GlobalTaskWorker, "_mark_content_plan_failed",
