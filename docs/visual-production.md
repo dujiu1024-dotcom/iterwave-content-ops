@@ -18,3 +18,19 @@
 - 必须启用 `ITERWAVE_ENABLE_AI_VISUALS=1`，并正确配置图像模型 API Key。
 - 单页重做只替换指定页，其他页沿用原文件；创建新视觉版本并保留历史版本。
 - 新版本状态为 `review_required`，仍需人工审核，不会自动发布。
+
+
+## Tenant design tokens and infographic components
+
+The tenant-scoped brand profile can override the theme preset with:
+- primary/accent, secondary/muted, background, and text colors;
+- one of the supported font families;
+- a component layout variant: `card`, `minimal`, or `editorial`.
+
+The renderer maps source paragraphs to semantic components without rewriting copy:
+- ordered process headings become step cards;
+- short numeric statements receive inline stat emphasis;
+- quoted statements become quote panels;
+- other paragraphs remain text blocks.
+
+OCR compares the rendered output against the original source text. A configured font that is unavailable fails rendering with an actionable installation message instead of silently falling back.
