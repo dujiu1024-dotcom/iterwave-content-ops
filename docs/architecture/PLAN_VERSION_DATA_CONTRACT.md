@@ -98,7 +98,7 @@
 历史归属：
 - 有 `plan_signature` 且可匹配历史快照：绑定匹配版本，状态为 `resolved`。
 - 缺少签名：状态为 `pending`，等待人工归属，不猜测。
-- 有签名但找不到对应快照，或同一签名对应多个候选版本且没有精确 round_id 历史事件：状态为 `manual_review`，等待人工处理，不按最新记录猜测。
+- 有签名但找不到对应快照，或同一签名对应多个候选版本且没有精确 round_id 历史事件：状态为 `manual_review`，等待人工处理，不按最新记录猜测。人工处理必须调用 `attribute_legacy_round()`，填写审核人和原因，并写入 `user_override` 审计记录；已归属轮次禁止再次改绑。
 - 轮次已开始后，主计划新版本生效不改变其绑定。
 
 ## 5. 自动开轮幂等
@@ -158,7 +158,7 @@ Migration 115 只增表、增列、增索引和视图；不删除旧表、不搬
 
 - [ ] Migration 115 在旧库升级成功，重复执行不重复插入版本。
 - [ ] `signature_history` 的每条事件均可追溯到 `master_plan_versions.legacy_history_id`。
-- [ ] 无签名轮次为 `pending`；无法匹配或签名匹配存在歧义的轮次为 `manual_review`。
+- [ ] 无签名轮次为 `pending`；无法匹配或签名匹配存在歧义的轮次为 `manual_review`；人工归属必须有审计记录且不可二次改绑。
 - [ ] 生效新主计划后，旧版本仍存在且状态为 `archived`。
 - [ ] 复盘采纳只创建草稿。
 - [ ] 子计划独立于旧 `content_plans`，每个平台使用独立身份和版本。
