@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from src.core.timezone import storage_now
 from typing import Optional
 
 _KEY = "ops_paused"
@@ -33,7 +33,7 @@ def set_ops_paused(conn, paused: bool, by: str = "web-ui") -> dict:
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
         "updated_at = excluded.updated_at, updated_by = excluded.updated_by",
         (_KEY, "1" if paused else "0",
-         datetime.now().strftime("%Y-%m-%d %H:%M:%S"), by),
+         storage_now().isoformat(timespec="seconds"), by),
     )
     conn.commit()
     return {"paused": paused}

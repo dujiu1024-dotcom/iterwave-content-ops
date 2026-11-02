@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from src.core.timezone import business_now
+from src.core.timezone import storage_now
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -14,7 +14,7 @@ SEED_MARKER = "ops_targets_yaml_seed_v1"
 
 
 def _now(cfg=None) -> str:
-    return business_now(cfg).isoformat(timespec="seconds")
+    return storage_now().isoformat(timespec="seconds")
 
 
 def _lock(conn):

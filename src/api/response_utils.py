@@ -19,7 +19,7 @@ _VALIDATION_FIELD_LABELS = {
 
 
 def api_datetime(value, *, naive_timezone=timezone.utc):
-    """Return ISO timestamps with an explicit timezone; interpret legacy naive values as UTC."""
+    """Add an explicit timezone to legacy naive values; preserve explicit offsets."""
     if not value or not isinstance(value, str):
         return value
     try:

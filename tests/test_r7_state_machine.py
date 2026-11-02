@@ -77,10 +77,10 @@ def test_round_transition_happy_path_and_illegal_jump(conn: sqlite3.Connection, 
         == "awaiting_publish"
 
 
-def test_round_transition_writes_local_time_log(conn: sqlite3.Connection, seed, cfg) -> None:
-    """R5：流转日志用本地时间，且 producing 起点独立落库（R8）。"""
+def test_round_transition_persists_utc_time_log(conn: sqlite3.Connection, seed, cfg) -> None:
+    """状态迁移日志和阶段起点使用统一 UTC 时间，业务时区仅用于日历计算。"""
     r = seed.round()
-    from src.core.timezone import business_now
+    from src.core.timezone import storage_now
     sm = RoundStateMachine(conn, cfg=cfg)
     sm.transition(r, "producing", "测试")
     row = conn.execute(
@@ -89,9 +89,10 @@ def test_round_transition_writes_local_time_log(conn: sqlite3.Connection, seed, 
     log, started = row[0], row[1]
     assert log and "producing" in log
     assert started is not None
-    # 与账号组业务时区的当前时间比较，而不是依赖 CI 主机操作系统时区。
-    delta = abs((business_now(cfg) - datetime.fromisoformat(started)).total_seconds())
-    assert delta < 300, f"producing_started_at 疑似 UTC：{started}"
+    parsed = datetime.fromisoformat(started)
+    assert parsed.utcoffset().total_seconds() == 0
+    delta = abs((storage_now() - parsed).total_seconds())
+    assert delta < 300, f"producing_started_at 疑似错误时间：{started}"
 
 
 def test_draft_transition_rejects_expired_from_pending(conn: sqlite3.Connection, seed) -> None:

@@ -64,7 +64,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from src.core.config import load_config, get_config, DEFAULT_ENV_PATH
-from src.core.timezone import business_now
+from src.core.timezone import business_now, business_zone, storage_now, parse_persisted_datetime
 from src.core.config import PROJECT_ROOT
 from src.api.response_utils import (
     api_datetime as _api_datetime,
@@ -1602,7 +1602,16 @@ def _register_routes(app: FastAPI) -> None:
         return _g_ctx
 
     def _now():
+        """Business-local clock for calendar windows; never use for persisted timestamps."""
         return business_now(_g().get("cfg"))
+
+    def _storage_now():
+        """Canonical aware UTC clock for persistence and API event timestamps."""
+        return storage_now()
+
+    def _api_business_datetime(value):
+        """Serialize legacy tenant-local naive timestamps with their original zone."""
+        return _api_datetime(value, naive_timezone=business_zone(_g().get("cfg")))
 
     def _tenant_id() -> str:
         return str(_g().get("runtime_tenant_id") or "default")
@@ -1672,7 +1681,7 @@ def _register_routes(app: FastAPI) -> None:
             "(id, tenant_id, sample_run_id, content_id, sample_content_id, event_type, event_at, source, metadata_json, idempotency_key) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, 'web', ?, ?)",
             (uuid.uuid4().hex, _tenant_id(), sample_run_id, content_id, sample_content_id, event_type,
-             _now().isoformat(sep=" ", timespec="seconds"),
+             _storage_now().isoformat(sep=" ", timespec="seconds"),
              json.dumps(metadata or {}, ensure_ascii=False), idempotency_key),
         )
         conn.commit()
@@ -1702,7 +1711,7 @@ def _register_routes(app: FastAPI) -> None:
     def start_activation():
         conn = _g()["conn"]
         tenant_id = _tenant_id()
-        now = _now().isoformat(sep=" ", timespec="seconds")
+        now = _storage_now().isoformat(sep=" ", timespec="seconds")
         conn.execute(
             "INSERT OR IGNORE INTO activation_cohort (tenant_id, first_seen_at) VALUES (?, ?)",
             (tenant_id, now),
@@ -1719,7 +1728,7 @@ def _register_routes(app: FastAPI) -> None:
     def activation_status():
         conn = _g()["conn"]
         tenant_id = _tenant_id()
-        now_dt = _now()
+        now_dt = _storage_now()
         now = now_dt.isoformat(sep=" ", timespec="seconds")
         stale_cutoff = (
             now_dt - timedelta(minutes=_g()["cfg"].activation.stale_task_timeout_minutes)
@@ -1757,9 +1766,9 @@ def _register_routes(app: FastAPI) -> None:
             "ORDER BY sr.created_at DESC, sr.id DESC LIMIT 1",
             (tenant_id,),
         ).fetchone()
-        day_start = now_dt.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(sep=" ")
+        day_start = now_dt.astimezone(business_zone(_g().get("cfg"))).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).isoformat(sep=" ")
         daily_runs_used = conn.execute(
-            "SELECT COUNT(*) FROM sample_runs WHERE tenant_id=? AND created_at>=?",
+            "SELECT COUNT(*) FROM sample_runs WHERE tenant_id=? AND datetime(created_at)>=datetime(?)",
             (tenant_id, day_start),
         ).fetchone()[0]
         return {
@@ -1809,7 +1818,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(422, "请求标识无效，请刷新后重试")
         conn = _g()["conn"]
         run_id = uuid.uuid4().hex
-        now = _now().isoformat(sep=" ", timespec="seconds")
+        now = _storage_now().isoformat(sep=" ", timespec="seconds")
         from src.core.content_pipeline import _llm_available
         model_ready = _llm_available(_g()["cfg"])
         initial_status = "created" if model_ready else "failed"
@@ -1868,7 +1877,7 @@ def _register_routes(app: FastAPI) -> None:
                     "(id, tenant_id, sample_run_id, event_type, event_at, source, metadata_json, idempotency_key) "
                     "VALUES (?, ?, ?, ?, ?, 'web', ?, ?)",
                     (uuid.uuid4().hex, tenant_id, run_id, event_type,
-                     business_now(cfg_bg).isoformat(sep=" ", timespec="seconds"),
+                     storage_now().isoformat(sep=" ", timespec="seconds"),
                      json.dumps(metadata, ensure_ascii=False), event_key),
                 )
 
@@ -1876,7 +1885,7 @@ def _register_routes(app: FastAPI) -> None:
             from src.core.content_pipeline import ContentGenerationError, generate_copy_content
             from src.adapters.base import Platform as PlatformEnum
             try:
-                started = business_now(cfg_bg).isoformat(sep=" ", timespec="seconds")
+                started = storage_now().isoformat(sep=" ", timespec="seconds")
                 with conn_bg:
                     cursor = conn_bg.execute(
                         "UPDATE sample_runs SET status='generating', started_at=? "
@@ -1985,7 +1994,7 @@ def _register_routes(app: FastAPI) -> None:
                     )
                     if cursor.rowcount != 1:
                         raise RuntimeError("体验任务状态已变化，拒绝进入质量检查")
-                now_done = business_now(cfg_bg).isoformat(sep=" ", timespec="seconds")
+                now_done = storage_now().isoformat(sep=" ", timespec="seconds")
                 _persist_activation_sample_results(
                     conn_bg, run_id, tenant_id, platform, results, now_done,
                 )
@@ -2010,7 +2019,7 @@ def _register_routes(app: FastAPI) -> None:
                         conn_bg.execute(
                             "UPDATE sample_runs SET status='failed', error_code=?, error_message_safe=?, completed_at=? "
                             "WHERE id=? AND tenant_id=? AND status IN ('created','generating','quality_check')",
-                            (code, safe_message[:300], business_now(cfg_bg).isoformat(sep=" ", timespec="seconds"),
+                            (code, safe_message[:300], storage_now().isoformat(sep=" ", timespec="seconds"),
                              run_id, tenant_id),
                         )
                 except Exception:
@@ -2025,7 +2034,7 @@ def _register_routes(app: FastAPI) -> None:
     @app.delete("/api/activation/samples/{sample_run_id}")
     def delete_activation_samples(sample_run_id: str):
         conn = _g()["conn"]
-        now = _now().isoformat(sep=" ", timespec="seconds")
+        now = _storage_now().isoformat(sep=" ", timespec="seconds")
         row = conn.execute(
             "SELECT status FROM sample_runs WHERE id=? AND tenant_id=?",
             (sample_run_id, _tenant_id()),
@@ -2113,7 +2122,7 @@ def _register_routes(app: FastAPI) -> None:
         topic_id = f"activation-{sample_content_id}"
         content_id = f"content-{uuid.uuid4().hex[:12]}"
         draft_id = f"draft-{uuid.uuid4().hex[:12]}"
-        now = _now().isoformat(sep=" ", timespec="seconds")
+        now = _storage_now().isoformat(sep=" ", timespec="seconds")
         try:
             conn.execute(
                 "INSERT OR IGNORE INTO topic_index (id, dimension, source, title, date, total_uses) "
@@ -2206,7 +2215,7 @@ def _register_routes(app: FastAPI) -> None:
         ).fetchone()
         if row is None:
             raise HTTPException(404, "体验样稿不存在")
-        now = _now().isoformat(sep=" ", timespec="seconds")
+        now = _storage_now().isoformat(sep=" ", timespec="seconds")
         metadata = {}
         if event_type == "saved":
             conn.execute(
@@ -2282,10 +2291,10 @@ def _register_routes(app: FastAPI) -> None:
             values[field] = raw
         if all(values[field] is None for field in supported_fields):
             raise HTTPException(422, "至少填写一项当前平台支持的指标")
-        measured_at = str((req or {}).get("measured_at") or _now().isoformat(sep=" ", timespec="microseconds"))
+        measured_at = str((req or {}).get("measured_at") or _storage_now().isoformat(sep=" ", timespec="microseconds"))
         if len(measured_at) > 40:
             raise HTTPException(422, "统计时间格式无效")
-        now = _now().isoformat(sep=" ", timespec="seconds")
+        now = _storage_now().isoformat(sep=" ", timespec="seconds")
         correction_of = (req or {}).get("correction_of")
         if correction_of:
             original = conn.execute(
@@ -2294,21 +2303,16 @@ def _register_routes(app: FastAPI) -> None:
             ).fetchone()
             if original is None:
                 raise HTTPException(422, "修正记录必须属于当前账号组和同一篇内容")
-        try:
-            measured_dt = datetime.fromisoformat(measured_at)
-            if measured_dt.tzinfo is not None:
-                measured_dt = measured_dt.astimezone().replace(tzinfo=None)
-            confirmed_dt = datetime.fromisoformat(str(row["user_confirmed_at"]))
-            if confirmed_dt.tzinfo is not None:
-                confirmed_dt = confirmed_dt.astimezone().replace(tzinfo=None)
-        except (TypeError, ValueError):
+        measured_dt = parse_persisted_datetime(measured_at, _g().get("cfg"))
+        confirmed_dt = parse_persisted_datetime(row["user_confirmed_at"], _g().get("cfg"))
+        if measured_dt is None or confirmed_dt is None:
             raise HTTPException(422, "统计时间或发布时间必须是有效的 ISO 日期时间")
-        now_dt = _now()
+        now_dt = storage_now()
         if measured_dt < confirmed_dt:
             raise HTTPException(422, "统计时间不能早于确认发布时间")
         if measured_dt > now_dt + timedelta(minutes=5):
             raise HTTPException(422, "统计时间不能晚于当前时间（允许 5 分钟设备时钟误差）")
-        measured_at = measured_dt.isoformat(sep=" ", timespec="seconds")
+        measured_at = measured_dt.isoformat(timespec="seconds")
         snapshot_id = uuid.uuid4().hex
         conn.execute(
             "INSERT INTO metric_snapshots "
@@ -2581,7 +2585,7 @@ def _register_routes(app: FastAPI) -> None:
                 str(action_item.get("basis") or ""),
             ))
             suggestion_key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
-            now_text = _now().isoformat(sep=" ", timespec="seconds")
+            now_text = _storage_now().isoformat(sep=" ", timespec="seconds")
             conn.execute(
                 "INSERT OR IGNORE INTO weekly_action_feedback "
                 "(tenant_id, suggestion_key, report_start, platform, action, basis, verification, "
@@ -2622,7 +2626,7 @@ def _register_routes(app: FastAPI) -> None:
             "data_conflicts": data_conflicts,
             "data_sources": sorted({str(r.get("source") or "platform_readback") for r in merged}),
             "limitations": ["只比较同平台数据", "单篇表现不代表因果", "人工与平台读回数据保留各自来源", "周内样本的发布后统计时长可能不同，特征差异仅作假设"],
-            "generated_at": _now().isoformat(sep=" ", timespec="seconds"),
+            "generated_at": _storage_now().isoformat(sep=" ", timespec="seconds"),
         }
 
     @app.post("/api/reports/weekly/actions")
@@ -2652,7 +2656,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(404, "建议记录不存在或已过期，请刷新周报")
         if existing["outcome"] != "pending" and decision != "adopted":
             raise HTTPException(409, "已记录验证结果的建议不能再改为忽略")
-        now = _now().isoformat(sep=" ", timespec="seconds")
+        now = _storage_now().isoformat(sep=" ", timespec="seconds")
         if outcome:
             conn.execute(
                 "UPDATE weekly_action_feedback SET decision='adopted', outcome=?, outcome_note=?, "
@@ -2676,7 +2680,7 @@ def _register_routes(app: FastAPI) -> None:
     # --- 健康检查 ---
     @app.get("/health")
     def health():
-        return {"status": "ok", "version": "0.1.0", "timestamp": _now().isoformat()}
+        return {"status": "ok", "version": "0.1.0", "timestamp": _storage_now().isoformat()}
 
     def _generate_media_asset(req: MediaGenerationRequest, source_asset_id: int | None = None):
         registry = _g().get("tenant_registry")
@@ -2723,7 +2727,7 @@ def _register_routes(app: FastAPI) -> None:
         if not _media_generation_lock.acquire(blocking=False):
             raise HTTPException(409, "已有图片生成任务正在执行，请稍后重试")
         try:
-            now = _now().strftime("%Y-%m-%d %H:%M:%S")
+            now = _storage_now().isoformat(timespec="seconds")
             # 个人账号组素材库不设置人为月度次数上限；成功次数仅用于成本与使用分析。
             cur = conn.execute(
                 "INSERT INTO media_generation_jobs (prompt, final_prompt, model, status, created_at) "
@@ -2770,7 +2774,7 @@ def _register_routes(app: FastAPI) -> None:
                 conn.execute(
                     "UPDATE media_generation_jobs SET status = 'succeeded', output_asset_id = ?, "
                     "completed_at = ? WHERE id = ?",
-                    (asset_id, _now().strftime("%Y-%m-%d %H:%M:%S"), job_id),
+                    (asset_id, _storage_now().isoformat(timespec="seconds"), job_id),
                 )
                 conn.commit()
                 return {
@@ -2788,7 +2792,7 @@ def _register_routes(app: FastAPI) -> None:
                     target.unlink(missing_ok=True)
                 conn.execute(
                     "UPDATE media_generation_jobs SET status = 'failed', error_message = ?, completed_at = ? WHERE id = ?",
-                    ("图片生成失败", _now().strftime("%Y-%m-%d %H:%M:%S"), job_id),
+                    ("图片生成失败", _storage_now().isoformat(timespec="seconds"), job_id),
                 )
                 conn.commit()
                 raise
@@ -2797,7 +2801,7 @@ def _register_routes(app: FastAPI) -> None:
                     target.unlink(missing_ok=True)
                 conn.execute(
                     "UPDATE media_generation_jobs SET status = 'failed', error_message = ?, completed_at = ? WHERE id = ?",
-                    ("图片生成失败，详细原因仅记录在服务端日志", _now().strftime("%Y-%m-%d %H:%M:%S"), job_id),
+                    ("图片生成失败，详细原因仅记录在服务端日志", _storage_now().isoformat(timespec="seconds"), job_id),
                 )
                 conn.commit()
                 from src.core.media_generation import ImageGenerationError
@@ -2824,7 +2828,7 @@ def _register_routes(app: FastAPI) -> None:
             "size": "1024x1024", "updated_at": None,
         }
         settings["enabled"] = bool(settings["enabled"])
-        month_start = _now().replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+        month_start = _now().replace(day=1, hour=0, minute=0, second=0, microsecond=0).replace(tzinfo=business_zone(_g().get("cfg"))).astimezone(timezone.utc).isoformat(timespec="seconds")
         settings["used_this_month"] = int(conn.execute(
             "SELECT COUNT(*) FROM media_generation_jobs WHERE created_at >= ? AND status = 'succeeded'", (month_start,),
         ).fetchone()[0])
@@ -2838,9 +2842,9 @@ def _register_routes(app: FastAPI) -> None:
         conn = _g()["conn"]
         conn.execute(
             "INSERT INTO media_generation_settings (id, enabled, monthly_quota, prompt_prefix, model, size, updated_at) "
-            "VALUES (1, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+            "VALUES (1, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%f+00:00','now')) "
             "ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled, monthly_quota=excluded.monthly_quota, "
-            "prompt_prefix=excluded.prompt_prefix, model=excluded.model, size=excluded.size, updated_at=CURRENT_TIMESTAMP",
+            "prompt_prefix=excluded.prompt_prefix, model=excluded.model, size=excluded.size, updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now')",
             (int(req.enabled), req.monthly_quota, req.prompt_prefix.strip(), req.model.strip(), req.size),
         )
         conn.commit()
@@ -2883,7 +2887,7 @@ def _register_routes(app: FastAPI) -> None:
         if row is None:
             raise HTTPException(404, "图片素材不存在")
         conn.execute(
-            "UPDATE media_assets SET review_status = ?, review_note = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE media_assets SET review_status = ?, review_note = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id = ?",
             (req.decision, req.note.strip(), asset_id),
         )
         conn.commit()
@@ -3265,7 +3269,7 @@ def _register_routes(app: FastAPI) -> None:
         if row is None:
             raise HTTPException(404, "图片素材不存在")
         conn.execute(
-            "UPDATE media_assets SET status = 'archived', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE media_assets SET status = 'archived', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id = ?",
             (asset_id,),
         )
         conn.commit()
@@ -3290,7 +3294,7 @@ def _register_routes(app: FastAPI) -> None:
         if not file_path.is_relative_to(paths.media_dir.resolve()) or not file_path.is_file():
             raise HTTPException(409, "素材原始文件不存在，不能恢复为可用状态")
         conn.execute(
-            "UPDATE media_assets SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE media_assets SET status = 'active', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id = ?",
             (asset_id,),
         )
         conn.commit()
@@ -3303,7 +3307,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(422, "素材名称不能为空且不能超过 120 个字符")
         conn = _g()["conn"]
         cur = conn.execute(
-            "UPDATE media_assets SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE media_assets SET title = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id = ?",
             (title, asset_id),
         )
         if cur.rowcount == 0:
@@ -3508,7 +3512,7 @@ def _register_routes(app: FastAPI) -> None:
         if registry is None:
             raise HTTPException(503, "账号组注册表尚未初始化")
         from datetime import timedelta
-        since = (_now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        since = (_storage_now() - timedelta(days=days)).isoformat(timespec="seconds")
         tenant_rows = []
         totals = {"tenants": 0, "available_tenants": 0, "contents_period": 0, "contents_all": 0, "drafts_all": 0, "drafts_pending": 0, "drafts_saved": 0, "drafts_published": 0, "drafts_failed": 0, "media_active": 0, "media_usage": 0, "registered_accounts": 0, "registered_accounts_active": 0}
         platform_totals = {p: {"contents": 0, "drafts": 0, "registered_accounts": 0} for p in ("xhs", "douyin", "kuaishou", "wechat_channels")}
@@ -4119,7 +4123,7 @@ def _register_routes(app: FastAPI) -> None:
         followers, likes_total = _int("followers"), _int("likes_total")
         if followers is None and likes_total is None:
             raise HTTPException(422, "粉丝数和获赞数至少填一个")
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         conn.execute(
             "INSERT INTO account_snapshots (platform, followers, likes_total, captured_at, source) "
             "VALUES (?, ?, ?, ?, 'manual')",
@@ -4141,7 +4145,7 @@ def _register_routes(app: FastAPI) -> None:
         v = (req or {}).get("current_value")
         if isinstance(v, bool) or not isinstance(v, (int, float)):
             raise HTTPException(422, "current_value 必须是数字")
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         conn.execute("UPDATE goals SET current_value = ?, progress_updated_at = ? WHERE id = ?",
                      (float(v), now, goal_id))
         conn.commit()
@@ -4189,7 +4193,7 @@ def _register_routes(app: FastAPI) -> None:
         """
         conn = _g()["conn"]
         goal_id = f"goal-{uuid.uuid4().hex[:12]}"
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         if req.parent_goal_id:
             _validate_goal_hierarchy(conn, None, req.goal_level or "platform", req.parent_goal_id)
         conn.execute(
@@ -4434,7 +4438,7 @@ def _register_routes(app: FastAPI) -> None:
                 params,
             ).fetchall()
             return [
-                {**dict(row), "created_at": _api_datetime(row["created_at"])}
+                {**dict(row), "created_at": _api_business_datetime(row["created_at"])}
                 for row in rows
             ]
         total = conn.execute("SELECT COUNT(*) FROM spiral_rounds" + where, params).fetchone()[0]
@@ -4519,10 +4523,13 @@ def _register_routes(app: FastAPI) -> None:
         result = dict(row)
         for timestamp_field in ("created_at", "producing_started_at", "collecting_metrics_started_at"):
             if result.get(timestamp_field):
-                result[timestamp_field] = _api_datetime(result[timestamp_field])
+                result[timestamp_field] = _api_business_datetime(result[timestamp_field])
         round_drafts = []
         for draft in drafts:
             item = dict(draft)
+            for field, value in tuple(item.items()):
+                if field.endswith("_at") and value:
+                    item[field] = _api_business_datetime(value)
             if item.get("save_verification_status") == "pending_verify":
                 item["status"] = "pending_verify"
             item.pop("save_verification_status", None)
@@ -4677,7 +4684,7 @@ def _register_routes(app: FastAPI) -> None:
             content_plan_id=plan_id, content_plan_version=int(plan["version"]),
         ))
         round_id = int(round_result["id"])
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         try:
             conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute(
@@ -4712,7 +4719,7 @@ def _register_routes(app: FastAPI) -> None:
                     conn.execute(
                         "UPDATE content_plans SET status='failed',version=version+1,updated_at=? "
                         "WHERE id=? AND status='generating'",
-                        (business_now(_g()["cfg"]).isoformat(timespec="seconds"), plan_id),
+                        (storage_now().isoformat(timespec="seconds"), plan_id),
                     )
                     conn.execute(
                         "UPDATE spiral_rounds SET status='cancelled' "
@@ -5048,7 +5055,7 @@ def _register_routes(app: FastAPI) -> None:
         conn.execute(
             "UPDATE draft_save_verifications SET status=?, verified_at=?, note=? WHERE draft_id=? AND status='pending_verify'",
             (
-                verification_status, _now().strftime("%Y-%m-%d %H:%M:%S"),
+                verification_status, _storage_now().isoformat(timespec="seconds"),
                 note, draft_id,
             ),
         )
@@ -5058,7 +5065,7 @@ def _register_routes(app: FastAPI) -> None:
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 row["round_id"], "draft_save_verify", "pending_verify", target,
-                note, "web-ui", _now().strftime("%Y-%m-%d %H:%M:%S"),
+                note, "web-ui", _storage_now().isoformat(timespec="seconds"),
             ),
         )
         return {
@@ -5194,7 +5201,7 @@ def _register_routes(app: FastAPI) -> None:
             cur = conn.execute(
                 "UPDATE drafts SET status='user_published', user_confirmed_at=? "
                 "WHERE id=? AND status IN ('draft_saved', 'draft_pending')",
-                (_now().isoformat(timespec="seconds"), draft_id),
+                (_storage_now().isoformat(timespec="seconds"), draft_id),
             )
             if cur.rowcount != 1:
                 latest = conn.execute(
@@ -5236,7 +5243,7 @@ def _register_routes(app: FastAPI) -> None:
                         }, ensure_ascii=False)[:500],
                         json.dumps({"status": "user_published"}, ensure_ascii=False),
                         override_reason, "publish-confirm-ui",
-                        _now().strftime("%Y-%m-%d %H:%M:%S"),
+                        _storage_now().isoformat(timespec="seconds"),
                     ),
                 )
                 conn.commit()
@@ -5260,7 +5267,7 @@ def _register_routes(app: FastAPI) -> None:
                         }, ensure_ascii=False)[:500],
                         json.dumps({"status": "user_published"}, ensure_ascii=False),
                         platform_sync_override_reason, "publish-confirm-ui",
-                        _now().strftime("%Y-%m-%d %H:%M:%S"),
+                        _storage_now().isoformat(timespec="seconds"),
                     ),
                 )
                 conn.commit()
@@ -5361,7 +5368,7 @@ def _register_routes(app: FastAPI) -> None:
                 json.dumps({"saved_content_hash": old_hash}, ensure_ascii=False)[:500],
                 json.dumps({"saved_content_hash": current_hash}, ensure_ascii=False)[:500],
                 req.reason.strip(), "publish-confirm-ui",
-                _now().strftime("%Y-%m-%d %H:%M:%S"),
+                _storage_now().isoformat(timespec="seconds"),
             ),
         )
         conn.commit()
@@ -5482,7 +5489,7 @@ def _register_routes(app: FastAPI) -> None:
             reason = str((req or {}).get("reason") or "人工审核未通过")[:500]
             cur = conn.execute(
                 """UPDATE master_plan_versions
-                   SET status='archived',reviewed_at=CURRENT_TIMESTAMP,reviewed_by='user',
+                   SET status='archived',reviewed_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),reviewed_by='user',
                        change_note=COALESCE(change_note,'') || ?
                    WHERE id=? AND status='draft'""",
                 ("；审核拒绝：" + reason, version_id),
@@ -5531,7 +5538,7 @@ def _register_routes(app: FastAPI) -> None:
             adoption = list(prior_adoptions) if isinstance(prior_adoptions, list) else []
             adoption.append({
                 "dimensions": dims,
-                "created_at": _now().isoformat(timespec="seconds"),
+                "created_at": _storage_now().isoformat(timespec="seconds"),
                 "source": "review_adoption",
                 "status": "suggestion",
             })
@@ -6153,9 +6160,10 @@ def _register_routes(app: FastAPI) -> None:
         with ctx["conn"]:
             ctx["conn"].execute(
                 "INSERT INTO visual_brand_profiles(tenant_id, profile_json, updated_at) "
-                "VALUES(?, ?, CURRENT_TIMESTAMP) ON CONFLICT(tenant_id) DO UPDATE SET "
-                "profile_json=excluded.profile_json, updated_at=CURRENT_TIMESTAMP",
-                (tenant_id, json.dumps(merged, ensure_ascii=False, sort_keys=True)),
+                "VALUES(?, ?, ?) ON CONFLICT(tenant_id) DO UPDATE SET "
+                "profile_json=excluded.profile_json, updated_at=excluded.updated_at",
+                (tenant_id, json.dumps(merged, ensure_ascii=False, sort_keys=True),
+                 storage_now().isoformat(timespec="seconds")),
             )
         return _visual_brand_profile(ctx["conn"], tenant_id)
 
@@ -6222,7 +6230,7 @@ def _register_routes(app: FastAPI) -> None:
                         json.dumps({"title": title, "body_len": len(body or "")},
                                    ensure_ascii=False)[:500],
                         req.reason or "UI 编辑", "web-ui",
-                        _now().strftime("%Y-%m-%d %H:%M:%S"),
+                        _storage_now().isoformat(timespec="seconds"),
                     ),
                 )
             conn.commit()
@@ -6437,7 +6445,7 @@ def _register_routes(app: FastAPI) -> None:
                 row["round_id"], "review_reject",
                 json.dumps({"title": row["title"]}, ensure_ascii=False)[:500],
                 "rejected", reason, "web-ui",
-                _now().strftime("%Y-%m-%d %H:%M:%S"),
+                _storage_now().isoformat(timespec="seconds"),
             ),
         )
         conn.commit()
@@ -6491,7 +6499,7 @@ def _register_routes(app: FastAPI) -> None:
                 row["round_id"], "review_resubmit",
                 json.dumps({"review_rejection_reason": row["review_rejection_reason"]}, ensure_ascii=False)[:500],
                 "resubmitted", reason, "web-ui",
-                _now().strftime("%Y-%m-%d %H:%M:%S"),
+                _storage_now().isoformat(timespec="seconds"),
             ),
         )
         conn.commit()
@@ -6651,7 +6659,7 @@ def _register_routes(app: FastAPI) -> None:
                 raise HTTPException(422, "输入输出 schema 必须为 JSON 对象且单项不超过 2000 字")
         if len(json.dumps([inputs, outputs], ensure_ascii=False)) > 20000:
             raise HTTPException(422, "输入输出 schema 总大小不能超过 20000 字")
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         conn = _g()["conn"]
         if conn.execute("SELECT COUNT(*) FROM tenant_skill_registry").fetchone()[0] >= 200:
             raise HTTPException(409, "每个账号组最多登记 200 个自定义 Skills")
@@ -6729,7 +6737,7 @@ def _register_routes(app: FastAPI) -> None:
         if len(json.dumps([inputs, outputs], ensure_ascii=False)) > 20000:
             raise HTTPException(422, "输入输出 schema 总大小不能超过 20000 字")
 
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         cursor = conn.execute(
             "UPDATE tenant_skill_registry SET name=?,version=?,description=?,category=?,"
             "inputs_json=?,outputs_json=?,permissions_json=?,enabled=?,"
@@ -6790,7 +6798,7 @@ def _register_routes(app: FastAPI) -> None:
             "cancelled": "cancelled",
         }.get(task.status if task else "")
         if terminal:
-            now = _now().isoformat(timespec="seconds")
+            now = _storage_now().isoformat(timespec="seconds")
             if terminal in ("generated", "failed"):
                 drafts = conn.execute(
                     "SELECT d.id FROM drafts d JOIN contents c ON c.id=d.content_id WHERE c.round_id=?",
@@ -6883,7 +6891,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(422, "计划产出数量必须是整数") from exc
         if not 1 <= planned_count <= 50:
             raise HTTPException(422, "计划产出数量必须在 1 到 50 之间")
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         plan_id = uuid.uuid4().hex
         conn = _g()["conn"]
         conn.execute(
@@ -6956,7 +6964,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(422, "计划产出数量必须在 1 到 100 之间")
         if len(str(values["topic"] or "")) > 500 or len(str(values["notes"] or "")) > 4000:
             raise HTTPException(422, "选题或备注内容过长")
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         cursor = conn.execute(
             "UPDATE content_plans SET title=?,topic=?,platforms_json=?,planned_count=?,scheduled_date=?,status=?,notes=?,version=version+1,updated_at=? "
             "WHERE id=? AND version=?",
@@ -7010,7 +7018,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(422, "draft_ids 不能包含空值")
         conn = _g()["conn"]
         linked_now = []
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         conn.execute("BEGIN IMMEDIATE")
         try:
             plan = conn.execute("SELECT status FROM content_plans WHERE id=?", (plan_id,)).fetchone()
@@ -7071,7 +7079,7 @@ def _register_routes(app: FastAPI) -> None:
         cursor = conn.execute(
             "UPDATE content_plans SET status='cancelled',version=version+1,updated_at=? "
             "WHERE id=? AND version=? AND status IN ('planned','failed','generating')",
-            (_now().isoformat(timespec="seconds"), plan_id, version),
+            (_storage_now().isoformat(timespec="seconds"), plan_id, version),
         )
         conn.commit()
         if cursor.rowcount != 1:
@@ -7089,7 +7097,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(409, "计划已被其他窗口修改，请刷新后重试")
         if row["status"] not in ("generated", "reviewed", "failed", "cancelled"):
             raise HTTPException(409, "只有已结束的计划可以归档")
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         cursor = conn.execute(
             "UPDATE content_plans SET status='archived',version=version+1,updated_at=? "
             "WHERE id=? AND version=? AND status IN ('generated','reviewed','failed','cancelled')",
@@ -7112,7 +7120,7 @@ def _register_routes(app: FastAPI) -> None:
         restore_to = {"archived": "reviewed", "cancelled": "planned"}.get(str(row["status"]))
         if restore_to is None:
             raise HTTPException(409, "只有已归档或已停用的计划可以恢复")
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         cursor = conn.execute(
             "UPDATE content_plans SET status=?,version=version+1,updated_at=? "
             "WHERE id=? AND version=? AND status=?",
@@ -7376,7 +7384,7 @@ def _register_routes(app: FastAPI) -> None:
         from datetime import timedelta
 
         conn = _g()["conn"]
-        since = (_now() - timedelta(days=days - 1)).strftime("%Y-%m-%d %H:%M:%S")
+        since = (_storage_now() - timedelta(days=days - 1)).isoformat(timespec="seconds")
 
         contents_created = int(conn.execute(
             "SELECT COUNT(*) FROM contents WHERE datetime(created_at) >= datetime(?)", (since,)
@@ -7608,7 +7616,7 @@ def _register_routes(app: FastAPI) -> None:
                         "INSERT INTO hot_topic_import_audit "
                         "(topic_id, title, categories, confirmed_by, confirmed_at) VALUES (?, ?, ?, ?, ?)",
                         (topic_id, title, json.dumps(sensitive_hits, ensure_ascii=False),
-                         confirmed_by, _now().isoformat(timespec="seconds")),
+                         confirmed_by, _storage_now().isoformat(timespec="seconds")),
                     )
                     conn.commit()
                 return {"id": topic_id, "imported": True,
@@ -7622,7 +7630,7 @@ def _register_routes(app: FastAPI) -> None:
             (
                 topic_id, title, dimension or None,
                 f"hot:{source}", _now().strftime("%Y-%m-%d"),
-                _now().strftime("%Y-%m-%d %H:%M:%S"),
+                _storage_now().isoformat(timespec="seconds"),
                 raw_url, str((req or {}).get("summary") or "").strip() or None,
             ),
         )
@@ -7633,7 +7641,7 @@ def _register_routes(app: FastAPI) -> None:
                 "INSERT INTO hot_topic_import_audit "
                 "(topic_id, title, categories, confirmed_by, confirmed_at) VALUES (?, ?, ?, ?, ?)",
                 (topic_id, title, json.dumps(sensitive_hits, ensure_ascii=False),
-                 confirmed_by, _now().isoformat(timespec="seconds")),
+                 confirmed_by, _storage_now().isoformat(timespec="seconds")),
             )
             conn.commit()
         return {"id": topic_id, "imported": True, "title": title,
@@ -7839,7 +7847,7 @@ def _register_routes(app: FastAPI) -> None:
             if row["resolution_action"] == action:
                 return {"id": log_id, "status": row["status"], "already_resolved": True}
             raise HTTPException(409, f"当前状态 {row['status']} 已收口，不能重复或反向核实")
-        resolved_at = _now().strftime("%Y-%m-%d %H:%M:%S")
+        resolved_at = _storage_now().isoformat(timespec="seconds")
         note = "用户核实：已发出" if action == "sent" else "用户核实：未发出（不自动重发）"
         actor = auth.audit_actor(request)
         updated = conn.execute(
@@ -7952,7 +7960,7 @@ def _register_routes(app: FastAPI) -> None:
                 return {"id": run_id, "status": row["status"], "already_resolved": True}
             raise HTTPException(409, f"当前状态 {row['status']} 已收口，不能重复或反向核实")
         note = "用户核实：已发出" if action == "sent" else "用户核实：未发出（不自动重发）"
-        resolved_at = _now().strftime("%Y-%m-%d %H:%M:%S")
+        resolved_at = _storage_now().isoformat(timespec="seconds")
         actor = auth.audit_actor(request)
         updated = conn.execute(
             "UPDATE task_runs SET status = ?, finished_at = ?, error_msg = ?, "
@@ -8071,7 +8079,7 @@ def _register_routes(app: FastAPI) -> None:
         conn = _g()["conn"]
         cur = conn.execute(
             "UPDATE notifications SET read_at = COALESCE(read_at, ?) WHERE id = ?",
-            (_now().strftime("%Y-%m-%d %H:%M:%S"), notification_id),
+            (_storage_now().isoformat(timespec="seconds"), notification_id),
         )
         if cur.rowcount == 0:
             conn.commit()
@@ -8087,7 +8095,7 @@ def _register_routes(app: FastAPI) -> None:
         conn = _g()["conn"]
         cur = conn.execute(
             "UPDATE notifications SET read_at = ? WHERE read_at IS NULL",
-            (_now().strftime("%Y-%m-%d %H:%M:%S"),),
+            (_storage_now().isoformat(timespec="seconds"),),
         )
         conn.commit()
         return {"updated": cur.rowcount}
@@ -8157,7 +8165,7 @@ def _register_routes(app: FastAPI) -> None:
         if job is None:
             raise HTTPException(404, f"任务不存在或已关闭: {job_id}")
         job.modify(next_run_time=_now())
-        return {"job_id": job_id, "triggered_at": _now().isoformat(timespec="seconds")}
+        return {"job_id": job_id, "triggered_at": _storage_now().isoformat(timespec="seconds")}
 
     # --- 节奏调度配置（只读）---
     @app.get("/api/rhythm")
@@ -8323,7 +8331,7 @@ def _register_routes(app: FastAPI) -> None:
         if req.asset_type == "reference" and not (req.source_url or "").strip():
             raise HTTPException(422, "外部参考必须填写原始链接 source_url（可溯源）")
         conn = _g()["conn"]
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         cur = conn.execute(
             "INSERT INTO content_assets "
             "(asset_type, title, body, source_url, platform, created_at, updated_at, version, is_active) "
@@ -8354,7 +8362,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(409, "内容资产类型不可修改")
         if req.asset_type == "reference" and not (req.source_url or "").strip():
             raise HTTPException(422, "外部参考必须填写原始链接 source_url（可溯源）")
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         if req.asset_type == "template" and (
             req.title != existing["title"] or (req.body or "") != (existing["body"] or "")
         ):
@@ -8411,7 +8419,7 @@ def _register_routes(app: FastAPI) -> None:
         if previous is None:
             raise HTTPException(404, "模板版本不存在")
         next_version = int(current["version"] or 1) + 1
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         conn.execute(
             "INSERT INTO content_template_versions (template_id, version, title, body, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -8436,7 +8444,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(400, "目前只有内容模板支持停用")
         conn.execute(
             "UPDATE content_assets SET is_active=0, updated_at=? WHERE id=?",
-            (_now().isoformat(timespec="seconds"), asset_id),
+            (_storage_now().isoformat(timespec="seconds"), asset_id),
         )
         conn.commit()
         return {"id": asset_id, "is_active": False}
@@ -8453,7 +8461,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(400, "目前只有内容模板支持恢复")
         conn.execute(
             "UPDATE content_assets SET is_active=1, updated_at=? WHERE id=?",
-            (_now().isoformat(timespec="seconds"), asset_id),
+            (_storage_now().isoformat(timespec="seconds"), asset_id),
         )
         conn.commit()
         return {"id": asset_id, "is_active": True}
@@ -8819,7 +8827,7 @@ def _register_routes(app: FastAPI) -> None:
                 result["status"], result["item_count"],
                 json.dumps(result["sample_titles"], ensure_ascii=False),
                 redact(result["message"])[:1000],
-                business_now(cfg).isoformat(timespec="seconds"),
+                storage_now().isoformat(timespec="seconds"),
             ),
         )
         conn.commit()
@@ -9062,7 +9070,7 @@ def _register_routes(app: FastAPI) -> None:
         if not changed:
             return {"platform": platform, "changed": 0, "message": "没有改动"}
 
-        now = _now().isoformat(timespec="seconds")  # R5：本地时区
+        now = _storage_now().isoformat(timespec="seconds")  # UTC 持久化时间
         for key, old, new in changed:
             # 审计口径与 config_changes 一致：platform_styles.<platform>.<field>
             conn.execute(
@@ -9200,7 +9208,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(409, "一个账号组内每个平台只能登记一个账号，请编辑现有记录或先删除原记录")
         try:
             conn.execute(
-                "UPDATE platform_accounts SET platform=?, account_handle=?, normalized_handle=?, display_name=?, status=?, notes=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                "UPDATE platform_accounts SET platform=?, account_handle=?, normalized_handle=?, display_name=?, status=?, notes=?, updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id=?",
                 (req.platform, handle, handle.casefold(), req.display_name.strip(), req.status, req.notes.strip(), account_id),
             )
             conn.commit()

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from src.core.timezone import business_now
+from src.core.timezone import storage_now
 from typing import Optional
 
 _KEY = "onboarding_progress"
@@ -54,7 +54,7 @@ def validate_onboarding_progress(req: Optional[dict]) -> tuple[str, int]:
 
 
 def set_onboarding_progress(conn, step_key: str, step_index: int, by: str = "web-ui", cfg=None) -> dict:
-    now = business_now(cfg).strftime("%Y-%m-%d %H:%M:%S")
+    now = storage_now().isoformat(timespec="seconds")
     with conn:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(
