@@ -356,12 +356,11 @@ class PlanVersionStore:
             })
 
         mismatched_rounds = self.conn.execute(
-            """SELECT id FROM spiral_rounds
-               WHERE master_plan_version_id IS NOT NULL
-                 AND (plan_signature IS NULL OR plan_signature != (
-                     SELECT plan_signature FROM master_plan_versions v
-                     WHERE v.id=spiral_rounds.master_plan_version_id
-                 ))"""
+            """SELECT r.id FROM spiral_rounds r
+               LEFT JOIN master_plan_versions v ON v.id=r.master_plan_version_id
+               WHERE r.master_plan_version_id IS NOT NULL
+                 AND (v.id IS NULL OR r.plan_signature IS NULL
+                      OR r.plan_signature != v.plan_signature)"""
         ).fetchall()
         if mismatched_rounds:
             issues.append({
@@ -393,6 +392,16 @@ class PlanVersionStore:
                 "code": "round_subplan_stage_mismatch",
                 "round_ids": [int(r["id"]) for r in bad_stage_links],
             })
+
+        active_pointer = self.conn.execute(
+            "SELECT active_version_id FROM plan_settings WHERE id=1"
+        ).fetchone()
+        if active_pointer is not None:
+            effective_pointer = self.conn.execute(
+                "SELECT id FROM master_plan_versions WHERE status='effective'"
+            ).fetchone()
+            if effective_pointer is None or active_pointer["active_version_id"] != effective_pointer["id"]:
+                issues.append({"code": "active_plan_pointer_mismatch"})
 
         effective_master_count = int(self.conn.execute(
             "SELECT COUNT(*) FROM master_plan_versions WHERE status='effective'"
