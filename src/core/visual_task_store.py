@@ -27,6 +27,126 @@ class VisualTaskStore:
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
+    def get_task(self, task_id: str) -> dict | None:
+        """Return a safe task snapshot and mark expired workers interrupted."""
+        now = time.time()
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT task_id,status,started_at,heartbeat_at,lease_expires_at,
+                          finished_at,error,created_at,updated_at
+                   FROM visual_generation_tasks WHERE task_id=?""",
+                (task_id,),
+            ).fetchone()
+            lease = conn.execute(
+                "SELECT expires_at FROM visual_generation_account_leases WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            if row and row["status"] in ("running", "retrying") and (
+                lease is None or float(lease["expires_at"]) <= now
+            ):
+                conn.execute(
+                    """UPDATE visual_generation_tasks SET status='interrupted',owner=NULL,
+                       lease_expires_at=NULL,error='worker lease expired',updated_at=?
+                       WHERE task_id=? AND status IN ('running','retrying')""",
+                    (now, task_id),
+                )
+                conn.execute(
+                    """INSERT INTO visual_generation_task_events
+                       (task_id,from_status,to_status,reason,created_at)
+                       VALUES(?,?,'interrupted','worker lease expired',?)""",
+                    (task_id, row["status"], now),
+                )
+                conn.execute(
+                    "DELETE FROM visual_generation_account_leases WHERE task_id=?",
+                    (task_id,),
+                )
+                row = conn.execute(
+                    """SELECT task_id,status,started_at,heartbeat_at,lease_expires_at,
+                              finished_at,error,created_at,updated_at
+                       FROM visual_generation_tasks WHERE task_id=?""",
+                    (task_id,),
+                ).fetchone()
+            pages = conn.execute(
+                """SELECT page_index,status,attempts,output_path,error
+                   FROM visual_generation_pages WHERE task_id=? ORDER BY page_index""",
+                (task_id,),
+            ).fetchall()
+            missing = [
+                int(page["page_index"]) for page in pages
+                if page["status"] == "completed"
+                and (not page["output_path"] or not Path(page["output_path"]).is_file())
+            ]
+            if row and missing and row["status"] == "completed":
+                conn.execute(
+                    """UPDATE visual_generation_tasks SET status='failed',
+                       error='completed visual page artifact is missing',updated_at=?
+                       WHERE task_id=? AND status='completed'""",
+                    (now, task_id),
+                )
+                conn.execute(
+                    """INSERT INTO visual_generation_task_events
+                       (task_id,from_status,to_status,reason,created_at)
+                       VALUES(?,'completed','failed','completed visual page artifact is missing',?)""",
+                    (task_id, now),
+                )
+                row = conn.execute(
+                    """SELECT task_id,status,started_at,heartbeat_at,lease_expires_at,
+                              finished_at,error,created_at,updated_at
+                       FROM visual_generation_tasks WHERE task_id=?""",
+                    (task_id,),
+                ).fetchone()
+            conn.commit()
+            if row is None:
+                return None
+            return {
+                "task_id": row["task_id"],
+                "status": row["status"],
+                "started_at": row["started_at"],
+                "heartbeat_at": row["heartbeat_at"],
+                "lease_expires_at": row["lease_expires_at"],
+                "finished_at": row["finished_at"],
+                "has_error": bool(row["error"]),
+                "error_kind": (
+                    "timeout" if row["error"] and (
+                        "超时" in str(row["error"]) or "timeout" in str(row["error"]).lower()
+                    ) else "ocr" if row["error"] and (
+                        "ocr" in str(row["error"]).lower()
+                        or "校验" in str(row["error"])
+                        or "识别" in str(row["error"])
+                    ) else "generation" if row["error"] else None
+                ),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "artifact_missing_pages": missing,
+                "pages": [
+                    {
+                        "page_index": int(page["page_index"]),
+                        "status": (
+                            "missing" if int(page["page_index"]) in missing else page["status"]
+                        ),
+                        "attempts": int(page["attempts"] or 0),
+                        "has_error": bool(page["error"]),
+                        "error_kind": (
+                            "timeout" if page["error"] and (
+                                "超时" in str(page["error"]) or "timeout" in str(page["error"]).lower()
+                            ) else "ocr" if page["error"] and (
+                                "ocr" in str(page["error"]).lower()
+                                or "校验" in str(page["error"])
+                                or "识别" in str(page["error"])
+                            ) else "generation" if page["error"] else None
+                        ),
+                    }
+                    for page in pages
+                ],
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def acquire(self, task_id: str, account_group: str, owner: str | None = None,
                 lease_seconds: int = 180) -> str:
         owner = owner or uuid.uuid4().hex

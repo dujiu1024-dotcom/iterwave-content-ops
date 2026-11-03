@@ -1826,6 +1826,22 @@ export interface VisualCatalog {
   fonts: Array<{ family: string; label: string; installed: boolean; matched: string }>;
   component_styles: Array<{ key: string; label: string }>;
 }
+export interface VisualGenerationTask {
+  task_id: string | null;
+  status: "not_found" | "running" | "retrying" | "interrupted" | "completed" | "failed";
+  message: string;
+  started_at?: number | null;
+  updated_at?: number | null;
+  finished_at?: number | null;
+  artifact_missing_pages?: number[];
+  failure_kind?: "timeout" | "ocr" | "generation" | null;
+  pages: Array<{
+    page_index: number;
+    status: "pending" | "running" | "completed" | "failed" | "missing";
+    attempts: number;
+    message: string;
+  }>;
+}
 export interface VisualUsageSummary {
   scanned_rounds: number;
   totals: { generation_count: number; bytes: number; elapsed_ms: number; items: number };
@@ -2624,6 +2640,10 @@ export const api = {
   regenerateContentCards: (id: string) =>
     fetchJson<{ id: string; image_count: number; image_paths: string[] }>(
       `/api/contents/${id}/cards`, { method: "POST" },
+    ),
+  visualGenerationTask: (id: string) =>
+    fetchJson<VisualGenerationTask>(
+      `/api/contents/${encodeURIComponent(id)}/visual-generation-task`,
     ),
   reviewQueue: (filters: { status?: string; platform?: Platform | "all"; taskType?: string; from?: string; to?: string; page?: number; pageSize?: number } = {}) => {
     const p = new URLSearchParams({ page: String(filters.page ?? 1), page_size: String(filters.pageSize ?? 30) });

@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   backend:
     name: Backend tests
@@ -73,3 +77,31 @@ jobs:
       - name: Verify offline demo artifact
         working-directory: web
         run: test -s ../iterwave-prototype.html && grep -q "静态原型演示" ../iterwave-prototype.html
+
+  visual-ui-browser:
+    name: Visual task browser acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: web
+        run: npm ci
+      - name: Install application and browser test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" playwright
+          python -m playwright install --with-deps chromium
+      - name: Run real-browser task recovery scenarios
+        run: python -m pytest -vv --override-ini python_files=visual_generation_browser.py web/browser_tests/visual_generation_browser.py
