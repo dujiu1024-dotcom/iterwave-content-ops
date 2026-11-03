@@ -1083,6 +1083,41 @@ class RoundExecutor:
                     if not strategy_step_id:
                         raise RoundPreconditionError("当前策略步骤缺少稳定 stage_key，拒绝创建生产任务")
                     task_store.recover_expired_tasks(round_id=round_id)
+                    # Freeze only confirmed, commercially permitted assets linked to
+                    # this topic, platform, or sub-plan. Existing task replays keep
+                    # their original immutable input snapshot.
+                    linked_assets = self.conn.execute(
+                        """SELECT DISTINCT a.id,a.current_version_no,v.title,v.description,
+                                  v.metadata_json,a.source_kind,a.source_media_asset_id,
+                                  a.source_content_asset_id,a.source_kb_id,a.commercial_use_status
+                           FROM original_assets a
+                           JOIN original_asset_versions v
+                             ON v.original_asset_id=a.id AND v.version_no=a.current_version_no
+                           JOIN original_asset_links l ON l.original_asset_id=a.id
+                           WHERE a.archived_at IS NULL AND a.review_status='confirmed'
+                             AND a.commercial_use_status='allowed'
+                             AND a.privacy_status IN ('clear','not_applicable')
+                             AND a.readability_status IN ('readable','not_applicable')
+                             AND a.completeness_status='complete'
+                             AND a.duplicate_status='unique'
+                             AND ((l.entity_type='content_topic' AND l.entity_id=?)
+                               OR (l.entity_type='platform' AND l.entity_id=?)
+                               OR (l.entity_type='plan' AND l.entity_id=?))
+                           ORDER BY a.id""",
+                        (str(topic.id), platform.value, str(self._subplan_context["sub_plan_id"])),
+                    ).fetchall()
+                    original_asset_snapshot = [{
+                        "asset_id": int(row["id"]),
+                        "version_no": int(row["current_version_no"]),
+                        "title": row["title"],
+                        "description": row["description"],
+                        "source_kind": row["source_kind"],
+                        "source_media_asset_id": row["source_media_asset_id"],
+                        "source_content_asset_id": row["source_content_asset_id"],
+                        "source_kb_id": row["source_kb_id"],
+                        "commercial_use_status": row["commercial_use_status"],
+                        "metadata": json.loads(row["metadata_json"] or "{}"),
+                    } for row in linked_assets]
                     task = task_store.create_task(
                         round_id=round_id,
                         master_plan_version_id=int(self._subplan_context["master_plan_version_id"]),
@@ -1109,8 +1144,20 @@ class RoundExecutor:
                                 "expected_result": stage.get("expected_result"),
                             },
                             "template": template_data,
+                            "original_assets": original_asset_snapshot,
                         },
                     )
+                    # Persist the exact same version references represented in the
+                    # task's immutable input snapshot. Never refresh them on retry.
+                    frozen_task_input = (task.get("input_snapshot") or {}).get("task_input") or {}
+                    for asset in frozen_task_input.get("original_assets", []):
+                        self.conn.execute(
+                            """INSERT OR IGNORE INTO production_task_asset_usages(
+                                production_task_id,original_asset_id,asset_version_no,permission_snapshot
+                            ) VALUES(?,?,?,'allowed')""",
+                            (task["id"], int(asset["asset_id"]), int(asset["version_no"])),
+                        )
+                    self.conn.commit()
                     existing = task_store.get_content_for_task(task["id"])
                     if existing is not None:
                         if task["status"] == "succeeded":

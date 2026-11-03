@@ -1855,7 +1855,44 @@ export interface VisualVersionHistory {
   style_key: string; status: string; created_at: string;
   design: { pages?: Array<{ page_index: number; image_url: string | null; can_revise?: boolean }> };
 }
+export interface OriginalAsset {
+  id: number; asset_type: string; title: string; description: string; source_kind: string;
+  source_media_asset_id: number | null; source_content_asset_id: number | null; source_kb_id: string | null;
+  source_uri: string | null; current_version_no: number; readability_status: string;
+  completeness_status: string; duplicate_status: string; freshness_status: string;
+  description_status: string; commercial_use_status: string; privacy_status: string;
+  review_status: "pending" | "confirmed" | "rejected"; review_note: string;
+}
+export interface OriginalAssetGap {
+  id: number; entity_type: string; entity_id: string; asset_type: string; title: string;
+  reason: string; priority: string; status: string; resolved_asset_id: number | null;
+}
+export interface OriginalAssetSummary {
+  total: number; by_type: Record<string, number>; by_review_status: Record<string, number>;
+  gaps: Record<string, number>; by_product?: Record<string, number>;
+}
 export const api = {
+
+  originalAssets: (params: { query?: string; asset_type?: string; review_status?: string } = {}) => {
+    const search = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => { if (value) search.set(key, value); });
+    const suffix = search.toString();
+    return fetchJson<{ items: OriginalAsset[]; total: number }>(`/api/original-assets${suffix ? `?${suffix}` : ""}`);
+  },
+  originalAssetsSummary: () => fetchJson<OriginalAssetSummary>("/api/original-assets/summary"),
+  syncOriginalAssets: () => fetchJson<{ total_created: number; created_media_assets: number; created_content_assets: number; created_kb_sources?: number; updated_kb_sources?: number; message: string }>("/api/original-assets/sync", { method: "POST" }),
+  analyzeOriginalAsset: (id: number, analysis_type: string) => fetchJson<{ id: number; status: string; result?: Record<string, unknown>; message: string }>(`/api/original-assets/${id}/analyses`, { method: "POST", body: JSON.stringify({ analysis_type }) }),
+  reviewOriginalAssetAnalysis: (assetId: number, analysisId: number, decision: string, note = "") => fetchJson<{ asset_id: number; analysis_id: number; review_status: string }>(`/api/original-assets/${assetId}/analyses/${analysisId}/review`, { method: "POST", body: JSON.stringify({ decision, note }) }),
+  originalAssetAnalyses: (id: number) => fetchJson<{ items: Array<{ id: number; asset_version_no: number; analysis_type: string; status: string; result: Record<string, unknown>; warnings: string[]; provider?: string | null; model?: string | null; created_at: string; completed_at?: string | null }> }>(`/api/original-assets/${id}/analyses`),
+  originalAssetVersions: (id: number) => fetchJson<{ items: Array<{ version_no: number; title: string; description: string; review_status: string; commercial_use_status: string; created_at: string; metadata: Record<string, unknown> }> }>(`/api/original-assets/${id}/versions`),
+  originalAssetLinks: (id: number) => fetchJson<{ items: Array<{ id: number; entity_type: string; entity_id: string; relation_type: string }> }>(`/api/original-assets/${id}/links`),
+  registerOriginalAsset: (data: Record<string, unknown>) => fetchJson<{ id: number; version_no: number; review_status: string }>("/api/original-assets", { method: "POST", body: JSON.stringify(data) }),
+  reviewOriginalAsset: (id: number, data: { decision: string; review_note?: string; quality?: Record<string, string> }) => fetchJson<{ id: number; version_no: number; review_status: string }>(`/api/original-assets/${id}/review`, { method: "POST", body: JSON.stringify(data) }),
+  linkOriginalAsset: (id: number, data: { entity_type: string; entity_id: string; relation_type?: string }) => fetchJson<{ id: number; created: boolean }>(`/api/original-assets/${id}/links`, { method: "POST", body: JSON.stringify(data) }),
+  originalAssetGaps: (status = "all") => fetchJson<{ items: OriginalAssetGap[]; total: number }>(`/api/original-asset-gaps?status=${status}`),
+  createOriginalAssetGap: (data: Record<string, unknown>) => fetchJson<{ id: number; created: boolean; status: string }>("/api/original-asset-gaps", { method: "POST", body: JSON.stringify(data) }),
+  updateOriginalAssetGap: (id: number, data: { status: string; resolved_asset_id?: number | null }) => fetchJson<{ id: number; status: string }>(`/api/original-asset-gaps/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+
 
   confirmBusinessAiProposal: (proposal: Record<string, unknown>) => fetchJson<Record<string, unknown>>("/api/business-profile/ai-proposals/confirm", { method: "POST", body: JSON.stringify({ proposal }) }),
   businessProfile: () => fetchJson<BusinessProfile>("/api/business-profile"),
