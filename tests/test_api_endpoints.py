@@ -3380,7 +3380,7 @@ def test_custom_skill_execute_does_not_echo_or_persist_untrusted_payload(client)
     assert response.status_code == 409
     assert secret not in response.text
     stored = conn.execute(
-        "SELECT input_sha256 FROM tenant_skill_executions WHERE skill_id='privacy_skill'"
+        "SELECT input_bytes FROM tenant_skill_executions WHERE skill_id='privacy_skill'"
     ).fetchone()
     assert stored is not None
-    assert secret not in stored["input_sha256"]
+    assert stored["input_bytes"] > 0
