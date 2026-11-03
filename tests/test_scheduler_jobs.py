@@ -724,3 +724,33 @@ def test_kb_scan_rolls_back_all_topic_inserts_when_one_insert_fails(conn: sqlite
         raise AssertionError("expected topic insert failure")
 
     assert conn.execute("SELECT COUNT(*) FROM topic_index").fetchone()[0] == 0
+
+
+
+def test_tracked_scheduler_job_rolls_back_implicit_write_on_exception(cfg, conn):
+    import threading
+    import pytest
+    from src.core.db import LockedConnection
+
+    locked = LockedConnection(conn)
+    locked.execute("CREATE TABLE IF NOT EXISTS scheduler_txn_probe (value INTEGER)")
+    locked.commit()
+    eng = SchedulerEngine(cfg, Path(cfg.paths.db_file))
+    eng.wire(conn=locked, adapters={})
+
+    async def abandon_transaction():
+        locked.execute("INSERT INTO scheduler_txn_probe VALUES (1)")
+        raise RuntimeError("simulated scheduler failure")
+
+    eng._job_abandon_transaction = abandon_transaction
+    with pytest.raises(RuntimeError, match="simulated scheduler failure"):
+        asyncio.run(eng._run_tracked("_job_abandon_transaction"))
+
+    assert locked.execute("SELECT COUNT(*) FROM scheduler_txn_probe").fetchone()[0] == 0
+    completed = threading.Event()
+    reader = threading.Thread(
+        target=lambda: (locked.execute("SELECT COUNT(*) FROM scheduler_txn_probe").fetchone(), completed.set())
+    )
+    reader.start()
+    reader.join(timeout=1)
+    assert completed.is_set(), "scheduler finalizer leaked the retained transaction lock"

@@ -95,15 +95,18 @@ def mark_cross_platform(
         raise RuntimeError("mark_cross_platform 必须显式传入账号组配置或绑定任务配置")
     if length_prefilter_ratio is None:
         length_prefilter_ratio = cfg.hot_topics.dedup.length_prefilter_ratio
-    from .timezone import business_now
-    since = (business_now(cfg) - timedelta(hours=window_hours)).isoformat(timespec="seconds")
+    from .timezone import storage_now, timestamp_since_sql
+    cutoff = storage_now() - timedelta(hours=window_hours)
+    # Historical hot_topics naive timestamps were written as UTC, not business-local time.
+    since_utc = cutoff.isoformat(sep=" ", timespec="seconds")
+    since_legacy_utc = cutoff.replace(tzinfo=None).isoformat(sep=" ", timespec="seconds")
     with conn:
         conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
             "SELECT id, platform, title_norm, discovered_at FROM hot_topics "
             "WHERE evidence_status = 'collected' AND title_norm IS NOT NULL AND title_norm != '' "
-            "AND last_seen_at >= ? ORDER BY discovered_at ASC, id ASC",
-            (since,),
+            "AND " + timestamp_since_sql("last_seen_at") + " ORDER BY discovered_at ASC, id ASC",
+            (since_utc, since_legacy_utc),
         ).fetchall()
         canon: list[dict] = []          # 主条目（按首次发现先后）
         assign: dict[str, str | None] = {}
@@ -127,14 +130,19 @@ def mark_cross_platform(
 
 
 def prune(conn, *, retention_days: int, max_rows: int, cfg=None) -> int:
-    """规则 3：按账号组业务时区、保留天数与总量上限原子清理。"""
-    from .timezone import business_now
+    """规则 3：按 UTC 时间点、保留天数与总量上限原子清理；兼容历史 naive-UTC 行。"""
+    from .timezone import storage_now, timestamp_before_sql
 
-    cutoff = (business_now(cfg) - timedelta(days=retention_days)).isoformat(timespec="seconds")
+    cutoff = storage_now() - timedelta(days=retention_days)
+    # Keep the historical hot_topics naive-UTC interpretation during the transition.
+    cutoff_utc = cutoff.isoformat(sep=" ", timespec="seconds")
+    cutoff_legacy_utc = cutoff.replace(tzinfo=None).isoformat(sep=" ", timespec="seconds")
     with conn:
         conn.execute("BEGIN IMMEDIATE")
         deleted = conn.execute(
-            "DELETE FROM hot_topics WHERE COALESCE(last_seen_at, discovered_at) < ?", (cutoff,)
+            "DELETE FROM hot_topics WHERE "
+            + timestamp_before_sql("COALESCE(last_seen_at, discovered_at)"),
+            (cutoff_utc, cutoff_legacy_utc),
         ).rowcount
         total = conn.execute("SELECT COUNT(*) FROM hot_topics").fetchone()[0]
         if total > max_rows:
