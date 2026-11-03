@@ -195,6 +195,72 @@ def test_round_is_pinned_to_effective_version_and_survives_new_draft(client):
     assert body["sub_plan_stage_snapshot"]["title"] == "阶段一"
 
 
+def test_manual_round_open_blocks_missing_predecessor_outcome_with_reason(client):
+    tc, conn, _ = client
+    store = PlanVersionStore(conn)
+    master = store.create_master_draft(dict(PLAN_BASE), author="test", source="user")
+    store.activate_master_version(int(master["id"]), reviewer="test")
+    store.create_subplan(
+        "dependency-sub", master_plan_version_id=int(master["id"]),
+        platform="xhs", title="依赖门禁子计划", author="test",
+    )
+    version = store.create_subplan_version(
+        "dependency-sub", {"title": "依赖门禁子计划", "platform": "xhs"},
+        master_plan_version_id=int(master["id"]),
+        stages=[
+            {"stage_key": "research", "title": "调研", "target_count": 1},
+            {"stage_key": "production", "title": "生产", "target_count": 2,
+             "dependencies": ["research"], "entry_condition_met": True},
+        ],
+    )
+    store.activate_subplan_version(int(version["id"]), reviewer="test")
+    stages = conn.execute(
+        "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order",
+        (int(version["id"]),),
+    ).fetchall()
+    store.update_stage_status(int(stages[0]["id"]), "in_progress")
+    store.update_stage_status(int(stages[0]["id"]), "completed")
+
+    before = int(conn.execute("SELECT COUNT(*) FROM spiral_rounds").fetchone()[0])
+    response = tc.post("/api/subplans/dependency-sub/rounds", json={"topic_count": 2})
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "strategy_step_blocked"
+    assert detail["stage_key"] == "production"
+    assert detail["dependencies"] == ["research"]
+    assert "实际效果记录" in detail["message"]
+    assert int(conn.execute("SELECT COUNT(*) FROM spiral_rounds").fetchone()[0]) == before
+
+
+def test_manual_round_open_blocks_unmet_entry_condition(client):
+    tc, conn, _ = client
+    store = PlanVersionStore(conn)
+    master = store.create_master_draft(dict(PLAN_BASE), author="test", source="user")
+    store.activate_master_version(int(master["id"]), reviewer="test")
+    store.create_subplan(
+        "entry-sub", master_plan_version_id=int(master["id"]),
+        platform="xhs", title="进入条件子计划", author="test",
+    )
+    version = store.create_subplan_version(
+        "entry-sub", {"title": "进入条件子计划", "platform": "xhs"},
+        master_plan_version_id=int(master["id"]),
+        stages=[{"stage_key": "prepare", "title": "准备", "target_count": 2,
+                 "entry_condition_met": False}],
+    )
+    store.activate_subplan_version(int(version["id"]), reviewer="test")
+
+    before = int(conn.execute("SELECT COUNT(*) FROM spiral_rounds").fetchone()[0])
+    response = tc.post("/api/subplans/entry-sub/rounds", json={"topic_count": 2})
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "strategy_step_blocked"
+    assert detail["stage_key"] == "prepare"
+    assert "进入条件" in detail["message"]
+    assert int(conn.execute("SELECT COUNT(*) FROM spiral_rounds").fetchone()[0]) == before
+
+
 # ---------------------------------------------------------------- 4. 任务执行
 
 class _FakeExecutor:
