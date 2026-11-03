@@ -1390,9 +1390,10 @@ class CreateRoundRequest(BaseModel):
     content_plan_version: Optional[int] = None
 
 class PublishConfirmRequest(BaseModel):
-    """发布确认补充：笔记链接；质检/人工审核/平台版本异常均需单独说明例外原因。"""
+    """发布确认补充：实际发布时间、笔记链接及必要的质量/版本例外说明。"""
 
     note_url: Optional[str] = Field(None, max_length=500)
+    published_at: Optional[str] = Field(None, max_length=40)
     quality_override_reason: Optional[str] = Field(None, max_length=500)
     platform_sync_override_reason: Optional[str] = Field(None, max_length=500)
 
@@ -2390,7 +2391,8 @@ def _register_routes(app: FastAPI) -> None:
         conn = _g()["conn"]
         tenant_id = _tenant_id()
         row = conn.execute(
-            "SELECT d.platform, d.status, d.content_id, d.user_confirmed_at FROM drafts d WHERE d.id=?", (draft_id,)
+            "SELECT d.platform, d.status, d.content_id, d.user_confirmed_at, "
+            "COALESCE(d.published_at,d.user_confirmed_at) AS published_at FROM drafts d WHERE d.id=?", (draft_id,)
         ).fetchone()
         if row is None:
             raise HTTPException(404, "草稿不存在")
@@ -2425,7 +2427,7 @@ def _register_routes(app: FastAPI) -> None:
             if original is None:
                 raise HTTPException(422, "修正记录必须属于当前账号组和同一篇内容")
         measured_dt = parse_persisted_datetime(measured_at, _g().get("cfg"))
-        confirmed_dt = parse_persisted_datetime(row["user_confirmed_at"], _g().get("cfg"))
+        confirmed_dt = parse_persisted_datetime(row["published_at"], _g().get("cfg"))
         if measured_dt is None or confirmed_dt is None:
             raise HTTPException(422, "统计时间或发布时间必须是有效的 ISO 日期时间")
         now_dt = storage_now()
@@ -5397,7 +5399,7 @@ def _register_routes(app: FastAPI) -> None:
         """
         conn = _g()["conn"]
         row = conn.execute(
-            "SELECT d.platform, d.status, d.error_msg, d.saved_content_hash, "
+            "SELECT d.platform, d.status, d.error_msg, d.saved_content_hash, d.published_at, d.publish_time_source, "
             "c.id AS content_id, c.round_id, c.title, c.body, c.tags, c.image_paths, "
             "c.guard_outcome, c.guard_reason, c.review_rejected, c.review_rejection_reason "
             "FROM drafts d JOIN contents c ON c.id = d.content_id WHERE d.id = ?",
@@ -5409,22 +5411,45 @@ def _register_routes(app: FastAPI) -> None:
         note_url = (req.note_url or "").strip() if req else ""
         if note_url:
             note_url = _validate_platform_note_url(row["platform"], note_url)
+        actual_published_at = None
+        if req and req.published_at:
+            parsed_publish_time = parse_persisted_datetime(req.published_at, _g().get("cfg"))
+            if parsed_publish_time is None:
+                raise HTTPException(422, "实际发布时间必须是有效的 ISO 日期时间")
+            if parsed_publish_time > storage_now() + timedelta(minutes=5):
+                raise HTTPException(422, "实际发布时间不能晚于当前时间（允许 5 分钟设备时钟误差）")
+            actual_published_at = parsed_publish_time.isoformat(timespec="seconds")
 
         # 重复确认应幂等：不重新注册采集任务，不重复推进轮次；已发布记录保留原状态。
         if row["status"] in ("user_published", "data_fetching", "published"):
-            if note_url:
+            duplicate_confirmation_updated = False
+            if actual_published_at and row["publish_time_source"] == "confirmation_time":
                 conn.execute(
-                    "UPDATE drafts SET platform_note_url = COALESCE(platform_note_url, ?) WHERE id = ?",
+                    "UPDATE drafts SET published_at=?,publish_time_source='user_supplied' WHERE id=?",
+                    (actual_published_at,draft_id),
+                )
+                duplicate_confirmation_updated = True
+            elif actual_published_at and row["published_at"] != actual_published_at:
+                raise HTTPException(409, "实际发布时间已有人工确认记录，不能直接覆盖")
+            if note_url:
+                changed = conn.execute(
+                    "UPDATE drafts SET platform_note_url = COALESCE(platform_note_url, ?) "
+                    "WHERE id = ? AND platform_note_url IS NULL",
                     (note_url, draft_id),
                 )
+                duplicate_confirmation_updated = duplicate_confirmation_updated or changed.rowcount > 0
+            # 发布时间与链接是两项独立的可补充信息；只补填发布时间时也必须提交。
+            if duplicate_confirmation_updated:
                 conn.commit()
             current_url = conn.execute(
-                "SELECT platform_note_url FROM drafts WHERE id = ?", (draft_id,)
+                "SELECT platform_note_url,published_at,publish_time_source FROM drafts WHERE id = ?", (draft_id,)
             ).fetchone()
             return {
                 "draft_id": draft_id,
                 "status": row["status"],
                 "note_url": current_url["platform_note_url"] if current_url else None,
+                "published_at": current_url["published_at"] if current_url else None,
+                "publish_time_source": current_url["publish_time_source"] if current_url else None,
                 "already_confirmed": True,
             }
 
@@ -5590,6 +5615,13 @@ def _register_routes(app: FastAPI) -> None:
             except Exception:  # noqa: BLE001 — 已发生的外部发布不能因审计写失败丢失采集
                 logger.exception("平台内容版本例外审计写入失败 draft=%s", draft_id)
 
+        conn.execute(
+            "UPDATE drafts SET publish_status='published',published_at=COALESCE(?,user_confirmed_at),"
+            "publish_time_source=CASE WHEN ? IS NULL THEN 'confirmation_time' ELSE 'user_supplied' END,"
+            "publish_result_note=NULL WHERE id=? AND user_confirmed_at IS NOT NULL",
+            (actual_published_at,actual_published_at,draft_id),
+        )
+        conn.commit()
         # G-15 场景：发布确认留痕（用户手动确认，非系统自动发布）
         message = f"草稿 {draft_id} 已由用户确认发布，进入数据采集"
         if quality_override_recorded:
@@ -5617,7 +5649,32 @@ def _register_routes(app: FastAPI) -> None:
                 metadata={"platform": row["platform"]},
                 idempotency_key=f"note-url:{draft_id}:{hashlib.sha256(note_url.encode()).hexdigest()[:16]}",
             )
-        return {"draft_id": draft_id, "status": "user_published", "note_url": note_url or None}
+        published = conn.execute("SELECT published_at,publish_time_source FROM drafts WHERE id=?",(draft_id,)).fetchone()
+        return {"draft_id": draft_id, "status": "user_published", "note_url": note_url or None,
+                "published_at": published["published_at"] if published else None,
+                "publish_time_source": published["publish_time_source"] if published else None}
+
+    @app.post("/api/drafts/{draft_id}/publish_failure")
+    def record_publish_failure(draft_id: str, req: dict):
+        """记录外部平台发布失败，不改变草稿保存状态。"""
+        reason = str((req or {}).get("reason") or "").strip()
+        if not reason or len(reason) > 1000:
+            raise HTTPException(422, "发布失败原因必须为 1-1000 个字符")
+        conn = _g()["conn"]
+        row = conn.execute("SELECT status,user_confirmed_at FROM drafts WHERE id=?",(draft_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "草稿不存在")
+        if row["user_confirmed_at"] is not None or row["status"] in ("user_published","data_fetching","published"):
+            raise HTTPException(409, "该内容已有发布成功记录，不能改记为发布失败")
+        cur = conn.execute(
+            "UPDATE drafts SET publish_status='failed',publish_result_note=? "
+            "WHERE id=? AND user_confirmed_at IS NULL AND status IN ('draft_pending','draft_saved')",
+            (reason,draft_id),
+        )
+        if cur.rowcount != 1:
+            raise HTTPException(409, "草稿状态已变化，请刷新后重试")
+        conn.commit()
+        return {"draft_id":draft_id,"publish_status":"failed","reason":reason}
 
     @app.post("/api/drafts/{draft_id}/confirm_platform_sync")
     def confirm_platform_draft_sync(
@@ -6171,32 +6228,32 @@ def _register_routes(app: FastAPI) -> None:
         if to_date:
             where.append("date(c.created_at) <= date(?)")
             params.append(to_date)
-        status_expr = (
-            "CASE WHEN c.review_rejected = 1 THEN 'rejected' "
-            "WHEN (SELECT u.override_field FROM user_override u "
-            "WHERE u.round_id = c.round_id "
-            "AND u.override_field IN ('review_approve','review_reject','review_resubmit') "
-            "AND CASE WHEN json_valid(u.original_value) "
-            "THEN json_extract(u.original_value, '$.content_id') ELSE NULL END = c.id "
-            "ORDER BY u.overridden_at DESC, u.rowid DESC LIMIT 1) = 'review_approve' "
-            "THEN 'approved' ELSE 'pending' END"
-        )
+        status_expr = "CASE WHEN c.review_rejected=1 THEN 'rejected' ELSE d.review_status END"
         if status != "all":
             where.append(f"({status_expr}) = ?")
             params.append(status)
         where_sql = " AND ".join(where)
         base = (
             " FROM contents c JOIN drafts d ON d.content_id = c.id "
-            "LEFT JOIN spiral_rounds r ON r.id = c.round_id WHERE " + where_sql
+            "LEFT JOIN spiral_rounds r ON r.id = c.round_id "
+            "LEFT JOIN master_plan_versions mp ON mp.id=r.master_plan_version_id "
+            "LEFT JOIN sub_plans sp ON sp.id=r.sub_plan_id "
+            "LEFT JOIN sub_plan_versions spv ON spv.id=r.sub_plan_version_id "
+            "LEFT JOIN sub_plan_stages ss ON ss.id=r.sub_plan_stage_id WHERE " + where_sql
         )
         total = int(conn.execute("SELECT COUNT(*)" + base, params).fetchone()[0])
         rows = conn.execute(
             "SELECT c.id, c.round_id, r.round_number, r.status AS round_status, "
+            "r.master_plan_version_id,r.sub_plan_id,r.sub_plan_version_id,r.sub_plan_stage_id,r.plan_attribution_status, "
+            "mp.version_no AS master_plan_version_no,mp.plan_snapshot AS master_plan_snapshot, "
+            "sp.title AS subplan_title,sp.platform AS subplan_platform,spv.version_no AS subplan_version_no, "
+            "ss.stage_order,ss.title AS strategy_step_title,ss.direction AS strategy_step_direction, "
+            "ss.completion_condition AS strategy_step_completion_condition,ss.notes AS strategy_step_notes, "
             "c.topic_id, c.platform, c.title, c.body, c.tags, c.image_paths, "
             "c.guard_outcome, c.guard_reason, "
             "c.review_rejected, c.review_rejection_reason, c.created_at, "
             "d.id AS draft_id, d.status AS draft_status, d.error_msg AS draft_error, "
-            "d.saved_at, d.scheduled_publish_at, "
+            "d.saved_at, d.scheduled_publish_at,d.publish_status,d.published_at,d.publish_time_source,d.publish_result_note,d.user_confirmed_at, "
             + status_expr + " AS review_status "
             + base + " ORDER BY c.created_at DESC, c.id DESC LIMIT ? OFFSET ?",
             [*params, page_size, (page - 1) * page_size],
@@ -6217,14 +6274,37 @@ def _register_routes(app: FastAPI) -> None:
                 item["image_count"] = 0
             # 不向集中列表暴露服务器绝对路径；图片只通过受保护的内容图片 API 读取。
             item.pop("image_paths", None)
+            try:
+                master_snapshot = json.loads(item.get("master_plan_snapshot") or "{}")
+            except (TypeError, ValueError):
+                master_snapshot = {}
+            item["master_plan_title"] = str(master_snapshot.get("title") or master_snapshot.get("goal_text") or "")
+            item.pop("master_plan_snapshot", None)
+            # 新事件表与旧 user_override 都可能包含审核记录：合并读取，并只抑制同一动作
+            # 在两个表中的近同时双写副本；更早的旧历史必须保留。
             events = conn.execute(
-                "SELECT override_field, reason, overridden_by, overridden_at, override_value "
-                "FROM user_override WHERE round_id = ? "
-                "AND override_field IN ('review_approve','review_reject','review_resubmit') "
-                "AND CASE WHEN json_valid(original_value) "
-                "THEN json_extract(original_value, '$.content_id') ELSE NULL END = ? "
-                "ORDER BY overridden_at DESC, rowid DESC LIMIT 10",
-                (item["round_id"], item["id"]),
+                "SELECT override_field,reason,overridden_by,overridden_at,override_value FROM ("
+                " SELECT CASE e.event_type WHEN 'approved' THEN 'review_approve' "
+                "WHEN 'rejected' THEN 'review_reject' WHEN 'resubmitted' THEN 'review_resubmit' "
+                "WHEN 'edited' THEN 'review_edit' ELSE e.event_type END AS override_field,"
+                " e.reason AS reason,e.actor AS overridden_by,e.created_at AS overridden_at,"
+                " COALESCE(e.after_json,'{}') AS override_value "
+                " FROM content_review_events e WHERE e.content_id=?"
+                " UNION ALL "
+                " SELECT u.override_field,u.reason,u.overridden_by,u.overridden_at,u.override_value "
+                " FROM user_override u WHERE u.round_id IS ? "
+                " AND u.override_field IN ('review_approve','review_reject','review_resubmit') "
+                " AND CASE WHEN json_valid(u.original_value) "
+                " THEN json_extract(u.original_value,'$.content_id') ELSE NULL END=? "
+                " AND NOT EXISTS (SELECT 1 FROM content_review_events e WHERE e.content_id=? "
+                " AND CASE e.event_type WHEN 'approved' THEN 'review_approve' "
+                " WHEN 'rejected' THEN 'review_reject' WHEN 'resubmitted' THEN 'review_resubmit' "
+                " WHEN 'edited' THEN 'review_edit' ELSE e.event_type END=u.override_field "
+                " AND e.reason=u.reason "
+                " AND ABS(COALESCE(strftime('%s',e.created_at),0)-"
+                " COALESCE(strftime('%s',u.overridden_at),0))<=10)"
+                ") ORDER BY overridden_at DESC LIMIT 10",
+                (item["id"], item["round_id"], item["id"], item["id"]),
             ).fetchall()
             item["review_history"] = [dict(event) for event in events]
             item["review_rejected"] = bool(item["review_rejected"])
@@ -6269,14 +6349,26 @@ def _register_routes(app: FastAPI) -> None:
             "AND CASE WHEN json_valid(u.original_value) "
             "THEN json_extract(u.original_value, '$.content_id') ELSE NULL END = ? "
             "ORDER BY u.overridden_at DESC, u.rowid DESC LIMIT 1"
-            "), '') != 'review_approve'",
+            "), '') != 'review_approve' "
+            "AND COALESCE((SELECT review_status FROM drafts WHERE content_id=? LIMIT 1),'pending') != 'approved'",
             (
                 row["round_id"], "review_approve",
                 json.dumps({"content_id": content_id, "title": row["title"]}, ensure_ascii=False)[:500],
                 "approved", reason, "web-ui", _storage_now().isoformat(timespec="seconds"),
-                row["round_id"], content_id,
+                row["round_id"], content_id, content_id,
             ),
         )
+        conn.execute(
+            "UPDATE drafts SET review_status='approved' WHERE content_id=? AND review_status!='rejected'",
+            (content_id,),
+        )
+        if inserted.rowcount == 1:
+            conn.execute(
+                "INSERT INTO content_review_events(content_id,draft_id,round_id,event_type,actor,reason,after_json,created_at) "
+                "SELECT ?,id,?,'approved','web-ui',?,?,? FROM drafts WHERE content_id=? LIMIT 1",
+                (content_id,row["round_id"],reason,json.dumps({"review_status":"approved"}),
+                 _storage_now().isoformat(timespec="seconds"),content_id),
+            )
         conn.commit()
         return {
             "id": content_id, "review_status": "approved",
@@ -6785,6 +6877,19 @@ def _register_routes(app: FastAPI) -> None:
                     (title, body, tags_json, len(body or ""), content_id),
                 )
             if changed:
+                if not bool(row["review_rejected"]):
+                    conn.execute(
+                        "UPDATE drafts SET review_status='pending' WHERE content_id=? AND review_status!='rejected'",
+                        (content_id,),
+                    )
+                conn.execute(
+                    "INSERT INTO content_review_events(content_id,round_id,event_type,actor,reason,before_json,after_json,created_at) "
+                    "VALUES(?,?,'edited','web-ui',?,?,?,?)",
+                    (content_id,row["round_id"],req.reason or "UI 编辑",
+                     json.dumps({"title":row["title"],"body":row["body"],"tags":row["tags"]},ensure_ascii=False),
+                     json.dumps({"title":title,"body":body,"tags":json.loads(tags_json) if tags_json else []},ensure_ascii=False),
+                     _storage_now().isoformat(timespec="seconds")),
+                )
                 conn.execute(
                     "INSERT INTO user_override (round_id, override_field, original_value, "
                     "override_value, reason, overridden_by, overridden_at) "
@@ -7074,7 +7179,7 @@ def _register_routes(app: FastAPI) -> None:
         if changed.rowcount != 1:
             raise HTTPException(409, "内容审核状态已被其他操作更新，请刷新后重试")
         cur = conn.execute(
-            "UPDATE drafts SET error_msg = ? "
+            "UPDATE drafts SET error_msg = ?,review_status='rejected' "
             "WHERE content_id = ? AND status IN ('draft_pending','draft_saved')",
             (message, content_id),
         )
@@ -7088,6 +7193,13 @@ def _register_routes(app: FastAPI) -> None:
                 "rejected", reason, "web-ui",
                 _storage_now().isoformat(timespec="seconds"),
             ),
+        )
+        conn.execute(
+            "INSERT INTO content_review_events(content_id,draft_id,round_id,event_type,actor,reason,after_json,created_at) "
+            "VALUES(?,?,?,'rejected','web-ui',?,?,?)",
+            (content_id,eligible[0]["id"],row["round_id"],reason,
+             json.dumps({"review_status":"rejected","affected_drafts":cur.rowcount},ensure_ascii=False),
+             _storage_now().isoformat(timespec="seconds")),
         )
         conn.commit()
         platform_drafts_left = sum(1 for draft in eligible if draft["status"] == "draft_saved")
@@ -7127,6 +7239,10 @@ def _register_routes(app: FastAPI) -> None:
             (content_id,),
         )
         conn.execute(
+            "UPDATE drafts SET review_status='pending' WHERE content_id=? "
+            "AND status IN ('draft_pending','draft_saved')",(content_id,),
+        )
+        conn.execute(
             "UPDATE drafts SET error_msg = NULL WHERE content_id = ? "
             "AND status IN ('draft_pending','draft_saved') "
             "AND error_msg LIKE '[已驳回]%'",
@@ -7143,8 +7259,91 @@ def _register_routes(app: FastAPI) -> None:
                 _storage_now().isoformat(timespec="seconds"),
             ),
         )
+        conn.execute(
+            "INSERT INTO content_review_events(content_id,draft_id,round_id,event_type,actor,reason,after_json,created_at) "
+            "SELECT ?,id,?,'resubmitted','web-ui',?,?,? FROM drafts WHERE content_id=? LIMIT 1",
+            (content_id,row["round_id"],reason,json.dumps({"review_status":"pending","guard_outcome":outcome}),
+             _storage_now().isoformat(timespec="seconds"),content_id),
+        )
         conn.commit()
         return {"id": content_id, "review_rejected": False, "message": "已重新提交审核"}
+
+    @app.get("/api/subplans/stages/{stage_id}/effect-feedback")
+    def get_stage_effect_feedback(stage_id: int):
+        """汇总当前策略步骤及其历史稳定步骤关联的实际内容效果。"""
+        conn = _g()["conn"]
+        stage = conn.execute(
+            "SELECT s.id,s.stage_key,s.title,s.direction,s.completion_condition,s.notes,"
+            "v.id AS version_id,p.id AS sub_plan_id,p.title AS subplan_title,p.platform,"
+            "m.id AS master_plan_version_id,m.version_no AS master_plan_version_no "
+            "FROM sub_plan_stages s JOIN sub_plan_versions v ON v.id=s.sub_plan_version_id "
+            "JOIN sub_plans p ON p.id=v.sub_plan_id JOIN master_plan_versions m ON m.id=v.master_plan_version_id "
+            "WHERE s.id=?",(stage_id,),
+        ).fetchone()
+        if stage is None:
+            raise HTTPException(404,"策略步骤不存在")
+        content_filter = (
+            "SELECT c.id FROM sub_plan_stages cs JOIN sub_plan_stages hs ON hs.stage_key=cs.stage_key "
+            "JOIN spiral_rounds r ON r.sub_plan_stage_id=hs.id JOIN contents c ON c.round_id=r.id WHERE cs.id=?"
+        )
+        attribution = conn.execute(
+            "SELECT COUNT(DISTINCT c.id) AS content_count,COUNT(DISTINCT CASE WHEN d.publish_status='published' THEN d.id END) AS published_count "
+            "FROM ("+content_filter+") cids JOIN contents c ON c.id=cids.id LEFT JOIN drafts d ON d.content_id=c.id",
+            (stage_id,),
+        ).fetchone()
+        manual = conn.execute(
+            "SELECT COUNT(*) AS samples,AVG(ms.views) AS views,AVG(ms.likes) AS likes,AVG(ms.collects) AS collects,"
+            "AVG(ms.comments) AS comments,AVG(ms.shares) AS shares FROM metric_snapshots ms "
+            "WHERE ms.tenant_id=? AND ms.source='manual' AND ms.content_id IN ("+content_filter+") "
+            "AND NOT EXISTS (SELECT 1 FROM metric_snapshots newer WHERE newer.tenant_id=ms.tenant_id "
+            "AND newer.draft_id=ms.draft_id AND (datetime(newer.measured_at)>datetime(ms.measured_at) "
+            "OR (datetime(newer.measured_at)=datetime(ms.measured_at) AND newer.recorded_at>ms.recorded_at)))",
+            (_tenant_id(),stage_id),
+        ).fetchone()
+        automatic = conn.execute(
+            "SELECT COUNT(*) AS samples,AVG(views) AS views,AVG(likes) AS likes,AVG(collects) AS collects,"
+            "AVG(comments) AS comments,AVG(shares) AS shares,AVG(new_followers) AS new_followers "
+            "FROM metrics ms WHERE ms.fetch_status IN ('success','partial') AND ms.content_id IN ("+content_filter+") "
+            "AND NOT EXISTS (SELECT 1 FROM metrics newer WHERE newer.draft_id=ms.draft_id "
+            "AND newer.fetch_status IN ('success','partial') AND (datetime(newer.fetched_at)>datetime(ms.fetched_at) "
+            "OR (datetime(newer.fetched_at)=datetime(ms.fetched_at) AND newer.id>ms.id)))",
+            (stage_id,),
+        ).fetchone()
+        history = conn.execute(
+            "SELECT er.id,er.assessment,er.recommendation,er.evidence_note,er.confidence,er.evidence_json,er.created_by,er.created_at "
+            "FROM strategy_effect_reviews er JOIN sub_plan_stages reviewed_stage ON reviewed_stage.id=er.stage_id "
+            "WHERE reviewed_stage.stage_key=(SELECT stage_key FROM sub_plan_stages WHERE id=?) "
+            "ORDER BY er.created_at DESC,er.id DESC LIMIT 20",(stage_id,),
+        ).fetchall()
+        return {"stage":dict(stage),"content_count":int(attribution["content_count"] or 0),
+                "published_count":int(attribution["published_count"] or 0),
+                "manual_metrics":dict(manual),"automatic_metrics":dict(automatic),
+                "reviews":[dict(x) for x in history]}
+
+    @app.post("/api/subplans/stages/{stage_id}/effect-feedback",status_code=201)
+    def create_stage_effect_feedback(stage_id: int, req: dict):
+        """保存不可覆盖的策略效果评估，并冻结本次指标证据。"""
+        assessment=str((req or {}).get("assessment") or "").strip()
+        recommendation=str((req or {}).get("recommendation") or "").strip()
+        evidence_note=str((req or {}).get("evidence_note") or "").strip()
+        confidence=str((req or {}).get("confidence") or "low").strip()
+        if assessment not in {"effective","mixed","ineffective","insufficient_data"}:
+            raise HTTPException(422,"策略评估结果无效")
+        if not recommendation or len(recommendation)>2000 or len(evidence_note)>2000:
+            raise HTTPException(422,"调整建议必须为 1-2000 个字符，证据说明不能超过 2000 个字符")
+        if confidence not in {"low","medium","high"}:
+            raise HTTPException(422,"置信度无效")
+        snapshot=get_stage_effect_feedback(stage_id)
+        evidence={key:snapshot[key] for key in ("content_count","published_count","manual_metrics","automatic_metrics")}
+        conn=_g()["conn"]; now=_storage_now().isoformat(timespec="seconds")
+        cur=conn.execute(
+            "INSERT INTO strategy_effect_reviews(stage_id,assessment,recommendation,evidence_note,confidence,evidence_json,created_by,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (stage_id,assessment,recommendation,evidence_note,confidence,json.dumps(evidence,ensure_ascii=False,sort_keys=True),"web-ui",now),
+        )
+        conn.commit()
+        return {"id":cur.lastrowid,"stage_id":stage_id,"assessment":assessment,
+                "recommendation":recommendation,"confidence":confidence,"created_at":now}
 
     # --- G-09 生产线阶段计数（G → G2 → H → I）---
     @app.get("/api/rounds/{round_id}/pipeline")

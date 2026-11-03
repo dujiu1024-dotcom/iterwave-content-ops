@@ -299,7 +299,9 @@ export interface Draft {
   id: string;
   content_id: string;
   platform: Platform;
+  /** Draft lifecycle and editorial review are independent state dimensions. */
   status: string;
+  review_status?: "pending" | "approved" | "rejected";
   saved_at: string | null;
   user_confirmed_at: string | null;
   error_msg: string | null;
@@ -1223,10 +1225,14 @@ export interface ContentItem {
 
 export interface ReviewQueueItem {
   id: string; round_id: number | null; round_number: number | null; round_status: string | null;
+  master_plan_version_id?: number | null; master_plan_version_no?: number | null; master_plan_title?: string;
+  sub_plan_id?: string | null; subplan_title?: string | null; subplan_platform?: Platform | null; subplan_version_id?: number | null; subplan_version_no?: number | null;
+  sub_plan_stage_id?: number | null; stage_order?: number | null; strategy_step_title?: string | null; strategy_step_direction?: string | null;
+  strategy_step_completion_condition?: string | null; strategy_step_notes?: string | null; plan_attribution_status?: string | null;
   topic_id: string | null; platform: Platform; title: string; body: string; tags: string[]; image_count: number; guard_outcome: string | null;
   guard_reason: string | null; review_rejected: boolean; review_rejection_reason: string | null;
   created_at: string; draft_id: string; draft_status: string; draft_error: string | null;
-  saved_at: string | null; scheduled_publish_at: string | null;
+  saved_at: string | null; scheduled_publish_at: string | null; publish_status?: "not_published" | "published" | "failed"; published_at?: string | null; publish_time_source?: "confirmation_time" | "user_supplied"; publish_result_note?: string | null; user_confirmed_at?: string | null;
   review_status: "pending" | "approved" | "rejected";
   review_history: { override_field: string; reason: string; overridden_by: string; overridden_at: string; override_value: string }[];
 }
@@ -1808,18 +1814,34 @@ export const api = {
     return all;
   },
   /** noteUrl：已发布笔记链接（可选；不填则该篇跳过被动评论轮询） */
+  recordPublishFailure: (draftId: string, reason: string) =>
+    fetchJson<{ draft_id: string; publish_status: "failed"; reason: string }>(
+      `/api/drafts/${draftId}/publish_failure`,
+      { method: "POST", body: JSON.stringify({ reason: reason.trim() }) },
+    ),
+  stageEffectFeedback: (stageId: number) =>
+    fetchJson<{ stage: Record<string, unknown>; content_count: number; published_count: number; manual_metrics: Record<string, number | null>; automatic_metrics: Record<string, number | null>; reviews: Array<{ id: number; assessment: string; recommendation: string; evidence_note: string; confidence: string; evidence_json: string; created_at: string }> }>(
+      `/api/subplans/stages/${stageId}/effect-feedback`,
+    ),
+  saveStageEffectFeedback: (stageId: number, data: { assessment: "effective" | "mixed" | "ineffective" | "insufficient_data"; recommendation: string; evidence_note?: string; confidence: "low" | "medium" | "high" }) =>
+    fetchJson<{ id: number; stage_id: number; assessment: string; recommendation: string; confidence: string; created_at: string }>(
+      `/api/subplans/stages/${stageId}/effect-feedback`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
   confirmPublish: (
     draftId: string,
     noteUrl?: string,
     qualityOverrideReason?: string,
     platformSyncOverrideReason?: string,
+    publishedAt?: string,
   ) =>
-    fetchJson<{ draft_id: string; status: string; note_url?: string | null; already_confirmed?: boolean }>(
+    fetchJson<{ draft_id: string; status: string; note_url?: string | null; published_at?: string | null; publish_time_source?: "confirmation_time" | "user_supplied"; already_confirmed?: boolean }>(
       `/api/drafts/${draftId}/publish_confirm`,
       {
         method: "POST",
         body: JSON.stringify({
           note_url: noteUrl ?? null,
+          published_at: publishedAt?.trim() || null,
           quality_override_reason: qualityOverrideReason?.trim() || null,
           platform_sync_override_reason: platformSyncOverrideReason?.trim() || null,
         }),
