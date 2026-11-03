@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import shutil
+import time
 import uuid
 from pathlib import Path
 
@@ -145,10 +146,12 @@ def _validate_cached_page(cache_dir: Path, fingerprint: str, expected: str, size
 def generate_ai_card_set(
     *, title: str, subtitle: str, body: str, output_dir: Path, platform,
     cfg, settings: dict, allow_fallback: bool | None = None,
-    brand_profile: dict | None = None,
+    brand_profile: dict | None = None, task_id: str | None = None,
+    account_group: str | None = None,
 ) -> tuple[list[Path], list[str]]:
-    """Generate only missing/invalid pages, then atomically deliver a complete validated set."""
+    """Generate validated AI pages with durable task checkpoints and atomic delivery."""
     from .visual_ocr import validate_rendered_pages
+    from .visual_task_store import VisualTaskStore
 
     body_pages = _paginate_body(body, max_chars=60, segments_per_page=3)
     page_texts = ["".join(page) for page in body_pages]
@@ -177,49 +180,79 @@ def generate_ai_card_set(
             f"组件风格：{brand_profile.get('component_style')}" if brand_profile.get("component_style") else "",
             f"避免风格：{'、'.join(brand_profile.get('forbidden_styles') or [])}" if brand_profile.get("forbidden_styles") else "",
         ]
-        brand_prefix = "账号品牌视觉规范（只约束画面风格，不得更改正文）：\n" + "\n".join(item for item in brand_rules if item)
+        brand_prefix = "账号品牌视觉规范（只约束画面风格，不得更改正文）：\n" + "\n".join(
+            item for item in brand_rules if item
+        )
         prefix = "\n\n".join(item for item in (prefix, brand_prefix) if item)
     if prefix:
         prompts = [f"{prefix}\n\n{prompt}" for prompt in prompts]
 
     output_dir = Path(output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
     media_root = output_dir / "media"
     staging_root = media_root / "staging"
     validated_root = media_root / "validated"
-    task_id = uuid.uuid4().hex
-    staging_dir = staging_root / task_id
     validated_root.mkdir(parents=True, exist_ok=True)
-    staging_dir.mkdir(parents=True, exist_ok=False)
+    task_id = str(task_id or uuid.uuid4().hex)
+    db_path = getattr(getattr(cfg, "paths", None), "db_file", "data/easel.db")
+    if callable(getattr(cfg, "resolve_path", None)):
+        db_path = cfg.resolve_path(db_path)
+    account_group = str(account_group or Path(db_path).resolve())
+    store = VisualTaskStore(db_path)
+    owner = store.acquire(task_id, account_group, lease_seconds=900)
+    policy = getattr(cfg, "media_generation", None)
+    page_timeout = int(getattr(policy, "page_timeout_seconds", 600))
+    group_timeout = int(getattr(policy, "group_timeout_seconds", 1800))
+    task_timeout = int(getattr(policy, "task_timeout_seconds", 1800))
+    task_deadline = time.monotonic() + min(group_timeout, task_timeout)
+    staging_dir = staging_root / f"{task_id}-{uuid.uuid4().hex}"
     accepted_cache: list[Path] = []
-    delivered: list[Path] = []
     published_dir: Path | None = None
+
+    def check_deadline(deadline: float, label: str) -> None:
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"{label}超时，已停止后续图片生成")
+
     try:
+        staging_dir.mkdir(parents=True, exist_ok=False)
         for index, prompt in enumerate(prompts):
+            check_deadline(task_deadline, "图片整组/任务")
+            page_deadline = min(task_deadline, time.monotonic() + page_timeout)
             fingerprint = _cache_fingerprint(
                 expected=expected[index], prompt=prompt, settings=settings,
-                brand_profile=brand_profile, platform=platform.value, page_index=index, cfg=cfg,
-                allow_fallback=allow_fallback,
+                brand_profile=brand_profile, platform=platform.value, page_index=index,
+                cfg=cfg, allow_fallback=allow_fallback,
             )
             cache_dir = validated_root / fingerprint
             critical = index <= 1 or bool(re.search(r"\d|禁止|不|没|无|非|未", expected[index]))
+
+            # A durable checkpoint is reusable only when the matching fingerprinted
+            # cache artifact still exists and passes the current OCR/image policy.
+            checkpoint = store.completed_page(task_id, index)
             cached = _validate_cached_page(
                 cache_dir, fingerprint, expected[index], settings["size"], cfg, critical=critical,
             )
+            check_deadline(page_deadline, "图片缓存校验")
             if cached is not None:
+                if checkpoint and Path(checkpoint).resolve() != cached.resolve():
+                    logger.info("视觉任务 checkpoint 指向旧缓存，采用当前指纹验证后的缓存 task=%s page=%s", task_id, index)
+                if not store.heartbeat(task_id, owner, lease_seconds=900):
+                    raise RuntimeError("图片生成任务租约已失效，停止继续图片处理")
+                store.start_page(task_id, index)
+                store.complete_page(task_id, index, str(cached))
                 accepted_cache.append(cached)
                 continue
 
             if cache_dir.exists():
-                concurrent_cache = _validate_cached_page(
-                    cache_dir, fingerprint, expected[index], settings["size"], cfg, critical=critical,
-                )
-                if concurrent_cache is not None:
-                    accepted_cache.append(concurrent_cache)
-                    continue
                 _safe_remove_tree(cache_dir, validated_root)
+
             last_error = "OCR 未通过"
             accepted_stage = None
+            store.start_page(task_id, index)
             for attempt in range(3):
+                check_deadline(page_deadline, "图片单页")
+                if not store.heartbeat(task_id, owner, lease_seconds=900):
+                    raise RuntimeError("图片生成任务租约已失效，停止继续调用图片 API")
                 retry_prompt = prompt if attempt == 0 else (
                     prompt + "\n上一版文字识别未通过。请优先保证所有指定中文逐字准确、清晰、完整，"
                     "减少装饰和文字数量，增大字号，重新设计整页成品。"
@@ -228,6 +261,7 @@ def generate_ai_card_set(
                     retry_prompt, model=settings["model"], size=settings["size"], cfg=cfg,
                     allow_fallback=allow_fallback,
                 )
+                check_deadline(page_deadline, "图片单页")
                 validate_target_image_spec(width, height, settings["size"], cfg=cfg)
                 staged_image = staging_dir / f"page_{index:03d}_{attempt}{suffix}"
                 staged_image.write_bytes(raw)
@@ -241,10 +275,12 @@ def generate_ai_card_set(
                         [staged_image], [expected[index]], report_path,
                         critical_pages=[critical],
                     )
+                    check_deadline(page_deadline, "图片单页 OCR")
                 except ValueError as exc:
                     last_error = str(exc)
                     staged_image.unlink(missing_ok=True)
                     report_path.unlink(missing_ok=True)
+                    store.fail_page(task_id, index, last_error)
                     continue
                 if report.get("status") == "passed" and report.get("gate") == "passed":
                     accepted_stage = staged_image
@@ -252,8 +288,12 @@ def generate_ai_card_set(
                 last_error = str(report.get("reason") or report.get("status") or "OCR 未通过")
                 staged_image.unlink(missing_ok=True)
                 report_path.unlink(missing_ok=True)
+                store.fail_page(task_id, index, last_error)
+
             if accepted_stage is None:
-                raise ValueError(f"第 {index + 1} 张 AI 完整卡片连续 3 次未通过 OCR，拒绝模板降级：{last_error}")
+                raise ValueError(
+                    f"第 {index + 1} 张 AI 完整卡片连续 3 次未通过 OCR，拒绝模板降级：{last_error}"
+                )
 
             cache_temp = staging_dir / f"cache_{fingerprint}"
             cache_temp.mkdir(parents=True, exist_ok=False)
@@ -263,8 +303,10 @@ def generate_ai_card_set(
             if staged_ocr_report.is_file():
                 shutil.copy2(staged_ocr_report, cache_temp / "ocr_report.json")
             (cache_temp / "manifest.json").write_text(
-                json.dumps({"fingerprint": fingerprint, "image": staged_cache_image.name,
-                            "ocr_rules_version": "ocr-semantic-v2"}, ensure_ascii=False, indent=2),
+                json.dumps({
+                    "fingerprint": fingerprint, "image": staged_cache_image.name,
+                    "ocr_rules_version": "ocr-semantic-v2",
+                }, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
             try:
@@ -276,11 +318,13 @@ def generate_ai_card_set(
                 )
                 if concurrent_cache is None:
                     raise
-                accepted_cache.append(concurrent_cache)
-                continue
-            accepted_cache.append(cache_dir / staged_cache_image.name)
+                cached = concurrent_cache
+            else:
+                cached = cache_dir / staged_cache_image.name
+            store.complete_page(task_id, index, str(cached))
+            accepted_cache.append(cached)
 
-        # Validate the complete page set once more before making any output visible.
+        check_deadline(task_deadline, "图片整组/任务")
         complete_report_path = staging_dir / "complete_ocr_report.json"
         critical_pages = [
             index <= 1 or bool(re.search(r"\d|禁止|不|没|无|非|未", expected[index]))
@@ -296,11 +340,10 @@ def generate_ai_card_set(
                 json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8",
             )
 
-        # Stage the complete delivery set in one directory, then publish it with one atomic rename.
         delivery_stage = staging_dir / "delivery"
         delivery_stage.mkdir()
         staged_paths: list[Path] = []
-        for index, source in enumerate(accepted_cache):
+        for source in accepted_cache:
             target = delivery_stage / f"ai_card_{platform.value}_{uuid.uuid4().hex[:12]}{source.suffix}"
             shutil.copy2(source, target)
             staged_paths.append(target)
@@ -319,14 +362,19 @@ def generate_ai_card_set(
         )
         sets_root = media_root / "sets"
         sets_root.mkdir(parents=True, exist_ok=True)
-        target_dir = sets_root / task_id
+        target_dir = sets_root / f"{task_id}-{uuid.uuid4().hex[:8]}"
         delivery_stage.replace(target_dir)
         published_dir = target_dir
         delivered = [published_dir / path.name for path in staged_paths]
+        store.finish(task_id, owner, "completed")
         return delivered, page_texts
-    except Exception:
+    except Exception as exc:
         if published_dir is not None and published_dir.exists():
             _safe_remove_tree(published_dir, media_root / "sets")
+        try:
+            store.finish(task_id, owner, "failed", str(exc))
+        except Exception:
+            pass
         raise
     finally:
         _safe_remove_tree(staging_dir, staging_root)
