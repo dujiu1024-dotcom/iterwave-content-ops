@@ -4480,7 +4480,7 @@ def _register_routes(app: FastAPI) -> None:
             "task_id": task.task_id, "task_type": task.task_type,
             "tenant_id": task.tenant_id, "aggregate_id": task.aggregate_id,
             "round_number": round_numbers.get((task.tenant_id, round_id)) if round_id is not None else None,
-            "status": task.status, "payload": task.payload, "result": task.result,
+            "status": task.status,
             "created_at": task.created_at, "available_at": task.available_at,
             "started_at": task.started_at,
             "finished_at": task.finished_at, "attempts": task.attempts,
