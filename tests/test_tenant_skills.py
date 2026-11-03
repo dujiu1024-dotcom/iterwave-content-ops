@@ -59,3 +59,27 @@ def test_custom_skill_never_becomes_executable(conn):
     item = tenant_skills.create_skill(conn, manifest())
     assert item["execution_enabled"] is False
     assert item["execution_state"] == "blocked_no_sandbox"
+
+
+def test_json_contract_validator_checks_types_required_and_bounds():
+    schema = {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string", "minLength": 2, "maxLength": 8},
+            "count": {"type": "integer", "minimum": 1, "maximum": 5},
+        },
+        "required": ["title", "count"],
+        "additionalProperties": False,
+    }
+    assert tenant_skills.validate_contract(schema, {"title": "draft", "count": 3})["valid"] is True
+    invalid = tenant_skills.validate_contract(schema, {"title": "x", "count": True, "extra": 1})
+    assert invalid["valid"] is False
+    assert {error["code"] for error in invalid["errors"]} >= {"min_length", "type", "additional_property"}
+
+
+def test_manifest_rejects_unsupported_or_malformed_contract_schema():
+    result = tenant_skills.validate_manifest(manifest(inputs={
+        "type": "object", "properties": {"title": {"type": "function"}}
+    }))
+    assert result["valid"] is False
+    assert any(error["code"] == "schema_type" for error in result["errors"])

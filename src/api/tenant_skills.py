@@ -100,6 +100,25 @@ def build_tenant_skills_router(get_context: Callable[[], dict]) -> APIRouter:
             raise HTTPException(404, "Skill 不存在")
         return {"items": skill_execution.list_executions(conn, skill_id, limit)}
 
+    def _validate_skill_contract(skill_id: str, request: dict, contract_name: str):
+        item = tenant_skills.get_skill(get_context()["conn"], skill_id)
+        if item is None:
+            raise HTTPException(404, "Skill 不存在")
+        schema = item["manifest"].get(contract_name)
+        if not isinstance(schema, dict) or "type" not in schema:
+            return {"supported": False, "valid": None, "errors": [
+                {"field": contract_name, "code": "contract_not_defined", "message": "该 Skill 未声明可校验的 JSON Schema 契约"}
+            ]}
+        return tenant_skills.validate_contract(schema, request.get("value"))
+
+    @router.post("/skills/{skill_id}/validate-input")
+    def validate_input(skill_id: str, request: dict):
+        return _validate_skill_contract(skill_id, request, "inputs")
+
+    @router.post("/skills/{skill_id}/validate-output")
+    def validate_output(skill_id: str, request: dict):
+        return _validate_skill_contract(skill_id, request, "outputs")
+
     @router.post("/skills/{skill_id}/execute")
     def execute_skill(skill_id: str, request: dict):
         conn = get_context()["conn"]
