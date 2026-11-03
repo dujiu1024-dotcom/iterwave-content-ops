@@ -443,7 +443,7 @@ export default function Production() {
           topic_count_per_platform: planTopicCount,
           dimension_allocation: alloc,
           enabled_platforms: planPlatforms,
-          content_format: plan?.plan.content_format ?? "image_text",
+          content_format: "image_text",
           per_platform,
           cadence: {
             ...(cadence.interval ? { round_interval_days: Number(cadence.interval) } : {}),

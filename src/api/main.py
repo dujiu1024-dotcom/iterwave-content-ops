@@ -1450,7 +1450,7 @@ class UpdatePlanRequest(BaseModel):
     topic_count_per_platform: int = Field(ge=1, le=50)
     dimension_allocation: dict[str, int] = Field(default_factory=dict)
     enabled_platforms: Optional[list[str]] = None
-    content_format: str = "image_text"
+    content_format: Literal["image_text"] = "image_text"
     # 平台分项计划：{平台: {topic_count, publish_slots: ["20:00"]}}
     per_platform: dict[str, dict] = Field(default_factory=dict)
     # 节奏：{round_interval_days, rounds_planned, goal_id}
