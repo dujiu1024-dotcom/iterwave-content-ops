@@ -71,6 +71,7 @@ export interface GlobalTaskQueueDetail {
   resolution_actor: string | null;
   resolution_note: string | null;
   resolution_at: string | null;
+  execution_log: Array<{ step: string; status: string; detail: string }>;
 }
 
 export interface GlobalTaskQueueSummary {
@@ -1693,9 +1694,10 @@ export const api = {
     const suffix = query.toString();
     return fetchJson<GlobalTaskQueueSummary>(`/api/task-queue/summary${suffix ? `?${suffix}` : ""}`);
   },
-  taskQueue: (params: { scope?: "all" | "active" | "history" | "failed"; page?: number; pageSize?: number; taskType?: string; tenantId?: string; errorKeyword?: string; dateFrom?: string; dateTo?: string } = {}) => {
+  taskQueue: (params: { scope?: "all" | "active" | "history" | "failed" | "filtered"; status?: GlobalTaskQueueItem["status"]; page?: number; pageSize?: number; taskType?: string; tenantId?: string; errorKeyword?: string; dateFrom?: string; dateTo?: string } = {}) => {
     const query = new URLSearchParams();
     if (params.scope) query.set("scope", params.scope);
+    if (params.status) query.set("status", params.status);
     if (params.page != null) query.set("page", String(params.page));
     if (params.pageSize != null) query.set("page_size", String(params.pageSize));
     if (params.taskType) query.set("task_type", params.taskType);
