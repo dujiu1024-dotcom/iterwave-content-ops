@@ -1,4 +1,4 @@
-"""117/118 must apply on an existing database that already ran every earlier migration."""
+"""121/122/126 must apply on a populated database that already ran all other migrations."""
 import json
 import shutil
 from pathlib import Path
@@ -7,7 +7,7 @@ import src.core.db as db_module
 from src.core.db import Database
 
 REPO_MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations"
-VISUAL_MIGRATIONS = {"117_visual_design_versions_jobs.sql", "118_visual_brand_profiles.sql"}
+VISUAL_MIGRATIONS = {"121_visual_design_versions_jobs.sql", "122_visual_brand_profiles.sql", "126_visual_ai_image_renderer.sql"}
 
 
 def test_visual_migrations_apply_on_populated_116_database(cfg, tmp_path, monkeypatch):
@@ -21,7 +21,7 @@ def test_visual_migrations_apply_on_populated_116_database(cfg, tmp_path, monkey
     database.initialize()
     conn = database.connect()
     applied = {row[0] for row in conn.execute("SELECT version FROM schema_version")}
-    assert 116 in applied and 117 not in applied and 118 not in applied
+    assert 117 in applied and 121 not in applied and 122 not in applied and 126 not in applied
     conn.execute(
         "INSERT INTO spiral_rounds (round_number, status, topic_ids, content_variants) VALUES (1, 'completed', '[]', '[]')"
     )
@@ -37,7 +37,7 @@ def test_visual_migrations_apply_on_populated_116_database(cfg, tmp_path, monkey
     Database(cfg).initialize()
     conn = Database(cfg).connect()
     applied = {row[0] for row in conn.execute("SELECT version FROM schema_version")}
-    assert {116, 117, 118} <= applied
+    assert {117, 121, 122, 126} <= applied
     assert conn.execute("SELECT title FROM contents WHERE id='c-1'").fetchone()[0] == "标题"
     conn.execute(
         "INSERT INTO visual_design_versions (content_id, version, content_hash, renderer, style_key, design_json) "

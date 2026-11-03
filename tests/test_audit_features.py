@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -146,6 +147,30 @@ def _executor(cfg, conn):
                          RoundStateMachine(conn), DraftStateMachine(conn)), adapters
 
 
+def _fake_ai_card_set(*, title, subtitle, body, output_dir, platform, **_kwargs):
+    import uuid
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"fake_ai_{uuid.uuid4().hex}.png"
+    path.write_bytes(b"fake image bytes")
+    (output_dir / f"visual_ocr_{path.stem}.json").write_text(
+        json.dumps({"status": "passed", "gate": "passed", "pages": []}),
+        encoding="utf-8",
+    )
+    return [path], [body]
+
+
+def _patch_ai_card_generation(monkeypatch):
+    from src.core.round_executor import RoundExecutor
+    monkeypatch.setattr(
+        "src.core.ai_card_generation.generate_ai_card_set", _fake_ai_card_set,
+    )
+    monkeypatch.setattr(
+        RoundExecutor, "_image_settings",
+        lambda self: ({"model": "test-image-model", "size": "1024x1536"}, ""),
+    )
+
+
 def test_executor_follows_plan(cfg, conn, seed, kb, monkeypatch):
     monkeypatch.setattr("src.core.login_manager.has_login_state", lambda _platform: True)
     for p in ("xhs", "douyin"):
@@ -160,8 +185,7 @@ def test_executor_follows_plan(cfg, conn, seed, kb, monkeypatch):
             ["个人成长", "实用经验"],
         ),
     )
-    monkeypatch.setattr("src.core.round_executor.make_card_set",
-                        lambda title, dim, body, out, platform, footer="", **_kw: [out / f"{abs(hash(title))}.png"])
+    _patch_ai_card_generation(monkeypatch)
     pvm = PlanVersionManager(cfg, conn)
     pvm.save_plan(pvm.build_plan(
         topic_count_per_platform=3, platforms=["xhs", "douyin"],
@@ -203,8 +227,7 @@ def test_excluded_topic_not_produced(cfg, conn, seed, kb, monkeypatch):
             ["个人成长", "实用经验"],
         ),
     )
-    monkeypatch.setattr("src.core.round_executor.make_card_set",
-                        lambda title, dim, body, out, platform, footer="", **_kw: [out / "x.png"])
+    _patch_ai_card_generation(monkeypatch)
     all_ids = [i.id for i in load_pool(cfg, conn)[0]]
     exclude_topics(cfg, conn, all_ids[:-1])
     steps = [dict(s, enabled=s["id"] not in ("save_draft", "auto_schedule", "await_publish"))
