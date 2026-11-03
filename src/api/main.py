@@ -131,7 +131,12 @@ class TransactionalAPIRoute(APIRoute):
                         return await original(*args, **call_kwargs)
                     finally:
                         if conn is not None and hasattr(conn, "rollback_if_open"):
-                            conn.rollback_if_open(timeout=2.0)
+                            try:
+                                conn.rollback_if_open(timeout=2.0)
+                            except TimeoutError:
+                                logger.error("异步请求结束时 SQLite 事务回滚兜底超时")
+                            except Exception:
+                                logger.exception("异步请求结束时 SQLite 事务回滚兜底失败")
                 wrapped = safe_async_endpoint
             else:
                 def safe_sync_endpoint(*args, **call_kwargs):
@@ -145,7 +150,12 @@ class TransactionalAPIRoute(APIRoute):
                         return original(*args, **call_kwargs)
                     finally:
                         if conn is not None and hasattr(conn, "rollback_if_open"):
-                            conn.rollback_if_open(timeout=2.0)
+                            try:
+                                conn.rollback_if_open(timeout=2.0)
+                            except TimeoutError:
+                                logger.error("同步请求结束时 SQLite 事务回滚兜底超时")
+                            except Exception:
+                                logger.exception("同步请求结束时 SQLite 事务回滚兜底失败")
                 wrapped = safe_sync_endpoint
             wrapped.__name__ = getattr(original, "__name__", "transactional_endpoint")
             wrapped.__doc__ = getattr(original, "__doc__", None)
