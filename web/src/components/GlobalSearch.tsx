@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, ActionItem, ContentItem, Draft, Goal, HotTopicItem, SpiralRound } from "../api";
 import { NAV_ITEMS } from "../Sidebar";
+import { displaySourceLabel, displayStatusLabel, displayPlatformLabel } from "../displayLabels";
 
 interface SearchHit {
   id: string;
@@ -102,7 +103,7 @@ export default function GlobalSearch({ onNavigate }: Props) {
             hitsNext.push({
               id: `goal-${goal.id}`,
               title: goal.goal_text,
-              detail: `目标 · ${goal.status === "active" ? "进行中" : goal.status}`,
+              detail: `目标 · ${goal.status === "active" ? "进行中" : displayStatusLabel(goal.status)}`,
               page: "goals",
               kind: "目标",
             });
@@ -115,7 +116,7 @@ export default function GlobalSearch({ onNavigate }: Props) {
             hitsNext.push({
               id: `hot-${topic.id}`,
               title: topic.title,
-              detail: `热点 · ${topic.source}`,
+              detail: `热点 · ${displaySourceLabel(topic.source)}`,
               page: "hot",
               kind: "热点",
             });
@@ -145,7 +146,7 @@ export default function GlobalSearch({ onNavigate }: Props) {
             hitsNext.push({
               id: `round-${round.id}`,
               title,
-              detail: `内容轮次 · ${round.status}`,
+              detail: `内容轮次 · ${displayStatusLabel(round.status)}`,
               page: "production",
               tab: "rounds",
               roundId: round.id,
@@ -160,7 +161,7 @@ export default function GlobalSearch({ onNavigate }: Props) {
             hitsNext.push({
               id: `draft-${draft.id}`,
               title: draft.title || draft.content_id,
-              detail: `草稿 · ${draft.platform} · ${draft.status}`,
+              detail: `草稿 · ${displayPlatformLabel(draft.platform)} · ${displayStatusLabel(draft.status)}`,
               page: "production",
               tab: "review",
               roundId: draft.round_id ?? undefined,
@@ -188,7 +189,7 @@ export default function GlobalSearch({ onNavigate }: Props) {
               hitsNext.push({
                 id: `content-${item.id}`,
                 title: item.title || "未命名内容",
-                detail: `内容 · ${item.platform} · 第 ${result.value.round_id} 轮`,
+                detail: `内容 · ${displayPlatformLabel(item.platform)} · 第 ${result.value.round_id} 轮`,
                 page: "production",
                 tab: "review",
                 roundId: item.round_id ?? result.value.round_id,

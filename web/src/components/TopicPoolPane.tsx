@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { useApp } from "../AppContext";
 import EmptyHint from "./EmptyHint";
 import { api, PoolTopic, TopicPoolResponse } from "../api";
+import { displaySourceLabel } from "../displayLabels";
 
 const SOURCE_LABEL: Record<string, { text: string; cls: string }> = {
   kb: { text: "本地库", cls: "gray" },
@@ -173,7 +174,7 @@ export default function TopicPoolPane() {
                     )}
                   </td>
                   <td><span className="tag gray">{t.dimension || "未分类"}</span></td>
-                  <td><span className={`tag ${SOURCE_LABEL[t.source_kind].cls}`}>{SOURCE_LABEL[t.source_kind].text}</span></td>
+                  <td><span className={`tag ${(SOURCE_LABEL[t.source_kind] ?? { text: displaySourceLabel(t.source_kind), cls: "gray" }).cls}`}>{(SOURCE_LABEL[t.source_kind] ?? { text: displaySourceLabel(t.source_kind), cls: "gray" }).text}</span></td>
                   <td>{t.content_count || "—"}</td>
                   <td style={{ fontSize: 11, color: "var(--muted)" }}>{t.date ?? "—"}</td>
                   <td>

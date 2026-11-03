@@ -9,6 +9,7 @@ import { useEffect, useState } from "react";
 import { api, type MediaGenerationSettings, type Platform, type PlatformStyle, type SystemConfigView } from "../api";
 import { useApp } from "../AppContext";
 import { navigate } from "../nav";
+import { displayPlatformLabel } from "../displayLabels";
 
 const PLATFORM_LABELS: Record<string, string> = {
   xhs: "小红书",
@@ -647,7 +648,7 @@ export function PlatformToggles({ view, onSaved, loggedIn }: {
           <tbody>
             {Object.entries(view.readonly.platforms).map(([k, v]) => (
               <tr key={k}>
-                <td>{PLATFORM_LABELS[k] ?? k}</td>
+                <td>{PLATFORM_LABELS[k] ?? displayPlatformLabel(k)}</td>
                 <td>
                   <input type="checkbox" checked={enabled[k] ?? false}
                     onChange={(e) => setEnabled((prev) => ({ ...prev, [k]: e.target.checked }))} />
@@ -1078,7 +1079,7 @@ export function PlatformStyleEditor() {
     try {
       const res = await withPending(pendingKey, () => api.updatePlatformStyle(platform, updates));
       if (!res) return;
-      showToast(`✓ ${PLATFORM_LABELS[platform] ?? platform} 已保存 ${res.changed} 项`, "success");
+      showToast(`✓ ${PLATFORM_LABELS[platform] ?? displayPlatformLabel(platform)} 已保存 ${res.changed} 项`, "success");
       await load();
     } catch (e: any) {
       showToast(`保存失败: ${e?.message ?? e}`, "error");
@@ -1115,7 +1116,7 @@ export function PlatformStyleEditor() {
         return (
           <div key={s.platform} style={{ padding: 12, border: "1px solid var(--border)", borderRadius: 8 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-              <strong style={{ fontSize: 13 }}>{PLATFORM_LABELS[s.platform] ?? s.platform}</strong>
+              <strong style={{ fontSize: 13 }}>{PLATFORM_LABELS[s.platform] ?? displayPlatformLabel(s.platform)}</strong>
               <button className="btn primary sm" disabled={busy} onClick={() => save(s.platform)}>
                 {busy ? "保存中…" : "保存"}
               </button>

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, VisualBrandProfile, VisualCatalog, VisualVersionHistory } from "../api";
 import { useApp } from "../AppContext";
+import { displayStatusLabel, displayPlatformLabel } from "../displayLabels";
 
 // 风格、字体、组件样式的可选项全部来自 GET /api/visual/catalog（后端 visual_catalog.json 单一来源）。
 export default function VisualBrandPane() {
@@ -135,7 +136,7 @@ export default function VisualBrandPane() {
               <div><div className="panel-sub">生产记录</div><strong>{usage.totals.items}</strong></div>
             </div>
             <div className="panel-sub" style={{ marginTop: 10 }}>
-              {usage.by_platform.map((item) => `${item.platform}: ${item.generation_count} 次`).join(" · ") || "暂无用量"}
+              {usage.by_platform.map((item) => `${displayPlatformLabel(item.platform)}：${item.generation_count} 次`).join(" · ") || "暂无用量"}
             </div>
           </>
         ) : <div className="note">用量数据暂不可用。</div>}
@@ -150,7 +151,7 @@ export default function VisualBrandPane() {
           <div key={version.id} className="panel" style={{ marginTop: 10 }}>
             <div className="toolbar" style={{ justifyContent: "space-between" }}>
               <strong>视觉版本 v{version.version}</strong>
-              <span className="tag blue">{version.status}</span>
+              <span className="tag blue">{displayStatusLabel(version.status)}</span>
             </div>
             <div className="panel-sub">{version.style_key} · {version.renderer} · {version.created_at}</div>
             <div className="toolbar" style={{ flexWrap: "wrap", marginTop: 8 }}>

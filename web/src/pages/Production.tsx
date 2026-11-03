@@ -9,6 +9,7 @@ import {
 import DemoBadge from "../components/DemoBadge";
 import EmptyHint from "../components/EmptyHint";
 import TaskProgressPanel from "../components/TaskProgressPanel";
+import { displayCodeLabel, displayStatusLabel, displayStepLabel, displayPlatformLabel, displaySourceLabel } from "../displayLabels";
 
 const ROUND_STATUSES = ["created", "producing", "awaiting_publish", "collecting_metrics", "analyzing", "completed", "partial_completed", "failed", "cancelled"];
 const ROUND_TARGETABLE: Record<string, string[]> = {
@@ -60,7 +61,7 @@ const PIPELINE_STEP_LABEL: Record<string, string> = {
 };
 
 const AUTHOR_LABEL: Record<string, string> = {
-  "web-ui": "手动保存", round_create: "新建轮次", round_executor: "轮次执行", autogrow: "自动闭环", agent: "Agent",
+  "web-ui": "手动保存", round_create: "新建轮次", round_executor: "轮次执行", autogrow: "自动闭环", agent: "智能助手",
 };
 
 interface AllocRow { dim: string; count: number }
@@ -820,7 +821,7 @@ export default function Production() {
               {plan.stale_rounds.length > 0 && (
                 <div className="note" style={{ marginTop: 12, color: "var(--orange)" }}>
                   ! 以下活跃轮次的签名与当前母计划不一致（下游已标记为基于旧计划）：
-                  {plan.stale_rounds.map((r) => ` 第 ${r.round_number} 轮（${ROUND_STATUS_LABEL[r.status] ?? r.status}）`).join(" · ")}
+                  {plan.stale_rounds.map((r) => ` 第 ${r.round_number} 轮（${ROUND_STATUS_LABEL[r.status] ?? displayStatusLabel(r.status)}）`).join(" · ")}
                 </div>
               )}
 
@@ -839,7 +840,7 @@ export default function Production() {
                         <tr key={i}>
                           <td style={{ fontFamily: "monospace", fontSize: 11 }}>{h.plan_signature.slice(0, 16)}…</td>
                           <td>{h.round_number != null ? `第 ${h.round_number} 轮` : h.round_id != null ? "关联轮次已归档" : "母计划"}</td>
-                          <td>{AUTHOR_LABEL[(h.author ?? "").split(":")[0]] ?? h.author ?? "—"}</td>
+                          <td>{AUTHOR_LABEL[(h.author ?? "").split(":")[0]] ?? displaySourceLabel(h.author)}</td>
                           <td style={{ fontSize: 11 }}>{h.created_at}</td>
                         </tr>
                       ))}
@@ -936,7 +937,7 @@ export default function Production() {
               <>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
                   <div style={{ fontWeight: 700 }}>第 {roundDetail.round_number} 轮</div>
-                  <span className={`tag ${STATUS_CLS[roundDetail.status]}`}>{ROUND_STATUS_LABEL[roundDetail.status] ?? roundDetail.status}</span>
+                  <span className={`tag ${STATUS_CLS[roundDetail.status]}`}>{ROUND_STATUS_LABEL[roundDetail.status] ?? displayStatusLabel(roundDetail.status)}</span>
                 </div>
 
                 {noLogin.length > 0 && (
@@ -1021,7 +1022,7 @@ export default function Production() {
                 )}
                 {!["created", "failed"].includes(roundDetail.status) && (
                   <div className="note" style={{ marginTop: 8 }}>
-                    当前轮次处于「{ROUND_STATUS_LABEL[roundDetail.status] ?? roundDetail.status}」，不能再次启动。
+                    当前轮次处于「{ROUND_STATUS_LABEL[roundDetail.status] ?? displayStatusLabel(roundDetail.status)}」，不能再次启动。
                   </div>
                 )}
                 {availableTopicCount === 0 && (
@@ -1036,7 +1037,7 @@ export default function Production() {
                 {report && (
                   <div style={{ marginTop: 16 }}>
                     <div className="panel-title" style={{ fontSize: 13, marginBottom: 10 }}>
-                      执行报告 · 状态 {ROUND_STATUS_LABEL[report.final_status ?? ""] ?? report.final_status ?? "—"}
+                      执行报告 · 状态 {ROUND_STATUS_LABEL[report.final_status ?? ""] ?? displayStatusLabel(report.final_status)}
                     </div>
                     <div className="grid four" style={{ marginBottom: 10 }}>
                       <MiniStat label="内容产出" value={report.contents_created} />
@@ -1056,16 +1057,16 @@ export default function Production() {
                         <tbody>
                           {report.steps.map((s, i) => (
                             <tr key={i}>
-                              <td style={{ fontSize: 11 }}>{PIPELINE_STEP_LABEL[s.step] ?? s.step}</td>
+                              <td style={{ fontSize: 11 }}>{PIPELINE_STEP_LABEL[s.step] ?? displayStepLabel(s.step)}</td>
                               <td style={{ fontSize: 11 }}>
                                 {s.step === "score" && `${(s.selected as unknown[])?.length ?? 0} 条选题入选`}
                                 {s.step === "kb_read" && `${s.count} 条选题库记录`}
                                 {s.step === "produce" && `产出 ${s.contents} 篇内容 · 目标检查拦截 ${s.guard_rejected} 次`}
                                 {s.step === "dry_run" && `${s.note}`}
                                 {s.step === "save_drafts" && `成功 ${s.saved} · 失败 ${s.failed}`}
-                                {s.step === "guard_reject" && `${s.platform} / ${s.topic_id} · ${s.result} · ${s.reason}`}
+                                {s.step === "guard_reject" && `${displayPlatformLabel(String(s.platform))} / ${s.topic_id} · ${displayCodeLabel(String(s.result))} · ${s.reason}`}
                                 {s.step === "plan_signature" && `签名 ${s.signature}`}
-                                {s.step === "draft_save" && `${s.platform} · ${s.status ?? ""} ${s.error ?? ""}`}
+                                {s.step === "draft_save" && `${displayPlatformLabel(String(s.platform))} · ${displayStatusLabel(s.status == null ? null : String(s.status))} ${s.error ?? ""}`}
                                 {s.step === "apply_feedback" && `吃进复盘结论：${Object.keys((s.dimension_bias as object) ?? {}).length} 个维度调整 · ${s.copy_hint_count} 条文案要点`}
                                 {s.step === "dimension_quota" && `维度配额 ${Object.entries((s.allocation as Record<string, number>) ?? {}).map(([d, n]) => `${d}×${n}`).join("、")}`}
                                 {s.step === "auto_schedule" && `自动排期 ${s.scheduled} 篇`}
@@ -1136,7 +1137,7 @@ export default function Production() {
                       )}
                       {pipeline.per_platform.map((r) => (
                         <tr key={r.platform}>
-                          <td>{PLATFORM_NAME[r.platform] ?? r.platform}</td>
+                          <td>{PLATFORM_NAME[r.platform] ?? displayPlatformLabel(r.platform)}</td>
                           <td>{r.contents}</td>
                           <td>{r.guard_pass}</td>
                           <td>{r.cards}</td>
@@ -1465,7 +1466,7 @@ export default function Production() {
                     <div className="task-title">第 {r.round_number} 轮</div>
                     <div className="task-desc">创建于 {new Date(r.created_at).toLocaleString("zh-CN")}</div>
                   </div>
-                  <span className={`tag ${STATUS_CLS[r.status]}`}>{ROUND_STATUS_LABEL[r.status] ?? r.status}</span>
+                  <span className={`tag ${STATUS_CLS[r.status]}`}>{ROUND_STATUS_LABEL[r.status] ?? displayStatusLabel(r.status)}</span>
                 </div>
               ))}
               {roundsTotal > 0 && (
@@ -1550,8 +1551,8 @@ export default function Production() {
                         {roundDetail.drafts?.map((d) => (
                           <tr key={d.id}>
                             <td style={{ fontFamily: "monospace", fontSize: 11 }}>{d.id.slice(0, 16)}...</td>
-                            <td>{PLATFORM_NAME[d.platform] ?? d.platform}</td>
-                            <td><span className={`tag ${STATUS_CLS[d.status] || "gray"}`}>{d.status === "pending_verify" ? "待核实平台保存" : d.status}</span></td>
+                            <td>{PLATFORM_NAME[d.platform] ?? displayPlatformLabel(d.platform)}</td>
+                            <td><span className={`tag ${STATUS_CLS[d.status] || "gray"}`}>{displayStatusLabel(d.status)}</span></td>
                             <td>
                               {d.status === "draft_saved" && (
                                 <button className="btn sm primary" onClick={() => confirmPublish(d.id)}>✓ 我已发布</button>

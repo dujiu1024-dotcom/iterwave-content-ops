@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type KbPreview, type KbSource } from "../api";
 import { useApp } from "../AppContext";
+import { displayCodeLabel } from "../displayLabels";
 import EmptyHint from "./EmptyHint";
 
 const FIELD_LABELS: Record<string, string> = {
@@ -268,7 +269,7 @@ export default function KbSourcesPanel() {
               {sources.map((s) => (
                 <tr key={s.id}>
                   <td style={{ fontWeight: 600 }}>{s.name}</td>
-                  <td><span className="tag gray">{KIND_LABELS[s.kind] ?? s.kind}</span></td>
+                  <td><span className="tag gray">{KIND_LABELS[s.kind] ?? displayCodeLabel(s.kind)}</span></td>
                   <td style={{ fontSize: 11, color: "var(--muted)" }}>{s.display_path}</td>
                   <td>{s.rows == null ? "—" : s.rows}</td>
                   <td>

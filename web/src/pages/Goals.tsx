@@ -3,6 +3,7 @@ import { useApp } from "../AppContext";
 import EmptyHint from "../components/EmptyHint";
 import { api, Goal, GoalSummary, SystemConfigView, type PersonasView } from "../api";
 import PersonaMatrix, { GOAL_MODE_META, ROLE_LABELS, RELATION_LABELS } from "../components/PersonaMatrix";
+import { displayCodeLabel, displayStatusLabel } from "../displayLabels";
 import { useUrlTab } from "../nav";
 import GoalHero, { PERCENT_METRICS, isActiveGoal, metricLabel, formatMetricValue, currentProgressText } from "../components/GoalHero";
 import { ALL_PLATFORMS, Platform, platformMeta } from "../platforms";
@@ -333,7 +334,7 @@ export default function Goals() {
               <div className="task-row">
                 <i className="task-prio blue" aria-hidden="true" />
                 <div className="task-main">
-                  <div className="task-title">目标模式 · {GOAL_MODE_META[mode as keyof typeof GOAL_MODE_META]?.title ?? mode}</div>
+                  <div className="task-title">目标模式 · {GOAL_MODE_META[mode as keyof typeof GOAL_MODE_META]?.title ?? displayCodeLabel(mode)}</div>
                   <div className="task-desc">
                     {GOAL_MODE_META[mode as keyof typeof GOAL_MODE_META]?.desc}
                     {mode === "hybrid" && (summary?.north_star ? ` · 总目标：${summary.north_star.goal_text}` : " · 还没有总目标，新建目标时选择「总目标」")}
@@ -656,7 +657,7 @@ export default function Goals() {
                   <tr key={g.id}>
                     <td style={{ fontWeight: 600 }}>{g.goal_text}</td>
                     <td>{g.goal_level === "north_star" ? <span className="tag purple">总目标</span> : g.target_platform ? platformMeta(g.target_platform).label : "全平台"}</td>
-                    <td style={{ fontSize: 11 }}>{METRICS.find((m) => m.value === g.target_metric)?.label ?? g.target_metric}</td>
+                    <td style={{ fontSize: 11 }}>{METRICS.find((m) => m.value === g.target_metric)?.label ?? displayCodeLabel(g.target_metric)}</td>
                     <td>{g.target_value}</td>
                     <td>{g.current_value != null
                       ? g.current_value
@@ -675,7 +676,7 @@ export default function Goals() {
                         </div>
                       ) : <span style={{ color: "var(--subtle)", fontSize: 11 }}>数据待采集</span>}
                     </td>
-                    <td><span className={`tag ${g.status === "active" ? "green" : g.status === "completed" ? "blue" : "gray"}`}>{GOAL_STATUS_LABEL[g.status] ?? g.status}</span></td>
+                    <td><span className={`tag ${g.status === "active" ? "green" : g.status === "completed" ? "blue" : "gray"}`}>{GOAL_STATUS_LABEL[g.status] ?? displayStatusLabel(g.status)}</span></td>
                     <td>
                       <div className="flex" style={{ gap: 4 }}>
                         <button className="btn sm" onClick={() => setEditing(g)}>编辑</button>

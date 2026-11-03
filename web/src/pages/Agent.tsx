@@ -6,6 +6,7 @@ import {
   api, Platform, SystemStatus, AiCallRecord, UserOverrideRecord, RedlineRecord,
   OrchestrationView, OrchestrationRun, DiagnoseResult, StepState, TenantSkillManifest, BuiltinSkillManifest,
 } from "../api";
+import { displayStepLabel, displayStatusLabel, displayPlatformLabel } from "../displayLabels";
 
 const PLATFORM_LABEL: Record<string, string> = {
   xhs: "小红书", douyin: "抖音", kuaishou: "快手", wechat_channels: "视频号",
@@ -118,7 +119,7 @@ function PreviewPane({ orch, runs, onEdit }: {
               <select id="run-pick" className="field" value={runIdx} onChange={(e) => setRunIdx(Number(e.target.value))}>
                 {runs.map((r, i) => (
                   <option key={r.round_id} value={i}>
-                    第 {r.round_number} 轮 · {ROUND_STATUS_LABEL[r.status] ?? r.status}{r.trigger_source === "auto" ? " · 自动" : ""}
+                    第 {r.round_number} 轮 · {ROUND_STATUS_LABEL[r.status] ?? displayStatusLabel(r.status)}{r.trigger_source === "auto" ? " · 自动" : ""}
                   </option>
                 ))}
               </select>
@@ -371,7 +372,7 @@ function TracePane({ status, runs }: { status: SystemStatus | null; runs: Orches
           <div className="task-row"><i className="task-prio blue" /><div className="task-main"><div className="task-title">补登记采集</div><div className="task-desc">{status.recovery?.requeued_data_fetch?.length ?? 0} 篇重入列</div></div></div>
           <div className="task-row"><i className="task-prio orange" /><div className="task-main"><div className="task-title">卡住轮次</div><div className="task-desc">{status.recovery?.stale_rounds?.length ? `#${status.recovery.stale_rounds.join(", #")}` : "无"}</div></div></div>
           <div className="task-row"><i className="task-prio purple" /><div className="task-main"><div className="task-title">最近一轮</div><div className="task-desc">
-            {runs && runs[0] ? `第 ${runs[0].round_number} 轮 · ${ROUND_STATUS_LABEL[runs[0].status] ?? runs[0].status}${runs[0].duration_seconds != null ? ` · 用时 ${runs[0].duration_seconds}s` : ""}` : "还没有轮次"}
+            {runs && runs[0] ? `第 ${runs[0].round_number} 轮 · ${ROUND_STATUS_LABEL[runs[0].status] ?? displayStatusLabel(runs[0].status)}${runs[0].duration_seconds != null ? ` · 用时 ${runs[0].duration_seconds}s` : ""}` : "还没有轮次"}
           </div></div>
             {runs && runs[0] && <button className="btn sm" onClick={() => navigate("production", "rounds")}>查看</button>}
           </div>
@@ -800,7 +801,7 @@ function AuditPane() {
                     {aiCalls.slice((auditPage - 1) * auditPageSize, auditPage * auditPageSize).map((r) => (
                       <tr key={r.id}>
                         <td style={{ fontSize: 11, fontFamily: "monospace", color: "var(--subtle)" }}>{r.called_at}</td>
-                        <td style={{ fontSize: 12, fontFamily: "monospace" }}>{r.step}</td>
+                        <td style={{ fontSize: 12, fontFamily: "monospace" }}>{displayStepLabel(r.step)}</td>
                         <td>{r.model}</td>
                         <td style={{ fontSize: 11, fontFamily: "monospace" }}>{r.prompt_version}</td>
                         <td>{r.tokens_in ?? <span style={{ color: "var(--subtle)" }}>—</span>}</td>
@@ -872,7 +873,7 @@ function AuditPane() {
                       <tr key={r.id}>
                         <td style={{ fontSize: 11, fontFamily: "monospace", color: "var(--subtle)" }}>{r.created_at}</td>
                         <td>{r.round_number != null ? `第 ${r.round_number} 轮` : r.round_id ? "关联轮次已归档" : "—"}</td>
-                        <td>{PLATFORM_LABEL[r.platform] ?? r.platform}</td>
+                        <td>{PLATFORM_LABEL[r.platform] ?? displayPlatformLabel(r.platform)}</td>
                         <td style={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title}</td>
                         <td>
                           {r.guard_outcome === "fail" ? <span className="tag red">✕ FAIL</span>

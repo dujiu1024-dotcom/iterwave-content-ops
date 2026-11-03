@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, HotTopicsResponse, HotTopicItem, type HotSource, type SystemConfigView } from "../api";
 import { useUrlTab } from "../nav";
 import { platformLabel } from "../platforms";
+import { displaySourceLabel, displayPlatformLabel } from "../displayLabels";
 import DemoBadge from "../components/DemoBadge";
 import EmptyHint from "../components/EmptyHint";
 import { useApp } from "../AppContext";
@@ -470,7 +471,7 @@ export default function HotTopics() {
                   {h.time_sensitive === 1 ? <span className="tag red">窗口短</span>
                     : h.time_sensitive === null ? <span className="tag gray">时效未知</span>
                     : <span className="tag green">可跟进</span>}
-                  <span className="tag gray">{platformLabel(h.source.split("/").pop() || h.source)}</span>
+                  <span className="tag gray">{displaySourceLabel(h.source.split("/").pop() || h.source)}</span>
                   {h.trend && (
                     <span className={`tag ${TREND_CLASS[h.trend]}`} title={h.trend_reason}>
                       {h.trend}
@@ -646,7 +647,7 @@ function HotSourceManager({ onSaved }: { onSaved: () => void }) {
                   <td>{s.name}</td>
                   <td><span className="tag gray">{s.type === "aggregate" ? "综合热榜" : s.type === "rss" ? "RSS" : "JSON"}</span></td>
                   <td className="metric-foot">{s.url}</td>
-                  <td>{(s.platforms || []).join("、") || s.platform || "—"}</td>
+                  <td>{(s.platforms || []).map(displayPlatformLabel).join("、") || displayPlatformLabel(s.platform)}</td>
                   <td>{s.enabled === false ? <span className="tag gray">停用</span> : <span className="tag green">启用</span>}</td>
                   <td>
                     <div className="flex wrap" style={{ gap: 6 }}>

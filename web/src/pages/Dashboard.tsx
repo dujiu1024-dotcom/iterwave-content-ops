@@ -8,6 +8,7 @@ import {
   api, SpiralRound, Goal, GoalSummary, HotTopicItem, InsightItem, PlatformProgress, ActionItem, SystemConfigView,
 } from "../api";
 import { platformMeta, Platform, ALL_PLATFORMS } from "../platforms";
+import { displaySourceLabel, displayStatusLabel } from "../displayLabels";
 
 /**
  * 运营总览 —— 版式对齐 v10 demo（goal-hero → KPI → 决策/热点 → 四平台 lane → Agent 编排/目标）。
@@ -318,7 +319,7 @@ export default function Dashboard() {
                   <div className="task-main">
                     <div className="task-title">{h.title}</div>
                     <div className="task-desc">
-                      <span className="source-chip">{h.source}</span>
+                      <span className="source-chip">{displaySourceLabel(h.source)}</span>
                       {h.dimension ? ` 维度 ${h.dimension}` : ""}
                       {h.heat != null ? ` · 热度 ${h.heat.toLocaleString("zh-CN")}${h.heat_unit ?? ""}` : ""}
                       {(h.time_sensitive ?? 0) > 0 ? " · 时效敏感" : ""}
@@ -376,7 +377,7 @@ export default function Dashboard() {
               <div className="panel-title"><span className="icon" aria-hidden="true">⎇</span>Agent 当前编排</div>
               <div className="panel-sub">
                 {latestRound
-                  ? `最近一轮：第 ${latestRound.round_number} 轮 · ${ROUND_STATUS_LABEL[latestRound.status] ?? latestRound.status}`
+                  ? `最近一轮：第 ${latestRound.round_number} 轮 · ${ROUND_STATUS_LABEL[latestRound.status] ?? displayStatusLabel(latestRound.status)}`
                   : "还没有运行过轮次"}
               </div>
             </div>
