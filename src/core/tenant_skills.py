@@ -60,9 +60,10 @@ def validate_manifest(manifest: dict) -> dict:
     return {"valid": not errors, "errors": errors, "content_sha256": hashlib.sha256(encoded).hexdigest()}
 
 
-def _audit(conn: sqlite3.Connection, skill_id: str, action: str, details: dict | None = None) -> None:
-    conn.execute("INSERT INTO tenant_skill_audit(skill_id,action,details_json,created_at) VALUES(?,?,?,?)",
-                 (skill_id, action, _json(details or {}), _now()))
+def _audit(conn: sqlite3.Connection, skill_id: str, action: str, details: dict | None = None,
+           actor: str = "system") -> None:
+    conn.execute("INSERT INTO tenant_skill_audit(skill_id,action,actor,details_json,created_at) VALUES(?,?,?,?,?)",
+                 (skill_id, action, actor, _json(details or {}), _now()))
 
 
 def _decode(row: sqlite3.Row | None) -> dict | None:
@@ -107,7 +108,7 @@ def create_skill(conn: sqlite3.Connection, manifest: dict, actor: str = "system"
          _json(manifest.get("permissions",[])), now, now, "user", payload, result["content_sha256"]))
     conn.execute("INSERT INTO tenant_skill_versions(skill_id,version,manifest_json,content_sha256,created_at) VALUES(?,?,?,?,?)",
                  (skill_id, manifest["version"], payload, result["content_sha256"], now))
-    _audit(conn, skill_id, "created", {"version": manifest["version"], "actor": actor})
+    _audit(conn, skill_id, "created", {"version": manifest["version"]}, actor)
     return get_skill(conn, skill_id)
 
 
@@ -135,7 +136,7 @@ def update_skill(conn: sqlite3.Connection, skill_id: str, manifest: dict, actor:
                      (skill_id,manifest["version"],payload,result["content_sha256"],now))
     except sqlite3.IntegrityError as exc:
         raise ValueError("该版本已存在") from exc
-    _audit(conn, skill_id, "updated", {"version": manifest["version"], "actor": actor})
+    _audit(conn, skill_id, "updated", {"version": manifest["version"]}, actor)
     return get_skill(conn, skill_id)
 
 
@@ -149,7 +150,7 @@ def set_enabled(conn: sqlite3.Connection, skill_id: str, enabled: bool, actor: s
             raise ValueError(result)
     conn.execute("UPDATE tenant_skill_registry SET enabled=?,updated_at=? WHERE skill_id=?",
                  (int(enabled),_now(),skill_id))
-    _audit(conn, skill_id, "enabled" if enabled else "disabled", {"actor": actor})
+    _audit(conn, skill_id, "enabled" if enabled else "disabled", actor=actor)
     return get_skill(conn, skill_id)
 
 
@@ -160,7 +161,7 @@ def delete_skill(conn: sqlite3.Connection, skill_id: str, actor: str = "system")
                         (skill_id,)).fetchone()
     if refs:
         raise RuntimeError("Skill 正在被引用，不能删除")
-    _audit(conn, skill_id, "deleted", {"actor": actor})
+    _audit(conn, skill_id, "deleted", actor=actor)
     conn.execute("DELETE FROM tenant_skill_registry WHERE skill_id=?", (skill_id,))
     return True
 
