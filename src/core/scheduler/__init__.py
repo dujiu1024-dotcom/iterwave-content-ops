@@ -38,7 +38,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.date import DateTrigger
 from zoneinfo import ZoneInfo
-from ..timezone import business_now, storage_now, parse_persisted_datetime, business_zone as configured_business_zone
+from ..timezone import (business_now, storage_now, parse_persisted_datetime, business_zone as configured_business_zone, storage_window_cutoffs, timestamp_since_sql, timestamp_before_sql)
 from ..task_context import bind_task_context, business_timestamp, business_zone
 
 logger = logging.getLogger(__name__)
@@ -342,13 +342,15 @@ class SchedulerEngine:
         if self.conn is None:
             return 0
         delay = self.cfg.timeouts.metrics_initial_delay_hours
-        cutoff = (storage_now() - timedelta(hours=delay)).isoformat()
+        cutoff = storage_now() - timedelta(hours=delay)
+        cutoff_utc, cutoff_legacy = storage_window_cutoffs(cutoff, self.cfg)
         rows = self.conn.execute(
             "SELECT d.id FROM drafts d WHERE d.status IN ('user_published', 'data_fetching') "
-            "AND d.user_confirmed_at IS NOT NULL AND d.user_confirmed_at <= ? "
-            "AND NOT EXISTS (SELECT 1 FROM metrics m WHERE m.draft_id = d.id "
+            "AND d.user_confirmed_at IS NOT NULL AND "
+            + timestamp_before_sql("d.user_confirmed_at")
+            + " AND NOT EXISTS (SELECT 1 FROM metrics m WHERE m.draft_id = d.id "
             "AND m.fetch_status IN ('success', 'partial'))",
-            (cutoff,),
+            (cutoff_utc, cutoff_legacy),
         ).fetchall()
         n = 0
         retry_times, _interval_min = self._metrics_retry_params()
@@ -756,14 +758,12 @@ class SchedulerEngine:
 
         # 今日已执行的运营动作（ops_logs）
         # R5：SQLite date('now') 是 UTC，必须用本地时区当日 00:00
-        today_start = business_now(self.cfg).replace(
-            hour=0, minute=0, second=0, microsecond=0,
-        ).replace(tzinfo=business_zone(self.cfg)).astimezone(timezone.utc).isoformat()
+        today_utc, today_legacy = self._today_cutoffs()
         rows = self.conn.execute(
             "SELECT platform, action_type, status, COUNT(*) AS n "
-            "FROM ops_logs WHERE executed_at >= ? "
+            "FROM ops_logs WHERE " + timestamp_since_sql("executed_at") + " "
             "GROUP BY platform, action_type, status",
-            (today_start,),
+            (today_utc, today_legacy),
         ).fetchall()
         usage: dict[str, dict[str, int]] = {}
         for r in rows:
@@ -771,9 +771,9 @@ class SchedulerEngine:
 
         # 今日活跃草稿（已存草稿但未 user_published）
         draft_count = self.conn.execute(
-            "SELECT COUNT(*) FROM drafts WHERE status IN ('draft_saved','user_published') "
-            "AND substr(created_at, 1, 10) = ?",
-            (today_start[:10],),
+            "SELECT COUNT(*) FROM drafts WHERE status IN ('draft_saved','user_published') AND "
+            + timestamp_since_sql("created_at"),
+            (today_utc, today_legacy),
         ).fetchone()[0]
 
         targets_map = getattr(self.cfg, "ops_targets", None) or {}
@@ -872,14 +872,18 @@ class SchedulerEngine:
         """剩余配额 = 上限 - 今日已成功/待核验（R17 灰色地带也计入）。"""
         return max(0, limit - self._today_action_count(platform, action_type))
 
-    def _today_action_count(self, platform, action_type: str) -> int:
-        today_start = business_now(self.cfg).replace(
+    def _today_cutoffs(self) -> tuple[str, str]:
+        local_midnight = business_now(self.cfg).replace(
             hour=0, minute=0, second=0, microsecond=0,
-        ).replace(tzinfo=configured_business_zone(self.cfg)).astimezone(timezone.utc).isoformat()
+        ).replace(tzinfo=configured_business_zone(self.cfg))
+        return storage_window_cutoffs(local_midnight.astimezone(timezone.utc), self.cfg)
+
+    def _today_action_count(self, platform, action_type: str) -> int:
         row = self.conn.execute(
-            "SELECT COUNT(*) FROM ops_logs WHERE platform = ? AND action_type = ? "
-            "AND executed_at >= ? AND status IN ('success','pending_verify')",
-            (platform.value, action_type, today_start),
+            "SELECT COUNT(*) FROM ops_logs WHERE platform = ? AND action_type = ? AND "
+            + timestamp_since_sql("executed_at")
+            + " AND status IN ('success','pending_verify')",
+            (platform.value, action_type, *self._today_cutoffs()),
         ).fetchone()
         return int(row[0]) if row else 0
 

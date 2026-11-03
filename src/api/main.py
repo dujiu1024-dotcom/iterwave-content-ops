@@ -64,7 +64,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from src.core.config import load_config, get_config, DEFAULT_ENV_PATH
-from src.core.timezone import business_now, business_zone, storage_now, parse_persisted_datetime
+from src.core.timezone import (business_now, business_zone, storage_now, parse_persisted_datetime, storage_window_cutoffs, timestamp_since_sql, timestamp_before_sql, business_date_cutoffs)
 from src.core.config import PROJECT_ROOT
 from src.api.response_utils import (
     api_datetime as _api_datetime,
@@ -1730,20 +1730,23 @@ def _register_routes(app: FastAPI) -> None:
         tenant_id = _tenant_id()
         now_dt = _storage_now()
         now = now_dt.isoformat(sep=" ", timespec="seconds")
-        stale_cutoff = (
-            now_dt - timedelta(minutes=_g()["cfg"].activation.stale_task_timeout_minutes)
-        ).isoformat(sep=" ", timespec="seconds")
+        stale_utc, stale_legacy = storage_window_cutoffs(
+            now_dt - timedelta(minutes=_g()["cfg"].activation.stale_task_timeout_minutes),
+            _g()["cfg"],
+        )
         stale_runs = conn.execute(
             "SELECT id FROM sample_runs WHERE tenant_id=? "
-            "AND status IN ('created','generating','quality_check') AND created_at<?",
-            (tenant_id, stale_cutoff),
+            "AND status IN ('created','generating','quality_check') AND "
+            + timestamp_before_sql("created_at"),
+            (tenant_id, stale_utc, stale_legacy),
         ).fetchall()
         if stale_runs:
             conn.execute(
                 "UPDATE sample_runs SET status='failed', error_code='task_interrupted', "
                 "error_message_safe='体验任务中断，请重新生成', completed_at=? "
-                "WHERE tenant_id=? AND status IN ('created','generating','quality_check') AND created_at<?",
-                (now, tenant_id, stale_cutoff),
+                "WHERE tenant_id=? AND status IN ('created','generating','quality_check') AND "
+                + timestamp_before_sql("created_at"),
+                (now, tenant_id, stale_utc, stale_legacy),
             )
             conn.commit()
             for stale in stale_runs:
@@ -1766,10 +1769,14 @@ def _register_routes(app: FastAPI) -> None:
             "ORDER BY sr.created_at DESC, sr.id DESC LIMIT 1",
             (tenant_id,),
         ).fetchone()
-        day_start = now_dt.astimezone(business_zone(_g().get("cfg"))).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).isoformat(sep=" ")
+        local_midnight = now_dt.astimezone(business_zone(cfg)).replace(
+            hour=0, minute=0, second=0, microsecond=0,
+        )
+        day_utc, day_legacy = storage_window_cutoffs(local_midnight.astimezone(timezone.utc), cfg)
         daily_runs_used = conn.execute(
-            "SELECT COUNT(*) FROM sample_runs WHERE tenant_id=? AND datetime(created_at)>=datetime(?)",
-            (tenant_id, day_start),
+            "SELECT COUNT(*) FROM sample_runs WHERE tenant_id=? AND "
+            + timestamp_since_sql("created_at"),
+            (tenant_id, day_utc, day_legacy),
         ).fetchone()[0]
         return {
             "tenant_id": tenant_id,
@@ -2828,9 +2835,14 @@ def _register_routes(app: FastAPI) -> None:
             "size": "1024x1024", "updated_at": None,
         }
         settings["enabled"] = bool(settings["enabled"])
-        month_start = _now().replace(day=1, hour=0, minute=0, second=0, microsecond=0).replace(tzinfo=business_zone(_g().get("cfg"))).astimezone(timezone.utc).isoformat(timespec="seconds")
+        month_local = _now().replace(day=1, hour=0, minute=0, second=0, microsecond=0).replace(
+            tzinfo=business_zone(_g().get("cfg")),
+        )
+        month_utc, month_legacy = storage_window_cutoffs(month_local.astimezone(timezone.utc), _g().get("cfg"))
         settings["used_this_month"] = int(conn.execute(
-            "SELECT COUNT(*) FROM media_generation_jobs WHERE created_at >= ? AND status = 'succeeded'", (month_start,),
+            "SELECT COUNT(*) FROM media_generation_jobs WHERE "
+            + timestamp_since_sql("created_at") + " AND status = 'succeeded'",
+            (month_utc, month_legacy),
         ).fetchone()[0])
         key_env = os.getenv("ITERWAVE_IMAGE_API_KEY_ENV", "OPENAI_API_KEY").strip()
         settings["provider_configured"] = bool(key_env and os.getenv(key_env))
@@ -7384,18 +7396,22 @@ def _register_routes(app: FastAPI) -> None:
         from datetime import timedelta
 
         conn = _g()["conn"]
-        since = (_storage_now() - timedelta(days=days - 1)).isoformat(timespec="seconds")
+        since_utc, since_legacy = storage_window_cutoffs(
+            _storage_now() - timedelta(days=days - 1), _g()["cfg"],
+        )
 
         contents_created = int(conn.execute(
-            "SELECT COUNT(*) FROM contents WHERE datetime(created_at) >= datetime(?)", (since,)
+            "SELECT COUNT(*) FROM contents WHERE " + timestamp_since_sql("created_at"),
+            (since_utc, since_legacy),
         ).fetchone()[0])
         drafts_created = int(conn.execute(
-            "SELECT COUNT(*) FROM drafts WHERE datetime(created_at) >= datetime(?)", (since,)
+            "SELECT COUNT(*) FROM drafts WHERE " + timestamp_since_sql("created_at"),
+            (since_utc, since_legacy),
         ).fetchone()[0])
         confirmed_published = int(conn.execute(
-            "SELECT COUNT(*) FROM drafts WHERE datetime(user_confirmed_at) >= datetime(?) "
-            "AND user_confirmed_at IS NOT NULL",
-            (since,),
+            "SELECT COUNT(*) FROM drafts WHERE " + timestamp_since_sql("user_confirmed_at")
+            + " AND user_confirmed_at IS NOT NULL",
+            (since_utc, since_legacy),
         ).fetchone()[0])
 
         # 每篇草稿仅取窗口内最新一条成功/部分成功快照，避免重复采集被重复求和。
@@ -7407,7 +7423,7 @@ def _register_routes(app: FastAPI) -> None:
                           ) AS rn
                    FROM metrics
                    WHERE draft_id IS NOT NULL
-                     AND datetime(fetched_at) >= datetime(?)
+                     AND """ + timestamp_since_sql("fetched_at") + """
                      AND fetch_status IN ('success','partial')
                )
                SELECT COUNT(*) AS sample_count,
@@ -7420,22 +7436,24 @@ def _register_routes(app: FastAPI) -> None:
                       SUM(CASE WHEN comments IS NOT NULL THEN 1 ELSE 0 END) AS comments_samples,
                       SUM(CASE WHEN shares IS NOT NULL THEN 1 ELSE 0 END) AS shares_samples
                FROM ranked WHERE rn = 1""",
-            (since,),
+            (since_utc, since_legacy),
         ).fetchone()
 
         followers_growth: dict[str, dict | None] = {}
         for platform in _g()["cfg"].platforms.enabled_keys():
             baseline = conn.execute(
                 "SELECT followers, captured_at FROM account_snapshots "
-                "WHERE platform=? AND followers IS NOT NULL AND datetime(captured_at) < datetime(?) "
+                "WHERE platform=? AND followers IS NOT NULL AND captured_at IS NOT NULL AND NOT ("
+                + timestamp_since_sql("captured_at") + ") "
                 "ORDER BY captured_at DESC, id DESC LIMIT 1",
-                (platform, since),
+                (platform, since_utc, since_legacy),
             ).fetchone()
             latest = conn.execute(
                 "SELECT followers, captured_at FROM account_snapshots "
-                "WHERE platform=? AND followers IS NOT NULL AND datetime(captured_at) >= datetime(?) "
+                "WHERE platform=? AND followers IS NOT NULL AND "
+                + timestamp_since_sql("captured_at") + " "
                 "ORDER BY captured_at DESC, id DESC LIMIT 1",
-                (platform, since),
+                (platform, since_utc, since_legacy),
             ).fetchone()
             followers_growth[platform] = (
                 {
@@ -7448,7 +7466,7 @@ def _register_routes(app: FastAPI) -> None:
 
         return {
             "window_days": days,
-            "since": since,
+            "since": since_utc,
             "contents_created": contents_created,
             "drafts_created": drafts_created,
             "confirmed_published": confirmed_published,
@@ -7658,10 +7676,13 @@ def _register_routes(app: FastAPI) -> None:
         """
         conn = _g()["conn"]
         # ops_logs 统计（窗口由 days 决定；1 = 今日，R6/R16 计数口径不变）
+        ops_since_utc, ops_since_legacy = storage_window_cutoffs(
+            _storage_now() - timedelta(days=max(0, days - 1)), _g()["cfg"],
+        )
         today_ops = conn.execute(
-            "SELECT action_type, status, COUNT(*) AS n FROM ops_logs "
-            "WHERE executed_at >= datetime('now', ?) GROUP BY action_type, status",
-            (f"-{max(0, days - 1)} days",),
+            "SELECT action_type, status, COUNT(*) AS n FROM ops_logs WHERE "
+            + timestamp_since_sql("executed_at") + " GROUP BY action_type, status",
+            (ops_since_utc, ops_since_legacy),
         ).fetchall()
         ops_by_type: dict[str, dict] = {}
         for r in today_ops:
@@ -7806,11 +7827,13 @@ def _register_routes(app: FastAPI) -> None:
             where.append("status = ?")
             params.append(status)
         if date_from:
-            where.append("substr(COALESCE(executed_at, schedule_time), 1, 10) >= ?")
-            params.append(date_from)
+            start_utc, start_legacy = business_date_cutoffs(date_from, _g()["cfg"])
+            where.append(timestamp_since_sql("COALESCE(executed_at, schedule_time)"))
+            params.extend((start_utc, start_legacy))
         if date_to:
-            where.append("substr(COALESCE(executed_at, schedule_time), 1, 10) <= ?")
-            params.append(date_to)
+            end_utc, end_legacy = business_date_cutoffs(date_to, _g()["cfg"], end=True)
+            where.append(timestamp_before_sql("COALESCE(executed_at, schedule_time)"))
+            params.extend((end_utc, end_legacy))
         if date_from and date_to and date_from > date_to:
             raise HTTPException(422, "date_from 不能晚于 date_to")
         where_sql = " WHERE " + " AND ".join(where)
@@ -7914,11 +7937,13 @@ def _register_routes(app: FastAPI) -> None:
             where.append("platform = ?")
             params.append(platform)
         if date_from:
-            where.append("substr(created_at, 1, 10) >= ?")
-            params.append(date_from)
+            start_utc, start_legacy = business_date_cutoffs(date_from, _g()["cfg"])
+            where.append(timestamp_since_sql("created_at"))
+            params.extend((start_utc, start_legacy))
         if date_to:
-            where.append("substr(created_at, 1, 10) <= ?")
-            params.append(date_to)
+            end_utc, end_legacy = business_date_cutoffs(date_to, _g()["cfg"], end=True)
+            where.append(timestamp_before_sql("created_at"))
+            params.extend((end_utc, end_legacy))
         if date_from and date_to and date_from > date_to:
             raise HTTPException(422, "date_from 不能晚于 date_to")
         where_sql = " WHERE " + " AND ".join(where)

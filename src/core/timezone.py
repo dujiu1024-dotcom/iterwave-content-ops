@@ -1,7 +1,8 @@
 """Business timezone and canonical UTC persistence helpers."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
+import re
 from zoneinfo import ZoneInfo
 
 DEFAULT_TIMEZONE = "Asia/Shanghai"
@@ -71,3 +72,58 @@ def parse_persisted_datetime(value, cfg=None, *, legacy_timezone=None) -> dateti
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=legacy_timezone or business_zone(cfg))
     return parsed.astimezone(timezone.utc)
+
+
+def storage_window_cutoffs(utc_cutoff, cfg=None) -> tuple[str, str]:
+    """Return UTC and legacy business-local cutoffs for mixed-format timestamp columns."""
+    parsed = parse_persisted_datetime(utc_cutoff, cfg, legacy_timezone=timezone.utc)
+    if parsed is None:
+        raise ValueError("invalid timestamp cutoff")
+    utc_value = parsed.isoformat(sep=" ", timespec="seconds")
+    local_value = parsed.astimezone(business_zone(cfg)).replace(tzinfo=None).isoformat(
+        sep=" ", timespec="seconds",
+    )
+    return utc_value, local_value
+
+
+def timestamp_since_sql(column: str) -> str:
+    """SQLite predicate for UTC-aware new rows plus legacy business-local naive rows."""
+    if not re.fullmatch(r"(?:[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?|COALESCE\([A-Za-z_][A-Za-z0-9_]*,\s*[A-Za-z_][A-Za-z0-9_]*\))", column):
+        raise ValueError("invalid timestamp column")
+    aware = (
+        f"(instr(substr({column}, 20), '+') > 0 "
+        f"OR instr(substr({column}, 20), '-') > 0 OR substr({column}, -1) = 'Z')"
+    )
+    return (
+        f"(({aware} AND datetime({column}) >= datetime(?)) "
+        f"OR (NOT {aware} AND datetime({column}) >= datetime(?)))"
+    )
+
+
+def timestamp_before_sql(column: str) -> str:
+    """SQLite predicate for timestamps at or before a cutoff in mixed legacy/new formats."""
+    if not re.fullmatch(r"(?:[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?|COALESCE\([A-Za-z_][A-Za-z0-9_]*,\s*[A-Za-z_][A-Za-z0-9_]*\))", column):
+        raise ValueError("invalid timestamp column")
+    aware = (
+        f"(instr(substr({column}, 20), '+') > 0 "
+        f"OR instr(substr({column}, 20), '-') > 0 OR substr({column}, -1) = 'Z')"
+    )
+    return (
+        f"(({aware} AND datetime({column}) <= datetime(?)) "
+        f"OR (NOT {aware} AND datetime({column}) <= datetime(?)))"
+    )
+
+
+def business_date_cutoffs(day: str, cfg=None, *, end: bool = False) -> tuple[str, str]:
+    """UTC and legacy-local cutoffs for an inclusive business-calendar date."""
+    try:
+        parsed_day = date.fromisoformat(str(day))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid business date") from exc
+    local_midnight = datetime.combine(parsed_day, time.min, tzinfo=business_zone(cfg))
+    if end:
+        next_day = parsed_day + timedelta(days=1)
+        local_midnight = datetime.combine(next_day, time.min, tzinfo=business_zone(cfg)) - timedelta(seconds=1)
+    utc_value = local_midnight.astimezone(timezone.utc).isoformat(sep=" ", timespec="seconds")
+    legacy_value = local_midnight.replace(tzinfo=None).isoformat(sep=" ", timespec="seconds")
+    return utc_value, legacy_value
