@@ -3384,3 +3384,17 @@ def test_custom_skill_execute_does_not_echo_or_persist_untrusted_payload(client)
     ).fetchone()
     assert stored is not None
     assert stored["input_bytes"] > 0
+
+def test_skill_execution_history_is_metadata_only(client):
+    tc, _, _ = client
+    assert tc.post("/api/skills", json={
+        "skill_id": "history_skill", "name": "History", "version": "1.0.0",
+    }).status_code == 201
+    attempt = tc.post("/api/skills/history_skill/execute", json={"private": "not persisted"})
+    assert attempt.status_code == 409
+    history = tc.get("/api/skills/history_skill/executions")
+    assert history.status_code == 200
+    item = history.json()["items"][0]
+    assert item["status"] == "rejected"
+    assert "private" not in item
+    assert "input" not in item
