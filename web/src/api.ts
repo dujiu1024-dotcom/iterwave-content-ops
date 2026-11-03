@@ -40,6 +40,30 @@ export interface GlobalTaskQueueItem {
   resolution_at?: string | null;
 }
 
+export interface GlobalTaskQueueDetail {
+  task_id: string;
+  queue_order: number;
+  task_type: string;
+  tenant_id: string;
+  aggregate_id: string | null;
+  round_number: number | null;
+  status: GlobalTaskQueueItem["status"];
+  created_at: string;
+  available_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  attempts: number;
+  error_code: string | null;
+  error_message: string | null;
+  retry_of_task_id: string | null;
+  retry_confirmed_by: string | null;
+  retry_confirmation_note: string | null;
+  resolution_action: "handled" | "ignored" | null;
+  resolution_actor: string | null;
+  resolution_note: string | null;
+  resolution_at: string | null;
+}
+
 export interface GlobalTaskQueueSummary {
   total: number;
   by_status: { queued: number; running: number; succeeded: number; failed: number; cancelled: number; interrupted: number };
@@ -1646,6 +1670,8 @@ export const api = {
     fetchJson<{ updated: Record<string, number | null>; goals: Goal[]; summary: GoalSummary }>(
       "/api/goals/progress/refresh", { method: "POST" },
     ),
+  taskQueueDetail: (taskId: string) =>
+    fetchJson<GlobalTaskQueueDetail>(`/api/task-queue/${encodeURIComponent(taskId)}`),
   taskQueueSummary: (params: { dateFrom?: string; dateTo?: string; tenantId?: string; taskType?: string; status?: string } = {}) => {
     const query = new URLSearchParams();
     if (params.dateFrom) query.set("date_from", params.dateFrom);
