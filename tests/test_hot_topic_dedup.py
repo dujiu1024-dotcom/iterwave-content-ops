@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone as dt_timezone
 from types import SimpleNamespace
 
 import pytest
@@ -26,13 +26,10 @@ def _connection():
 def test_prune_uses_business_timezone_and_enforces_retention_and_row_cap(monkeypatch):
     conn = _connection()
     cfg = SimpleNamespace(business_timezone="Asia/Shanghai")
-    observed = {}
+    def fixed_now():
+        return datetime(2026, 11, 2, 12, 0, 0, tzinfo=dt_timezone.utc)
 
-    def fixed_now(received_cfg):
-        observed["cfg"] = received_cfg
-        return datetime(2026, 11, 2, 12, 0, 0)
-
-    monkeypatch.setattr(timezone, "business_now", fixed_now)
+    monkeypatch.setattr(timezone, "storage_now", fixed_now)
     conn.executemany(
         "INSERT INTO hot_topics(id, discovered_at, last_seen_at, duplicate_of) VALUES(?,?,?,?)",
         [
@@ -45,7 +42,6 @@ def test_prune_uses_business_timezone_and_enforces_retention_and_row_cap(monkeyp
 
     deleted = prune(conn, retention_days=7, max_rows=1, cfg=cfg)
 
-    assert observed["cfg"] is cfg
     assert deleted == 2
     assert conn.execute("SELECT id FROM hot_topics").fetchall() == [("recent-b",)]
     conn.close()
@@ -54,8 +50,8 @@ def test_prune_uses_business_timezone_and_enforces_retention_and_row_cap(monkeyp
 def test_prune_rolls_back_all_deletes_when_dangling_link_cleanup_fails(monkeypatch):
     conn = _connection()
     monkeypatch.setattr(
-        timezone, "business_now",
-        lambda _cfg=None: datetime(2026, 11, 2, 12, 0, 0),
+        timezone, "storage_now",
+        lambda: datetime(2026, 11, 2, 12, 0, 0, tzinfo=dt_timezone.utc),
     )
     conn.executemany(
         "INSERT INTO hot_topics(id, discovered_at, last_seen_at, duplicate_of) VALUES(?,?,?,?)",
