@@ -1,5 +1,21 @@
 // ===== API Client — 所有后端调用集中在这里 =====
 
+export type BusinessEvidenceStatus = "user_confirmed" | "external_source" | "ai_inferred" | "missing";
+export interface BusinessProfile {
+  business_name: string; introduction: string; industry: string; business_model: string;
+  business_stage: string; operating_goal: string;
+  field_evidence: Record<string, { status: BusinessEvidenceStatus; source?: string | null; confirmed_at?: string | null }>;
+  version_no: number; updated_at: string | null;
+}
+export interface BusinessCatalogItem {
+  id: string; entity_type: "product" | "service" | "audience" | "market"; name: string;
+  details: Record<string, unknown>;
+  field_evidence: Record<string, { status: BusinessEvidenceStatus; source?: string | null }>;
+  is_active: number; created_at: string; updated_at: string;
+}
+
+
+
 // Platform 类型 + 元数据：唯一来源在 platforms.ts
 import type { Platform as _Platform } from "./platforms";
 import { clientErrorMessage } from "./api-error";
@@ -1824,6 +1840,24 @@ export interface VisualVersionHistory {
   design: { pages?: Array<{ page_index: number; image_url: string | null; can_revise?: boolean }> };
 }
 export const api = {
+
+  confirmBusinessAiProposal: (proposal: Record<string, unknown>) => fetchJson<Record<string, unknown>>("/api/business-profile/ai-proposals/confirm", { method: "POST", body: JSON.stringify({ proposal }) }),
+  businessProfile: () => fetchJson<BusinessProfile>("/api/business-profile"),
+  saveBusinessProfile: (data: Partial<BusinessProfile> & { change_note?: string }) =>
+    fetchJson<BusinessProfile>("/api/business-profile", { method: "PUT", body: JSON.stringify(data) }),
+  businessItems: (entityType?: BusinessCatalogItem["entity_type"]) =>
+    fetchJson<{ items: BusinessCatalogItem[] }>(`/api/business-profile/items${entityType ? `?entity_type=${entityType}` : ""}`),
+  saveBusinessItem: (entityType: BusinessCatalogItem["entity_type"], data: { name: string; details: Record<string, unknown>; field_evidence?: BusinessCatalogItem["field_evidence"] }, id?: string) =>
+    fetchJson<BusinessCatalogItem>(id ? `/api/business-profile/items/${entityType}/${id}` : `/api/business-profile/items/${entityType}`, {
+      method: id ? "PUT" : "POST", body: JSON.stringify(data),
+    }),
+  archiveBusinessItem: (id: string) =>
+    fetchJson<{ id: string; archived: boolean }>(`/api/business-profile/items/${id}`, { method: "DELETE" }),
+  businessAnalysis: () => fetchJson<{ missing: Array<{ field: string; label: string; status: string }>; completeness: number }>("/api/business-profile/analysis"),
+  businessVersions: () => fetchJson<{ items: Array<{version_no:number;change_note:string;created_at:string;created_by:string}> }>("/api/business-profile/versions"),
+  businessVersion: (version: number) => fetchJson<{version_no:number;snapshot:Record<string,unknown>;change_note:string;created_at:string;created_by:string}>(`/api/business-profile/versions/${version}`),
+  businessAiProposal: (source_text: string) =>
+    fetchJson<{ status: string; message: string; proposals: Array<Record<string, unknown>> }>("/api/business-profile/ai-proposals", { method: "POST", body: JSON.stringify({ source_text }) }),
   status: () => fetchJson<SystemStatus>("/api/status"),
   goals: () => fetchJson<Goal[]>("/api/goals"),
   /** 总体目标进度（后端统一计算等权平均，前端只展示） */
