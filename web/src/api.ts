@@ -1889,6 +1889,10 @@ export const api = {
     fetchJson<{ version?: MasterPlanVersion; version_id?: number; status?: string; effective: boolean }>(
       `/api/plans/${versionId}/review`, { method: "POST", body: JSON.stringify({ action, reason }) },
     ),
+  deleteMasterPlan: (versionId: number) =>
+    fetchJson<{ deleted_version: MasterPlanVersion & { deleted_at: string }; restored_version: MasterPlanVersion }>(
+      `/api/plans/${versionId}`, { method: "DELETE" },
+    ),
   planVersions: (limit = 100) =>
     fetchJson<{ items: MasterPlanVersion[] }>(`/api/plans/versions?limit=${limit}`),
   subplans: (params: { masterPlanVersionId?: number; platform?: Platform; status?: string; page?: number; pageSize?: number } = {}) => {

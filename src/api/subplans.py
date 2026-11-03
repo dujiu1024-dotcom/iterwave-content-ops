@@ -763,8 +763,13 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
             if current["version_status"] != "effective" or current["master_status"] != "effective":
                 raise HTTPException(409, "关联主计划版本已失效，不能恢复该子计划；请基于当前主计划重新创建并审核")
         cur = conn.execute(
-            "UPDATE sub_plans SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('active','paused')",
-            ("paused" if paused else "active", sub_plan_id),
+            """UPDATE sub_plans
+               SET status=?,
+                   pause_reason=CASE WHEN ?='paused' THEN 'user' ELSE NULL END,
+                   paused_by_master_version_id=NULL,
+                   updated_at=CURRENT_TIMESTAMP
+               WHERE id=? AND status IN ('active','paused')""",
+            ("paused" if paused else "active", "paused" if paused else "active", sub_plan_id),
         )
         if cur.rowcount != 1:
             raise HTTPException(404, "可暂停/恢复的子计划不存在")

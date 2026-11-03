@@ -27,13 +27,15 @@ def _db(path=None):
             source TEXT NOT NULL, legacy_history_id INTEGER UNIQUE,
             based_on_version_id INTEGER, created_at TEXT NOT NULL,
             created_by TEXT NOT NULL, reviewed_at TEXT, reviewed_by TEXT,
-            effective_at TEXT, superseded_at TEXT, change_note TEXT
+            effective_at TEXT, superseded_at TEXT, change_note TEXT,
+            deleted_at TEXT, deleted_by TEXT
         );
         CREATE TABLE sub_plans (
             id TEXT PRIMARY KEY, master_plan_version_id INTEGER NOT NULL,
             platform TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL,
             current_version_id INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-            created_by TEXT NOT NULL, archived_at TEXT
+            created_by TEXT NOT NULL, archived_at TEXT,
+            pause_reason TEXT, paused_by_master_version_id INTEGER
         );
         CREATE TABLE sub_plan_versions (
             id INTEGER PRIMARY KEY AUTOINCREMENT, sub_plan_id TEXT NOT NULL,
@@ -542,3 +544,250 @@ def test_stage_key_cannot_be_reused_from_another_subplan():
             based_on_version_id=second["id"],
             stages=[{"stage_key": first_stage_key, "title": "伪造阶段", "target_count": 3}],
         )
+
+
+def test_delete_latest_master_restores_predecessor_and_only_switch_paused_children():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    first = _active_master(store)
+    active_child, _ = _active_subplan(store, first)
+    store.create_subplan(
+        "sub-manual", master_plan_version_id=first["id"],
+        platform="douyin", title="人工暂停子计划",
+    )
+    manual_version = store.create_subplan_version(
+        "sub-manual", {"title": "人工暂停子计划"},
+        master_plan_version_id=first["id"], stages=[{"title": "阶段"}],
+    )
+    store.activate_subplan_version(manual_version["id"], reviewer="reviewer")
+    conn.execute(
+        "UPDATE sub_plans SET status='paused',pause_reason='user' WHERE id='sub-manual'"
+    )
+    conn.execute(
+        """INSERT INTO sub_plans(
+               id,master_plan_version_id,platform,title,status,created_at,updated_at,created_by
+           ) VALUES('sub-manual-after-switch',?,'kuaishou','切换后人工暂停','active','now','now','test')""",
+        (first["id"],),
+    )
+    conn.execute(
+        """INSERT INTO sub_plans(
+               id,master_plan_version_id,platform,title,status,created_at,updated_at,created_by
+           ) VALUES('sub-completed',?,'kuaishou','已完成','completed','now','now','test')""",
+        (first["id"],),
+    )
+    conn.execute(
+        """INSERT INTO sub_plans(
+               id,master_plan_version_id,platform,title,status,created_at,updated_at,created_by
+           ) VALUES('sub-cancelled',?,'wechat_channels','已取消','cancelled','now','now','test')""",
+        (first["id"],),
+    )
+    conn.commit()
+
+    second = store.create_master_draft(_plan(6), based_on_version_id=first["id"])
+    store.activate_master_version(second["id"], reviewer="reviewer-2")
+    auto_paused = conn.execute(
+        "SELECT status,pause_reason,paused_by_master_version_id FROM sub_plans WHERE id='sub-xhs'"
+    ).fetchone()
+    assert tuple(auto_paused) == ("paused", "master_plan_switch", second["id"])
+    assert conn.execute(
+        "SELECT pause_reason FROM sub_plans WHERE id='sub-manual'"
+    ).fetchone()[0] == "user"
+    # An explicit user pause after automatic suspension overrides restoration provenance.
+    conn.execute(
+        """UPDATE sub_plans SET status='paused',pause_reason='user',
+               paused_by_master_version_id=NULL WHERE id='sub-manual-after-switch'"""
+    )
+    conn.commit()
+
+    # Keep a production round and its content/draft attached to the deleted master.
+    conn.execute(
+        "UPDATE spiral_rounds SET master_plan_version_id=? WHERE id=1", (second["id"],)
+    )
+    conn.execute("INSERT INTO contents(id,round_id) VALUES('kept-content',1)")
+    conn.execute(
+        "INSERT INTO drafts(id,content_id,user_confirmed_at) VALUES('kept-draft','kept-content','2026-11-03')"
+    )
+    conn.commit()
+
+    result = store.delete_master_version(second["id"], actor="operator")
+    assert result["deleted_version"]["deleted_at"] is not None
+    assert result["deleted_version"]["status"] == "archived"
+    assert result["restored_version"]["id"] == first["id"]
+    assert result["restored_version"]["status"] == "effective"
+    assert conn.execute(
+        "SELECT active_version_id FROM plan_settings WHERE id=1"
+    ).fetchone()[0] == first["id"]
+    assert tuple(conn.execute(
+        "SELECT status,pause_reason,paused_by_master_version_id FROM sub_plans WHERE id='sub-xhs'"
+    ).fetchone()) == ("active", None, None)
+    assert tuple(conn.execute(
+        "SELECT status,pause_reason FROM sub_plans WHERE id='sub-manual'"
+    ).fetchone()) == ("paused", "user")
+    assert conn.execute("SELECT status FROM sub_plans WHERE id='sub-completed'").fetchone()[0] == "completed"
+    assert conn.execute("SELECT status FROM sub_plans WHERE id='sub-cancelled'").fetchone()[0] == "cancelled"
+    assert tuple(conn.execute(
+        "SELECT status,pause_reason,paused_by_master_version_id FROM sub_plans WHERE id='sub-manual-after-switch'"
+    ).fetchone()) == ("paused", "user", None)
+    assert conn.execute("SELECT COUNT(*) FROM drafts WHERE id='kept-draft'").fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT master_plan_version_id FROM spiral_rounds WHERE id=1"
+    ).fetchone()[0] == second["id"]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM master_plan_versions WHERE status='effective' AND deleted_at IS NULL"
+    ).fetchone()[0] == 1
+
+
+def test_latest_undeleted_master_is_required_for_activation():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    first = _active_master(store)
+    older_draft = store.create_master_draft(_plan(6), based_on_version_id=first["id"])
+    latest_draft = store.create_master_draft(_plan(7), based_on_version_id=older_draft["id"])
+    with pytest.raises(PlanVersionError, match="最新"):
+        store.activate_master_version(older_draft["id"], reviewer="reviewer")
+    store.activate_master_version(latest_draft["id"], reviewer="reviewer")
+    assert conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective'"
+    ).fetchone()[0] == latest_draft["id"]
+
+
+def test_master_delete_rolls_back_every_change_when_settings_row_is_missing():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    first = _active_master(store)
+    second = store.create_master_draft(_plan(6), based_on_version_id=first["id"])
+    store.activate_master_version(second["id"], reviewer="reviewer")
+    conn.execute("DELETE FROM plan_settings WHERE id=1")
+    conn.commit()
+
+    with pytest.raises(PlanVersionError, match="设置记录缺失"):
+        store.delete_master_version(second["id"], actor="operator")
+    current = conn.execute(
+        "SELECT status,deleted_at FROM master_plan_versions WHERE id=?", (second["id"],)
+    ).fetchone()
+    assert tuple(current) == ("effective", None)
+    assert conn.execute(
+        "SELECT status FROM master_plan_versions WHERE id=?", (first["id"],)
+    ).fetchone()[0] == "archived"
+
+
+def test_deleted_master_cannot_be_reactivated_or_deleted_twice():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    first = _active_master(store)
+    second = store.create_master_draft(_plan(6), based_on_version_id=first["id"])
+    store.activate_master_version(second["id"], reviewer="reviewer")
+    store.delete_master_version(second["id"])
+    with pytest.raises(PlanVersionError, match="已经删除"):
+        store.delete_master_version(second["id"])
+    with pytest.raises(PlanVersionError):
+        store.activate_master_version(second["id"], reviewer="reviewer")
+
+
+def test_delete_skips_rejected_draft_when_finding_previous_effective_master():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    first = _active_master(store)
+    rejected = store.create_master_draft(_plan(6), based_on_version_id=first["id"])
+    conn.execute(
+        "UPDATE master_plan_versions SET status='archived',reviewed_at='2026-11-03',reviewed_by='reviewer' WHERE id=?",
+        (rejected["id"],),
+    )
+    conn.commit()
+    latest = store.create_master_draft(_plan(7), based_on_version_id=rejected["id"])
+    store.activate_master_version(latest["id"], reviewer="reviewer")
+    result = store.delete_master_version(latest["id"])
+    assert result["restored_version"]["id"] == first["id"]
+    assert conn.execute(
+        "SELECT status FROM master_plan_versions WHERE id=?", (rejected["id"],)
+    ).fetchone()[0] == "archived"
+
+
+def test_concurrent_master_deletes_restore_once_without_duplicate_effective_versions(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    path = tmp_path / "master-delete-race.db"
+    setup = _db(path)
+    store = PlanVersionStore(setup)
+    first = _active_master(store)
+    second = store.create_master_draft(_plan(6), based_on_version_id=first["id"])
+    store.activate_master_version(second["id"], reviewer="reviewer")
+    setup.close()
+
+    barrier = Barrier(2)
+    def delete_once():
+        conn = sqlite3.connect(str(path), timeout=10)
+        conn.row_factory = sqlite3.Row
+        try:
+            barrier.wait(timeout=5)
+            PlanVersionStore(conn).delete_master_version(second["id"], actor="parallel")
+            return "deleted"
+        except PlanVersionError:
+            return "conflict"
+        finally:
+            conn.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(lambda _n: delete_once(), range(2)))
+
+    assert sorted(outcomes) == ["conflict", "deleted"]
+    verify = sqlite3.connect(str(path))
+    try:
+        assert verify.execute(
+            "SELECT id FROM master_plan_versions WHERE status='effective' AND deleted_at IS NULL"
+        ).fetchone()[0] == first["id"]
+        assert verify.execute(
+            "SELECT COUNT(*) FROM master_plan_versions WHERE status='effective'"
+        ).fetchone()[0] == 1
+        assert verify.execute(
+            "SELECT deleted_at IS NOT NULL FROM master_plan_versions WHERE id=?", (second["id"],)
+        ).fetchone()[0] == 1
+    finally:
+        verify.close()
+
+
+def test_concurrent_master_delete_and_new_review_cannot_break_single_effective_invariant(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    path = tmp_path / "master-review-race.db"
+    setup = _db(path)
+    store = PlanVersionStore(setup)
+    first = _active_master(store)
+    second = store.create_master_draft(_plan(6), based_on_version_id=first["id"])
+    store.activate_master_version(second["id"], reviewer="reviewer")
+    third = store.create_master_draft(_plan(7), based_on_version_id=second["id"])
+    setup.close()
+
+    barrier = Barrier(2)
+    def run(action):
+        conn = sqlite3.connect(str(path), timeout=10)
+        conn.row_factory = sqlite3.Row
+        try:
+            barrier.wait(timeout=5)
+            if action == "delete":
+                PlanVersionStore(conn).delete_master_version(second["id"], actor="parallel")
+                return "deleted"
+            PlanVersionStore(conn).activate_master_version(third["id"], reviewer="parallel")
+            return "activated"
+        except PlanVersionError:
+            return "conflict"
+        finally:
+            conn.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(run, ("delete", "activate")))
+
+    assert "activated" in outcomes
+    verify = sqlite3.connect(str(path))
+    try:
+        effective = verify.execute(
+            "SELECT id FROM master_plan_versions WHERE status='effective' AND deleted_at IS NULL"
+        ).fetchall()
+        assert [row[0] for row in effective] == [third["id"]]
+        assert verify.execute(
+            "SELECT COUNT(*) FROM master_plan_versions WHERE status='effective'"
+        ).fetchone()[0] == 1
+    finally:
+        verify.close()
