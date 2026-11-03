@@ -557,7 +557,7 @@ class Database:
                 # introduced by migrations 133, 136 and 137.
                 "content_review_events", "strategy_effect_reviews",
                 "sub_plan_stage_outcomes", "production_tasks",
-                "production_task_attempts",
+                "production_task_attempts", "strategy_step_condition_reviews",
             }
             result["missing_tables"] = sorted(expected_tables - existing)
             result["existing_tables"] = sorted(existing & expected_tables)
@@ -647,6 +647,7 @@ class Database:
                 "idx_production_line_versions_line", "idx_spiral_rounds_production_line",
                 "idx_production_tasks_line_version", "idx_production_lines_current_version",
                 "idx_production_line_versions_based_on",
+                "idx_strategy_step_condition_reviews_stage",
                 # Foreign-key child indexes added in migration 128.
                 "idx_ops_logs_round_id", "idx_contents_topic_id",
                 "idx_user_override_round_id",
@@ -667,6 +668,39 @@ class Database:
             }
             result["missing_indexes"] = sorted(expected_indexes - existing_indexes)
             result["existing_indexes"] = sorted(expected_indexes & existing_indexes)
+
+            expected_triggers = {
+                "trg_production_tasks_validate_insert",
+                "trg_production_tasks_validate_update",
+                "trg_production_lines_validate_current_version_insert",
+                "trg_production_lines_validate_current_version_update",
+                "trg_production_line_versions_validate_insert",
+                "trg_production_line_versions_validate_update",
+                "trg_contents_task_link_validate_insert",
+                "trg_contents_task_link_validate_update",
+                "trg_production_tasks_sync_content_insert",
+                "trg_production_tasks_sync_content_update",
+                "trg_contents_sync_production_task_insert",
+                "trg_contents_sync_production_task_update",
+                "trg_contents_prevent_linked_delete",
+                "trg_production_tasks_prevent_linked_delete",
+                "trg_production_tasks_prevent_content_relink",
+                "trg_contents_prevent_task_relink",
+                "trg_rounds_prevent_task_orphan",
+                "trg_master_plan_versions_prevent_task_orphan",
+                "trg_sub_plans_prevent_task_orphan",
+                "trg_sub_plan_versions_prevent_task_orphan",
+                "trg_sub_plan_stages_prevent_task_orphan",
+                "trg_sub_plan_stages_prevent_task_rekey",
+                "trg_production_line_versions_prevent_task_orphan",
+            }
+            existing_triggers = {
+                row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='trigger'"
+                ).fetchall()
+            }
+            result["missing_triggers"] = sorted(expected_triggers - existing_triggers)
+            result["existing_triggers"] = sorted(expected_triggers & existing_triggers)
 
             expected_foreign_keys = {
                 ("schema_migration_checksums", "version", "schema_version", "version", "CASCADE"),
@@ -733,6 +767,7 @@ class Database:
                 ("sub_plan_stage_outcomes", "source_version_id", "sub_plan_versions", "id", "RESTRICT"),
                 ("sub_plan_stage_outcomes", "stage_id", "sub_plan_stages", "id", "RESTRICT"),
                 ("production_task_attempts", "task_id", "production_tasks", "id", "CASCADE"),
+                ("strategy_step_condition_reviews", "stage_id", "sub_plan_stages", "id", "RESTRICT"),
             }
             actual_foreign_keys = set()
             for table_name in existing:
@@ -826,6 +861,9 @@ class Database:
                     "completion_criteria": "TEXT", "effect_evaluation": "TEXT",
                     "entry_condition": "TEXT", "entry_condition_met": "INTEGER",
                     "dependencies_json": "TEXT",
+                    "business_completion_required": "INTEGER",
+                    "business_completion_status": "TEXT",
+                    "effect_required": "INTEGER", "effect_status": "TEXT",
                 },
                 "content_review_events": {
                     "id": "INTEGER", "content_id": "TEXT", "draft_id": "TEXT",
@@ -878,6 +916,11 @@ class Database:
                     "status": "TEXT", "worker_id": "TEXT", "started_at": "TEXT",
                     "finished_at": "TEXT", "error_code": "TEXT",
                     "error_message": "TEXT", "output_content_id": "TEXT",
+                },
+                "strategy_step_condition_reviews": {
+                    "id": "INTEGER", "stage_id": "INTEGER", "condition_type": "TEXT",
+                    "decision": "TEXT", "reason": "TEXT", "evidence_json": "TEXT",
+                    "reviewed_by": "TEXT", "created_at": "TEXT",
                 },
             }
             missing_columns = []
@@ -933,6 +976,10 @@ class Database:
                 "production_task_attempts": {
                     "task_id", "attempt_no", "status", "started_at",
                 },
+                "strategy_step_condition_reviews": {
+                    "stage_id", "condition_type", "decision", "reason",
+                    "evidence_json", "reviewed_by", "created_at",
+                },
             }
             nullable_mismatches = []
             for table_name, required_columns in expected_not_null_columns.items():
@@ -961,6 +1008,9 @@ class Database:
                     "completion_criteria": "''", "effect_evaluation": "''",
                     "entry_condition": "''", "entry_condition_met": "1",
                     "dependencies_json": "'[]'",
+                    "business_completion_required": "0",
+                    "business_completion_status": "'not_required'",
+                    "effect_required": "0", "effect_status": "'not_required'",
                 },
                 "content_review_events": {"actor": "'web-ui'", "reason": "''"},
                 "strategy_effect_reviews": {
@@ -1002,7 +1052,13 @@ class Database:
                     "publish_time_source IN ('confirmation_time','user_supplied')",
                     "review_status IN ('pending','approved','rejected')",
                 ),
-                "sub_plan_stages": ("entry_condition_met IN (0,1)",),
+                "sub_plan_stages": (
+                    "entry_condition_met IN (0,1)",
+                    "business_completion_required IN (0,1)",
+                    "business_completion_status IN ('not_required','pending','passed','failed','needs_review')",
+                    "effect_required IN (0,1)",
+                    "effect_status IN ('not_required','pending','passed','failed','needs_review')",
+                ),
                 "production_tasks": (
                     "status IN ('pending','running','succeeded','failed','cancelled')",
                     "task_ordinal > 0", "attempt_count >= 0", "max_attempts > 0",
@@ -1011,6 +1067,10 @@ class Database:
                 "production_task_attempts": (
                     "attempt_no > 0",
                     "status IN ('running','succeeded','failed','cancelled','abandoned')",
+                ),
+                "strategy_step_condition_reviews": (
+                    "condition_type IN ('business','effect')",
+                    "decision IN ('passed','failed','needs_review')",
                 ),
                 "production_lines": (
                     "status IN ('draft','active','paused','completed','cancelled','archived')",
@@ -1048,6 +1108,82 @@ class Database:
             result["foreign_key_violations"] = [
                 tuple(row) for row in conn.execute("PRAGMA foreign_key_check").fetchall()
             ]
+
+            # Application-level checks are not enough for historical rows or direct SQL.
+            # Surface cross-table provenance damage even when no physical FK exists.
+            relationship_violations = {}
+            required_relationship_tables = {
+                "production_tasks", "production_lines", "production_line_versions",
+                "spiral_rounds", "sub_plans", "sub_plan_versions",
+                "sub_plan_stages", "contents",
+            }
+            if required_relationship_tables.issubset(existing):
+                checks = {
+                    "production_task_round_provenance": """
+                        SELECT COUNT(*) FROM production_tasks t
+                        LEFT JOIN spiral_rounds r ON r.id=t.round_id
+                        LEFT JOIN sub_plans p ON p.id=t.sub_plan_id
+                        LEFT JOIN sub_plan_stages s
+                          ON s.id=r.sub_plan_stage_id
+                         AND s.sub_plan_version_id=r.sub_plan_version_id
+                        WHERE r.id IS NULL OR p.id IS NULL
+                           OR r.master_plan_version_id!=t.master_plan_version_id
+                           OR r.sub_plan_id!=t.sub_plan_id
+                           OR r.sub_plan_version_id!=t.sub_plan_version_id
+                           OR s.stage_key IS NOT t.strategy_step_id
+                           OR p.platform!=t.platform
+                           OR r.production_line_version_id IS NOT t.production_line_version_id
+                    """,
+                    "production_task_content_links": """
+                        SELECT COUNT(*) FROM production_tasks t
+                        LEFT JOIN contents c ON c.id=t.content_id
+                        WHERE t.content_id IS NOT NULL
+                          AND (c.id IS NULL OR c.production_task_id IS NOT t.id
+                               OR c.round_id!=t.round_id OR c.platform!=t.platform)
+                    """,
+                    "content_task_links": """
+                        SELECT COUNT(*) FROM contents c
+                        LEFT JOIN production_tasks t ON t.id=c.production_task_id
+                        WHERE c.production_task_id IS NOT NULL
+                          AND (t.id IS NULL OR t.content_id IS NOT c.id
+                               OR t.round_id!=c.round_id OR t.platform!=c.platform)
+                    """,
+                    "production_task_line_versions": """
+                        SELECT COUNT(*) FROM production_tasks t
+                        LEFT JOIN production_line_versions v ON v.id=t.production_line_version_id
+                        LEFT JOIN production_lines l ON l.id=v.production_line_id
+                        LEFT JOIN sub_plan_versions sv ON sv.id=v.sub_plan_version_id
+                        WHERE t.production_line_version_id IS NOT NULL
+                          AND (v.id IS NULL OR l.id IS NULL OR sv.id IS NULL
+                               OR l.sub_plan_id!=t.sub_plan_id
+                               OR sv.sub_plan_id!=t.sub_plan_id
+                               OR v.sub_plan_version_id!=t.sub_plan_version_id)
+                    """,
+                    "production_line_current_versions": """
+                        SELECT COUNT(*) FROM production_lines l
+                        LEFT JOIN production_line_versions v ON v.id=l.current_version_id
+                        LEFT JOIN sub_plan_versions sv ON sv.id=v.sub_plan_version_id
+                        WHERE l.current_version_id IS NOT NULL
+                          AND (v.id IS NULL OR sv.id IS NULL
+                               OR v.production_line_id!=l.id
+                               OR sv.sub_plan_id!=l.sub_plan_id)
+                    """,
+                    "production_line_version_subplans": """
+                        SELECT COUNT(*) FROM production_line_versions v
+                        LEFT JOIN production_lines l ON l.id=v.production_line_id
+                        LEFT JOIN sub_plan_versions sv ON sv.id=v.sub_plan_version_id
+                        WHERE l.id IS NULL OR sv.id IS NULL OR l.sub_plan_id!=sv.sub_plan_id
+                    """,
+                    "production_line_version_base_identity": """
+                        SELECT COUNT(*) FROM production_line_versions v
+                        LEFT JOIN production_line_versions parent ON parent.id=v.based_on_version_id
+                        WHERE v.based_on_version_id IS NOT NULL
+                          AND (parent.id IS NULL OR parent.production_line_id!=v.production_line_id)
+                    """,
+                }
+                for name, sql in checks.items():
+                    relationship_violations[name] = int(conn.execute(sql).fetchone()[0])
+            result["relationship_violations"] = relationship_violations
             integrity_mode = "integrity_check" if full_integrity else "quick_check"
             integrity = conn.execute(f"PRAGMA {integrity_mode}").fetchone()
             result["integrity_check"] = integrity[0] if integrity else "no result"
