@@ -74,6 +74,7 @@ from src.api.response_utils import (
 from src.api.notify_rules import NotifyRuleRequest, build_notify_rules_router  # noqa: F401
 from src.api.hot_sources import build_hot_sources_router
 from src.api.audit_queries import build_audit_query_router
+from src.api.tenant_skills import build_tenant_skills_router
 from src.api.platform_progress import build_platform_progress_router
 from src.api.tenant_settings import build_tenant_settings_router
 from src.api.action_items import build_action_items_router
@@ -8984,6 +8985,7 @@ def _register_routes(app: FastAPI) -> None:
     # ============================================================
 
     app.include_router(build_audit_query_router(_g))
+    app.include_router(build_tenant_skills_router(_g))
 
     # ============================================================
     # 账号管理（扫码登录四平台 — 直接调 Easel publish.py login）
