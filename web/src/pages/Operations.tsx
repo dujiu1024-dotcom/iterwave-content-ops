@@ -779,11 +779,25 @@ function BreakerPane({
                 <span className={`tag ${broken ? "red" : "green"}`}>{broken ? "! 熔断中" : "✓ 正常"}</span>
               </div>
               {evt && (
-                <div style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.7 }}>
-                  触发：{evt.reason}<br />
-                  检测：{new Date(evt.detected_at).toLocaleString("zh-CN")}<br />
-                  {evt.cooldown_until && <>冷却到期：{new Date(evt.cooldown_until).toLocaleString("zh-CN")}</>}
-                </div>
+                <>
+                  <div style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.7 }}>
+                    触发：{evt.reason_label ?? evt.reason}
+                    <span style={{ opacity: .6 }}>（{evt.reason}）</span><br />
+                    检测：{new Date(evt.detected_at).toLocaleString("zh-CN")}<br />
+                    {evt.cooldown_until && (
+                      <>冷却到期：{new Date(evt.cooldown_until).toLocaleString("zh-CN")}
+                        {evt.cooldown_expired
+                          ? <span className="tag green" style={{ marginLeft: 6 }}>已到期</span>
+                          : <span className="tag orange" style={{ marginLeft: 6 }}>冷却中</span>}
+                      </>
+                    )}
+                  </div>
+                  {evt.guidance && (
+                    <div className="note" style={{ marginTop: 8, fontSize: 11, lineHeight: 1.6 }}>
+                      处理建议：{evt.guidance}
+                    </div>
+                  )}
+                </>
               )}
               <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
                 <button className="btn sm" onClick={() => onRecover(p)}>3 步恢复</button>
@@ -810,7 +824,7 @@ function BreakerPane({
                 <tr key={e.id}>
                   <td style={{ fontSize: 12, color: "var(--muted)" }}>{new Date(e.detected_at).toLocaleString("zh-CN")}</td>
                   <td>{e.platform}</td>
-                  <td><span className="tag orange">{e.reason}</span></td>
+                  <td><span className="tag orange">{e.reason_label ?? e.reason}</span></td>
                   <td>{e.resolved_at ? <span className="tag green">已恢复</span> : <span className="tag red">熔断中</span>}</td>
                 </tr>
               ))}

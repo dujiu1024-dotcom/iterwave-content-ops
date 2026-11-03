@@ -122,6 +122,47 @@ class CircuitBreakerReason(str, Enum):
     DEVICE_VERIFY = "device_verify"
 
 
+# 熔断原因的中文名与处理建议：通知、待办事项、熔断面板共用一处，避免各处只显示英文枚举。
+CIRCUIT_REASON_LABELS: dict[str, str] = {
+    CircuitBreakerReason.CAPTCHA.value: "出现人机验证",
+    CircuitBreakerReason.RATE_LIMIT.value: "操作被限流",
+    CircuitBreakerReason.LOGIN_EXPIRED.value: "登录态失效",
+    CircuitBreakerReason.ACTION_BLOCKED.value: "操作被平台拦截",
+    CircuitBreakerReason.DEVICE_VERIFY.value: "需要设备验证",
+}
+
+CIRCUIT_REASON_GUIDANCE: dict[str, str] = {
+    CircuitBreakerReason.CAPTCHA.value: (
+        "在平台后台手动完成验证码，冷却到期后再点「3 步恢复」；恢复后先降低当天操作量。"
+    ),
+    CircuitBreakerReason.RATE_LIMIT.value: (
+        "保持冷却，期间不要重复操作；到期后点「3 步恢复」，并下调当前节奏控制器配额。"
+    ),
+    CircuitBreakerReason.LOGIN_EXPIRED.value: (
+        "到「账号与登录」页对该平台点「重新扫码」登录；登录成功后，冷却到期再点「3 步恢复」。"
+    ),
+    CircuitBreakerReason.ACTION_BLOCKED.value: (
+        "暂停该平台写操作；冷却到期后点「3 步恢复」，若仍失败则延长冷却并人工检查账号状态。"
+    ),
+    CircuitBreakerReason.DEVICE_VERIFY.value: (
+        "在常用设备/常用网络完成平台验证；冷却到期后点「3 步恢复」。"
+    ),
+}
+
+
+def circuit_reason_label(reason: str) -> str:
+    """把熔断原因枚举转成用户能看懂的中文；未知值原样返回，不伪造解释。"""
+    return CIRCUIT_REASON_LABELS.get(str(reason), str(reason))
+
+
+def circuit_reason_guidance(reason: str) -> str:
+    """返回该熔断原因的处理建议；未知原因给通用指引。"""
+    return CIRCUIT_REASON_GUIDANCE.get(
+        str(reason),
+        "冷却到期后点「3 步恢复」；仍然失败请手动检查该平台账号状态与登录态。",
+    )
+
+
 # =====================================================================
 # 数据模型（全部 Optional[int] = None，R3 NULL ≠ 0）
 # =====================================================================

@@ -7,6 +7,8 @@ from typing import Callable
 
 from fastapi import APIRouter
 
+from src.adapters.base import circuit_reason_guidance, circuit_reason_label
+
 
 def build_action_items_router(
     get_context: Callable[[], dict],
@@ -103,15 +105,17 @@ def build_action_items_router(
             (now.isoformat(),),
         ).fetchall()
         for row in cb_rows:
+            label = circuit_reason_label(row["reason"])
+            guidance = circuit_reason_guidance(row["reason"])
             items.append({
                 "id": f"cb:{row['id']}",
                 "type": "circuit_recover",
                 "title": (
                     f"{platform_name(row['platform'])} 熔断冷却已到期"
-                    f"（原因：{row['reason']}），需执行 3 步恢复验证"
+                    f"（原因：{label}），需执行 3 步恢复验证"
                 ),
                 "platform": row["platform"],
-                "detail": f"冷却到期于 {row['cooldown_until'][:16]}",
+                "detail": f"处理建议：{guidance}（冷却到期于 {row['cooldown_until'][:16]}）",
                 "priority": "high",
                 "source": "circuit_breaker",
                 "created_at": row["detected_at"],
@@ -128,14 +132,17 @@ def build_action_items_router(
             (now.isoformat(),),
         ).fetchall()
         for row in active_rows:
+            label = circuit_reason_label(row["reason"])
+            guidance = circuit_reason_guidance(row["reason"])
             items.append({
                 "id": f"cb2:{row['id']}",
                 "type": "circuit_active",
                 "title": (
-                    f"{platform_name(row['platform'])} 熔断中（原因：{row['reason']}），"
+                    f"{platform_name(row['platform'])} 熔断中（原因：{label}），"
                     f"冷却至 {row['cooldown_until'][:16] if row['cooldown_until'] else '—'}"
                 ),
                 "platform": row["platform"],
+                "detail": f"处理建议：{guidance}",
                 "priority": "medium",
                 "source": "circuit_breaker",
                 "created_at": row["detected_at"],

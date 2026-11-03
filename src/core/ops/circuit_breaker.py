@@ -21,7 +21,13 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
-from ...adapters.base import Platform, PlatformAdapter, CircuitBreakerReason
+from ...adapters.base import (
+    CircuitBreakerReason,
+    Platform,
+    PlatformAdapter,
+    circuit_reason_guidance,
+    circuit_reason_label,
+)
 
 from ..timezone import business_now
 
@@ -89,10 +95,12 @@ class CircuitBreakerEngine:
         from ..notify import get_active as _get_notifier
         notifier = _get_notifier()
         if notifier is not None:
+            label = circuit_reason_label(reason.value)
+            guidance = circuit_reason_guidance(reason.value)
             notifier.emit(
                 "circuit_broken",
-                f"{platform.display_name} 触发熔断：{reason.value}，"
-                f"冷却至 {cooldown_until.strftime('%H:%M')}",
+                f"{platform.display_name} 触发熔断：{label}（{reason.value}），"
+                f"冷却至 {cooldown_until.strftime('%H:%M')}。处理建议：{guidance}",
                 platform=platform.value,
             )
 
