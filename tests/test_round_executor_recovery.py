@@ -485,7 +485,9 @@ def test_finalize_saved_draft_with_cancelled_sibling_still_awaits_publish(cfg, c
 
 
 
-def test_unexpected_draft_adapter_exception_is_not_persisted_verbatim(cfg, conn, seed, monkeypatch):
+def test_unexpected_draft_adapter_exception_requires_human_verification(
+    cfg, conn, seed, monkeypatch,
+):
     from src.core import login_manager
 
     monkeypatch.setattr(login_manager, "has_login_state", lambda _platform: True)
@@ -493,25 +495,49 @@ def test_unexpected_draft_adapter_exception_is_not_persisted_verbatim(cfg, conn,
     draft_id = seed.draft(
         round_id, platform="xhs", draft_status="draft_pending", fetch_status=None,
     )
+
     class BrokenAdapter:
+        def __init__(self):
+            self.calls = 0
+
         async def save_draft(self, payload):
+            self.calls += 1
             raise RuntimeError("https://internal.example/private?token=secret")
 
-    executor = _executor(cfg, conn, {Platform.XHS: BrokenAdapter()})
-    report = {
-        "drafts_failed": 0, "drafts_saved": 0, "steps": [],
-    }
+    adapter = BrokenAdapter()
+    executor = _executor(cfg, conn, {Platform.XHS: adapter})
+    report = {"drafts_failed": 0, "drafts_saved": 0, "steps": []}
+    content_id = conn.execute(
+        "SELECT content_id FROM drafts WHERE id=?", (draft_id,),
+    ).fetchone()[0]
     rows = [{
-        "content_id": conn.execute("SELECT content_id FROM drafts WHERE id=?", (draft_id,)).fetchone()[0],
-        "draft_id": draft_id, "platform": Platform.XHS, "title": "测试标题",
-        "body": "测试正文", "tags": [], "image_paths": [],
+        "content_id": content_id, "draft_id": draft_id, "platform": Platform.XHS,
+        "title": "测试标题", "body": "测试正文", "tags": [], "image_paths": [],
     }]
     asyncio.run(executor._save_all_drafts(rows, round_id, report))
 
-    stored = conn.execute("SELECT error_msg FROM drafts WHERE id=?", (draft_id,)).fetchone()[0]
-    assert "internal.example" not in stored
-    assert "secret" not in stored
-    assert "平台存草稿操作异常" in stored
+    verification = conn.execute(
+        "SELECT status, error_msg FROM draft_save_verifications WHERE draft_id=?",
+        (draft_id,),
+    ).fetchone()
+    assert verification is not None
+    assert verification["status"] == "pending_verify"
+    assert "internal.example" not in verification["error_msg"]
+    assert "secret" not in verification["error_msg"]
+    assert "结果不确定" in verification["error_msg"]
+    assert conn.execute(
+        "SELECT status FROM drafts WHERE id=?", (draft_id,),
+    ).fetchone()[0] == "draft_pending"
+    assert report["drafts_needs_human_verify"] == 1
+    assert report["drafts_failed"] == 0
+
+    try:
+        asyncio.run(executor.save_pending_drafts(round_id))
+    except ValueError as exc:
+        assert "没有待存草稿" in str(exc)
+    else:
+        raise AssertionError("adapter exception must not be retried automatically")
+    assert adapter.calls == 1
 
 
 def test_uncertain_draft_save_is_not_retried_and_remains_for_human_verification(

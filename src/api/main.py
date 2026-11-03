@@ -6675,11 +6675,17 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(409, f"AI 图片生成未启用，拒绝模板降级：{settings_reason}")
         conn.commit()
         try:
+            import hashlib
+            generation_identity = json.dumps({
+                "content_id": content_id, "title": title, "subtitle": subtitle, "body": body,
+                "settings": settings, "brand_profile": profile,
+            }, ensure_ascii=False, sort_keys=True, default=str)
             paths, pages = generate_ai_card_set(
                 title=title, subtitle=subtitle, body=body, output_dir=output_dir,
                 platform=platform, cfg=cfg, settings=settings,
                 allow_fallback=settings.get("fallback_enabled"),
                 brand_profile=profile,
+                task_id=hashlib.sha256(generation_identity.encode("utf-8")).hexdigest(),
             )
         except (ValueError, RuntimeError) as exc:
             raise HTTPException(422, f"AI 完整卡片生成或 OCR 硬门失败：{exc}") from exc

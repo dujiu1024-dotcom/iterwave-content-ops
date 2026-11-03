@@ -3053,6 +3053,52 @@ def test_global_task_queue_exposes_business_round_number_not_db_id(client, cfg, 
 
 
 
+def test_subplan_create_cleans_identity_when_initial_version_fails(client, monkeypatch):
+    from src.core.plan_version_store import PlanVersionError, PlanVersionStore
+
+    tc, conn, _ = client
+    store = PlanVersionStore(conn)
+    active = conn.execute(
+        "SELECT id,plan_snapshot FROM master_plan_versions WHERE status='effective' ORDER BY version_no DESC LIMIT 1"
+    ).fetchone()
+    if active is None:
+        plan, *_ = PlanVersionManager(api_main._g_ctx["cfg"], conn).load_plan()
+        plan["enabled_platforms"] = list(dict.fromkeys([*(plan.get("enabled_platforms") or []), "xhs"]))
+        draft = store.create_master_draft(plan)
+        active_id = store.activate_master_version(draft["id"], reviewer="test")["id"]
+    else:
+        active_id = int(active["id"])
+        snapshot = json.loads(active["plan_snapshot"])
+        if "xhs" not in (snapshot.get("enabled_platforms") or []):
+            snapshot["enabled_platforms"] = list(dict.fromkeys([*(snapshot.get("enabled_platforms") or []), "xhs"]))
+            draft = store.create_master_draft(snapshot, based_on_version_id=active_id)
+            active_id = store.activate_master_version(draft["id"], reviewer="test")["id"]
+
+    created_ids = []
+    original_create = PlanVersionStore.create_subplan
+
+    def capture_identity(self, sub_id, **kwargs):
+        result = original_create(self, sub_id, **kwargs)
+        created_ids.append(sub_id)
+        return result
+
+    def fail_first_version(self, *args, **kwargs):
+        raise PlanVersionError("模拟初始版本创建失败")
+
+    monkeypatch.setattr(PlanVersionStore, "create_subplan", capture_identity)
+    monkeypatch.setattr(PlanVersionStore, "create_subplan_version", fail_first_version)
+    response = tc.post("/api/subplans", json={
+        "master_plan_version_id": active_id,
+        "platform": "xhs",
+        "title": "补偿清理测试",
+        "snapshot": {"title": "补偿清理测试", "platform": "xhs"},
+        "stages": [{"title": "第一阶段", "direction": "测试", "target_count": 1}],
+    })
+    assert response.status_code == 409
+    assert len(created_ids) == 1
+    assert conn.execute("SELECT 1 FROM sub_plans WHERE id=?", (created_ids[0],)).fetchone() is None
+
+
 def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client):
     from src.core.plan_version_store import PlanVersionStore
 

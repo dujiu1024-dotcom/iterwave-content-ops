@@ -173,6 +173,8 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         _validate_stage_inputs(stages)
         sub_id = str(req.get("id") or ("sub_" + uuid.uuid4().hex))
         identity_created = False
+        # Keep the request-scoped connection available to the compensation branch.
+        conn = get_runtime()["conn"]
         try:
             identity = store().create_subplan(
                 sub_id, master_plan_version_id=int(master_id),

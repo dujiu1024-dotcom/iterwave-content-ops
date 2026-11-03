@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import uuid
@@ -975,6 +976,11 @@ class RoundExecutor:
                             cfg=self.cfg, settings=image_settings,
                             allow_fallback=image_settings.get("fallback_enabled"),
                             brand_profile=self._visual_brand_profile(),
+                            task_id=hashlib.sha256(json.dumps({
+                                "round_id": round_id, "platform": platform.value, "topic_id": topic.id,
+                                "title": title, "subtitle": topic.dimension, "body": body, "image_settings": image_settings,
+                                "brand_profile": self._visual_brand_profile(),
+                            }, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
                         )
                         cover_path = str(image_paths[0])
                         body_page_count = len(image_paths) - 1
@@ -1045,6 +1051,11 @@ class RoundExecutor:
                             cfg=self.cfg, settings=image_settings,
                             allow_fallback=image_settings.get("fallback_enabled"),
                             brand_profile=self._visual_brand_profile(),
+                            task_id=hashlib.sha256(json.dumps({
+                                "round_id": round_id, "platform": platform.value, "topic_id": topic.id,
+                                "title": title, "body": body, "image_settings": image_settings,
+                                "brand_profile": self._visual_brand_profile(),
+                            }, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
                         )
                         cover_path = str(image_paths[0])
                         body_page_count = len(image_paths) - 1
@@ -1316,15 +1327,30 @@ class RoundExecutor:
             )
             try:
                 result = await adapter.save_draft(payload)
-            except Exception as exc:  # noqa: BLE001 — 单篇失败不影响整轮
-                logger.exception("存草稿异常 platform=%s", platform.value)
-                report["drafts_failed"] += 1
-                safe_error = "平台存草稿操作异常，请检查登录状态、网络连接或平台页面后重试"
-                self._mark_draft_failed(row["draft_id"], safe_error)
-                self._notify_failed(
-                    platform, row["title"], safe_error,
-                    draft_id=row["draft_id"], round_id=round_id,
+            except Exception:  # noqa: BLE001 — 调用期间异常时，平台侧结果可能不确定
+                logger.exception("存草稿调用异常，转人工核实 platform=%s draft=%s",
+                                 platform.value, row["draft_id"])
+                # 即使适配器抛出异常，也不能推断平台未保存：请求可能已到达平台，
+                # 仅确认响应在本地丢失。保留 draft_pending 并阻止自动重试，避免重复草稿。
+                from src.core.timezone import storage_now
+                safe_error = "平台存草稿调用异常，保存结果不确定；请先到平台草稿箱核实，确认未保存后再恢复"
+                self.conn.execute(
+                    "INSERT INTO draft_save_verifications "
+                    "(draft_id, status, attempted_at, platform_draft_id, error_msg) "
+                    "VALUES (?, 'pending_verify', ?, NULL, ?) "
+                    "ON CONFLICT(draft_id) DO UPDATE SET "
+                    "status='pending_verify', attempted_at=excluded.attempted_at, "
+                    "verified_at=NULL, platform_draft_id=NULL, error_msg=excluded.error_msg, note=NULL",
+                    (row["draft_id"], storage_now().isoformat(timespec="seconds"), safe_error),
                 )
+                self.conn.commit()
+                report.setdefault("drafts_needs_human_verify", 0)
+                report["drafts_needs_human_verify"] += 1
+                if self.notifier:
+                    self.notifier.emit(
+                        "needs_human_verify",
+                        f"{platform.display_name} 存草稿结果不确定（需人工核实）：{row['title'][:30]}",
+                    )
                 continue
 
             if result.success:

@@ -237,6 +237,29 @@ def _decode_payload(payload, cfg) -> tuple[bytes, str, str, int, int]:
     return raw, mime_type, suffix, width, height
 
 
+def _bounded_post(client: httpx.Client, url: str, *, max_bytes: int, **kwargs) -> httpx.Response:
+    """Read an image-provider response incrementally and stop before buffering an oversized body."""
+    with client.stream("POST", url, **kwargs) as streamed:
+        declared = streamed.headers.get("content-length")
+        if declared:
+            try:
+                if int(declared) > max_bytes:
+                    raise ImageGenerationError("图片服务响应 JSON 超过允许大小")
+            except ValueError:
+                pass
+        body = bytearray()
+        for chunk in streamed.iter_bytes():
+            if len(body) + len(chunk) > max_bytes:
+                raise ImageGenerationError("图片服务响应 JSON 超过允许大小")
+            body.extend(chunk)
+        return httpx.Response(
+            status_code=streamed.status_code,
+            headers=streamed.headers,
+            content=bytes(body),
+            request=streamed.request,
+        )
+
+
 def _request_endpoint(
     endpoint: _ImageEndpoint,
     prompt: str,
@@ -250,6 +273,8 @@ def _request_endpoint(
     policy = cfg.media_generation
     timeout_seconds = int(getattr(policy, "timeout_seconds", 150))
     connect_timeout = int(getattr(policy, "connect_timeout_seconds", 15))
+    max_response_bytes = int(getattr(policy, "max_response_bytes", 20 * 1024 * 1024))
+    max_encoded_bytes = ((max_response_bytes + 2) // 3) * 4 + 1024 * 1024
     headers = {"Authorization": f"Bearer {endpoint.api_key}"}
     sensenova = _is_sensenova(endpoint)
     data: dict = {"model": endpoint.model, "prompt": prompt, "size": size, "n": 1}
@@ -271,8 +296,9 @@ def _request_endpoint(
                         "response_format": "b64_json",
                         "images": [{"image_url": data_url}],
                     }
-                    response = client.post(
-                        endpoint.base_url + "/images/edits", headers=headers, json=body
+                    response = _bounded_post(
+                        client, endpoint.base_url + "/images/edits",
+                        max_bytes=max_encoded_bytes, headers=headers, json=body,
                     )
                 else:
                     files = {
@@ -282,21 +308,27 @@ def _request_endpoint(
                             source_mime_type or "application/octet-stream",
                         )
                     }
-                    response = client.post(
-                        endpoint.base_url + "/images/edits",
+                    response = _bounded_post(
+                        client, endpoint.base_url + "/images/edits",
+                        max_bytes=max_encoded_bytes,
                         headers=headers,
                         data={key: str(value) for key, value in data.items()},
                         files=files,
                     )
             else:
                 # 显式要求 base64 响应（部分供应商默认返回临时 URL，本适配器只接受 b64_json）
-                response = client.post(
-                    endpoint.base_url + "/images/generations",
+                response = _bounded_post(
+                    client, endpoint.base_url + "/images/generations",
+                    max_bytes=max_encoded_bytes,
                     headers=headers,
                     json={**data, "response_format": "b64_json"},
                 )
         if response.status_code >= 400:
             raise ImageGenerationError(_error_message(response))
+        max_response_bytes = int(getattr(policy, "max_response_bytes", 20 * 1024 * 1024))
+        max_encoded_bytes = ((max_response_bytes + 2) // 3) * 4 + 1024 * 1024
+        if len(response.content) > max_encoded_bytes:
+            raise ImageGenerationError("图片服务响应 JSON 超过允许大小")
         payload = response.json()
     except ImageGenerationError:
         raise

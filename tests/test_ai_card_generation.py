@@ -1,3 +1,5 @@
+import sqlite3
+
 import pytest
 
 from src.core import ai_card_generation as cards
@@ -7,6 +9,35 @@ class _Cfg:
     class media_generation:
         max_dimension = 20000
         max_pixels = 40_000_000
+
+    def __init__(self, tmp_path):
+        db_path = tmp_path / "visual.db"
+        conn = sqlite3.connect(db_path)
+        conn.executescript("""
+            CREATE TABLE visual_generation_tasks (
+                task_id TEXT PRIMARY KEY, account_group TEXT NOT NULL, status TEXT NOT NULL,
+                owner TEXT, lease_expires_at REAL, started_at REAL, heartbeat_at REAL,
+                finished_at REAL, error TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL
+            );
+            CREATE TABLE visual_generation_pages (
+                task_id TEXT NOT NULL, page_index INTEGER NOT NULL, status TEXT NOT NULL,
+                output_path TEXT, attempts INTEGER NOT NULL DEFAULT 0, error TEXT,
+                updated_at REAL NOT NULL, PRIMARY KEY(task_id, page_index)
+            );
+            CREATE TABLE visual_generation_task_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL,
+                from_status TEXT, to_status TEXT NOT NULL, reason TEXT, created_at REAL NOT NULL
+            );
+            CREATE TABLE visual_generation_account_leases (
+                account_group TEXT PRIMARY KEY, task_id TEXT NOT NULL,
+                owner TEXT NOT NULL, expires_at REAL NOT NULL, updated_at REAL NOT NULL
+            );
+        """)
+        conn.close()
+        self.paths = type("Paths", (), {"db_file": str(db_path)})()
+        self.platforms = type("Platforms", (), {
+            "xhs": type("Account", (), {"account_key": "test-account"})()
+        })()
 
 
 def test_ai_card_generation_calls_image_api_for_cover_and_every_body_page(monkeypatch, tmp_path):
@@ -21,7 +52,7 @@ def test_ai_card_generation_calls_image_api_for_cover_and_every_body_page(monkey
     paths, pages = cards.generate_ai_card_set(
         title="测试标题", subtitle="运营", body="第一条内容。第二条内容。",
         output_dir=tmp_path, platform=type("P", (), {"value": "xhs"})(),
-        cfg=_Cfg(), settings={"model": "image-model", "size": "1024x1536"},
+        cfg=_Cfg(tmp_path), settings={"model": "image-model", "size": "1024x1536"},
     )
     assert len(paths) == len(calls) == len(pages) + 1
     assert "完整、可发布" in calls[0]
@@ -42,7 +73,7 @@ def test_ai_card_generation_fails_closed_when_ocr_does_not_pass(monkeypatch, tmp
         cards.generate_ai_card_set(
             title="标题", subtitle="栏目", body="正文内容。",
             output_dir=tmp_path, platform=type("P", (), {"value": "xhs"})(),
-            cfg=_Cfg(), settings={"model": "image-model", "size": "1024x1536"},
+            cfg=_Cfg(tmp_path), settings={"model": "image-model", "size": "1024x1536"},
         )
 
 
@@ -71,7 +102,7 @@ def test_ai_card_generation_reuses_compatible_validated_pages(monkeypatch, tmp_p
     kwargs = dict(
         title="测试标题", subtitle="运营", body="第一条内容。第二条内容。",
         output_dir=tmp_path, platform=type("P", (), {"value": "xhs"})(),
-        cfg=_Cfg(), settings={"model": "image-model", "size": "1024x1536"},
+        cfg=_Cfg(tmp_path), settings={"model": "image-model", "size": "1024x1536"},
     )
     first_paths, _ = cards.generate_ai_card_set(**kwargs)
     first_call_count = len(calls)
@@ -103,7 +134,7 @@ def test_ai_card_generation_cleans_staging_after_group_failure(monkeypatch, tmp_
         cards.generate_ai_card_set(
             title="标题", subtitle="栏目", body="正文内容。",
             output_dir=tmp_path, platform=type("P", (), {"value": "xhs"})(),
-            cfg=_Cfg(), settings={"model": "image-model", "size": "1024x1536"},
+            cfg=_Cfg(tmp_path), settings={"model": "image-model", "size": "1024x1536"},
         )
     assert staging_root.exists()
     assert list(staging_root.iterdir()) == [other_task]
@@ -130,10 +161,38 @@ def test_ai_card_generation_regenerates_corrupt_cached_page(monkeypatch, tmp_pat
     kwargs = dict(
         title="测试标题", subtitle="运营", body="第一条内容。",
         output_dir=tmp_path, platform=type("P", (), {"value": "xhs"})(),
-        cfg=_Cfg(), settings={"model": "image-model", "size": "1024x1536"},
+        cfg=_Cfg(tmp_path), settings={"model": "image-model", "size": "1024x1536"},
     )
     cards.generate_ai_card_set(**kwargs)
     cached_image = next((tmp_path / "media" / "validated").glob("*/image.png"))
     cached_image.write_bytes(b"corrupt-cache")
     cards.generate_ai_card_set(**kwargs)
     assert len(calls) == 3
+
+
+def test_ai_card_generation_reuses_completed_pages_on_retry(monkeypatch, tmp_path):
+    from io import BytesIO
+    from PIL import Image
+
+    image_buffer = BytesIO()
+    Image.new("RGB", (1024, 1536), "white").save(image_buffer, format="PNG")
+    image_bytes = image_buffer.getvalue()
+    calls = []
+    monkeypatch.setattr(cards, "generate_image_bytes", lambda prompt, **kwargs: (
+        calls.append(prompt) or (image_bytes, "image/png", ".png", 1024, 1536)
+    ))
+    monkeypatch.setattr(
+        "src.core.visual_ocr.validate_rendered_pages",
+        lambda images, expected, report, **kwargs: {"status": "passed", "gate": "passed"},
+    )
+    kwargs = dict(
+        title="稳定任务", subtitle="运营", body="第一页内容。第二页内容。",
+        output_dir=tmp_path, platform=type("P", (), {"value": "xhs"})(),
+        cfg=_Cfg(tmp_path), settings={"model": "image-model", "size": "1024x1536"},
+        task_id="stable-task-id", account_group="test-account",
+    )
+    first, _ = cards.generate_ai_card_set(**kwargs)
+    call_count = len(calls)
+    second, _ = cards.generate_ai_card_set(**kwargs)
+    assert len(calls) == call_count
+    assert [p.read_bytes() for p in first] == [p.read_bytes() for p in second]
