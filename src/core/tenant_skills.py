@@ -45,7 +45,7 @@ def validate_manifest(manifest: dict) -> dict:
     if not isinstance(instructions, str) or len(instructions) > 16000:
         errors.append({"field": "instructions", "code": "length", "message": "指令必须为字符串且最多 16000 字符"})
     permissions = manifest.get("permissions", [])
-    if not isinstance(permissions, list) or any(p not in _ALLOWED_PERMISSIONS for p in permissions):
+    if not isinstance(permissions, list) or any(not isinstance(p, str) or p not in _ALLOWED_PERMISSIONS for p in permissions):
         errors.append({"field": "permissions", "code": "denied", "message": "权限包含未支持或高风险能力；默认拒绝"})
     for key in ("inputs", "outputs", "config"):
         if key in manifest and not isinstance(manifest[key], (dict, list)):

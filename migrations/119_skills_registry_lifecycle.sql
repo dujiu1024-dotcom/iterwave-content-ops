@@ -11,8 +11,7 @@ CREATE TABLE IF NOT EXISTS tenant_skill_versions (
   manifest_json TEXT NOT NULL,
   content_sha256 TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  UNIQUE(skill_id, version),
-  FOREIGN KEY(skill_id) REFERENCES tenant_skill_registry(skill_id) ON DELETE CASCADE
+  UNIQUE(skill_id, version)
 );
 CREATE TABLE IF NOT EXISTS tenant_skill_audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
