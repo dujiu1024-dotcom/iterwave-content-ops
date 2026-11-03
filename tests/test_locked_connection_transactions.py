@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.core.db import Database, LockedConnection
+from src.api import main as api_main
 
 
 def test_unrelated_thread_cannot_commit_another_threads_partial_write():
@@ -353,7 +354,7 @@ def test_connection_transaction_supports_raw_sqlite_connection():
 def test_abandoned_worker_transaction_is_rolled_back_and_lock_recovered(tmp_path):
     import threading
 
-    conn = _locked(sqlite3.connect(tmp_path / "abandoned.db", check_same_thread=False))
+    conn = LockedConnection(sqlite3.connect(tmp_path / "abandoned.db", check_same_thread=False))
     conn.execute("CREATE TABLE t (v INTEGER)")
     conn.commit()
     finished = threading.Event()
@@ -390,7 +391,7 @@ def test_transactional_route_respects_own_transaction_marker():
 
 def test_sync_get_endpoint_finalizer_rolls_back_implicit_write(tmp_path):
     raw = sqlite3.connect(tmp_path / "get-write.db", check_same_thread=False)
-    conn = _locked(raw)
+    conn = LockedConnection(raw)
     conn.execute("CREATE TABLE t (v INTEGER)")
     conn.commit()
     saved = dict(api_main._g_ctx)
