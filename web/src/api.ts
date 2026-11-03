@@ -7,6 +7,35 @@ export { clientErrorMessage } from "./api-error";
 export type Platform = _Platform;
 export { platformMeta, PLATFORM_META, ALL_PLATFORMS } from "./platforms";
 
+export interface ProductionMonitorRound {
+  id: number; round_number: number; status: string; created_at: string | null;
+  trigger_source?: string; plan_attribution_status?: string;
+}
+export interface ProductionMonitorStage {
+  id: number; title: string; status: string; stage_order: number; direction?: string; completion_condition?: string; notes?: string;
+  target_count: number; round_count: number; production_task_count: number; production_task_status_counts: Record<string, number>;
+  content_count: number; draft_count: number; review_pending_count: number;
+  review_approved_count: number; review_rejected_count: number; published_count: number; failed_draft_count: number;
+  metric_record_count: number; dependencies?: string[]; dependencies_available?: boolean; round_status_counts: Record<string, number>;
+  rounds: ProductionMonitorRound[];
+  contents: Array<{ id: string; title: string; platform: Platform; created_at: string | null; draft_count: number; draft_statuses: string | null; review_rejected: number }>;
+}
+export interface ProductionMonitorSubplan {
+  id: string; platform: Platform; title: string; status: string;
+  version_no: number | null; stages: ProductionMonitorStage[];
+  stage_count: number; round_count: number;
+}
+export interface ProductionMonitorResponse {
+  master_plan: { id: number; version_no: number; status: string; created_at: string; effective_at: string | null } | null;
+  platforms: ProductionMonitorSubplan[];
+  totals: Record<string, number> & { content_progress_percent: number | null };
+  effect_summary: { views: number | null; likes: number | null; collects: number | null; comments: number | null; shares: number | null; new_followers: number | null };
+  consistency_checks: Array<{ code: string; severity: string; count?: number; round_id?: number; stage_id?: number; message: string }>;
+  generated_at: string;
+  data_scope: string;
+  limitations: { production_task_source: string; task_model_available: boolean; legacy_task_run_fallback: boolean; metric_records_source: string; published_definition: string };
+}
+
 export interface RecoveryInfo {
   interrupted_tasks: number;
   requeued_data_fetch: string[];
@@ -2063,6 +2092,7 @@ export const api = {
     fetchJson<{ plan_id: string; round_id: number; task_id: string; status: string; queued: boolean }>(
       `/api/content-plans/${id}/start`, { method: "POST" },
     ),
+  productionMonitor: () => fetchJson<ProductionMonitorResponse>("/api/production-monitor"),
   globalOperationsSummary: (days = 30) => fetchJson<GlobalMonitorResponse>(`/api/global-monitor?days=${days}`),
   todos: (page = 1, pageSize = 20, tenantId?: string, source?: GlobalTodoItem["source"]) => {
     const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
