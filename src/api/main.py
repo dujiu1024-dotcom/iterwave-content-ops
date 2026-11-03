@@ -124,6 +124,7 @@ class TransactionalAPIRoute(APIRoute):
             use_request_transaction = (
                 methods.intersection({"POST", "PUT", "PATCH", "DELETE"})
                 and not inspect.iscoroutinefunction(original)
+                and not getattr(original, "_manages_own_transaction", False)
             )
             if inspect.iscoroutinefunction(original):
                 async def safe_async_endpoint(*args, **call_kwargs):
