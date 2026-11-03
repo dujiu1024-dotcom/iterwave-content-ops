@@ -427,6 +427,8 @@ class DraftSaver:
           ⚠️ 按钮点了但无成功证据 → needs_human_verify=True（R17）
           ❌ 明确失败（登录态 / 熔断 / 图片数量不符 / 按钮未找到）→ success=False
         """
+        save_attempt_started = False
+        draft_id = None
         try:
             # UI 白名单之外再加一层请求级防线（BrowserContext 级）；安装失败时 fail closed。
             await _install_publish_network_guard(page)
@@ -525,6 +527,9 @@ class DraftSaver:
             initial_draft_count = await self._draft_count(page)
 
             # 7. ⚠️ 存草稿（只点 save_draft_button，严禁点 _publish_button_audit_only！）
+            # 从第一次尝试触发保存按钮开始，后续未分类异常都可能发生在平台已接收操作之后。
+            # 保守记为不确定状态，避免把可能已保存的草稿标为 failed 并自动重复提交。
+            save_attempt_started = True
             save_ok = await self._click_save_draft_button(page, self.selectors["save_draft_button"])
             if not save_ok:
                 logger.warning("存草稿按钮未找到，尝试兜底 ...")
@@ -582,8 +587,23 @@ class DraftSaver:
             )
 
         except Exception as exc:
-            logger.exception("❌ 平台 %s 存草稿失败: %s", self.platform, exc)
-            return DraftResult(success=False, error_msg=safe_error_summary(exc, "平台存草稿失败，请检查登录状态后重试"))
+            logger.exception("❌ 平台 %s 存草稿流程异常: %s", self.platform, exc)
+            safe_error = safe_error_summary(exc, "平台存草稿操作异常")
+            if save_attempt_started:
+                return DraftResult(
+                    success=False,
+                    needs_human_verify=True,
+                    platform_draft_id=draft_id,
+                    platform_draft_id_missing=(draft_id is None),
+                    error_msg=(
+                        "存草稿操作已开始但流程异常，平台是否已保存无法确认；"
+                        "已暂停自动重试，请人工核实平台草稿箱。"
+                    ),
+                )
+            return DraftResult(
+                success=False,
+                error_msg=safe_error_summary(exc, "平台存草稿失败，请检查登录状态后重试"),
+            )
 
     # ------------------------------------------------------------------
     # 内部辅助
@@ -968,15 +988,38 @@ class DraftSaver:
             frame = await self._wechat_composer_frame(page, timeout_s=8)
             if frame is None:
                 continue
-            if await self._wechat_click_save(frame):
+            try:
+                clicked = await self._wechat_click_save(frame)
+            except Exception as exc:
+                # 发生在保存按钮调用期间的异常无法证明平台没有收到点击。
+                logger.exception("视频号保存草稿点击异常，转人工核实")
+                return DraftResult(
+                    success=False,
+                    needs_human_verify=True,
+                    platform_draft_id_missing=True,
+                    uploaded_image_count=len(content.image_paths),
+                    error_msg="视频号保存草稿操作发生异常，平台是否已保存无法确认；请人工核实。",
+                )
+            if clicked:
                 save_clicked = True
                 break
             await page.wait_for_timeout(1500)
         if not save_clicked:
             return DraftResult(success=False, error_msg="未找到「保存草稿」按钮")
 
-        await page.wait_for_timeout(3000)
-        evidence = await self._verify_wechat_draft(page, content.title)
+        try:
+            await page.wait_for_timeout(3000)
+            evidence = await self._verify_wechat_draft(page, content.title)
+        except Exception:
+            # 保存动作已确认触发，后续等待/核验异常一律不得降级成可自动重试的失败。
+            logger.exception("视频号保存后核验异常，转人工核实")
+            return DraftResult(
+                success=False,
+                needs_human_verify=True,
+                platform_draft_id_missing=True,
+                uploaded_image_count=len(content.image_paths),
+                error_msg="视频号已触发保存，但核验流程异常；平台是否已保存无法确认，请人工核实。",
+            )
         if evidence:
             return DraftResult(
                 success=True,
