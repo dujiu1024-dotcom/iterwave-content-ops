@@ -4515,13 +4515,25 @@ def _register_routes(app: FastAPI) -> None:
             "confirmation_note": task.retry_confirmation_note,
         }
 
-    @app.post("/api/task-queue/{task_id}/cancel")
-    def cancel_global_task(task_id: str):
+    @app.get("/api/task-queue/{task_id}/audit")
+    def list_global_task_audit(task_id: str):
         if _task_queue is None:
             raise HTTPException(503, "全局任务队列尚未初始化")
         if _task_queue.get(task_id) is None:
             raise HTTPException(404, "任务不存在")
-        if not _task_queue.cancel(task_id):
+        return {"items": _task_queue.list_admin_audit(task_id)}
+
+    @app.post("/api/task-queue/{task_id}/cancel")
+    def cancel_global_task(task_id: str, request: Request):
+        if _task_queue is None:
+            raise HTTPException(503, "全局任务队列尚未初始化")
+        if _task_queue.get(task_id) is None:
+            raise HTTPException(404, "任务不存在")
+        try:
+            cancelled = _task_queue.cancel(task_id, actor=auth.audit_actor(request))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if not cancelled:
             raise HTTPException(409, "任务已开始执行或已结束，当前不能取消")
         return {"task_id": task_id, "status": "cancelled"}
 

@@ -138,6 +138,16 @@ class GlobalTaskQueue:
                     note TEXT NOT NULL,
                     acted_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS global_task_admin_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL REFERENCES global_task_queue(task_id) ON DELETE CASCADE,
+                    action TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    acted_at TEXT NOT NULL,
+                    details_json TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE INDEX IF NOT EXISTS idx_global_task_admin_audit_task_time
+                    ON global_task_admin_audit(task_id, acted_at DESC, id DESC);
                 """
             )
             # 跨进程串行执行旧表迁移，避免多 Uvicorn worker 同时 ALTER 同一列。
@@ -486,15 +496,31 @@ class GlobalTaskQueue:
         finally:
             conn.close()
 
-    def cancel(self, task_id: str) -> bool:
+    def cancel(self, task_id: str, *, actor: str = "system") -> bool:
+        """Cancel a queued task and append its audit event in the same transaction."""
+        actor = str(actor or "").strip()
+        if not actor or len(actor) > 100:
+            raise ValueError("actor 无效")
         conn = self._connect()
         try:
+            conn.execute("BEGIN IMMEDIATE")
+            acted_at = _stamp()
             cursor = conn.execute(
                 "UPDATE global_task_queue SET status='cancelled',finished_at=? "
                 "WHERE task_id=? AND status='queued'",
-                (_stamp(), task_id),
+                (acted_at, task_id),
             )
+            if cursor.rowcount == 1:
+                conn.execute(
+                    "INSERT INTO global_task_admin_audit(task_id,action,actor,acted_at,details_json) "
+                    "VALUES(?,?,?,?,?)",
+                    (task_id, "cancel", actor, acted_at, "{}"),
+                )
+            conn.commit()
             return cursor.rowcount == 1
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -581,6 +607,30 @@ class GlobalTaskQueue:
         finally:
             conn.close()
 
+    def list_admin_audit(self, task_id: str) -> list[dict[str, Any]]:
+        """Return append-only operator actions for a task, newest first."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT id, task_id, action, actor, acted_at, details_json "
+                "FROM global_task_admin_audit WHERE task_id=? ORDER BY acted_at DESC, id DESC",
+                (task_id,),
+            ).fetchall()
+            result = []
+            for row in rows:
+                try:
+                    details = json.loads(row["details_json"] or "{}")
+                except (TypeError, ValueError):
+                    details = {}
+                result.append({
+                    "id": int(row["id"]), "task_id": row["task_id"],
+                    "action": row["action"], "actor": row["actor"],
+                    "acted_at": row["acted_at"], "details": details,
+                })
+            return result
+        finally:
+            conn.close()
+
     def resolve_failed_task(
         self, task_id: str, *, action: str, actor: str, note: str,
     ) -> tuple[dict[str, str], bool]:
@@ -616,6 +666,12 @@ class GlobalTaskQueue:
             conn.execute(
                 "INSERT INTO global_task_actions(task_id,action,actor,note,acted_at) VALUES(?,?,?,?,?)",
                 (task_id, action, actor, note, acted_at),
+            )
+            conn.execute(
+                "INSERT INTO global_task_admin_audit(task_id,action,actor,acted_at,details_json) "
+                "VALUES(?,?,?,?,?)",
+                (task_id, f"resolve_{action}", actor, acted_at,
+                 json.dumps({"note": note}, ensure_ascii=False)),
             )
             conn.commit()
             return {"action": action, "actor": actor, "note": note, "acted_at": acted_at}, True
@@ -695,6 +751,13 @@ class GlobalTaskQueue:
             row = conn.execute(
                 "SELECT * FROM global_task_queue WHERE task_id=?", (retry_id,)
             ).fetchone()
+            conn.execute(
+                "INSERT INTO global_task_admin_audit(task_id,action,actor,acted_at,details_json) "
+                "VALUES(?,?,?,?,?)",
+                (task_id, "retry", actor, now,
+                 json.dumps({"retry_task_id": retry_id, "confirmed_not_executed": True,
+                             "confirmation_note": note}, ensure_ascii=False)),
+            )
             conn.commit()
             task = self._decode(row)
             assert task is not None

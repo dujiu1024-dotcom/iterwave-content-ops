@@ -40,6 +40,15 @@ export interface GlobalTaskQueueItem {
   resolution_at?: string | null;
 }
 
+export interface GlobalTaskQueueAuditItem {
+  id: number;
+  task_id: string;
+  action: string;
+  actor: string;
+  acted_at: string;
+  details: Record<string, unknown>;
+}
+
 export interface GlobalTaskQueueDetail {
   task_id: string;
   queue_order: number;
@@ -1672,6 +1681,8 @@ export const api = {
     ),
   taskQueueDetail: (taskId: string) =>
     fetchJson<GlobalTaskQueueDetail>(`/api/task-queue/${encodeURIComponent(taskId)}`),
+  taskQueueAudit: (taskId: string) =>
+    fetchJson<{ items: GlobalTaskQueueAuditItem[] }>(`/api/task-queue/${encodeURIComponent(taskId)}/audit`),
   taskQueueSummary: (params: { dateFrom?: string; dateTo?: string; tenantId?: string; taskType?: string; status?: string } = {}) => {
     const query = new URLSearchParams();
     if (params.dateFrom) query.set("date_from", params.dateFrom);

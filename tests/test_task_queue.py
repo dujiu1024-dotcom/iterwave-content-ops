@@ -837,3 +837,44 @@ def test_dispatch_summary_can_filter_by_status(tmp_path):
     assert summary["total"] == 1
     assert summary["by_status"]["queued"] == 1
     assert summary["filters"]["status"] == "queued"
+
+
+def test_cancel_and_retry_admin_actions_are_audited(tmp_path):
+    queue = make_queue(tmp_path)
+    cancelled, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={})
+    assert queue.cancel(cancelled.task_id, actor="session:test-operator")
+    audit = queue.list_admin_audit(cancelled.task_id)
+    assert len(audit) == 1
+    assert audit[0]["action"] == "cancel"
+    assert audit[0]["actor"] == "session:test-operator"
+
+    failed, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={})
+    conn = queue._connect()
+    try:
+        conn.execute("UPDATE global_task_queue SET status='failed' WHERE task_id=?", (failed.task_id,))
+    finally:
+        conn.close()
+    retry, created = queue.retry_after_manual_verification(
+        failed.task_id, confirmed_by="session:test-operator",
+        confirmation_note="已核验平台无执行记录", confirmed_not_executed=True,
+    )
+    assert created
+    audit = queue.list_admin_audit(failed.task_id)
+    assert audit[0]["action"] == "retry"
+    assert audit[0]["actor"] == "session:test-operator"
+    assert audit[0]["details"]["retry_task_id"] == retry.task_id
+
+
+def test_resolve_action_is_recorded_in_admin_audit(tmp_path):
+    queue = make_queue(tmp_path)
+    task, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={})
+    conn = queue._connect()
+    try:
+        conn.execute("UPDATE global_task_queue SET status='failed' WHERE task_id=?", (task.task_id,))
+    finally:
+        conn.close()
+    queue.resolve_failed_task(task.task_id, action="handled", actor="session:auditor", note="已检查并修复相关配置")
+    audit = queue.list_admin_audit(task.task_id)
+    assert len(audit) == 1
+    assert audit[0]["action"] == "resolve_handled"
+    assert audit[0]["actor"] == "session:auditor"

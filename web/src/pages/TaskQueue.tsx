@@ -167,6 +167,7 @@ export default function TaskQueue() {
   const [detailTask, setDetailTask] = useState<import("../api").GlobalTaskQueueDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
+  const [detailAudit, setDetailAudit] = useState<import("../api").GlobalTaskQueueAuditItem[]>([]);
 
   const refresh = useCallback(async () => {
     try {
@@ -223,10 +224,16 @@ export default function TaskQueue() {
 
   const openDetails = async (task: GlobalTaskQueueItem) => {
     setDetailTask(null);
+    setDetailAudit([]);
     setDetailError("");
     setDetailLoading(true);
     try {
-      setDetailTask(await api.taskQueueDetail(task.task_id));
+      const [detail, audit] = await Promise.all([
+        api.taskQueueDetail(task.task_id),
+        api.taskQueueAudit(task.task_id),
+      ]);
+      setDetailTask(detail);
+      setDetailAudit(audit.items ?? []);
     } catch (err) {
       setDetailError((err as Error).message || "任务详情读取失败");
     } finally {
@@ -453,6 +460,20 @@ export default function TaskQueue() {
                   处理记录：{detailTask.resolution_action === "handled" ? "已处理" : "已忽略"} · {detailTask.resolution_actor || "操作人未知"} · {timeLabel(detailTask.resolution_at)}
                   {detailTask.resolution_note && <div>{detailTask.resolution_note}</div>}
                 </div>}
+                <section style={{ marginTop: 16 }}>
+                  <h3>操作审计</h3>
+                  {detailAudit.length ? <div className="list">
+                    {detailAudit.map((entry) => <div className="task-row" key={entry.id}>
+                      <div className="task-main">
+                        <strong>{entry.action}</strong>
+                        <div className="tiny">{entry.actor} · {timeLabel(entry.acted_at)}</div>
+                        {typeof entry.details.note === "string" && <div className="tiny">{entry.details.note}</div>}
+                        {typeof entry.details.confirmation_note === "string" && <div className="tiny">恢复核验：{entry.details.confirmation_note}</div>}
+                        {typeof entry.details.retry_task_id === "string" && <div className="tiny">恢复任务：{entry.details.retry_task_id}</div>}
+                      </div>
+                    </div>)}
+                  </div> : <div className="empty-state">暂无管理操作审计记录。</div>}
+                </section>
                 <div className="tiny" style={{ marginTop: 16 }}>仅展示队列持久化的状态与诊断字段；系统未记录的步骤级执行进度不会在此处推断。</div>
               </>
             )}
