@@ -7,6 +7,35 @@ export { clientErrorMessage } from "./api-error";
 export type Platform = _Platform;
 export { platformMeta, PLATFORM_META, ALL_PLATFORMS } from "./platforms";
 
+export interface ProductionMonitorRound {
+  id: number; round_number: number; status: string; created_at: string | null;
+  trigger_source?: string; plan_attribution_status?: string;
+}
+export interface ProductionMonitorStage {
+  id: number; title: string; status: string; stage_order: number; direction?: string; completion_condition?: string; notes?: string;
+  target_count: number; round_count: number; production_task_count: number; production_task_status_counts: Record<string, number>;
+  content_count: number; draft_count: number; review_pending_count: number;
+  review_approved_count: number; review_rejected_count: number; published_count: number; failed_draft_count: number;
+  metric_record_count: number; dependencies?: string[]; dependencies_available?: boolean; round_status_counts: Record<string, number>;
+  rounds: ProductionMonitorRound[];
+  contents: Array<{ id: string; title: string; platform: Platform; created_at: string | null; draft_count: number; draft_statuses: string | null; review_rejected: number }>;
+}
+export interface ProductionMonitorSubplan {
+  id: string; platform: Platform; title: string; status: string;
+  version_no: number | null; stages: ProductionMonitorStage[];
+  stage_count: number; round_count: number;
+}
+export interface ProductionMonitorResponse {
+  master_plan: { id: number; version_no: number; status: string; created_at: string; effective_at: string | null } | null;
+  platforms: ProductionMonitorSubplan[];
+  totals: Record<string, number> & { content_progress_percent: number | null };
+  effect_summary: { views: number | null; likes: number | null; collects: number | null; comments: number | null; shares: number | null; new_followers: number | null };
+  consistency_checks: Array<{ code: string; severity: string; count?: number; round_id?: number; stage_id?: number; message: string }>;
+  generated_at: string;
+  data_scope: string;
+  limitations: { production_task_source: string; task_model_available: boolean; legacy_task_run_fallback: boolean; metric_records_source: string; published_definition: string };
+}
+
 export interface RecoveryInfo {
   interrupted_tasks: number;
   requeued_data_fetch: string[];
@@ -317,7 +346,9 @@ export interface Draft {
   id: string;
   content_id: string;
   platform: Platform;
+  /** Draft lifecycle and editorial review are independent state dimensions. */
   status: string;
+  review_status?: "pending" | "approved" | "rejected";
   saved_at: string | null;
   user_confirmed_at: string | null;
   error_msg: string | null;
@@ -1168,8 +1199,12 @@ export interface MasterPlanVersion {
 export interface SubPlanStageRecord {
   id: number; sub_plan_version_id: number; stage_key: string; stage_order: number; title: string;
   direction: string; target_count: number; start_date: string | null; end_date: string | null;
-  completion_condition: string; status: "pending" | "in_progress" | "completed" | "paused" | "cancelled";
+  completion_condition: string; completion_criteria?: string; status: "pending" | "in_progress" | "completed" | "paused" | "cancelled";
   notes: string; confirmed_published_count?: number;
+  strategy_goal?: string; current_problem?: string; execution_strategy?: string;
+  prerequisites?: string; input_info?: string; expected_result?: string;
+  effect_evaluation?: string; entry_condition?: string; entry_condition_met?: boolean;
+  dependencies?: string[]; latest_outcome?: { result: Record<string, unknown>; evaluation: string; recorded_at: string } | null;
 }
 export interface SubPlanVersionRecord {
   id: number; sub_plan_id: string; version_no: number; master_plan_version_id: number;
@@ -1244,10 +1279,14 @@ export interface ContentItem {
 
 export interface ReviewQueueItem {
   id: string; round_id: number | null; round_number: number | null; round_status: string | null;
+  master_plan_version_id?: number | null; master_plan_version_no?: number | null; master_plan_title?: string;
+  sub_plan_id?: string | null; subplan_title?: string | null; subplan_platform?: Platform | null; subplan_version_id?: number | null; subplan_version_no?: number | null;
+  sub_plan_stage_id?: number | null; stage_order?: number | null; strategy_step_title?: string | null; strategy_step_direction?: string | null;
+  strategy_step_completion_condition?: string | null; strategy_step_notes?: string | null; plan_attribution_status?: string | null;
   topic_id: string | null; platform: Platform; title: string; body: string; tags: string[]; image_count: number; guard_outcome: string | null;
   guard_reason: string | null; review_rejected: boolean; review_rejection_reason: string | null;
   created_at: string; draft_id: string; draft_status: string; draft_error: string | null;
-  saved_at: string | null; scheduled_publish_at: string | null;
+  saved_at: string | null; scheduled_publish_at: string | null; publish_status?: "not_published" | "published" | "failed"; published_at?: string | null; publish_time_source?: "confirmation_time" | "user_supplied"; publish_result_note?: string | null; user_confirmed_at?: string | null;
   review_status: "pending" | "approved" | "rejected";
   review_history: { override_field: string; reason: string; overridden_by: string; overridden_at: string; override_value: string }[];
 }
@@ -1829,18 +1868,34 @@ export const api = {
     return all;
   },
   /** noteUrl：已发布笔记链接（可选；不填则该篇跳过被动评论轮询） */
+  recordPublishFailure: (draftId: string, reason: string) =>
+    fetchJson<{ draft_id: string; publish_status: "failed"; reason: string }>(
+      `/api/drafts/${draftId}/publish_failure`,
+      { method: "POST", body: JSON.stringify({ reason: reason.trim() }) },
+    ),
+  stageEffectFeedback: (stageId: number) =>
+    fetchJson<{ stage: Record<string, unknown>; content_count: number; published_count: number; manual_metrics: Record<string, number | null>; automatic_metrics: Record<string, number | null>; reviews: Array<{ id: number; assessment: string; recommendation: string; evidence_note: string; confidence: string; evidence_json: string; created_at: string }> }>(
+      `/api/subplans/stages/${stageId}/effect-feedback`,
+    ),
+  saveStageEffectFeedback: (stageId: number, data: { assessment: "effective" | "mixed" | "ineffective" | "insufficient_data"; recommendation: string; evidence_note?: string; confidence: "low" | "medium" | "high" }) =>
+    fetchJson<{ id: number; stage_id: number; assessment: string; recommendation: string; confidence: string; created_at: string }>(
+      `/api/subplans/stages/${stageId}/effect-feedback`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
   confirmPublish: (
     draftId: string,
     noteUrl?: string,
     qualityOverrideReason?: string,
     platformSyncOverrideReason?: string,
+    publishedAt?: string,
   ) =>
-    fetchJson<{ draft_id: string; status: string; note_url?: string | null; already_confirmed?: boolean }>(
+    fetchJson<{ draft_id: string; status: string; note_url?: string | null; published_at?: string | null; publish_time_source?: "confirmation_time" | "user_supplied"; already_confirmed?: boolean }>(
       `/api/drafts/${draftId}/publish_confirm`,
       {
         method: "POST",
         body: JSON.stringify({
           note_url: noteUrl ?? null,
+          published_at: publishedAt?.trim() || null,
           quality_override_reason: qualityOverrideReason?.trim() || null,
           platform_sync_override_reason: platformSyncOverrideReason?.trim() || null,
         }),
@@ -1910,6 +1965,10 @@ export const api = {
     fetchJson<{ version?: MasterPlanVersion; version_id?: number; status?: string; effective: boolean }>(
       `/api/plans/${versionId}/review`, { method: "POST", body: JSON.stringify({ action, reason }) },
     ),
+  deleteMasterPlan: (versionId: number) =>
+    fetchJson<{ deleted_version: MasterPlanVersion & { deleted_at: string }; restored_version: MasterPlanVersion }>(
+      `/api/plans/${versionId}`, { method: "DELETE" },
+    ),
   planVersions: (limit = 100) =>
     fetchJson<{ items: MasterPlanVersion[] }>(`/api/plans/versions?limit=${limit}`),
   subplans: (params: { masterPlanVersionId?: number; platform?: Platform; status?: string; page?: number; pageSize?: number } = {}) => {
@@ -1932,7 +1991,7 @@ export const api = {
     fetchJson<SubPlanVersionRecord>(`/api/subplans/${encodeURIComponent(id)}`, {
       method: "PATCH", body: JSON.stringify(data),
     }),
-  addSubplanStage: (id: string, data: { based_on_version_id: number; expected_version_no: number; stage: { title: string; direction?: string; target_count: number; start_date?: string | null; end_date?: string | null; completion_condition?: string; notes?: string } }) =>
+  addSubplanStage: (id: string, data: { based_on_version_id: number; expected_version_no: number; stage: Partial<SubPlanStageRecord> & { title: string; target_count: number } }) =>
     fetchJson<SubPlanVersionRecord>(`/api/subplans/${encodeURIComponent(id)}/stages`, {
       method: "POST", body: JSON.stringify(data),
     }),
@@ -1944,6 +2003,15 @@ export const api = {
     fetchJson<SubPlanVersionRecord>(`/api/subplans/${encodeURIComponent(id)}/stages/${stageId}?based_on_version_id=${versionId}&expected_version_no=${versionNo}`, {
       method: "DELETE",
     }),
+  reorderSubplanStages: (id: string, data: { based_on_version_id: number; expected_version_no: number; stage_ids: number[] }) =>
+    fetchJson<SubPlanVersionRecord>(`/api/subplans/${encodeURIComponent(id)}/stages/reorder`, {
+      method: "POST", body: JSON.stringify(data),
+    }),
+  recordSubplanStageOutcome: (id: string, stageId: number, data: { version_id: number; result: Record<string, unknown>; evaluation?: string }) =>
+    fetchJson<{ outcome: { id: number; result: Record<string, unknown>; evaluation: string } }>(
+      `/api/subplans/${encodeURIComponent(id)}/stages/${stageId}/outcomes`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
   reviewSubplan: (id: string, versionId: number, action: "approve" | "reject", reason?: string) =>
     fetchJson<{ version: SubPlanVersionRecord; authorization: string }>(`/api/subplans/${encodeURIComponent(id)}/review`, {
       method: "POST", body: JSON.stringify({ version_id: versionId, action, reason }),
@@ -2045,6 +2113,7 @@ export const api = {
     fetchJson<{ plan_id: string; round_id: number; task_id: string; status: string; queued: boolean }>(
       `/api/content-plans/${id}/start`, { method: "POST" },
     ),
+  productionMonitor: () => fetchJson<ProductionMonitorResponse>("/api/production-monitor"),
   globalOperationsSummary: (days = 30) => fetchJson<GlobalMonitorResponse>(`/api/global-monitor?days=${days}`),
   todos: (page = 1, pageSize = 20, tenantId?: string, source?: GlobalTodoItem["source"]) => {
     const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });

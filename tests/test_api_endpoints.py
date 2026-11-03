@@ -3053,6 +3053,52 @@ def test_global_task_queue_exposes_business_round_number_not_db_id(client, cfg, 
 
 
 
+def test_subplan_create_cleans_identity_when_initial_version_fails(client, monkeypatch):
+    from src.core.plan_version_store import PlanVersionError, PlanVersionStore
+
+    tc, conn, _ = client
+    store = PlanVersionStore(conn)
+    active = conn.execute(
+        "SELECT id,plan_snapshot FROM master_plan_versions WHERE status='effective' ORDER BY version_no DESC LIMIT 1"
+    ).fetchone()
+    if active is None:
+        plan, *_ = PlanVersionManager(api_main._g_ctx["cfg"], conn).load_plan()
+        plan["enabled_platforms"] = list(dict.fromkeys([*(plan.get("enabled_platforms") or []), "xhs"]))
+        draft = store.create_master_draft(plan)
+        active_id = store.activate_master_version(draft["id"], reviewer="test")["id"]
+    else:
+        active_id = int(active["id"])
+        snapshot = json.loads(active["plan_snapshot"])
+        if "xhs" not in (snapshot.get("enabled_platforms") or []):
+            snapshot["enabled_platforms"] = list(dict.fromkeys([*(snapshot.get("enabled_platforms") or []), "xhs"]))
+            draft = store.create_master_draft(snapshot, based_on_version_id=active_id)
+            active_id = store.activate_master_version(draft["id"], reviewer="test")["id"]
+
+    created_ids = []
+    original_create = PlanVersionStore.create_subplan
+
+    def capture_identity(self, sub_id, **kwargs):
+        result = original_create(self, sub_id, **kwargs)
+        created_ids.append(sub_id)
+        return result
+
+    def fail_first_version(self, *args, **kwargs):
+        raise PlanVersionError("模拟初始版本创建失败")
+
+    monkeypatch.setattr(PlanVersionStore, "create_subplan", capture_identity)
+    monkeypatch.setattr(PlanVersionStore, "create_subplan_version", fail_first_version)
+    response = tc.post("/api/subplans", json={
+        "master_plan_version_id": active_id,
+        "platform": "xhs",
+        "title": "补偿清理测试",
+        "snapshot": {"title": "补偿清理测试", "platform": "xhs"},
+        "stages": [{"title": "第一阶段", "direction": "测试", "target_count": 1}],
+    })
+    assert response.status_code == 409
+    assert len(created_ids) == 1
+    assert conn.execute("SELECT 1 FROM sub_plans WHERE id=?", (created_ids[0],)).fetchone() is None
+
+
 def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client):
     from src.core.plan_version_store import PlanVersionStore
 
@@ -3611,3 +3657,63 @@ def test_skill_registry_input_contract_endpoint(client):
     assert valid.status_code == 200 and valid.json()["valid"] is True
     invalid = tc.post("/api/skill-registry/skills/contract_skill/validate-input", json={"value": {}})
     assert invalid.status_code == 200 and invalid.json()["valid"] is False
+
+
+def test_review_queue_merges_legacy_and_new_review_history_without_duplicates(client):
+    tc, conn, seed = client
+    round_id = seed.round(status="created")
+    draft_id = seed.draft(round_id, draft_status="draft_saved", fetch_status=None)
+    content_id = conn.execute(
+        "SELECT content_id FROM drafts WHERE id = ?", (draft_id,)
+    ).fetchone()[0]
+    conn.execute(
+        "INSERT INTO user_override "
+        "(round_id,override_field,original_value,override_value,reason,overridden_by,overridden_at) "
+        "VALUES(?,?,?,?,?,?,?)",
+        (round_id,"review_reject",json.dumps({"content_id":content_id}),"rejected",
+         "legacy rejection","tester","2026-11-03T09:00:00"),
+    )
+    conn.execute(
+        "INSERT INTO content_review_events "
+        "(content_id,draft_id,round_id,event_type,actor,reason,after_json,created_at) "
+        "VALUES(?,?,?,'approved','tester','new approval','{}','2026-11-03T10:00:00')",
+        (content_id,draft_id,round_id),
+    )
+    conn.commit()
+
+    response = tc.get("/api/review-queue?status=all")
+    assert response.status_code == 200
+    item = next(row for row in response.json()["items"] if row["id"] == content_id)
+    history = item["review_history"]
+    assert {entry["override_field"] for entry in history} >= {
+        "review_reject", "review_approve",
+    }
+    assert len([entry for entry in history if entry["reason"] == "legacy rejection"]) == 1
+
+
+def test_duplicate_publish_confirmation_commits_user_supplied_time_without_note_url(client):
+    tc, conn, seed = client
+    round_id = seed.round(status="collecting_metrics")
+    draft_id = seed.draft(round_id, draft_status="user_published", fetch_status=None)
+    confirmed_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    published_at = (datetime.now().astimezone() - timedelta(minutes=10)).isoformat(timespec="seconds")
+    conn.execute(
+        "UPDATE drafts SET user_confirmed_at=?,published_at=?,publish_time_source='confirmation_time' "
+        "WHERE id=?",
+        (confirmed_at, confirmed_at, draft_id),
+    )
+    conn.commit()
+
+    response = tc.post(
+        f"/api/drafts/{draft_id}/publish_confirm",
+        json={"published_at": published_at},
+    )
+    assert response.status_code == 200
+    row = conn.execute(
+        "SELECT published_at,publish_time_source,platform_note_url FROM drafts WHERE id=?",
+        (draft_id,),
+    ).fetchone()
+    assert row["published_at"] == published_at
+    assert row["publish_time_source"] == "user_supplied"
+    assert row["platform_note_url"] is None
+    assert conn.in_transaction is False

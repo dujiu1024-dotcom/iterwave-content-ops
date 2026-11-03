@@ -12,6 +12,7 @@ import base64
 import io
 import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -77,6 +78,52 @@ def validate_image_bytes(raw: bytes, cfg=None) -> tuple[str, str, int, int]:
         raise ImageGenerationError("生成结果尺寸超出允许范围（总像素不超过 4000 万）")
     mime_type, suffix = _FORMATS[image_format]
     return mime_type, suffix, width, height
+
+
+
+def _target_dimensions(size: str) -> tuple[int, int] | None:
+    match = re.fullmatch(r"\s*(\d{2,5})\s*[xX×]\s*(\d{2,5})\s*", str(size or ""))
+    if not match:
+        raise ImageGenerationError("图片目标尺寸必须明确为 WIDTHxHEIGHT，拒绝跳过尺寸校验")
+    width, height = int(match.group(1)), int(match.group(2))
+    if not (256 <= width <= 20000 and 256 <= height <= 20000):
+        raise ImageGenerationError("图片目标宽高超出允许范围")
+    return width, height
+
+
+def validate_target_image_spec(width: int, height: int, size: str, cfg=None) -> None:
+    """Reject generated images outside the requested dimensions and configured aspect band."""
+    target = _target_dimensions(size)
+    if target is None:
+        return
+    target_width, target_height = target
+    tolerance = 0.03
+    width_tolerance = max(8, round(target_width * tolerance))
+    height_tolerance = max(8, round(target_height * tolerance))
+    if abs(width - target_width) > width_tolerance or abs(height - target_height) > height_tolerance:
+        raise ImageGenerationError(
+            f"图片尺寸不符合目标规格：实际 {width}x{height}，目标 {target_width}x{target_height}，允许误差 3%"
+        )
+    ratio = width / height
+    quality = getattr(cfg, "media_quality", None) if cfg is not None else None
+    if quality is not None:
+        target_ratio = target_width / target_height
+        if target_ratio < 1:
+            lower = float(getattr(quality, "portrait_ratio_min", 0.55))
+            upper = float(getattr(quality, "portrait_ratio_max", 0.85))
+            if not lower <= ratio <= upper:
+                raise ImageGenerationError(
+                    f"图片纵横比 {ratio:.4f} 超出竖图配置范围 {lower:.2f}-{upper:.2f}"
+                )
+        elif target_ratio <= float(getattr(quality, "square_ratio_max", 1.1)):
+            if ratio > float(getattr(quality, "square_ratio_max", 1.1)):
+                raise ImageGenerationError("图片纵横比超出方图配置范围")
+        elif ratio > float(getattr(quality, "landscape_ratio_max", 1.7)):
+            raise ImageGenerationError("图片纵横比超出横图配置范围")
+    actual_ratio = width / height
+    if abs(actual_ratio - target_width / target_height) > max(0.015, (target_width / target_height) * 0.02):
+        raise ImageGenerationError("图片实际纵横比与目标纵横比不一致")
+
 
 
 def _safe_base_url(value: str) -> bool:
@@ -190,6 +237,29 @@ def _decode_payload(payload, cfg) -> tuple[bytes, str, str, int, int]:
     return raw, mime_type, suffix, width, height
 
 
+def _bounded_post(client: httpx.Client, url: str, *, max_bytes: int, **kwargs) -> httpx.Response:
+    """Read an image-provider response incrementally and stop before buffering an oversized body."""
+    with client.stream("POST", url, **kwargs) as streamed:
+        declared = streamed.headers.get("content-length")
+        if declared:
+            try:
+                if int(declared) > max_bytes:
+                    raise ImageGenerationError("图片服务响应 JSON 超过允许大小")
+            except ValueError:
+                pass
+        body = bytearray()
+        for chunk in streamed.iter_bytes():
+            if len(body) + len(chunk) > max_bytes:
+                raise ImageGenerationError("图片服务响应 JSON 超过允许大小")
+            body.extend(chunk)
+        return httpx.Response(
+            status_code=streamed.status_code,
+            headers=streamed.headers,
+            content=bytes(body),
+            request=streamed.request,
+        )
+
+
 def _request_endpoint(
     endpoint: _ImageEndpoint,
     prompt: str,
@@ -199,10 +269,15 @@ def _request_endpoint(
     source_path: Path | None,
     source_mime_type: str | None,
     source_filename: str | None,
+    budget_timeout_seconds: float | None = None,
 ) -> tuple[bytes, str, str, int, int]:
     policy = cfg.media_generation
-    timeout_seconds = int(getattr(policy, "timeout_seconds", 150))
-    connect_timeout = int(getattr(policy, "connect_timeout_seconds", 15))
+    timeout_seconds = float(getattr(policy, "timeout_seconds", 150))
+    if budget_timeout_seconds is not None:
+        timeout_seconds = max(0.1, min(timeout_seconds, float(budget_timeout_seconds)))
+    connect_timeout = min(float(getattr(policy, "connect_timeout_seconds", 15)), timeout_seconds)
+    max_response_bytes = int(getattr(policy, "max_response_bytes", 20 * 1024 * 1024))
+    max_encoded_bytes = ((max_response_bytes + 2) // 3) * 4 + 1024 * 1024
     headers = {"Authorization": f"Bearer {endpoint.api_key}"}
     sensenova = _is_sensenova(endpoint)
     data: dict = {"model": endpoint.model, "prompt": prompt, "size": size, "n": 1}
@@ -224,8 +299,9 @@ def _request_endpoint(
                         "response_format": "b64_json",
                         "images": [{"image_url": data_url}],
                     }
-                    response = client.post(
-                        endpoint.base_url + "/images/edits", headers=headers, json=body
+                    response = _bounded_post(
+                        client, endpoint.base_url + "/images/edits",
+                        max_bytes=max_encoded_bytes, headers=headers, json=body,
                     )
                 else:
                     files = {
@@ -235,21 +311,27 @@ def _request_endpoint(
                             source_mime_type or "application/octet-stream",
                         )
                     }
-                    response = client.post(
-                        endpoint.base_url + "/images/edits",
+                    response = _bounded_post(
+                        client, endpoint.base_url + "/images/edits",
+                        max_bytes=max_encoded_bytes,
                         headers=headers,
                         data={key: str(value) for key, value in data.items()},
                         files=files,
                     )
             else:
                 # 显式要求 base64 响应（部分供应商默认返回临时 URL，本适配器只接受 b64_json）
-                response = client.post(
-                    endpoint.base_url + "/images/generations",
+                response = _bounded_post(
+                    client, endpoint.base_url + "/images/generations",
+                    max_bytes=max_encoded_bytes,
                     headers=headers,
                     json={**data, "response_format": "b64_json"},
                 )
         if response.status_code >= 400:
             raise ImageGenerationError(_error_message(response))
+        max_response_bytes = int(getattr(policy, "max_response_bytes", 20 * 1024 * 1024))
+        max_encoded_bytes = ((max_response_bytes + 2) // 3) * 4 + 1024 * 1024
+        if len(response.content) > max_encoded_bytes:
+            raise ImageGenerationError("图片服务响应 JSON 超过允许大小")
         payload = response.json()
     except ImageGenerationError:
         raise
@@ -274,6 +356,21 @@ def generate_image_bytes(
     allow_fallback=None 时按配置默认值；False 表示只用主模型，失败直接抛错。
     """
     cfg = _resolve_config(cfg)
+    from .image_generation_budget import article_budget, has_active_article, has_active_run, image_generation_run
+    if not has_active_run():
+        policy = cfg.media_generation
+        with image_generation_run(max_calls=int(getattr(policy, "max_api_calls_per_run", 30)), timeout_seconds=int(getattr(policy, "hard_timeout_seconds", 300)), max_concurrency=int(getattr(policy, "max_concurrency", 2))):
+            with article_budget(max_calls=int(getattr(policy, "max_api_calls_per_article", 27)), page_max_calls=int(getattr(policy, "max_api_calls_per_page", 3))):
+                return generate_image_bytes(prompt, model=model, size=size, source_path=source_path, source_mime_type=source_mime_type, source_filename=source_filename, cfg=cfg, allow_fallback=allow_fallback)
+    if not has_active_article():
+        policy = cfg.media_generation
+        with article_budget(max_calls=int(getattr(policy, "max_api_calls_per_article", 27)), page_max_calls=int(getattr(policy, "max_api_calls_per_page", 3))):
+            return generate_image_bytes(prompt, model=model, size=size, source_path=source_path, source_mime_type=source_mime_type, source_filename=source_filename, cfg=cfg, allow_fallback=allow_fallback)
+    from .visual_ocr import preflight_ocr
+    ocr_policy = cfg.media_generation
+    ocr_check = preflight_ocr(languages=getattr(ocr_policy, "ocr_languages", "chi_sim+eng"), timeout=getattr(ocr_policy, "ocr_timeout_seconds", 45))
+    if ocr_check.get("status") != "available":
+        raise ImageGenerationError(f"OCR 前置预检失败（{ocr_check.get('reason')}），已阻止图片 API 调用")
     endpoints = _endpoints(cfg, model, allow_fallback=allow_fallback)
     if not endpoints:
         raise ImageGenerationError(
@@ -288,10 +385,15 @@ def generate_image_bytes(
             errors.append(f"{endpoint.label} {endpoint.model}: 图片 API 地址无效")
             continue
         try:
-            return _request_endpoint(
-                endpoint, prompt, size, cfg=cfg, source_path=source_path,
-                source_mime_type=source_mime_type, source_filename=source_filename,
-            )
+            from .image_generation_budget import provider_request
+            with provider_request() as remaining_seconds:
+                result = _request_endpoint(
+                    endpoint, prompt, size, cfg=cfg, source_path=source_path,
+                    source_mime_type=source_mime_type, source_filename=source_filename,
+                    budget_timeout_seconds=remaining_seconds,
+                )
+            validate_target_image_spec(result[3], result[4], size, cfg=cfg)
+            return result
         except ImageGenerationError as exc:
             errors.append(f"{endpoint.label} {endpoint.model}: {exc}")
             if index < len(endpoints) - 1:

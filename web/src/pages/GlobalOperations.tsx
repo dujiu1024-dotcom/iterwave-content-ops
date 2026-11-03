@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, GlobalMonitorResponse, GlobalTaskQueueItem, GlobalTodoItem, NotificationItem } from "../api";
 import { navigate } from "../nav";
 import { roundTaskLabel } from "../roundLabel";
+import ProductionPlanMonitor from "../components/ProductionPlanMonitor";
 
 const STATUS: Record<string, string> = {
   queued: "排队中", running: "运行中", succeeded: "已完成",
@@ -136,6 +137,8 @@ export default function GlobalOperations() {
       {error && <div className="panel" role="alert" style={{ borderColor: "var(--orange)", color: "var(--orange)" }}>
         部分数据加载失败：{error}。未成功加载的指标不会按 0 处理。
       </div>}
+
+      <ProductionPlanMonitor />
 
       <div className="grid four" style={{ marginBottom: 16 }}>
         <div className="metric"><div className="metric-label">账号组</div><div className="metric-val">{monitor?.totals?.tenants ?? "—"}</div><div className="metric-foot">数据库可读取 {monitor?.totals?.available_tenants ?? "—"} 个</div></div>

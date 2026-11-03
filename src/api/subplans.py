@@ -91,6 +91,37 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
                 raise HTTPException(422, "阶段结束日期不能早于开始日期")
         if len(set(orders)) != len(orders):
             raise HTTPException(422, "阶段排序不能重复")
+        keys = [str(stage.get("stage_key") or "").strip() for stage in stages if stage.get("stage_key")]
+        if len(set(keys)) != len(keys):
+            raise HTTPException(422, "阶段稳定标识不能重复")
+        known = set(keys)
+        graph = {}
+        for stage in stages:
+            key = str(stage.get("stage_key") or "").strip()
+            deps = stage.get("dependencies", stage.get("depends_on", []))
+            if not isinstance(deps, list) or any(not isinstance(dep, str) or not dep.strip() for dep in deps):
+                raise HTTPException(422, "阶段依赖必须是稳定阶段标识数组")
+            deps = [dep.strip() for dep in deps]
+            if len(set(deps)) != len(deps) or (key and key in deps):
+                raise HTTPException(422, "阶段依赖不能重复或依赖自身")
+            if deps and (not key or any(dep not in known for dep in deps)):
+                raise HTTPException(422, "阶段依赖必须引用同一版本中已定义的稳定阶段标识")
+            graph[key] = deps
+            if "entry_condition_met" in stage and not isinstance(stage["entry_condition_met"], bool):
+                raise HTTPException(422, "entry_condition_met 必须是布尔值")
+        visiting, visited = set(), set()
+        def visit(key):
+            if key in visiting:
+                raise HTTPException(422, "阶段依赖关系存在循环")
+            if key in visited:
+                return
+            visiting.add(key)
+            for dep in graph.get(key, []):
+                visit(dep)
+            visiting.remove(key)
+            visited.add(key)
+        for key in graph:
+            visit(key)
     def _stages(version_id: int) -> list[dict[str, Any]]:
         return [dict(row) for row in get_runtime()["conn"].execute(
             "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order,id",
@@ -109,6 +140,30 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         except (TypeError, ValueError):
             raise HTTPException(409, "子计划版本快照损坏")
         result["stages"] = _stages(version_id)
+        for stage in result["stages"]:
+            try:
+                stage["dependencies"] = json.loads(stage.get("dependencies_json") or "[]")
+                stage["entry_condition_met"] = bool(stage.get("entry_condition_met", 1))
+            except (TypeError, ValueError):
+                raise HTTPException(409, "阶段依赖快照损坏")
+        outcomes = get_runtime()["conn"].execute(
+            """SELECT o.* FROM sub_plan_stage_outcomes o
+               JOIN sub_plan_stages s ON s.stage_key=o.stage_key
+               WHERE s.sub_plan_version_id=? AND o.sub_plan_id=?
+               ORDER BY o.recorded_at DESC,o.id DESC""",
+            (version_id, result["sub_plan_id"]),
+        ).fetchall()
+        latest = {}
+        for outcome in outcomes:
+            latest.setdefault(outcome["stage_key"], dict(outcome))
+        for stage in result["stages"]:
+            outcome = latest.get(stage.get("stage_key"))
+            if outcome:
+                try:
+                    outcome["result"] = json.loads(outcome.pop("result_json"))
+                except (TypeError, ValueError):
+                    outcome["result"] = None
+            stage["latest_outcome"] = outcome
         return result
 
     def _check_expected_version(version: dict[str, Any], expected: Any) -> None:
@@ -173,6 +228,8 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         _validate_stage_inputs(stages)
         sub_id = str(req.get("id") or ("sub_" + uuid.uuid4().hex))
         identity_created = False
+        # Keep the request-scoped connection available to the compensation branch.
+        conn = get_runtime()["conn"]
         try:
             identity = store().create_subplan(
                 sub_id, master_plan_version_id=int(master_id),
@@ -286,6 +343,7 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         stages = [{k: v for k, v in s.items() if k not in ("id", "sub_plan_version_id", "created_at", "updated_at")}
                   for s in version["stages"]]
         new_stage = dict(req["stage"])
+        new_stage.setdefault("stage_key", uuid.uuid4().hex)
         new_stage["stage_order"] = len(stages) + 1
         stages.append(new_stage)
         _validate_stage_inputs(stages)
@@ -415,15 +473,55 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         enabled_master_platforms = set(master_snapshot.get("enabled_platforms") or [])
         if not set(platforms).issubset(enabled_master_platforms):
             raise HTTPException(422, "AI 拆解平台必须属于生效主计划启用的平台")
+        outcome_context = {}
+        conn = get_runtime()["conn"]
+        for platform in platforms:
+            active_subplan = conn.execute(
+                """SELECT id FROM sub_plans WHERE platform=? AND status='active'
+                   ORDER BY updated_at DESC LIMIT 1""",
+                (platform,),
+            ).fetchone()
+            if active_subplan is None:
+                continue
+            history = conn.execute(
+                """SELECT o.stage_key,s.title,o.result_json,o.evaluation,o.recorded_at
+                   FROM sub_plan_stage_outcomes o
+                   JOIN sub_plan_stages s ON s.id=o.stage_id
+                   WHERE o.sub_plan_id=?
+                   ORDER BY o.recorded_at DESC,o.id DESC LIMIT 30""",
+                (active_subplan["id"],),
+            ).fetchall()
+            parsed_history = []
+            for item in history:
+                try:
+                    actual_result = json.loads(item["result_json"])
+                except (TypeError, ValueError):
+                    actual_result = {"unreadable_result": True}
+                parsed_history.append({
+                    "stage_key": item["stage_key"], "stage_title": item["title"],
+                    "actual_result": actual_result, "evaluation": item["evaluation"],
+                    "recorded_at": item["recorded_at"],
+                })
+            if parsed_history:
+                outcome_context[platform] = parsed_history
+
         prompt = (
             "你是内容运营计划拆解器。根据母计划，为每个平台分别生成子计划草稿。"
             "只返回 JSON 对象，格式为 {subplans:[{platform,title,snapshot,stages:["
-            "{title,direction,target_count,start_date,end_date,completion_condition,notes}]}]}。"
+            "{stage_key,title,direction,target_count,start_date,end_date,completion_condition,"
+            "strategy_goal,current_problem,execution_strategy,prerequisites,input_info,"
+            "expected_result,completion_criteria,effect_evaluation,entry_condition,"
+            "entry_condition_met,dependencies,notes}]}]}。"
+            "每个阶段必须有唯一 stage_key；dependencies 是前置阶段 stage_key 数组，只能引用本子计划中更早的阶段；"
+            "不得生成循环依赖。前置阶段的实际结果将供后续阶段引用。"
             "每个子计划至少 1 个阶段；阶段顺序按数组顺序；target_count 是用户最终确认发布篇数，"
             "不是生成草稿数。不得输出审核状态或要求自动生效。"
             "\n母计划："
             + json.dumps(master_snapshot, ensure_ascii=False)
             + "\n目标平台：" + json.dumps(platforms, ensure_ascii=False)
+            + "\n历史阶段实际结果：" + json.dumps(outcome_context, ensure_ascii=False)
+            + "\n必须基于历史实际结果调整后续策略步骤：未达成预期时明确修正问题和执行策略；"
+              "已达成时说明可复用做法及是否扩大规模；不得忽略历史结果或把历史结果伪装成新的预期结果。"
         )
 
         # Use the same independently configured primary/fallback providers as content
@@ -529,12 +627,27 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
                 if target < 1 or target > 10000:
                     raise HTTPException(502, {"code": "ai_target_invalid", "message": "AI 阶段目标数量不合理",
                                               "manual_creation_available": True})
+                if "entry_condition_met" in stage and not isinstance(stage["entry_condition_met"], bool):
+                    raise HTTPException(502, {"code": "ai_entry_condition_invalid", "message": "AI 阶段进入条件格式不合法",
+                                              "manual_creation_available": True})
                 clean_stages.append({
-                    "stage_order": index, "title": str(stage["title"]).strip(),
+                    "stage_order": index, "stage_key": str(stage.get("stage_key") or ("ai-stage-" + uuid.uuid4().hex)),
+                    "title": str(stage["title"]).strip(),
                     "direction": str(stage.get("direction") or ""),
                     "target_count": target, "start_date": stage.get("start_date"),
                     "end_date": stage.get("end_date"),
-                    "completion_condition": str(stage.get("completion_condition") or ""),
+                    "completion_condition": str(stage.get("completion_condition") or stage.get("completion_criteria") or ""),
+                    "completion_criteria": str(stage.get("completion_criteria") or stage.get("completion_condition") or ""),
+                    "strategy_goal": str(stage.get("strategy_goal") or ""),
+                    "current_problem": str(stage.get("current_problem") or ""),
+                    "execution_strategy": str(stage.get("execution_strategy") or ""),
+                    "prerequisites": str(stage.get("prerequisites") or ""),
+                    "input_info": str(stage.get("input_info") or ""),
+                    "expected_result": str(stage.get("expected_result") or ""),
+                    "effect_evaluation": str(stage.get("effect_evaluation") or ""),
+                    "entry_condition": str(stage.get("entry_condition") or ""),
+                    "entry_condition_met": stage.get("entry_condition_met", True),
+                    "dependencies": stage.get("dependencies") or [],
                     "notes": str(stage.get("notes") or ""),
                 })
             title = str(item.get("title") or f"{item['platform']} 平台子计划").strip()
@@ -576,6 +689,51 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         return {"items": created, "effective": False, "requires_human_review": True,
                 "manual_creation_available": True}
 
+
+    @app.post("/api/subplans/{sub_plan_id}/stages/{stage_id}/outcomes", status_code=201)
+    def record_stage_outcome(sub_plan_id: str, stage_id: int, req: dict):
+        version_id = req.get("version_id")
+        result = req.get("result")
+        if isinstance(version_id, bool):
+            raise HTTPException(422, "version_id 必须是正整数")
+        try:
+            version_id = int(version_id)
+        except (TypeError, ValueError, OverflowError):
+            raise HTTPException(422, "version_id 必须是正整数")
+        if not isinstance(result, dict):
+            raise HTTPException(422, "result 必须是实际执行结果对象")
+        conn = get_runtime()["conn"]
+        identity = conn.execute(
+            "SELECT current_version_id FROM sub_plans WHERE id=?", (sub_plan_id,)
+        ).fetchone()
+        if identity is None:
+            raise HTTPException(404, "子计划不存在")
+        current_version_id = int(identity["current_version_id"] or 0)
+        if current_version_id < 1:
+            raise HTTPException(409, "子计划尚无生效版本，不能记录实际结果")
+        requested_stage = conn.execute(
+            """SELECT s.stage_key FROM sub_plan_stages s
+               JOIN sub_plan_versions v ON v.id=s.sub_plan_version_id
+               WHERE s.id=? AND v.id=? AND v.sub_plan_id=?""",
+            (stage_id, version_id, sub_plan_id),
+        ).fetchone()
+        if requested_stage is None:
+            raise HTTPException(404, "阶段不属于指定子计划版本")
+        effective_stage = conn.execute(
+            """SELECT id FROM sub_plan_stages
+               WHERE sub_plan_version_id=? AND stage_key=?""",
+            (current_version_id, requested_stage["stage_key"]),
+        ).fetchone()
+        if effective_stage is None:
+            raise HTTPException(409, "当前生效版本已移除该策略步骤，不能记录其执行结果")
+        try:
+            outcome = store().record_stage_outcome(
+                int(effective_stage["id"]), current_version_id, result,
+                evaluation=str(req.get("evaluation") or ""), author="user",
+            )
+            return {"outcome": outcome}
+        except PlanVersionError as exc:
+            fail(exc)
 
     @app.post("/api/subplans/{sub_plan_id}/rounds", status_code=201)
     def create_subplan_round(sub_plan_id: str, req: dict):
@@ -721,6 +879,344 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
                 raise HTTPException(503, "数据库暂时无法创建生产轮次，请稍后重试") from exc
             fail(exc)
 
+
+    @app.get("/api/production-monitor")
+    def production_monitor():
+        """Read-only hierarchy monitor for the effective master plan and its production lineage."""
+        from datetime import datetime, timezone
+
+        conn = get_runtime()["conn"]
+        table_names = {row["name"] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        view_names = {row["name"] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='view'"
+        ).fetchall()}
+        stage_columns = {row["name"] for row in conn.execute(
+            "PRAGMA table_info(sub_plan_stages)"
+        ).fetchall()}
+        draft_columns = {row["name"] for row in conn.execute(
+            "PRAGMA table_info(drafts)"
+        ).fetchall()}
+        dependency_fields_available = "dependencies_json" in stage_columns or bool(
+            {"prerequisites","dependencies","depends_on"} & stage_columns
+        )
+        # Migration 137 introduces the independent per-content production task table.
+        production_tasks_available = "production_tasks" in table_names
+        master_rows = conn.execute(
+            """SELECT id,version_no,plan_signature,status,created_at,effective_at
+               FROM master_plan_versions WHERE status='effective'
+               ORDER BY version_no DESC,id DESC LIMIT 2"""
+        ).fetchall()
+        consistency = []
+        if len(master_rows) > 1:
+            consistency.append({"code":"multiple_effective_master_plans","severity":"critical",
+                                "count":len(master_rows),"message":"存在多个生效母计划版本"})
+        master = dict(master_rows[0]) if master_rows else None
+        platforms = []
+        totals = {
+            "subplans":0,"stages":0,"rounds":0,"production_tasks":0,"contents":0,"target_contents":0,
+            "drafts":0,"review_pending":0,"review_approved":0,"review_rejected":0,"published":0,
+            "failed_rounds":0,"successful_rounds":0,"failed_drafts":0,"metric_records":0
+        }
+        now = datetime.now(timezone.utc)
+        if master:
+            subplans = conn.execute(
+                """SELECT p.id,p.platform,p.title,p.status,p.master_plan_version_id,
+                          p.current_version_id,p.created_at,p.updated_at,
+                          v.version_no,v.status AS version_status
+                   FROM sub_plans p
+                   LEFT JOIN sub_plan_versions v ON v.id=p.current_version_id
+                   WHERE p.master_plan_version_id=?
+                   ORDER BY p.platform,p.created_at,p.id""",
+                (master["id"],)
+            ).fetchall()
+            for sub in subplans:
+                subplan = dict(sub)
+                totals["subplans"] += 1
+                stages = []
+                if subplan["current_version_id"] is not None:
+                    stage_rows = conn.execute(
+                        """SELECT s.*,COALESCE(pub.confirmed_published_count,0) AS published_view_count
+                           FROM sub_plan_stages s
+                           LEFT JOIN sub_plan_stage_publish_stats pub ON pub.stage_id=s.id
+                           WHERE s.sub_plan_version_id=? ORDER BY s.stage_order,s.id""",
+                        (subplan["current_version_id"],)
+                    ).fetchall() if "sub_plan_stage_publish_stats" in view_names else conn.execute(
+                        "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order,id",
+                        (subplan["current_version_id"],)
+                    ).fetchall()
+                    for stage_row in stage_rows:
+                        stage = dict(stage_row)
+                        stage_id = stage["id"]
+                        if stage.get("stage_key") and "stage_key" in stage_columns:
+                            round_rows = conn.execute(
+                                """SELECT r.id,r.round_number,r.status,r.created_at,r.trigger_source,
+                                          r.plan_attribution_status
+                                   FROM spiral_rounds r
+                                   WHERE r.sub_plan_id=? AND r.sub_plan_stage_id IN
+                                     (SELECT id FROM sub_plan_stages WHERE stage_key=?)
+                                   ORDER BY r.created_at DESC,r.id DESC""",
+                                (subplan["id"],stage["stage_key"])
+                            ).fetchall()
+                        else:
+                            round_rows = conn.execute(
+                                """SELECT r.id,r.round_number,r.status,r.created_at,r.trigger_source,
+                                          r.plan_attribution_status
+                                   FROM spiral_rounds r
+                                   WHERE r.sub_plan_id=? AND r.sub_plan_version_id=? AND r.sub_plan_stage_id=?
+                                   ORDER BY r.created_at DESC,r.id DESC""",
+                                (subplan["id"],subplan["current_version_id"],stage_id)
+                            ).fetchall()
+                        raw_dependencies = stage.get(
+                            "dependencies_json",
+                            stage.get("prerequisites",stage.get("dependencies",stage.get("depends_on",[]))),
+                        )
+                        if isinstance(raw_dependencies,str):
+                            try:
+                                raw_dependencies = json.loads(raw_dependencies)
+                            except (TypeError,ValueError):
+                                raw_dependencies = [raw_dependencies] if raw_dependencies.strip() else []
+                        stage["dependencies"] = raw_dependencies if isinstance(raw_dependencies,list) else []
+                        stage["dependencies_available"] = dependency_fields_available
+                        round_ids = [int(r["id"]) for r in round_rows]
+                        round_stats = {key:0 for key in (
+                            "created","producing","awaiting_publish","collecting_metrics","analyzing",
+                            "completed","partial_completed","failed","cancelled"
+                        )}
+                        content_count = draft_count = review_pending = review_approved = review_rejected = published = failed_drafts = 0
+                        metric_records = 0
+                        effect_summary = {"views":None,"likes":None,"collects":None,"comments":None,"shares":None,"new_followers":None}
+                        for rr in round_rows:
+                            status = str(rr["status"] or "")
+                            if status in round_stats:
+                                round_stats[status] += 1
+                            if status == "failed":
+                                totals["failed_rounds"] += 1
+                            if status in {"completed","partial_completed"}:
+                                totals["successful_rounds"] += 1
+                            if status in {"producing","awaiting_publish"} and rr["created_at"]:
+                                try:
+                                    started = datetime.fromisoformat(str(rr["created_at"]).replace("Z","+00:00"))
+                                    if started.tzinfo is None:
+                                        started = started.replace(tzinfo=timezone.utc)
+                                    age_seconds = (now-started).total_seconds()
+                                    if status == "producing" and age_seconds > 1800:
+                                        consistency.append({"code":"stuck_round","severity":"warning",
+                                            "round_id":int(rr["id"]),"stage_id":stage_id,
+                                            "message":f"轮次 {rr['round_number']} 已生产中超过 30 分钟"})
+                                    if status == "awaiting_publish" and age_seconds > 48*3600:
+                                        consistency.append({"code":"stuck_publish","severity":"warning",
+                                            "round_id":int(rr["id"]),"stage_id":stage_id,
+                                            "message":f"轮次 {rr['round_number']} 已待发布超过 48 小时"})
+                                except (TypeError,ValueError):
+                                    pass
+                        content_items = []
+                        if round_ids:
+                            placeholders = ",".join("?" for _ in round_ids)
+                            content_count = int(conn.execute(
+                                f"SELECT COUNT(*) FROM contents WHERE round_id IN ({placeholders})",round_ids
+                            ).fetchone()[0])
+                            content_items = [dict(row) for row in conn.execute(
+                                f"""SELECT c.id,c.title,c.platform,c.created_at,c.review_rejected,
+                                           COUNT(d.id) AS draft_count,
+                                           GROUP_CONCAT(d.status, ',') AS draft_statuses
+                                    FROM contents c LEFT JOIN drafts d ON d.content_id=c.id
+                                    WHERE c.round_id IN ({placeholders})
+                                    GROUP BY c.id,c.title,c.platform,c.created_at,c.review_rejected
+                                    ORDER BY c.created_at DESC,c.id DESC LIMIT 20""",
+                                round_ids
+                            ).fetchall()]
+                            failed_expr = (
+                                "status='failed' OR publish_status='failed'"
+                                if "publish_status" in draft_columns else "status='failed'"
+                            )
+                            published_expr = (
+                                "publish_status='published'"
+                                if "publish_status" in draft_columns else "user_confirmed_at IS NOT NULL"
+                            )
+                            draft_row = conn.execute(
+                                f"""SELECT COUNT(*) AS total,
+                                           SUM(CASE WHEN {failed_expr} THEN 1 ELSE 0 END) AS failed,
+                                           SUM(CASE WHEN {published_expr} THEN 1 ELSE 0 END) AS published
+                                    FROM drafts WHERE content_id IN
+                                      (SELECT id FROM contents WHERE round_id IN ({placeholders}))""",
+                                round_ids
+                            ).fetchone()
+                            draft_count = int(draft_row["total"] or 0)
+                            failed_drafts = int(draft_row["failed"] or 0)
+                            published = int(draft_row["published"] or 0)
+                            if "review_status" in draft_columns:
+                                review_status_expr = (
+                                    "CASE WHEN c.review_rejected = 1 THEN 'rejected' "
+                                    "ELSE COALESCE(d.review_status,'pending') END"
+                                )
+                            else:
+                                review_status_expr = (
+                                    "CASE WHEN c.review_rejected = 1 THEN 'rejected' "
+                                    "WHEN (SELECT u.override_field FROM user_override u "
+                                    "WHERE u.round_id = c.round_id "
+                                    "AND u.override_field IN ('review_approve','review_reject','review_resubmit') "
+                                    "AND CASE WHEN json_valid(u.original_value) "
+                                    "THEN json_extract(u.original_value, '$.content_id') ELSE NULL END = c.id "
+                                    "ORDER BY u.overridden_at DESC, u.rowid DESC LIMIT 1) = 'review_approve' "
+                                    "THEN 'approved' ELSE 'pending' END"
+                                )
+                            review_row = conn.execute(
+                                f"""SELECT
+                                        COUNT(DISTINCT CASE WHEN ({review_status_expr})='pending' THEN c.id END) AS pending,
+                                        COUNT(DISTINCT CASE WHEN ({review_status_expr})='approved' THEN c.id END) AS approved,
+                                        COUNT(DISTINCT CASE WHEN ({review_status_expr})='rejected' THEN c.id END) AS rejected
+                                    FROM contents c JOIN drafts d ON d.content_id=c.id
+                                    WHERE c.round_id IN ({placeholders})""",
+                                round_ids
+                            ).fetchone()
+                            review_pending = int(review_row["pending"] or 0)
+                            review_approved = int(review_row["approved"] or 0)
+                            review_rejected = int(review_row["rejected"] or 0)
+                            if "metrics" in table_names:
+                                metric_row = conn.execute(
+                                    f"""WITH ranked_metrics AS (
+                                           SELECT m.*,
+                                                  ROW_NUMBER() OVER (
+                                                      PARTITION BY COALESCE(m.draft_id,m.content_id)
+                                                      ORDER BY COALESCE(m.fetched_at,'') DESC,m.id DESC
+                                                  ) AS row_no
+                                           FROM metrics m
+                                           WHERE m.content_id IN
+                                             (SELECT id FROM contents WHERE round_id IN ({placeholders}))
+                                             AND m.fetch_status IN ('success','partial')
+                                       )
+                                       SELECT COUNT(*) AS records,
+                                              SUM(views) AS views,SUM(likes) AS likes,
+                                              SUM(collects) AS collects,SUM(comments) AS comments,
+                                              SUM(shares) AS shares,SUM(new_followers) AS new_followers
+                                       FROM ranked_metrics WHERE row_no=1""",
+                                    round_ids
+                                ).fetchone()
+                                metric_records = int(metric_row["records"] or 0)
+                                effect_summary = {key:metric_row[key] for key in effect_summary}
+                        task_status_counts = {}
+                        if production_tasks_available and round_ids:
+                            task_rows = conn.execute(
+                                f"""SELECT status,COUNT(*) AS count FROM production_tasks
+                                    WHERE strategy_step_id=? AND sub_plan_id=?
+                                      AND round_id IN ({','.join('?' for _ in round_ids)})
+                                    GROUP BY status""",
+                                [str(stage.get("stage_key") or ""), str(subplan["id"]), *round_ids]
+                            ).fetchall()
+                            task_status_counts = {str(row["status"]):int(row["count"] or 0) for row in task_rows}
+                        elif "task_runs" in table_names and round_ids:
+                            # Legacy fallback is a round-pipeline run count, not a count of
+                            # independently persisted content-production tasks.
+                            task_rows = conn.execute(
+                                f"""SELECT status,COUNT(*) AS count FROM task_runs
+                                    WHERE task_type='round_pipeline'
+                                      AND biz_id IN ({','.join('?' for _ in round_ids)})
+                                    GROUP BY status""",
+                                [str(rid) for rid in round_ids]
+                            ).fetchall()
+                            task_status_counts = {
+                                ("succeeded" if row["status"] in ("success","completed") else str(row["status"])):
+                                int(row["count"] or 0) for row in task_rows
+                            }
+                        task_count = sum(task_status_counts.values())
+                        stage["round_count"] = len(round_rows)
+                        stage["round_status_counts"] = round_stats
+                        stage["production_task_count"] = task_count
+                        stage["production_task_status_counts"] = task_status_counts
+                        stage["content_count"] = content_count
+                        stage["draft_count"] = draft_count
+                        stage["review_pending_count"] = review_pending
+                        stage["review_approved_count"] = review_approved
+                        stage["review_rejected_count"] = review_rejected
+                        stage["published_count"] = published
+                        if stage.get("published_view_count") is not None and int(stage["published_view_count"]) != published:
+                            consistency.append({"code":"stage_publish_count_mismatch","severity":"warning",
+                                "stage_id":stage_id,"sub_plan_id":subplan["id"],
+                                "count":abs(int(stage["published_view_count"])-published),
+                                "message":f"策略步骤「{stage['title']}」发布统计视图与草稿明细不一致"})
+                        stage["failed_draft_count"] = failed_drafts
+                        stage["metric_record_count"] = metric_records
+                        stage["effect_summary"] = effect_summary
+                        stage["rounds"] = [dict(r) for r in round_rows[:20]]
+                        stage["contents"] = content_items
+                        if stage["status"] == "in_progress" and stage.get("updated_at"):
+                            try:
+                                updated = datetime.fromisoformat(str(stage["updated_at"]).replace("Z","+00:00"))
+                                if updated.tzinfo is None:
+                                    updated = updated.replace(tzinfo=timezone.utc)
+                                if (now-updated).total_seconds() > 7*86400:
+                                    consistency.append({"code":"stale_stage","severity":"warning",
+                                        "stage_id":stage_id,"sub_plan_id":subplan["id"],
+                                        "message":f"策略步骤「{stage['title']}」已超过 7 天未更新"})
+                            except (TypeError,ValueError):
+                                pass
+                        totals["stages"] += 1
+                        totals["rounds"] += len(round_rows)
+                        totals["production_tasks"] += task_count
+                        totals["contents"] += content_count
+                        totals["target_contents"] += max(0,int(stage.get("target_count") or 0))
+                        totals["drafts"] += draft_count
+                        totals["review_pending"] += review_pending
+                        totals["review_approved"] += review_approved
+                        totals["review_rejected"] += review_rejected
+                        totals["published"] += published
+                        totals["failed_drafts"] += failed_drafts
+                        totals["metric_records"] += metric_records
+                        stages.append(stage)
+                subplan["stages"] = stages
+                subplan["stage_count"] = len(stages)
+                subplan["round_count"] = sum(s["round_count"] for s in stages)
+                platforms.append(subplan)
+        if "spiral_rounds" in table_names:
+            unresolved = int(conn.execute(
+                "SELECT COUNT(*) FROM spiral_rounds WHERE plan_attribution_status IN ('pending','manual_review')"
+            ).fetchone()[0]) if "plan_attribution_status" in {
+                row["name"] for row in conn.execute("PRAGMA table_info(spiral_rounds)").fetchall()
+            } else 0
+            if unresolved:
+                consistency.append({"code":"unresolved_round_attribution","severity":"warning",
+                    "count":unresolved,"message":"存在无法准确归属母计划/子计划的历史轮次"})
+        totals["failed_rounds"] = int(conn.execute(
+            """SELECT COUNT(*) FROM spiral_rounds r
+               JOIN sub_plans p ON p.id=r.sub_plan_id
+               WHERE p.master_plan_version_id=? AND r.status='failed'""",
+            (master["id"],)
+        ).fetchone()[0]) if master else 0
+        totals["abnormal_rounds"] = sum(1 for item in consistency if item["code"] in {"stuck_round","stuck_publish"})
+        if totals["stages"] and not dependency_fields_available:
+            consistency.append({"code":"strategy_step_dependencies_unavailable","severity":"warning",
+                "count":totals["stages"],"message":"当前策略步骤数据模型尚未持久化前置依赖，无法展示依赖链"})
+        target_contents = totals["target_contents"]
+        totals["content_progress_percent"] = round(totals["contents"] / target_contents * 100, 1) if target_contents > 0 else None
+        return {
+            "master_plan":master,"platforms":platforms,"totals":totals,
+            "consistency_checks":consistency,
+            "generated_at":now.isoformat(timespec="seconds"),
+            "data_scope":"current_tenant_effective_master_plan",
+            "effect_summary": {
+                key: (lambda values: sum(values) if values else None)(
+                    [stage["effect_summary"][key] for sub in platforms for stage in sub["stages"]
+                     if stage.get("effect_summary",{}).get(key) is not None]
+                )
+                for key in ("views","likes","collects","comments","shares","new_followers")
+            },
+            "limitations":{
+                "production_task_source": (
+                    "production_tasks" if production_tasks_available
+                    else ("task_runs.round_pipeline" if "task_runs" in table_names else "unavailable")
+                ),
+                "task_model_available": production_tasks_available,
+                "legacy_task_run_fallback": not production_tasks_available and "task_runs" in table_names,
+                "metric_records_source":"metrics",
+                "published_definition": (
+                    "drafts.publish_status='published'"
+                    if "publish_status" in draft_columns else "drafts.user_confirmed_at IS NOT NULL"
+                )
+            }
+        }
+
     @app.post("/api/production/pause")
     def set_production_pause(req: dict):
         paused = req.get("paused")
@@ -761,8 +1257,13 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
             if current["version_status"] != "effective" or current["master_status"] != "effective":
                 raise HTTPException(409, "关联主计划版本已失效，不能恢复该子计划；请基于当前主计划重新创建并审核")
         cur = conn.execute(
-            "UPDATE sub_plans SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('active','paused')",
-            ("paused" if paused else "active", sub_plan_id),
+            """UPDATE sub_plans
+               SET status=?,
+                   pause_reason=CASE WHEN ?='paused' THEN 'user' ELSE NULL END,
+                   paused_by_master_version_id=NULL,
+                   updated_at=CURRENT_TIMESTAMP
+               WHERE id=? AND status IN ('active','paused')""",
+            ("paused" if paused else "active", "paused" if paused else "active", sub_plan_id),
         )
         if cur.rowcount != 1:
             raise HTTPException(404, "可暂停/恢复的子计划不存在")

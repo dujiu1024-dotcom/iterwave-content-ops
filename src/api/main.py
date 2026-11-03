@@ -1390,9 +1390,10 @@ class CreateRoundRequest(BaseModel):
     content_plan_version: Optional[int] = None
 
 class PublishConfirmRequest(BaseModel):
-    """发布确认补充：笔记链接；质检/人工审核/平台版本异常均需单独说明例外原因。"""
+    """发布确认补充：实际发布时间、笔记链接及必要的质量/版本例外说明。"""
 
     note_url: Optional[str] = Field(None, max_length=500)
+    published_at: Optional[str] = Field(None, max_length=40)
     quality_override_reason: Optional[str] = Field(None, max_length=500)
     platform_sync_override_reason: Optional[str] = Field(None, max_length=500)
 
@@ -2402,7 +2403,8 @@ def _register_routes(app: FastAPI) -> None:
         conn = _g()["conn"]
         tenant_id = _tenant_id()
         row = conn.execute(
-            "SELECT d.platform, d.status, d.content_id, d.user_confirmed_at FROM drafts d WHERE d.id=?", (draft_id,)
+            "SELECT d.platform, d.status, d.content_id, d.user_confirmed_at, "
+            "COALESCE(d.published_at,d.user_confirmed_at) AS published_at FROM drafts d WHERE d.id=?", (draft_id,)
         ).fetchone()
         if row is None:
             raise HTTPException(404, "草稿不存在")
@@ -2437,7 +2439,7 @@ def _register_routes(app: FastAPI) -> None:
             if original is None:
                 raise HTTPException(422, "修正记录必须属于当前账号组和同一篇内容")
         measured_dt = parse_persisted_datetime(measured_at, _g().get("cfg"))
-        confirmed_dt = parse_persisted_datetime(row["user_confirmed_at"], _g().get("cfg"))
+        confirmed_dt = parse_persisted_datetime(row["published_at"], _g().get("cfg"))
         if measured_dt is None or confirmed_dt is None:
             raise HTTPException(422, "统计时间或发布时间必须是有效的 ISO 日期时间")
         now_dt = storage_now()
@@ -2881,12 +2883,31 @@ def _register_routes(app: FastAPI) -> None:
             source_mime = source["mime_type"]
             source_filename = source["original_filename"]
 
-        # 只保留并发互斥，避免同一账号组同时生成造成资源竞争；monthly_quota 为历史兼容字段，不再限制使用次数。
+        # 月度配额按已创建的生成任务计数，失败请求也可能已经产生供应商费用。
         if not _media_generation_lock.acquire(blocking=False):
             raise HTTPException(409, "已有图片生成任务正在执行，请稍后重试")
         try:
+            conn.execute("BEGIN IMMEDIATE")
             now = _storage_now().isoformat(timespec="seconds")
-            # 个人账号组素材库不设置人为月度次数上限；成功次数仅用于成本与使用分析。
+            month_local = _now().replace(
+                day=1, hour=0, minute=0, second=0, microsecond=0,
+            ).replace(tzinfo=business_zone(cfg))
+            month_utc, month_legacy = storage_window_cutoffs(
+                month_local.astimezone(timezone.utc), cfg,
+            )
+            used_this_month = int(conn.execute(
+                "SELECT COUNT(*) FROM media_generation_jobs WHERE "
+                + timestamp_since_sql("created_at"),
+                (month_utc, month_legacy),
+            ).fetchone()[0])
+            monthly_quota = max(0, int(settings.get("monthly_quota") or 0))
+            if used_this_month >= monthly_quota:
+                conn.rollback()
+                raise HTTPException(
+                    429,
+                    f"本月图片生成配额已用完（{used_this_month}/{monthly_quota}），下月自动恢复",
+                )
+            # 每个已创建任务都计入月度配额，失败请求也可能已经产生供应商费用。
             cur = conn.execute(
                 "INSERT INTO media_generation_jobs (prompt, final_prompt, model, status, created_at) "
                 "VALUES (?, ?, ?, 'running', ?)",
@@ -2895,14 +2916,31 @@ def _register_routes(app: FastAPI) -> None:
             job_id = int(cur.lastrowid)
             conn.commit()
             target = None
+            budget = None
             try:
                 from src.core.media_generation import ImageGenerationError, generate_image_bytes
                 from src.core.media_quality import score_image
-                raw, mime_type, suffix, width, height = generate_image_bytes(
-                    final_prompt, model=model, size=size, source_path=source_path,
-                    source_mime_type=source_mime, source_filename=source_filename, cfg=cfg,
-                    allow_fallback=bool(settings.get("fallback_enabled", 1)),
+                from src.core.image_generation_budget import image_generation_run, article_budget
+                with image_generation_run(
+                    max_calls=getattr(cfg.media_generation, "max_api_calls_per_run", 30),
+                    timeout_seconds=getattr(cfg.media_generation, "hard_timeout_seconds", 300),
+                    max_concurrency=getattr(cfg.media_generation, "max_concurrency", 2),
+                ) as budget:
+                    with article_budget(
+                        max_calls=getattr(cfg.media_generation, "max_api_calls_per_article", 27),
+                        page_max_calls=getattr(cfg.media_generation, "max_api_calls_per_page", 3),
+                    ):
+                        raw, mime_type, suffix, width, height = generate_image_bytes(
+                            final_prompt, model=model, size=size, source_path=source_path,
+                            source_mime_type=source_mime, source_filename=source_filename, cfg=cfg,
+                            allow_fallback=bool(settings.get("fallback_enabled", 1)),
+                        )
+                usage = budget.snapshot()
+                conn.execute(
+                    "UPDATE media_generation_jobs SET api_calls = ?, failed_api_calls = ? WHERE id = ?",
+                    (usage["api_calls"], usage["failed_calls"], job_id),
                 )
+                conn.commit()
                 stored_filename = f"{uuid.uuid4().hex}{suffix}"
                 target = (paths.media_dir / stored_filename).resolve()
                 if not target.is_relative_to(paths.media_dir.resolve()):
@@ -2947,6 +2985,12 @@ def _register_routes(app: FastAPI) -> None:
                     "job_id": job_id, "review_required": True,
                 }
             except HTTPException:
+                if budget is not None:
+                    usage = budget.snapshot()
+                    conn.execute(
+                        "UPDATE media_generation_jobs SET api_calls = ?, failed_api_calls = ? WHERE id = ?",
+                        (usage["api_calls"], usage["failed_calls"], job_id),
+                    )
                 if target is not None:
                     target.unlink(missing_ok=True)
                 conn.execute(
@@ -2956,6 +3000,12 @@ def _register_routes(app: FastAPI) -> None:
                 conn.commit()
                 raise
             except Exception as exc:  # noqa: BLE001 — 保存失败必须记账并留审计
+                if budget is not None:
+                    usage = budget.snapshot()
+                    conn.execute(
+                        "UPDATE media_generation_jobs SET api_calls = ?, failed_api_calls = ? WHERE id = ?",
+                        (usage["api_calls"], usage["failed_calls"], job_id),
+                    )
                 if target is not None:
                     target.unlink(missing_ok=True)
                 conn.execute(
@@ -2993,7 +3043,7 @@ def _register_routes(app: FastAPI) -> None:
         month_utc, month_legacy = storage_window_cutoffs(month_local.astimezone(timezone.utc), _g().get("cfg"))
         settings["used_this_month"] = int(conn.execute(
             "SELECT COUNT(*) FROM media_generation_jobs WHERE "
-            + timestamp_since_sql("created_at") + " AND status = 'succeeded'",
+            + timestamp_since_sql("created_at"),
             (month_utc, month_legacy),
         ).fetchone()[0])
         key_env = os.getenv("ITERWAVE_IMAGE_API_KEY_ENV", "OPENAI_API_KEY").strip()
@@ -3029,13 +3079,34 @@ def _register_routes(app: FastAPI) -> None:
     @manages_own_transaction
     def generate_media_for_content(content_id: str, usage_role: str = Query("cover", pattern="^(cover|illustration|background)$")):
         """根据现有内容生成候选配图；生成结果进入待审核状态，不自动分配。"""
-        row = _g()["conn"].execute("SELECT id, title, body, platform FROM contents WHERE id = ?", (content_id,)).fetchone()
+        row = _g()["conn"].execute("SELECT id, title, body, platform, tags FROM contents WHERE id = ?", (content_id,)).fetchone()
         if row is None:
             raise HTTPException(404, "目标内容不存在")
         title = str(row["title"] or "内容配图")
         body = str(row["body"] or "")
         if not body.strip():
             raise HTTPException(422, "请先补充正文后再生成配图")
+        guard = _g().get("guard")
+        if guard is None:
+            raise HTTPException(503, "质量检查服务不可用，已阻止图片生成")
+        try:
+            content_tags = json.loads(row["tags"]) if row["tags"] else []
+            if not isinstance(content_tags, list):
+                content_tags = []
+            outcome = guard.check_content(title, body, content_tags, platform=row["platform"])
+        except Exception as exc:
+            logger.exception("内容配图前 G2 检查异常 content=%s", content_id)
+            raise HTTPException(503, "质量检查服务暂时不可用，未放行图片生成") from exc
+        _g()["conn"].execute(
+            "UPDATE contents SET guard_outcome = ?, guard_reason = ? WHERE id = ?",
+            (outcome.result.value, outcome.reason, content_id),
+        )
+        _g()["conn"].commit()
+        if not outcome.passes:
+            raise HTTPException(
+                409,
+                f"当前内容未通过 G2（{outcome.result.value}），禁止生成图片：{outcome.reason}",
+            )
         role_label = {"cover": "封面主视觉", "illustration": "正文插图", "background": "背景图"}[usage_role]
         prompt = (f"为当前平台内容生成一张{role_label}。主题：{title}。正文摘要：{body[:900]}。" +
                   "画面与主题直接相关，构图清晰，适合移动端阅读；不要生成文字、二维码、水印或虚构品牌标识。" +
@@ -5346,7 +5417,7 @@ def _register_routes(app: FastAPI) -> None:
         """
         conn = _g()["conn"]
         row = conn.execute(
-            "SELECT d.platform, d.status, d.error_msg, d.saved_content_hash, "
+            "SELECT d.platform, d.status, d.error_msg, d.saved_content_hash, d.published_at, d.publish_time_source, "
             "c.id AS content_id, c.round_id, c.title, c.body, c.tags, c.image_paths, "
             "c.guard_outcome, c.guard_reason, c.review_rejected, c.review_rejection_reason "
             "FROM drafts d JOIN contents c ON c.id = d.content_id WHERE d.id = ?",
@@ -5358,22 +5429,45 @@ def _register_routes(app: FastAPI) -> None:
         note_url = (req.note_url or "").strip() if req else ""
         if note_url:
             note_url = _validate_platform_note_url(row["platform"], note_url)
+        actual_published_at = None
+        if req and req.published_at:
+            parsed_publish_time = parse_persisted_datetime(req.published_at, _g().get("cfg"))
+            if parsed_publish_time is None:
+                raise HTTPException(422, "实际发布时间必须是有效的 ISO 日期时间")
+            if parsed_publish_time > storage_now() + timedelta(minutes=5):
+                raise HTTPException(422, "实际发布时间不能晚于当前时间（允许 5 分钟设备时钟误差）")
+            actual_published_at = parsed_publish_time.isoformat(timespec="seconds")
 
         # 重复确认应幂等：不重新注册采集任务，不重复推进轮次；已发布记录保留原状态。
         if row["status"] in ("user_published", "data_fetching", "published"):
-            if note_url:
+            duplicate_confirmation_updated = False
+            if actual_published_at and row["publish_time_source"] == "confirmation_time":
                 conn.execute(
-                    "UPDATE drafts SET platform_note_url = COALESCE(platform_note_url, ?) WHERE id = ?",
+                    "UPDATE drafts SET published_at=?,publish_time_source='user_supplied' WHERE id=?",
+                    (actual_published_at,draft_id),
+                )
+                duplicate_confirmation_updated = True
+            elif actual_published_at and row["published_at"] != actual_published_at:
+                raise HTTPException(409, "实际发布时间已有人工确认记录，不能直接覆盖")
+            if note_url:
+                changed = conn.execute(
+                    "UPDATE drafts SET platform_note_url = COALESCE(platform_note_url, ?) "
+                    "WHERE id = ? AND platform_note_url IS NULL",
                     (note_url, draft_id),
                 )
+                duplicate_confirmation_updated = duplicate_confirmation_updated or changed.rowcount > 0
+            # 发布时间与链接是两项独立的可补充信息；只补填发布时间时也必须提交。
+            if duplicate_confirmation_updated:
                 conn.commit()
             current_url = conn.execute(
-                "SELECT platform_note_url FROM drafts WHERE id = ?", (draft_id,)
+                "SELECT platform_note_url,published_at,publish_time_source FROM drafts WHERE id = ?", (draft_id,)
             ).fetchone()
             return {
                 "draft_id": draft_id,
                 "status": row["status"],
                 "note_url": current_url["platform_note_url"] if current_url else None,
+                "published_at": current_url["published_at"] if current_url else None,
+                "publish_time_source": current_url["publish_time_source"] if current_url else None,
                 "already_confirmed": True,
             }
 
@@ -5539,6 +5633,13 @@ def _register_routes(app: FastAPI) -> None:
             except Exception:  # noqa: BLE001 — 已发生的外部发布不能因审计写失败丢失采集
                 logger.exception("平台内容版本例外审计写入失败 draft=%s", draft_id)
 
+        conn.execute(
+            "UPDATE drafts SET publish_status='published',published_at=COALESCE(?,user_confirmed_at),"
+            "publish_time_source=CASE WHEN ? IS NULL THEN 'confirmation_time' ELSE 'user_supplied' END,"
+            "publish_result_note=NULL WHERE id=? AND user_confirmed_at IS NOT NULL",
+            (actual_published_at,actual_published_at,draft_id),
+        )
+        conn.commit()
         # G-15 场景：发布确认留痕（用户手动确认，非系统自动发布）
         message = f"草稿 {draft_id} 已由用户确认发布，进入数据采集"
         if quality_override_recorded:
@@ -5566,7 +5667,32 @@ def _register_routes(app: FastAPI) -> None:
                 metadata={"platform": row["platform"]},
                 idempotency_key=f"note-url:{draft_id}:{hashlib.sha256(note_url.encode()).hexdigest()[:16]}",
             )
-        return {"draft_id": draft_id, "status": "user_published", "note_url": note_url or None}
+        published = conn.execute("SELECT published_at,publish_time_source FROM drafts WHERE id=?",(draft_id,)).fetchone()
+        return {"draft_id": draft_id, "status": "user_published", "note_url": note_url or None,
+                "published_at": published["published_at"] if published else None,
+                "publish_time_source": published["publish_time_source"] if published else None}
+
+    @app.post("/api/drafts/{draft_id}/publish_failure")
+    def record_publish_failure(draft_id: str, req: dict):
+        """记录外部平台发布失败，不改变草稿保存状态。"""
+        reason = str((req or {}).get("reason") or "").strip()
+        if not reason or len(reason) > 1000:
+            raise HTTPException(422, "发布失败原因必须为 1-1000 个字符")
+        conn = _g()["conn"]
+        row = conn.execute("SELECT status,user_confirmed_at FROM drafts WHERE id=?",(draft_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "草稿不存在")
+        if row["user_confirmed_at"] is not None or row["status"] in ("user_published","data_fetching","published"):
+            raise HTTPException(409, "该内容已有发布成功记录，不能改记为发布失败")
+        cur = conn.execute(
+            "UPDATE drafts SET publish_status='failed',publish_result_note=? "
+            "WHERE id=? AND user_confirmed_at IS NULL AND status IN ('draft_pending','draft_saved')",
+            (reason,draft_id),
+        )
+        if cur.rowcount != 1:
+            raise HTTPException(409, "草稿状态已变化，请刷新后重试")
+        conn.commit()
+        return {"draft_id":draft_id,"publish_status":"failed","reason":reason}
 
     @app.post("/api/drafts/{draft_id}/confirm_platform_sync")
     def confirm_platform_draft_sync(
@@ -5770,6 +5896,17 @@ def _register_routes(app: FastAPI) -> None:
                 version_id, reviewer="user",
             )
             return {"version": result, "effective": True}
+        except PlanVersionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.delete("/api/plans/{version_id}")
+    def delete_master_plan(version_id: int):
+        """软删除最新生效母计划，并在同一事务中恢复上一份未删除版本。"""
+        from src.core.plan_version_store import PlanVersionStore, PlanVersionError
+        try:
+            return PlanVersionStore(_g()["conn"]).delete_master_version(
+                version_id, actor="user",
+            )
         except PlanVersionError as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -6109,32 +6246,32 @@ def _register_routes(app: FastAPI) -> None:
         if to_date:
             where.append("date(c.created_at) <= date(?)")
             params.append(to_date)
-        status_expr = (
-            "CASE WHEN c.review_rejected = 1 THEN 'rejected' "
-            "WHEN (SELECT u.override_field FROM user_override u "
-            "WHERE u.round_id = c.round_id "
-            "AND u.override_field IN ('review_approve','review_reject','review_resubmit') "
-            "AND CASE WHEN json_valid(u.original_value) "
-            "THEN json_extract(u.original_value, '$.content_id') ELSE NULL END = c.id "
-            "ORDER BY u.overridden_at DESC, u.rowid DESC LIMIT 1) = 'review_approve' "
-            "THEN 'approved' ELSE 'pending' END"
-        )
+        status_expr = "CASE WHEN c.review_rejected=1 THEN 'rejected' ELSE d.review_status END"
         if status != "all":
             where.append(f"({status_expr}) = ?")
             params.append(status)
         where_sql = " AND ".join(where)
         base = (
             " FROM contents c JOIN drafts d ON d.content_id = c.id "
-            "LEFT JOIN spiral_rounds r ON r.id = c.round_id WHERE " + where_sql
+            "LEFT JOIN spiral_rounds r ON r.id = c.round_id "
+            "LEFT JOIN master_plan_versions mp ON mp.id=r.master_plan_version_id "
+            "LEFT JOIN sub_plans sp ON sp.id=r.sub_plan_id "
+            "LEFT JOIN sub_plan_versions spv ON spv.id=r.sub_plan_version_id "
+            "LEFT JOIN sub_plan_stages ss ON ss.id=r.sub_plan_stage_id WHERE " + where_sql
         )
         total = int(conn.execute("SELECT COUNT(*)" + base, params).fetchone()[0])
         rows = conn.execute(
             "SELECT c.id, c.round_id, r.round_number, r.status AS round_status, "
+            "r.master_plan_version_id,r.sub_plan_id,r.sub_plan_version_id,r.sub_plan_stage_id,r.plan_attribution_status, "
+            "mp.version_no AS master_plan_version_no,mp.plan_snapshot AS master_plan_snapshot, "
+            "sp.title AS subplan_title,sp.platform AS subplan_platform,spv.version_no AS subplan_version_no, "
+            "ss.stage_order,ss.title AS strategy_step_title,ss.direction AS strategy_step_direction, "
+            "ss.completion_condition AS strategy_step_completion_condition,ss.notes AS strategy_step_notes, "
             "c.topic_id, c.platform, c.title, c.body, c.tags, c.image_paths, "
             "c.guard_outcome, c.guard_reason, "
             "c.review_rejected, c.review_rejection_reason, c.created_at, "
             "d.id AS draft_id, d.status AS draft_status, d.error_msg AS draft_error, "
-            "d.saved_at, d.scheduled_publish_at, "
+            "d.saved_at, d.scheduled_publish_at,d.publish_status,d.published_at,d.publish_time_source,d.publish_result_note,d.user_confirmed_at, "
             + status_expr + " AS review_status "
             + base + " ORDER BY c.created_at DESC, c.id DESC LIMIT ? OFFSET ?",
             [*params, page_size, (page - 1) * page_size],
@@ -6155,14 +6292,37 @@ def _register_routes(app: FastAPI) -> None:
                 item["image_count"] = 0
             # 不向集中列表暴露服务器绝对路径；图片只通过受保护的内容图片 API 读取。
             item.pop("image_paths", None)
+            try:
+                master_snapshot = json.loads(item.get("master_plan_snapshot") or "{}")
+            except (TypeError, ValueError):
+                master_snapshot = {}
+            item["master_plan_title"] = str(master_snapshot.get("title") or master_snapshot.get("goal_text") or "")
+            item.pop("master_plan_snapshot", None)
+            # 新事件表与旧 user_override 都可能包含审核记录：合并读取，并只抑制同一动作
+            # 在两个表中的近同时双写副本；更早的旧历史必须保留。
             events = conn.execute(
-                "SELECT override_field, reason, overridden_by, overridden_at, override_value "
-                "FROM user_override WHERE round_id = ? "
-                "AND override_field IN ('review_approve','review_reject','review_resubmit') "
-                "AND CASE WHEN json_valid(original_value) "
-                "THEN json_extract(original_value, '$.content_id') ELSE NULL END = ? "
-                "ORDER BY overridden_at DESC, rowid DESC LIMIT 10",
-                (item["round_id"], item["id"]),
+                "SELECT override_field,reason,overridden_by,overridden_at,override_value FROM ("
+                " SELECT CASE e.event_type WHEN 'approved' THEN 'review_approve' "
+                "WHEN 'rejected' THEN 'review_reject' WHEN 'resubmitted' THEN 'review_resubmit' "
+                "WHEN 'edited' THEN 'review_edit' ELSE e.event_type END AS override_field,"
+                " e.reason AS reason,e.actor AS overridden_by,e.created_at AS overridden_at,"
+                " COALESCE(e.after_json,'{}') AS override_value "
+                " FROM content_review_events e WHERE e.content_id=?"
+                " UNION ALL "
+                " SELECT u.override_field,u.reason,u.overridden_by,u.overridden_at,u.override_value "
+                " FROM user_override u WHERE u.round_id IS ? "
+                " AND u.override_field IN ('review_approve','review_reject','review_resubmit') "
+                " AND CASE WHEN json_valid(u.original_value) "
+                " THEN json_extract(u.original_value,'$.content_id') ELSE NULL END=? "
+                " AND NOT EXISTS (SELECT 1 FROM content_review_events e WHERE e.content_id=? "
+                " AND CASE e.event_type WHEN 'approved' THEN 'review_approve' "
+                " WHEN 'rejected' THEN 'review_reject' WHEN 'resubmitted' THEN 'review_resubmit' "
+                " WHEN 'edited' THEN 'review_edit' ELSE e.event_type END=u.override_field "
+                " AND e.reason=u.reason "
+                " AND ABS(COALESCE(strftime('%s',e.created_at),0)-"
+                " COALESCE(strftime('%s',u.overridden_at),0))<=10)"
+                ") ORDER BY overridden_at DESC LIMIT 10",
+                (item["id"], item["round_id"], item["id"], item["id"]),
             ).fetchall()
             item["review_history"] = [dict(event) for event in events]
             item["review_rejected"] = bool(item["review_rejected"])
@@ -6207,14 +6367,26 @@ def _register_routes(app: FastAPI) -> None:
             "AND CASE WHEN json_valid(u.original_value) "
             "THEN json_extract(u.original_value, '$.content_id') ELSE NULL END = ? "
             "ORDER BY u.overridden_at DESC, u.rowid DESC LIMIT 1"
-            "), '') != 'review_approve'",
+            "), '') != 'review_approve' "
+            "AND COALESCE((SELECT review_status FROM drafts WHERE content_id=? LIMIT 1),'pending') != 'approved'",
             (
                 row["round_id"], "review_approve",
                 json.dumps({"content_id": content_id, "title": row["title"]}, ensure_ascii=False)[:500],
                 "approved", reason, "web-ui", _storage_now().isoformat(timespec="seconds"),
-                row["round_id"], content_id,
+                row["round_id"], content_id, content_id,
             ),
         )
+        conn.execute(
+            "UPDATE drafts SET review_status='approved' WHERE content_id=? AND review_status!='rejected'",
+            (content_id,),
+        )
+        if inserted.rowcount == 1:
+            conn.execute(
+                "INSERT INTO content_review_events(content_id,draft_id,round_id,event_type,actor,reason,after_json,created_at) "
+                "SELECT ?,id,?,'approved','web-ui',?,?,? FROM drafts WHERE content_id=? LIMIT 1",
+                (content_id,row["round_id"],reason,json.dumps({"review_status":"approved"}),
+                 _storage_now().isoformat(timespec="seconds"),content_id),
+            )
         conn.commit()
         return {
             "id": content_id, "review_status": "approved",
@@ -6361,6 +6533,101 @@ def _register_routes(app: FastAPI) -> None:
         instruction = str((req or {}).get("instruction") or "改善本页构图、色彩协调和视觉层次").strip()[:500]
         if not instruction:
             raise HTTPException(422, "重做说明不能为空")
+        guard = ctx.get("guard")
+        if guard is None:
+            raise HTTPException(503, "质量检查服务不可用，已阻止单页图片重做")
+        try:
+            content_tags = json.loads(row["tags"]) if row["tags"] else []
+            if not isinstance(content_tags, list):
+                content_tags = []
+            outcome = guard.check_content(row["title"], row["body"], content_tags, platform=row["platform"])
+        except Exception as exc:
+            logger.exception("单页重做前 G2 检查异常 content=%s", content_id)
+            raise HTTPException(503, "质量检查服务暂时不可用，未放行单页图片重做") from exc
+        conn.execute(
+            "UPDATE contents SET guard_outcome=?, guard_reason=? WHERE id=?",
+            (outcome.result.value, outcome.reason, content_id),
+        )
+        conn.commit()
+        if not outcome.passes:
+            raise HTTPException(
+                409, f"当前内容未通过 G2（{outcome.result.value}），禁止单页图片重做：{outcome.reason}",
+            )
+
+        def _generate_revision_with_budget():
+            if not _media_generation_lock.acquire(blocking=False):
+                raise HTTPException(409, "已有图片生成任务正在执行，请稍后重试")
+            manual_job_id = None
+            budget = None
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                month_local = _now().replace(
+                    day=1, hour=0, minute=0, second=0, microsecond=0,
+                ).replace(tzinfo=business_zone(cfg))
+                month_utc, month_legacy = storage_window_cutoffs(
+                    month_local.astimezone(timezone.utc), cfg,
+                )
+                quota_row = conn.execute(
+                    "SELECT monthly_quota FROM media_generation_settings WHERE id=1"
+                ).fetchone()
+                monthly_quota = max(0, int(quota_row["monthly_quota"] if quota_row else 20))
+                used = int(conn.execute(
+                    "SELECT COUNT(*) FROM media_generation_jobs WHERE "
+                    + timestamp_since_sql("created_at"),
+                    (month_utc, month_legacy),
+                ).fetchone()[0])
+                if used >= monthly_quota:
+                    conn.rollback()
+                    raise HTTPException(
+                        429, f"本月图片生成配额已用完（{used}/{monthly_quota}），下月自动恢复",
+                    )
+                prompt = f"manual_visual_page_revision:{content_id}:{version_id}:{page_index}"
+                cur = conn.execute(
+                    "INSERT INTO media_generation_jobs (prompt, final_prompt, model, status, created_at) "
+                    "VALUES (?, ?, ?, 'running', ?)",
+                    (prompt, prompt, image_settings["model"], _storage_now().isoformat(timespec="seconds")),
+                )
+                manual_job_id = int(cur.lastrowid)
+                conn.commit()
+                from src.core.image_generation_budget import image_generation_run
+                with image_generation_run(
+                    max_calls=getattr(cfg.media_generation, "max_api_calls_per_run", 30),
+                    timeout_seconds=getattr(cfg.media_generation, "hard_timeout_seconds", 300),
+                    max_concurrency=getattr(cfg.media_generation, "max_concurrency", 2),
+                ) as budget:
+                    generated = revise_visual_background(
+                        source_path=background, feedback=[instruction], output_dir=output_root,
+                        settings=image_settings, cfg=cfg,
+                    )
+                usage = budget.snapshot()
+                success = generated.get("status") == "revised" and bool(generated.get("path"))
+                conn.execute(
+                    "UPDATE media_generation_jobs SET status=?, api_calls=?, failed_api_calls=?, "
+                    "error_message=?, completed_at=? WHERE id=?",
+                    (
+                        "succeeded" if success else "failed",
+                        usage["api_calls"], usage["failed_calls"],
+                        None if success else "单页视觉重做未成功",
+                        _storage_now().isoformat(timespec="seconds"), manual_job_id,
+                    ),
+                )
+                conn.commit()
+                if not success:
+                    raise HTTPException(503, "AI 背景重做未成功，请检查图像模型配置")
+                return generated
+            except Exception:
+                if manual_job_id is not None:
+                    usage = budget.snapshot() if budget is not None else {"api_calls": 0, "failed_calls": 0}
+                    conn.execute(
+                        "UPDATE media_generation_jobs SET status='failed', api_calls=?, failed_api_calls=?, "
+                        "error_message='单页视觉重做失败', completed_at=? WHERE id=?",
+                        (usage["api_calls"], usage["failed_calls"], _storage_now().isoformat(timespec="seconds"), manual_job_id),
+                    )
+                    conn.commit()
+                raise
+            finally:
+                _media_generation_lock.release()
+
         from src.core.visual_persistence import create_visual_page_job, create_visual_version, transition_visual_job
         # 任务登记单独提交：调用图像模型（数十秒）期间绝不持有 SQLite 写事务，避免 database is locked。
         with conn:
@@ -6373,10 +6640,7 @@ def _register_routes(app: FastAPI) -> None:
         revised_path = None
         try:
             from src.core.visual_generation import revise_visual_background
-            result = revise_visual_background(
-                source_path=background, feedback=[instruction], output_dir=output_root,
-                settings=image_settings, cfg=cfg,
-            )
+            result = _generate_revision_with_budget()
             if result.get("status") != "revised" or not result.get("path"):
                 raise HTTPException(503, "AI 背景重做未成功，请检查图像模型配置")
             revised_background = Path(result["path"]).resolve()
@@ -6633,6 +6897,19 @@ def _register_routes(app: FastAPI) -> None:
                     (title, body, tags_json, len(body or ""), content_id),
                 )
             if changed:
+                if not bool(row["review_rejected"]):
+                    conn.execute(
+                        "UPDATE drafts SET review_status='pending' WHERE content_id=? AND review_status!='rejected'",
+                        (content_id,),
+                    )
+                conn.execute(
+                    "INSERT INTO content_review_events(content_id,round_id,event_type,actor,reason,before_json,after_json,created_at) "
+                    "VALUES(?,?,'edited','web-ui',?,?,?,?)",
+                    (content_id,row["round_id"],req.reason or "UI 编辑",
+                     json.dumps({"title":row["title"],"body":row["body"],"tags":row["tags"]},ensure_ascii=False),
+                     json.dumps({"title":title,"body":body,"tags":json.loads(tags_json) if tags_json else []},ensure_ascii=False),
+                     _storage_now().isoformat(timespec="seconds")),
+                )
                 conn.execute(
                     "INSERT INTO user_override (round_id, override_field, original_value, "
                     "override_value, reason, overridden_by, overridden_at) "
@@ -6684,6 +6961,29 @@ def _register_routes(app: FastAPI) -> None:
                 logger.warning("重出图读取选题维度失败 content_id=%s", content_id, exc_info=True)
                 dimension = ""
 
+        # 手动重出图也必须先对当前标题/正文重新执行 G2，不能沿用历史 PASS。
+        guard = _g().get("guard")
+        if guard is None:
+            raise HTTPException(503, "质量检查服务不可用，已阻止图片生成")
+        try:
+            tags = json.loads(row["tags"]) if row["tags"] else []
+            if not isinstance(tags, list):
+                tags = []
+            outcome = guard.check_content(title, body, tags, platform=platform.value)
+        except Exception as exc:
+            logger.exception("手动重出图前 G2 检查异常 content=%s", content_id)
+            raise HTTPException(503, "质量检查服务暂时不可用，未放行图片生成") from exc
+        conn.execute(
+            "UPDATE contents SET guard_outcome = ?, guard_reason = ? WHERE id = ?",
+            (outcome.result.value, outcome.reason, content_id),
+        )
+        conn.commit()
+        if not outcome.passes:
+            raise HTTPException(
+                409,
+                f"当前内容未通过 G2（{outcome.result.value}），禁止生成图片：{outcome.reason}",
+            )
+
         from ..core.content_pipeline import image_generation_settings
         from ..core.ai_card_generation import generate_ai_card_set
         output_dir = cfg.resolve_path(cfg.paths.output_dir)
@@ -6693,16 +6993,87 @@ def _register_routes(app: FastAPI) -> None:
         settings, settings_reason = image_generation_settings(conn)
         if not settings:
             raise HTTPException(409, f"AI 图片生成未启用，拒绝模板降级：{settings_reason}")
-        conn.commit()
+        if not _media_generation_lock.acquire(blocking=False):
+            raise HTTPException(409, "已有图片生成任务正在执行，请稍后重试")
+        budget = None
+        job_id = None
         try:
-            paths, pages = generate_ai_card_set(
-                title=title, subtitle=subtitle, body=body, output_dir=output_dir,
-                platform=platform, cfg=cfg, settings=settings,
-                allow_fallback=settings.get("fallback_enabled"),
-                brand_profile=profile, allow_ocr_failure=True,
+            conn.execute("BEGIN IMMEDIATE")
+            month_local = _now().replace(
+                day=1, hour=0, minute=0, second=0, microsecond=0,
+            ).replace(tzinfo=business_zone(cfg))
+            month_utc, month_legacy = storage_window_cutoffs(
+                month_local.astimezone(timezone.utc), cfg,
             )
-        except (ValueError, RuntimeError) as exc:
-            raise HTTPException(422, f"AI 完整卡片生成或 OCR 硬门失败：{exc}") from exc
+            quota_row = conn.execute(
+                "SELECT monthly_quota FROM media_generation_settings WHERE id = 1"
+            ).fetchone()
+            monthly_quota = max(0, int(quota_row["monthly_quota"] if quota_row else 20))
+            used_this_month = int(conn.execute(
+                "SELECT COUNT(*) FROM media_generation_jobs WHERE "
+                + timestamp_since_sql("created_at"),
+                (month_utc, month_legacy),
+            ).fetchone()[0])
+            if used_this_month >= monthly_quota:
+                conn.rollback()
+                raise HTTPException(
+                    429,
+                    f"本月图片生成配额已用完（{used_this_month}/{monthly_quota}），下月自动恢复",
+                )
+            job_prompt = f"manual_full_card_regeneration:{content_id}"
+            cur = conn.execute(
+                "INSERT INTO media_generation_jobs (prompt, final_prompt, model, status, created_at) "
+                "VALUES (?, ?, ?, 'running', ?)",
+                (job_prompt, job_prompt, settings["model"], _storage_now().isoformat(timespec="seconds")),
+            )
+            job_id = int(cur.lastrowid)
+            conn.commit()
+            from src.core.image_generation_budget import image_generation_run
+            with image_generation_run(
+                max_calls=getattr(cfg.media_generation, "max_api_calls_per_run", 30),
+                timeout_seconds=getattr(cfg.media_generation, "hard_timeout_seconds", 300),
+                max_concurrency=getattr(cfg.media_generation, "max_concurrency", 2),
+            ) as budget:
+                paths, pages = generate_ai_card_set(
+                    title=title, subtitle=subtitle, body=body, output_dir=output_dir,
+                    platform=platform, cfg=cfg, settings=settings,
+                    allow_fallback=settings.get("fallback_enabled"),
+                    brand_profile=profile,
+                )
+            usage = budget.snapshot()
+            conn.execute(
+                "UPDATE media_generation_jobs SET status='succeeded', api_calls=?, "
+                "failed_api_calls=?, completed_at=? WHERE id=?",
+                (usage["api_calls"], usage["failed_calls"], _storage_now().isoformat(timespec="seconds"), job_id),
+            )
+            conn.commit()
+        except HTTPException:
+            if job_id is not None:
+                conn.execute(
+                    "UPDATE media_generation_jobs SET status='failed', api_calls=?, failed_api_calls=?, "
+                    "error_message='图片生成任务未完成', completed_at=? WHERE id=?",
+                    (
+                        budget.snapshot()["api_calls"] if budget is not None else 0,
+                        budget.snapshot()["failed_calls"] if budget is not None else 0,
+                        _storage_now().isoformat(timespec="seconds"), job_id,
+                    ),
+                )
+                conn.commit()
+            raise
+        except Exception as exc:
+            if job_id is not None:
+                usage = budget.snapshot() if budget is not None else {"api_calls": 0, "failed_calls": 0}
+                conn.execute(
+                    "UPDATE media_generation_jobs SET status='failed', api_calls=?, failed_api_calls=?, "
+                    "error_message='图片生成失败，详细原因仅记录在服务端日志', completed_at=? WHERE id=?",
+                    (usage["api_calls"], usage["failed_calls"], _storage_now().isoformat(timespec="seconds"), job_id),
+                )
+                conn.commit()
+            if isinstance(exc, (ValueError, RuntimeError)):
+                raise HTTPException(422, f"AI 完整卡片生成或 OCR 硬门失败：{exc}") from exc
+            raise
+        finally:
+            _media_generation_lock.release()
         from src.core.visual_ocr import load_ocr_report
         from src.core.visual_persistence import (
             compute_content_hash, create_visual_page_job, create_visual_version,
@@ -6828,7 +7199,7 @@ def _register_routes(app: FastAPI) -> None:
         if changed.rowcount != 1:
             raise HTTPException(409, "内容审核状态已被其他操作更新，请刷新后重试")
         cur = conn.execute(
-            "UPDATE drafts SET error_msg = ? "
+            "UPDATE drafts SET error_msg = ?,review_status='rejected' "
             "WHERE content_id = ? AND status IN ('draft_pending','draft_saved')",
             (message, content_id),
         )
@@ -6842,6 +7213,13 @@ def _register_routes(app: FastAPI) -> None:
                 "rejected", reason, "web-ui",
                 _storage_now().isoformat(timespec="seconds"),
             ),
+        )
+        conn.execute(
+            "INSERT INTO content_review_events(content_id,draft_id,round_id,event_type,actor,reason,after_json,created_at) "
+            "VALUES(?,?,?,'rejected','web-ui',?,?,?)",
+            (content_id,eligible[0]["id"],row["round_id"],reason,
+             json.dumps({"review_status":"rejected","affected_drafts":cur.rowcount},ensure_ascii=False),
+             _storage_now().isoformat(timespec="seconds")),
         )
         conn.commit()
         platform_drafts_left = sum(1 for draft in eligible if draft["status"] == "draft_saved")
@@ -6881,6 +7259,10 @@ def _register_routes(app: FastAPI) -> None:
             (content_id,),
         )
         conn.execute(
+            "UPDATE drafts SET review_status='pending' WHERE content_id=? "
+            "AND status IN ('draft_pending','draft_saved')",(content_id,),
+        )
+        conn.execute(
             "UPDATE drafts SET error_msg = NULL WHERE content_id = ? "
             "AND status IN ('draft_pending','draft_saved') "
             "AND error_msg LIKE '[已驳回]%'",
@@ -6897,8 +7279,91 @@ def _register_routes(app: FastAPI) -> None:
                 _storage_now().isoformat(timespec="seconds"),
             ),
         )
+        conn.execute(
+            "INSERT INTO content_review_events(content_id,draft_id,round_id,event_type,actor,reason,after_json,created_at) "
+            "SELECT ?,id,?,'resubmitted','web-ui',?,?,? FROM drafts WHERE content_id=? LIMIT 1",
+            (content_id,row["round_id"],reason,json.dumps({"review_status":"pending","guard_outcome":outcome}),
+             _storage_now().isoformat(timespec="seconds"),content_id),
+        )
         conn.commit()
         return {"id": content_id, "review_rejected": False, "message": "已重新提交审核"}
+
+    @app.get("/api/subplans/stages/{stage_id}/effect-feedback")
+    def get_stage_effect_feedback(stage_id: int):
+        """汇总当前策略步骤及其历史稳定步骤关联的实际内容效果。"""
+        conn = _g()["conn"]
+        stage = conn.execute(
+            "SELECT s.id,s.stage_key,s.title,s.direction,s.completion_condition,s.notes,"
+            "v.id AS version_id,p.id AS sub_plan_id,p.title AS subplan_title,p.platform,"
+            "m.id AS master_plan_version_id,m.version_no AS master_plan_version_no "
+            "FROM sub_plan_stages s JOIN sub_plan_versions v ON v.id=s.sub_plan_version_id "
+            "JOIN sub_plans p ON p.id=v.sub_plan_id JOIN master_plan_versions m ON m.id=v.master_plan_version_id "
+            "WHERE s.id=?",(stage_id,),
+        ).fetchone()
+        if stage is None:
+            raise HTTPException(404,"策略步骤不存在")
+        content_filter = (
+            "SELECT c.id FROM sub_plan_stages cs JOIN sub_plan_stages hs ON hs.stage_key=cs.stage_key "
+            "JOIN spiral_rounds r ON r.sub_plan_stage_id=hs.id JOIN contents c ON c.round_id=r.id WHERE cs.id=?"
+        )
+        attribution = conn.execute(
+            "SELECT COUNT(DISTINCT c.id) AS content_count,COUNT(DISTINCT CASE WHEN d.publish_status='published' THEN d.id END) AS published_count "
+            "FROM ("+content_filter+") cids JOIN contents c ON c.id=cids.id LEFT JOIN drafts d ON d.content_id=c.id",
+            (stage_id,),
+        ).fetchone()
+        manual = conn.execute(
+            "SELECT COUNT(*) AS samples,AVG(ms.views) AS views,AVG(ms.likes) AS likes,AVG(ms.collects) AS collects,"
+            "AVG(ms.comments) AS comments,AVG(ms.shares) AS shares FROM metric_snapshots ms "
+            "WHERE ms.tenant_id=? AND ms.source='manual' AND ms.content_id IN ("+content_filter+") "
+            "AND NOT EXISTS (SELECT 1 FROM metric_snapshots newer WHERE newer.tenant_id=ms.tenant_id "
+            "AND newer.draft_id=ms.draft_id AND (datetime(newer.measured_at)>datetime(ms.measured_at) "
+            "OR (datetime(newer.measured_at)=datetime(ms.measured_at) AND newer.recorded_at>ms.recorded_at)))",
+            (_tenant_id(),stage_id),
+        ).fetchone()
+        automatic = conn.execute(
+            "SELECT COUNT(*) AS samples,AVG(views) AS views,AVG(likes) AS likes,AVG(collects) AS collects,"
+            "AVG(comments) AS comments,AVG(shares) AS shares,AVG(new_followers) AS new_followers "
+            "FROM metrics ms WHERE ms.fetch_status IN ('success','partial') AND ms.content_id IN ("+content_filter+") "
+            "AND NOT EXISTS (SELECT 1 FROM metrics newer WHERE newer.draft_id=ms.draft_id "
+            "AND newer.fetch_status IN ('success','partial') AND (datetime(newer.fetched_at)>datetime(ms.fetched_at) "
+            "OR (datetime(newer.fetched_at)=datetime(ms.fetched_at) AND newer.id>ms.id)))",
+            (stage_id,),
+        ).fetchone()
+        history = conn.execute(
+            "SELECT er.id,er.assessment,er.recommendation,er.evidence_note,er.confidence,er.evidence_json,er.created_by,er.created_at "
+            "FROM strategy_effect_reviews er JOIN sub_plan_stages reviewed_stage ON reviewed_stage.id=er.stage_id "
+            "WHERE reviewed_stage.stage_key=(SELECT stage_key FROM sub_plan_stages WHERE id=?) "
+            "ORDER BY er.created_at DESC,er.id DESC LIMIT 20",(stage_id,),
+        ).fetchall()
+        return {"stage":dict(stage),"content_count":int(attribution["content_count"] or 0),
+                "published_count":int(attribution["published_count"] or 0),
+                "manual_metrics":dict(manual),"automatic_metrics":dict(automatic),
+                "reviews":[dict(x) for x in history]}
+
+    @app.post("/api/subplans/stages/{stage_id}/effect-feedback",status_code=201)
+    def create_stage_effect_feedback(stage_id: int, req: dict):
+        """保存不可覆盖的策略效果评估，并冻结本次指标证据。"""
+        assessment=str((req or {}).get("assessment") or "").strip()
+        recommendation=str((req or {}).get("recommendation") or "").strip()
+        evidence_note=str((req or {}).get("evidence_note") or "").strip()
+        confidence=str((req or {}).get("confidence") or "low").strip()
+        if assessment not in {"effective","mixed","ineffective","insufficient_data"}:
+            raise HTTPException(422,"策略评估结果无效")
+        if not recommendation or len(recommendation)>2000 or len(evidence_note)>2000:
+            raise HTTPException(422,"调整建议必须为 1-2000 个字符，证据说明不能超过 2000 个字符")
+        if confidence not in {"low","medium","high"}:
+            raise HTTPException(422,"置信度无效")
+        snapshot=get_stage_effect_feedback(stage_id)
+        evidence={key:snapshot[key] for key in ("content_count","published_count","manual_metrics","automatic_metrics")}
+        conn=_g()["conn"]; now=_storage_now().isoformat(timespec="seconds")
+        cur=conn.execute(
+            "INSERT INTO strategy_effect_reviews(stage_id,assessment,recommendation,evidence_note,confidence,evidence_json,created_by,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (stage_id,assessment,recommendation,evidence_note,confidence,json.dumps(evidence,ensure_ascii=False,sort_keys=True),"web-ui",now),
+        )
+        conn.commit()
+        return {"id":cur.lastrowid,"stage_id":stage_id,"assessment":assessment,
+                "recommendation":recommendation,"confidence":confidence,"created_at":now}
 
     # --- G-09 生产线阶段计数（G → G2 → H → I）---
     @app.get("/api/rounds/{round_id}/pipeline")

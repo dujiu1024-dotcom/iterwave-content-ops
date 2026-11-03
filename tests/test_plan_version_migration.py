@@ -113,6 +113,10 @@ def test_stage_publish_stats_count_only_user_confirmed_drafts():
     db._run_migration(conn, Migration(115, MIGRATION, "plan_version_lifecycle"))
     stage_migration = Path(__file__).resolve().parents[1] / "migrations" / "116_subplan_round_metadata.sql"
     db._run_migration(conn, Migration(116, stage_migration, "subplan_round_metadata"))
+    lifecycle_migration = Path(__file__).resolve().parents[1] / "migrations" / "131_master_plan_lifecycle_restore.sql"
+    db._run_migration(conn, Migration(131, lifecycle_migration, "master_plan_lifecycle_restore"))
+    strategy_migration = Path(__file__).resolve().parents[1] / "migrations" / "136_platform_subplan_strategy_model.sql"
+    db._run_migration(conn, Migration(136, strategy_migration, "platform_subplan_strategy_model"))
     conn.execute(
         "INSERT INTO spiral_rounds(id,round_number,status,plan_signature,created_at) "
         "VALUES(3,3,'created',NULL,'2026-01-03')"
@@ -193,4 +197,70 @@ def test_round_metadata_migration_adds_origin_and_feedback_columns():
     ).fetchone()
     assert row["trigger_source"] == "manual"
     assert row["applied_feedback"] is None
+    conn.close()
+
+
+def test_master_plan_lifecycle_migration_adds_soft_delete_provenance_and_db_guards():
+    conn = _legacy_db()
+    db = Database.__new__(Database)
+    for version, filename, name in (
+        (115, "115_plan_version_lifecycle.sql", "plan_version_lifecycle"),
+        (116, "116_subplan_round_metadata.sql", "subplan_round_metadata"),
+        (130, "131_master_plan_lifecycle_restore.sql", "master_plan_lifecycle_restore"),
+    ):
+        path = Path(__file__).resolve().parents[1] / "migrations" / filename
+        db._run_migration(conn, Migration(version, path, name))
+
+    master_columns = {row["name"] for row in conn.execute("PRAGMA table_info(master_plan_versions)")}
+    subplan_columns = {row["name"] for row in conn.execute("PRAGMA table_info(sub_plans)")}
+    assert {"deleted_at", "deleted_by"} <= master_columns
+    assert {"pause_reason", "paused_by_master_version_id"} <= subplan_columns
+
+    snapshot = '{"topic_count_per_platform":5,"dimension_allocation":{"AI教育":5},"enabled_platforms":["xhs"],"content_format":"image_text"}'
+    conn.execute(
+        """INSERT INTO master_plan_versions(
+               version_no,plan_signature,plan_snapshot,status,source,created_at,created_by
+           ) VALUES(1001,'sig-1',?,'draft','user','2026-11-03','test')""",
+        (snapshot,),
+    )
+    first_id = conn.execute("SELECT id FROM master_plan_versions WHERE version_no=1001").fetchone()[0]
+    conn.execute(
+        """INSERT INTO master_plan_versions(
+               version_no,plan_signature,plan_snapshot,status,source,created_at,created_by
+           ) VALUES(1002,'sig-2',?,'draft','user','2026-11-03','test')""",
+        (snapshot,),
+    )
+    second_id = conn.execute("SELECT id FROM master_plan_versions WHERE version_no=1002").fetchone()[0]
+    conn.execute(
+        """INSERT INTO master_plan_versions(
+               version_no,plan_signature,plan_snapshot,status,source,created_at,created_by,
+               reviewed_at,reviewed_by
+           ) VALUES(1003,'sig-rejected',?,'archived','user','2026-11-03','test','2026-11-03','reviewer')""",
+        (snapshot,),
+    )
+
+    import pytest
+    conn.execute("UPDATE master_plan_versions SET status='archived' WHERE status='effective'")
+    with pytest.raises(sqlite3.IntegrityError, match="latest undeleted"):
+        conn.execute("UPDATE master_plan_versions SET status='effective' WHERE id=?", (first_id,))
+    conn.execute(
+        "UPDATE master_plan_versions SET status='effective',effective_at='2026-11-03' WHERE id=?",
+        (second_id,),
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="archived before soft deletion"):
+        conn.execute(
+            "UPDATE master_plan_versions SET deleted_at='2026-11-03T00:00:00Z' WHERE id=?",
+            (second_id,),
+        )
+    conn.execute(
+        "UPDATE master_plan_versions SET status='archived',deleted_at='2026-11-03T00:00:00Z' WHERE id=?",
+        (second_id,),
+    )
+    # A previously effective predecessor may be restored; a rejected archived draft
+    # with no effective_at must not shadow it as the "latest" activatable plan.
+    conn.execute("UPDATE master_plan_versions SET status='effective' WHERE id=?", (first_id,))
+    conn.commit()
+    assert conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective' AND deleted_at IS NULL"
+    ).fetchone()[0] == first_id
     conn.close()
