@@ -1051,7 +1051,7 @@ def image_generation_settings(conn) -> "tuple[Optional[dict], str]":
         row = conn.execute(
             "SELECT enabled, prompt_prefix, model, size FROM media_generation_settings WHERE id = 1"
         ).fetchone()
-    except Exception:  # noqa: BLE001 — 旧库无此表
+    except sqlite3.OperationalError:  # 兼容尚未应用迁移的旧库；其他数据库错误必须向上传播
         return None, "media_generation_settings 未就绪"
     if not row or not row["enabled"]:
         return None, "AI 配图未在图片素材库设置中启用"
