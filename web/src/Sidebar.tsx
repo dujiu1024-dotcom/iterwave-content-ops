@@ -18,9 +18,10 @@ export const NAV_ITEMS: NavItem[] = [
   { page: "hot",        label: "热点雷达",   icon: "✳", section: "指挥与发现" },
   { page: "goals",      label: "目标与策略", icon: "◎", section: "指挥与发现" },
 
+  // 计划管理是内容生产的上游入口，必须先于生产、审核、日历和资产模块。
+  { page: "plan-center", label: "计划管理", icon: "▧", section: "内容作战" },
   { page: "production", label: "内容生产",   icon: "▤", section: "内容作战" },
   { page: "review",     label: "集中审核",   icon: "✓", section: "内容作战" },
-  { page: "plan-center", label: "计划管理", icon: "▧", section: "内容作战" },
   { page: "calendar",   label: "内容日历",   icon: "▦", section: "内容作战" },
   { page: "assets",     label: "内容资产",   icon: "▣", section: "内容作战" },
 
@@ -89,6 +90,7 @@ export default function Sidebar({ current, onChange, brokenPlatforms, loggedIn, 
                   key={item.page}
                   className={`nav ${active ? "active" : ""}`}
                   aria-current={active ? "page" : undefined}
+                  aria-label={item.label}
                   onClick={() => onChange(item.page)}
                   title={item.label}
                 >
