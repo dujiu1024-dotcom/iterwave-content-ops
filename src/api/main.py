@@ -72,6 +72,7 @@ from src.api.response_utils import (
 )
 # Keep NotifyRuleRequest in this module namespace: FastAPI resolves the wrapped route signature here.
 from src.api.notify_rules import NotifyRuleRequest, build_notify_rules_router  # noqa: F401
+from src.api.audit_queries import build_audit_query_router
 from src.api.platform_progress import build_platform_progress_router
 from src.api.platform_styles import build_platform_styles_router
 from src.core.tenant_registry import TenantRegistry, TenantError
@@ -9009,28 +9010,7 @@ def _register_routes(app: FastAPI) -> None:
     # P1 — AI 证据审计链（对比报告缺口）
     # ============================================================
 
-    @app.get("/api/ai_calls")
-    def list_ai_calls(limit: int = Query(200, ge=1, le=2000), step: str | None = None):
-        conn = _g()["conn"]
-        sql = "SELECT * FROM ai_calls"
-        args: list = []
-        if step:
-            sql += " WHERE step = ?"
-            args.append(step)
-        sql += " ORDER BY called_at DESC LIMIT ?"
-        args.append(limit)
-        rows = conn.execute(sql, args).fetchall()
-        return [dict(r) for r in rows]
-
-    @app.get("/api/user_override")
-    def list_user_override(limit: int = Query(200, ge=1, le=2000)):
-        conn = _g()["conn"]
-        rows = conn.execute(
-            "SELECT u.*, r.round_number FROM user_override u "
-            "LEFT JOIN spiral_rounds r ON r.id = u.round_id "
-            "ORDER BY u.overridden_at DESC LIMIT ?", (limit,)
-        ).fetchall()
-        return [dict(r) for r in rows]
+    app.include_router(build_audit_query_router(_g))
 
     # ============================================================
     # 账号管理（扫码登录四平台 — 直接调 Easel publish.py login）
