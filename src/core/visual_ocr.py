@@ -18,6 +18,7 @@ from pathlib import Path
 
 
 def normalize_ocr_text(value: str) -> str:
+    """Normalize width/case and ignore punctuation, whitespace and line breaks."""
     value = unicodedata.normalize("NFKC", value or "").lower()
     return "".join(
         ch for ch in value
@@ -25,57 +26,165 @@ def normalize_ocr_text(value: str) -> str:
     )
 
 
-_NUMBER_RUN = re.compile(r"\d+(?:\s?[.,，]\s?\d+)*")
+_OCR_RULES_VERSION = "ocr-semantic-v2"
+_NEGATIONS = ("禁止", "不", "没", "无", "非", "未")
+_SEGMENT_SPLIT = re.compile(r"[。！？!?；;，,、：:\n]+")
+_DATE_PATTERN = re.compile(r"(?<!\d)(\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}日?)(?!\d)")
+_NUMERIC_PATTERN = re.compile(
+    r"(?<!\d)[+-]?\d+(?:[.,，]\d+)?\s*(?:%|％|万人|亿人|万次|亿次|万家|万件|万元|亿元|元|万|亿|年|月|日|天|小时|分钟|秒|人|个|次|倍|件|台|家|岁|℃|°c)?"
+)
+
+_NUMBER_BOX_PATTERN = re.compile(
+    r"(?<![0-9,.])([+-]?(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?%?)(?![0-9])"
+)
 
 
-def _number_tokens(value: str) -> list[str]:
-    """Digit runs split at real separators (space, colon, newline), with decimal and
-    thousands separators removed, so "1.8 : 1" -> ["18", "1"] and adjacent list items
-    never merge into one token."""
+def _expected_number_box_tokens(value: str) -> list[str]:
     text = unicodedata.normalize("NFKC", value or "")
-    return [re.sub(r"[^0-9]", "", token) for token in _NUMBER_RUN.findall(text)]
+    return [
+        token
+        for match in _NUMBER_BOX_PATTERN.finditer(text)
+        for token in _numeric_tokens(match.group(1))
+    ]
 
 
-def compare_expected_text(expected: str, recognized: str,
-                          recognized_numbers: list[str] | None = None) -> dict:
+
+def _numeric_tokens(value: str) -> list[str]:
+    """Keep decimal/date/percentage/unit semantics and occurrence counts."""
+    text = unicodedata.normalize("NFKC", value or "").lower()
+    dates = []
+    for match in _DATE_PATTERN.finditer(text):
+        year, month, day = (int(part) for part in re.findall(r"\d+", match.group(1)))
+        dates.append((match.start(), match.end(), f"{year:04d}-{month:02d}-{day:02d}"))
+    tokens: list[tuple[int, int, str]] = list(dates)
+    for match in _NUMERIC_PATTERN.finditer(text):
+        if any(match.start() < end and match.end() > begin for begin, end, _ in dates):
+            continue
+        token = re.sub(r"\s+", "", match.group(0))
+        if token.startswith("+"):
+            token = token[1:]
+        tokens.append((match.start(), match.end(), token))
+    return [item[2] for item in sorted(tokens)]
+
+
+def _segments(value: str) -> list[str]:
+    return [normalize_ocr_text(part) for part in _SEGMENT_SPLIT.split(unicodedata.normalize("NFKC", value or "")) if normalize_ocr_text(part)]
+
+
+def _negation_counts(value: str) -> Counter:
+    text = normalize_ocr_text(value)
+    return Counter({word: text.count(word) for word in _NEGATIONS if word in text})
+
+
+def _negations_match_by_segment(expected: str, recognized: str) -> tuple[bool, list[dict]]:
+    expected_parts, recognized_parts = _segments(expected), _segments(recognized)
+    failures = []
+    if len(expected_parts) != len(recognized_parts):
+        if any(_negation_counts(part) for part in expected_parts + recognized_parts):
+            failures.append({
+                "segment": None, "word": "alignment_uncertain",
+                "required": [dict(_negation_counts(part)) for part in expected_parts],
+                "recognized": [dict(_negation_counts(part)) for part in recognized_parts],
+            })
+        return not failures, failures
+    for index, (expected_part, recognized_part) in enumerate(zip(expected_parts, recognized_parts)):
+        required = _negation_counts(expected_part)
+        actual = _negation_counts(recognized_part)
+        for word in sorted(set(required) | set(actual)):
+            if actual[word] != required[word]:
+                failures.append({
+                    "segment": index, "word": word,
+                    "required": required[word], "recognized": actual[word],
+                })
+    return not failures, failures
+
+
+def compare_expected_text(
+    expected: str, recognized: str,
+    recognized_numbers: list[str] | None = None,
+    *, critical: bool = False,
+    expected_number_boxes: list[str] | None = None,
+) -> dict:
     expected_norm = normalize_ocr_text(expected)
     recognized_norm = normalize_ocr_text(recognized)
     if not expected_norm:
         return {
-            "passed": True, "expected_chars": 0, "matched_chars": 0,
-            "recall": 1.0, "sequence_similarity": 1.0, "missing_numbers": [],
+            "passed": False, "expected_chars": 0, "recognized_chars": len(recognized_norm),
+            "matched_chars": 0, "recall": 0.0, "sequence_similarity": 0.0,
+            "length_ratio": 0.0, "missing_numbers": [], "extra_numbers": [],
+            "number_mismatch": False, "negation_mismatches": [], "critical": critical,
         }
 
-    # Counter coverage tolerates OCR line-order changes without allowing repeated
-    # characters to be counted more often than they occur in the source.
     expected_counts = Counter(expected_norm)
     recognized_counts = Counter(recognized_norm)
     matched = sum(min(count, recognized_counts[char]) for char, count in expected_counts.items())
     recall = matched / len(expected_norm)
-    sequence_similarity = SequenceMatcher(
-        None, expected_norm, recognized_norm, autojunk=False,
-    ).ratio()
+    sequence_similarity = SequenceMatcher(None, expected_norm, recognized_norm, autojunk=False).ratio()
+    length_ratio = len(recognized_norm) / max(1, len(expected_norm))
 
-    # OCR often drops decimal separators and percent signs. Preserve every numeric
-    # digit token exactly, but do not reject solely because punctuation was missed.
-    expected_numbers = _number_tokens(expected)
-    recognized_numbers = Counter(
-        _number_tokens(recognized) if recognized_numbers is None else recognized_numbers
-    )
-    required_numbers = Counter(expected_numbers)
-    missing_numbers = [
-        number for number, count in required_numbers.items()
-        for _ in range(max(0, count - recognized_numbers[number]))
-    ]
+    expected_numbers = Counter(_numeric_tokens(expected))
+    text_numbers = Counter(_numeric_tokens(recognized))
+    missing_numbers: list[str] = []
+    extra_numbers: list[str] = []
+    if recognized_numbers is not None and expected_number_boxes is not None:
+        expected_boxes = Counter(token for value in expected_number_boxes for token in _numeric_tokens(value))
+        actual_boxes = Counter(recognized_numbers)
+        missing_numbers.extend(
+            f"box:{token}" for token, count in expected_boxes.items()
+            for _ in range(max(0, count - actual_boxes[token]))
+        )
+        extra_numbers.extend(
+            f"box:{token}" for token, count in actual_boxes.items()
+            for _ in range(max(0, count - expected_boxes[token]))
+        )
 
+        def _parts(token: str) -> tuple[str, str]:
+            match = re.match(r"^([+-]?\d+(?:[.,]\d+)?)(.*)$", token)
+            return (match.group(1), match.group(2)) if match else (token, "")
+
+        # Region mode has exhaustive DOM numeric boxes; full-text OCR can hallucinate
+        # punctuation-adjacent digits (e.g. "8.7%" as "8.709"). Numeric values are
+        # therefore gated by the exact crops, while prose OCR is used to verify units.
+        expected_units = Counter(unit for token in expected_numbers.elements() for unit in [_parts(token)[1]] if unit)
+        text_units = Counter(unit for token in text_numbers.elements() for unit in [_parts(token)[1]] if unit)
+        box_units = Counter(unit for token in actual_boxes.elements() for unit in [_parts(token)[1]] if unit)
+        recognized_units = Counter({
+            unit: max(text_units[unit], box_units[unit])
+            for unit in set(text_units) | set(box_units)
+        })
+        for unit, count in expected_units.items():
+            if recognized_units[unit] < count:
+                missing_numbers.extend(f"unit:{unit}" for _ in range(count - recognized_units[unit]))
+        for unit, count in recognized_units.items():
+            if count > expected_units[unit]:
+                extra_numbers.extend(f"unit:{unit}" for _ in range(count - expected_units[unit]))
+    else:
+        actual_numbers = Counter(text_numbers if recognized_numbers is None else recognized_numbers)
+        missing_numbers.extend(
+            token for token, count in expected_numbers.items()
+            for _ in range(max(0, count - actual_numbers[token]))
+        )
+        extra_numbers.extend(
+            token for token, count in actual_numbers.items()
+            for _ in range(max(0, count - expected_numbers[token]))
+        )
+    negations_ok, negation_mismatches = _negations_match_by_segment(expected, recognized)
+
+    ordinary_text_ok = recall >= 0.86 and sequence_similarity >= 0.72
+    if critical:
+        ordinary_text_ok = expected_norm == recognized_norm
+    passed = ordinary_text_ok and length_ratio <= 1.2 and not missing_numbers and not extra_numbers and negations_ok
     return {
-        "passed": recall >= 0.86 and sequence_similarity >= 0.72 and not missing_numbers,
-        "expected_chars": len(expected_norm),
-        "matched_chars": matched,
+        "passed": passed, "expected_chars": len(expected_norm),
+        "recognized_chars": len(recognized_norm), "matched_chars": matched,
         "recall": round(recall, 4),
         "sequence_similarity": round(sequence_similarity, 4),
-        "missing_numbers": missing_numbers,
+        "length_ratio": round(length_ratio, 4),
+        "missing_numbers": missing_numbers, "extra_numbers": extra_numbers,
+        "number_mismatch": bool(missing_numbers or extra_numbers),
+        "negation_mismatches": negation_mismatches, "critical": critical,
     }
+
 
 
 def run_ocr(
@@ -177,18 +286,17 @@ def _ocr_crop(gray, region: dict, *, glyph_px: int, pad: int) -> dict:
 
 
 def ocr_numbers(image_path: Path, numbers: list[dict]) -> dict:
-    """Read every rendered numeric token box on its own (digits-only whitelist).
-
-    Returns the digit strings actually recognised; a token whose digits are not read
-    exactly is simply absent, so the caller's strict numeric check fails for it."""
+    """Read each numeric box and preserve decimal/percent/unit tokens, not digits alone."""
     from PIL import Image, ImageOps
 
     recognized: list[str] = []
     with Image.open(image_path) as source:
         gray = source.convert("L")
         for box in numbers:
-            want = re.sub(r"[^0-9]", "", box.get("text", ""))
-            got = ""
+            expected_tokens = _numeric_tokens(box.get("text", ""))
+            expected_digits = re.sub(r"[^0-9]", "", box.get("text", ""))
+            best_tokens: list[str] = []
+            best_digits = ""
             for glyph_px in (40, 56, 32):
                 left = max(0, int(box["x"]))
                 top = max(0, int(box["y"]) - 2)
@@ -209,16 +317,17 @@ def ocr_numbers(image_path: Path, numbers: list[dict]) -> dict:
                     crop.save(crop_path)
                     result = run_ocr(
                         crop_path, language="eng",
-                        page_segmentation_mode=10 if len(want) == 1 else 8 if len(want) == 2 else 7,
+                        page_segmentation_mode=10 if len(expected_digits) == 1 else 8 if len(expected_digits) == 2 else 7,
                         extra_config=("tessedit_char_whitelist=0123456789.,%+-",),
                     )
                 if result["status"] != "available":
                     return result
-                got = re.sub(r"[^0-9]", "", result["text"])
-                if got == want:
+                best_digits = re.sub(r"[^0-9]", "", result["text"])
+                best_tokens = _numeric_tokens(result["text"])
+                if best_digits == expected_digits and best_tokens == expected_tokens:
                     break
-            if got:
-                recognized.append(got)
+            if best_digits == expected_digits and best_tokens == expected_tokens:
+                recognized.extend(best_tokens)
     return {"status": "available", "numbers": recognized}
 
 
@@ -273,11 +382,15 @@ def _whole_page_ocr(image_path: Path, expected: str) -> tuple[dict, int]:
 
 def validate_rendered_pages(images: list[Path], expected_texts: list[str], report_path: Path,
                             regions: list[list[dict]] | None = None,
-                            numbers: list[list[dict]] | None = None) -> dict:
-    """Run the OCR hard gate. With ``regions`` (DOM text boxes per page) each region is read
-    separately; without them the legacy whole-page strategy is used."""
-    if len(images) != len(expected_texts) or (regions is not None and len(regions) != len(images)) \
-            or (numbers is not None and len(numbers) != len(images)):
+                            numbers: list[list[dict]] | None = None,
+                            critical_pages: list[bool] | None = None) -> dict:
+    """Run the OCR hard gate. With regions each DOM text box is read separately."""
+    if (
+        len(images) != len(expected_texts)
+        or (regions is not None and len(regions) != len(images))
+        or (numbers is not None and len(numbers) != len(images))
+        or (critical_pages is not None and len(critical_pages) != len(images))
+    ):
         raise ValueError("OCR 校验输入页数与预期文案页数不一致")
     from concurrent.futures import ThreadPoolExecutor
 
@@ -296,7 +409,7 @@ def validate_rendered_pages(images: list[Path], expected_texts: list[str], repor
         recognized = list(pool.map(_recognize, range(len(images))))
     results = []
     unavailable = None
-    for image_path, expected, (ocr, passes) in zip(images, expected_texts, recognized):
+    for index, (image_path, expected, (ocr, passes)) in enumerate(zip(images, expected_texts, recognized)):
         if ocr["status"] != "available":
             results.append({
                 "image": Path(image_path).name,
@@ -305,7 +418,11 @@ def validate_rendered_pages(images: list[Path], expected_texts: list[str], repor
             })
             unavailable = ocr
             continue
-        comparison = compare_expected_text(expected, ocr["text"], ocr.get("numbers"))
+        comparison = compare_expected_text(
+            expected, ocr["text"], ocr.get("numbers"),
+            critical=bool(critical_pages[index]) if critical_pages is not None else False,
+            expected_number_boxes=_expected_number_box_tokens(expected) if ocr.get("numbers") is not None else None,
+        )
         comparison["ocr_passes"] = passes
         comparison["ocr_mode"] = ocr.get("mode", "page")
         comparison["recognized_text"] = (ocr.get("text") or "")[:2000]
@@ -332,12 +449,16 @@ def validate_rendered_pages(images: list[Path], expected_texts: list[str], repor
                 "image": item["image"],
                 "recall": item.get("recall"),
                 "sequence_similarity": item.get("sequence_similarity"),
+                "length_ratio": item.get("length_ratio"),
                 "missing_numbers": item.get("missing_numbers", []),
+                "extra_numbers": item.get("extra_numbers", []),
+                "negation_mismatches": item.get("negation_mismatches", []),
+                "critical": item.get("critical", False),
             }
             for item in results if item["status"] == "failed"
         ]
         detail = json.dumps(failed_pages, ensure_ascii=False, separators=(",", ":"))
-        raise ValueError(f"OCR 文字校验失败，视觉结果未通过硬门；识别指标={detail}")
+        raise ValueError(f"OCR 粗检未通过，视觉结果未通过硬门；识别指标={detail}")
     return report
 
 

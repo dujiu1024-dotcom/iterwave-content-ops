@@ -12,6 +12,7 @@ import base64
 import io
 import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -77,6 +78,52 @@ def validate_image_bytes(raw: bytes, cfg=None) -> tuple[str, str, int, int]:
         raise ImageGenerationError("生成结果尺寸超出允许范围（总像素不超过 4000 万）")
     mime_type, suffix = _FORMATS[image_format]
     return mime_type, suffix, width, height
+
+
+
+def _target_dimensions(size: str) -> tuple[int, int] | None:
+    match = re.fullmatch(r"\s*(\d{2,5})\s*[xX×]\s*(\d{2,5})\s*", str(size or ""))
+    if not match:
+        raise ImageGenerationError("图片目标尺寸必须明确为 WIDTHxHEIGHT，拒绝跳过尺寸校验")
+    width, height = int(match.group(1)), int(match.group(2))
+    if not (256 <= width <= 20000 and 256 <= height <= 20000):
+        raise ImageGenerationError("图片目标宽高超出允许范围")
+    return width, height
+
+
+def validate_target_image_spec(width: int, height: int, size: str, cfg=None) -> None:
+    """Reject generated images outside the requested dimensions and configured aspect band."""
+    target = _target_dimensions(size)
+    if target is None:
+        return
+    target_width, target_height = target
+    tolerance = 0.03
+    width_tolerance = max(8, round(target_width * tolerance))
+    height_tolerance = max(8, round(target_height * tolerance))
+    if abs(width - target_width) > width_tolerance or abs(height - target_height) > height_tolerance:
+        raise ImageGenerationError(
+            f"图片尺寸不符合目标规格：实际 {width}x{height}，目标 {target_width}x{target_height}，允许误差 3%"
+        )
+    ratio = width / height
+    quality = getattr(cfg, "media_quality", None) if cfg is not None else None
+    if quality is not None:
+        target_ratio = target_width / target_height
+        if target_ratio < 1:
+            lower = float(getattr(quality, "portrait_ratio_min", 0.55))
+            upper = float(getattr(quality, "portrait_ratio_max", 0.85))
+            if not lower <= ratio <= upper:
+                raise ImageGenerationError(
+                    f"图片纵横比 {ratio:.4f} 超出竖图配置范围 {lower:.2f}-{upper:.2f}"
+                )
+        elif target_ratio <= float(getattr(quality, "square_ratio_max", 1.1)):
+            if ratio > float(getattr(quality, "square_ratio_max", 1.1)):
+                raise ImageGenerationError("图片纵横比超出方图配置范围")
+        elif ratio > float(getattr(quality, "landscape_ratio_max", 1.7)):
+            raise ImageGenerationError("图片纵横比超出横图配置范围")
+    actual_ratio = width / height
+    if abs(actual_ratio - target_width / target_height) > max(0.015, (target_width / target_height) * 0.02):
+        raise ImageGenerationError("图片实际纵横比与目标纵横比不一致")
+
 
 
 def _safe_base_url(value: str) -> bool:
@@ -288,10 +335,12 @@ def generate_image_bytes(
             errors.append(f"{endpoint.label} {endpoint.model}: 图片 API 地址无效")
             continue
         try:
-            return _request_endpoint(
+            result = _request_endpoint(
                 endpoint, prompt, size, cfg=cfg, source_path=source_path,
                 source_mime_type=source_mime_type, source_filename=source_filename,
             )
+            validate_target_image_spec(result[3], result[4], size, cfg=cfg)
+            return result
         except ImageGenerationError as exc:
             errors.append(f"{endpoint.label} {endpoint.model}: {exc}")
             if index < len(endpoints) - 1:

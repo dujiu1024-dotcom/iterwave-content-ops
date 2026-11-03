@@ -122,7 +122,10 @@ export default function CreatedContentPane() {
                       {d.visual_status === "media_asset"
                         ? <span className="tag green">已选素材图</span>
                         : d.visual_status === "generated"
-                          ? <span className="tag blue">AI 配图</span>
+                          ? <>
+                              <span className="tag blue">AI 配图</span>
+                              <span className="tag blue" title="已检查主要文字、数字和关键文本。OCR 不能保证逐字准确，最终发布前仍需人工审核。">OCR 粗检通过</span>
+                            </>
                           : <span className="tag orange" title={d.visual_reason || "尚未选用正式视觉素材"}>模板降级</span>}
                     </td>
                     <td style={{ fontSize: 11, color: "var(--muted)" }}>{d.scheduled_publish_at ?? d.saved_at ?? "—"}</td>
