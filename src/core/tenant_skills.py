@@ -106,6 +106,8 @@ def create_skill(conn: sqlite3.Connection, manifest: dict, actor: str = "system"
         (skill_id, manifest["name"].strip(), manifest["version"], manifest.get("description",""),
          "custom", _json(manifest.get("inputs",{})), _json(manifest.get("outputs",{})),
          _json(manifest.get("permissions",[])), now, now, "user", payload, result["content_sha256"]))
+    conn.execute("UPDATE tenant_skill_registry SET validation_json=? WHERE skill_id=?",
+                 (_json(result), skill_id))
     conn.execute("INSERT INTO tenant_skill_versions(skill_id,version,manifest_json,content_sha256,created_at) VALUES(?,?,?,?,?)",
                  (skill_id, manifest["version"], payload, result["content_sha256"], now))
     _audit(conn, skill_id, "created", {"version": manifest["version"]}, actor)
@@ -128,10 +130,11 @@ def update_skill(conn: sqlite3.Connection, skill_id: str, manifest: dict, actor:
     now, payload = _now(), _json(manifest)
     try:
         conn.execute("""UPDATE tenant_skill_registry SET name=?,version=?,description=?,inputs_json=?,outputs_json=?,
-            permissions_json=?,manifest_json=?,content_sha256=?,validation_json='{}',manifest_version=manifest_version+1,
+            permissions_json=?,manifest_json=?,content_sha256=?,validation_json=?,manifest_version=manifest_version+1,
             updated_at=? WHERE skill_id=?""",
             (manifest["name"].strip(),manifest["version"],manifest.get("description",""),_json(manifest.get("inputs",{})),
-             _json(manifest.get("outputs",{})),_json(manifest.get("permissions",[])),payload,result["content_sha256"],now,skill_id))
+             _json(manifest.get("outputs",{})),_json(manifest.get("permissions",[])),payload,result["content_sha256"],
+             _json(result),now,skill_id))
         conn.execute("INSERT INTO tenant_skill_versions(skill_id,version,manifest_json,content_sha256,created_at) VALUES(?,?,?,?,?)",
                      (skill_id,manifest["version"],payload,result["content_sha256"],now))
     except sqlite3.IntegrityError as exc:
