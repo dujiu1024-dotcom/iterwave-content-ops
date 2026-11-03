@@ -560,6 +560,7 @@ class Database:
                 "content_review_events", "strategy_effect_reviews",
                 "sub_plan_stage_outcomes", "production_tasks",
                 "production_task_attempts", "strategy_step_condition_reviews",
+                "plan_change_audit",
             }
             result["missing_tables"] = sorted(expected_tables - existing)
             result["existing_tables"] = sorted(existing & expected_tables)

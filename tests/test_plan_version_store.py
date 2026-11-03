@@ -98,6 +98,24 @@ def _db(path=None):
         );
         CREATE TABLE contents(id TEXT PRIMARY KEY, round_id INTEGER);
         CREATE TABLE drafts(id TEXT PRIMARY KEY, content_id TEXT, user_confirmed_at TEXT);
+        CREATE TABLE production_tasks(
+            id TEXT PRIMARY KEY, round_id INTEGER, status TEXT, attempt_count INTEGER DEFAULT 0,
+            content_id TEXT, master_plan_version_id INTEGER, sub_plan_version_id INTEGER,
+            production_line_version_id INTEGER, created_at TEXT
+        );
+        CREATE TABLE plan_change_audit(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL,
+            event_type TEXT NOT NULL, from_version_id INTEGER, to_version_id INTEGER NOT NULL,
+            change_reason TEXT NOT NULL DEFAULT '', before_snapshot_json TEXT, after_snapshot_json TEXT NOT NULL,
+            affected_tasks_json TEXT NOT NULL DEFAULT '{}', actor TEXT NOT NULL DEFAULT 'system',
+            created_at TEXT NOT NULL
+        );
+        CREATE TRIGGER trg_plan_change_audit_no_update
+        BEFORE UPDATE ON plan_change_audit
+        BEGIN SELECT RAISE(ABORT, 'plan_change_audit is append-only'); END;
+        CREATE TRIGGER trg_plan_change_audit_no_delete
+        BEFORE DELETE ON plan_change_audit
+        BEGIN SELECT RAISE(ABORT, 'plan_change_audit is append-only'); END;
         CREATE TABLE user_override(
             id INTEGER PRIMARY KEY AUTOINCREMENT, round_id INTEGER,
             override_field TEXT, original_value TEXT, override_value TEXT,
@@ -878,7 +896,6 @@ def test_master_delete_rolls_back_every_change_when_settings_row_is_missing():
         "SELECT status FROM master_plan_versions WHERE id=?", (first["id"],)
     ).fetchone()[0] == "archived"
 
-
 def test_deleted_master_cannot_be_reactivated_or_deleted_twice():
     conn = _db()
     store = PlanVersionStore(conn)
@@ -999,3 +1016,183 @@ def test_concurrent_master_delete_and_new_review_cannot_break_single_effective_i
         ).fetchone()[0] == 1
     finally:
         verify.close()
+
+
+
+def test_master_plan_audit_preserves_snapshots_and_classifies_affected_tasks():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    first = store.create_master_draft(_plan(5), author="planner", change_note="初始计划")
+    store.activate_master_version(first["id"], reviewer="reviewer")
+    conn.execute(
+        "INSERT INTO production_tasks(id,round_id,status,attempt_count,master_plan_version_id,created_at) "
+        "VALUES('task-done',1,'succeeded',1,?,'2026-11-03T10:00:00')",
+        (first["id"],),
+    )
+    conn.execute(
+        "INSERT INTO production_tasks(id,round_id,status,attempt_count,master_plan_version_id,created_at) "
+        "VALUES('task-running',1,'running',2,?,'2026-11-03T10:01:00')",
+        (first["id"],),
+    )
+    conn.commit()
+
+    second = store.create_master_draft(
+        _plan(6), based_on_version_id=first["id"], author="planner",
+        change_note="调整每平台目标篇数",
+    )
+    created_event = conn.execute(
+        "SELECT * FROM plan_change_audit WHERE entity_type='master_plan' "
+        "AND to_version_id=? AND event_type='draft_created'", (second["id"],)
+    ).fetchone()
+    assert created_event is not None
+    impact = json.loads(created_event["affected_tasks_json"])
+    assert impact["counts"] == {"running": 1, "succeeded": 1}
+    assert impact["reassessment"]["completed"] == ["task-done"]
+    assert impact["reassessment"]["in_progress"] == ["task-running"]
+    assert json.loads(created_event["before_snapshot_json"])["topic_count_per_platform"] == 5
+    assert json.loads(created_event["after_snapshot_json"])["topic_count_per_platform"] == 6
+
+    store.activate_master_version(second["id"], reviewer="reviewer")
+    approved = conn.execute(
+        "SELECT * FROM plan_change_audit WHERE entity_type='master_plan' "
+        "AND to_version_id=? AND event_type='version_approved'", (second["id"],)
+    ).fetchone()
+    assert approved is not None
+    assert json.loads(approved["affected_tasks_json"])["counts"]["succeeded"] == 1
+    assert conn.execute(
+        "SELECT status FROM master_plan_versions WHERE id=?", (first["id"],)
+    ).fetchone()[0] == "archived"
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute(
+            "UPDATE plan_change_audit SET change_reason='tampered' WHERE id=?",
+            (created_event["id"],),
+        )
+    conn.rollback()
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute("DELETE FROM plan_change_audit WHERE id=?", (created_event["id"],))
+    conn.rollback()
+
+
+
+def test_subplan_revision_audit_keeps_strategy_step_snapshots():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    master = _active_master(store)
+    original, _stage_id = _active_subplan(store, master)
+    revision = store.create_subplan_version(
+        "sub-xhs",
+        {"title": "小红书子计划修订", "platform": "xhs"},
+        master_plan_version_id=master["id"],
+        stages=[{
+            "stage_key": conn.execute(
+                "SELECT stage_key FROM sub_plan_stages WHERE sub_plan_version_id=?",
+                (original["id"],),
+            ).fetchone()[0],
+            "title": "第一阶段修订", "target_count": 9, "direction": "调整后的策略",
+        }],
+        based_on_version_id=original["id"],
+        change_note="根据效果反馈调整阶段目标",
+    )
+    event = conn.execute(
+        "SELECT * FROM plan_change_audit WHERE entity_type='sub_plan' "
+        "AND to_version_id=? AND event_type='draft_created'", (revision["id"],)
+    ).fetchone()
+    assert event is not None
+    before = json.loads(event["before_snapshot_json"])
+    after = json.loads(event["after_snapshot_json"])
+    assert before["stages"][0]["target_count"] == 8
+    assert after["stages"][0]["target_count"] == 9
+    assert event["change_reason"] == "根据效果反馈调整阶段目标"
+
+    store.activate_subplan_version(revision["id"], reviewer="reviewer")
+    approved = conn.execute(
+        "SELECT * FROM plan_change_audit WHERE entity_type='sub_plan' "
+        "AND to_version_id=? AND event_type='version_approved'", (revision["id"],)
+    ).fetchone()
+    assert approved is not None
+    assert approved["from_version_id"] == original["id"]
+
+
+def test_master_draft_respects_outer_transaction_boundary():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    conn.execute("BEGIN")
+    draft = store.create_master_draft(
+        _plan(7), author="planner", change_note="外层事务回滚测试",
+    )
+    assert conn.in_transaction
+    assert conn.execute(
+        "SELECT COUNT(*) FROM plan_change_audit WHERE to_version_id=?",
+        (draft["id"],),
+    ).fetchone()[0] == 1
+    conn.rollback()
+    assert conn.execute(
+        "SELECT COUNT(*) FROM master_plan_versions WHERE id=?", (draft["id"],)
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM plan_change_audit WHERE to_version_id=?", (draft["id"],)
+    ).fetchone()[0] == 0
+    conn.close()
+
+
+def test_task_impact_tolerates_legacy_tables_without_version_provenance():
+    from src.core.plan_change_audit import analyze_task_impact
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE production_tasks(id TEXT PRIMARY KEY, status TEXT);
+        CREATE TABLE spiral_rounds(id INTEGER PRIMARY KEY);
+    """)
+    impact = analyze_task_impact(conn, "master_plan", 12)
+    assert impact["tasks"] == []
+    assert impact["counts"] == {}
+    assert impact["round_ids"] == []
+    assert impact["reassessment"]["completed"] == []
+    conn.close()
+
+
+def test_stage_status_update_respects_outer_transaction_boundary():
+    conn = _db()
+    cursor = conn.execute(
+        """INSERT INTO sub_plan_stages(
+            sub_plan_version_id,stage_key,stage_order,title,direction,target_count,
+            completion_condition,status,created_at,updated_at
+        ) VALUES(1,'step-a',1,'阶段','方向',1,'完成条件','pending','now','now')"""
+    )
+    stage_id = int(cursor.lastrowid)
+    conn.commit()
+
+    store = PlanVersionStore(conn)
+    conn.execute("BEGIN")
+    updated = store.update_stage_status(stage_id, "in_progress")
+    assert updated["status"] == "in_progress"
+    assert conn.in_transaction
+    conn.rollback()
+
+    assert conn.execute(
+        "SELECT status FROM sub_plan_stages WHERE id=?", (stage_id,)
+    ).fetchone()[0] == "pending"
+    conn.close()
+
+
+def test_fail_round_open_respects_outer_transaction_boundary():
+    conn = _db()
+    conn.execute(
+        """INSERT INTO round_open_idempotency(
+            idempotency_key,request_hash,master_plan_version_id,sub_plan_id,
+            sub_plan_version_id,sub_plan_stage_id,status,created_at,updated_at
+        ) VALUES('key-a','hash-a',1,'sub-a',1,1,'reserved','now','now')"""
+    )
+    conn.commit()
+
+    store = PlanVersionStore(conn)
+    conn.execute("BEGIN")
+    store.fail_round_open("key-a", "测试失败")
+    assert conn.in_transaction
+    conn.rollback()
+
+    assert conn.execute(
+        "SELECT status FROM round_open_idempotency WHERE idempotency_key='key-a'"
+    ).fetchone()[0] == "reserved"
+    conn.close()

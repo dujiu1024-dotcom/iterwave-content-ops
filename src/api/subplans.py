@@ -140,6 +140,10 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         except (TypeError, ValueError):
             raise HTTPException(409, "子计划版本快照损坏")
         result["stages"] = _stages(version_id)
+        from src.core.plan_change_audit import analyze_task_impact
+        result["impact"] = analyze_task_impact(
+            get_runtime()["conn"], "sub_plan", result.get("based_on_version_id"),
+        )
         for stage in result["stages"]:
             try:
                 stage["dependencies"] = json.loads(stage.get("dependencies_json") or "[]")

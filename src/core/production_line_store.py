@@ -7,6 +7,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from .plan_change_audit import record_plan_change
+
 
 class ProductionLineError(ValueError):
     """Raised when a production-line lifecycle transition is invalid."""
@@ -197,6 +199,12 @@ class ProductionLineStore:
                  generation_source, based_on_version_id, now, author, change_note),
             )
             self.conn.execute("UPDATE production_lines SET updated_at=? WHERE id=?", (now, line_id))
+            record_plan_change(
+                self.conn, entity_type="production_line", entity_id=line_id,
+                event_type="draft_created", from_version_id=based_on_version_id,
+                to_version_id=int(cur.lastrowid), change_reason=change_note,
+                actor=author,
+            )
             if owns_transaction:
                 self.conn.commit()
             else:
@@ -297,6 +305,14 @@ class ProductionLineStore:
                 (version_id, next_line_status, now, now, reviewer,
                  next_line_status, version["production_line_id"]),
             )
+            previous_version_id = int(version["current_version_id"]) if version["current_version_id"] is not None else None
+            record_plan_change(
+                self.conn, entity_type="production_line",
+                entity_id=str(version["production_line_id"]),
+                event_type="version_approved", from_version_id=previous_version_id,
+                to_version_id=version_id, change_reason=version["change_note"] or "生产线审核生效",
+                actor=reviewer,
+            )
             if owns_transaction:
                 self.conn.commit()
             else:
@@ -312,23 +328,47 @@ class ProductionLineStore:
 
     def reject(self, version_id: int, *, reviewer: str = "user", reason: str = "") -> dict[str, Any]:
         owns_transaction = not self.conn.in_transaction
-        now = _now()
-        row = self.conn.execute(
-            "SELECT status FROM production_line_versions WHERE id=?", (version_id,)
-        ).fetchone()
-        if row is None:
-            raise ProductionLineError("生产线版本不存在")
-        if row["status"] != "draft":
-            raise ProductionLineError("只有草稿生产线版本可以拒绝")
-        cursor = self.conn.execute(
-            "UPDATE production_line_versions SET status='rejected',reviewed_at=?,reviewed_by=?,change_note=? WHERE id=? AND status='draft'",
-            (now, reviewer, (reason or "人工拒绝")[:2000], version_id),
-        )
-        if cursor.rowcount != 1:
-            raise ProductionLineError("生产线草稿状态已变化，请刷新后重试")
+        savepoint = "production_line_reject_" + uuid.uuid4().hex
         if owns_transaction:
-            self.conn.commit()
-        return self.get_version(version_id)
+            self.conn.execute("BEGIN IMMEDIATE")
+        else:
+            self.conn.execute(f"SAVEPOINT {savepoint}")
+        try:
+            now = _now()
+            row = self.conn.execute(
+                """SELECT v.*,l.sub_plan_id FROM production_line_versions v
+                   JOIN production_lines l ON l.id=v.production_line_id WHERE v.id=?""",
+                (version_id,),
+            ).fetchone()
+            if row is None:
+                raise ProductionLineError("生产线版本不存在")
+            if row["status"] != "draft":
+                raise ProductionLineError("只有草稿生产线版本可以拒绝")
+            cursor = self.conn.execute(
+                "UPDATE production_line_versions SET status='rejected',reviewed_at=?,reviewed_by=?,change_note=? WHERE id=? AND status='draft'",
+                (now, reviewer, (reason or "人工拒绝")[:2000], version_id),
+            )
+            if cursor.rowcount != 1:
+                raise ProductionLineError("生产线草稿状态已变化，请刷新后重试")
+            record_plan_change(
+                self.conn, entity_type="production_line",
+                entity_id=str(row["production_line_id"]),
+                event_type="version_rejected", from_version_id=row["based_on_version_id"],
+                to_version_id=version_id, change_reason=reason or "人工拒绝",
+                actor=reviewer,
+            )
+            if owns_transaction:
+                self.conn.commit()
+            else:
+                self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            return self.get_version(version_id)
+        except Exception:
+            if owns_transaction:
+                self.conn.rollback()
+            else:
+                self.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            raise
 
     def set_status(self, sub_plan_id: str, status: str, *, actor: str = "user", reason: str = "") -> dict[str, Any]:
         owns_transaction = not self.conn.in_transaction
