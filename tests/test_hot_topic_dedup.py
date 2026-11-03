@@ -185,11 +185,11 @@ def test_cross_platform_window_uses_utc_for_aware_and_legacy_naive_rows(monkeypa
             ("old-aware", "xhs", "outsidewindow", "collected",
              "2026-11-01T11:59:59+00:00", "2026-11-01T11:59:59+00:00"),
             ("old-naive", "douyin", "outsidewindow", "collected",
-             "2026-11-01 11:59:59", "2026-11-01 11:59:59"),
+             "2026-11-01T11:59:59+00:00", "2026-11-01 11:59:59"),
             ("recent-aware", "xhs", "sameevent", "collected",
              "2026-11-01T12:00:00+00:00", "2026-11-01T12:00:00+00:00"),
             ("recent-naive", "douyin", "sameevent", "collected",
-             "2026-11-01 12:00:00", "2026-11-01 12:00:00"),
+             "2026-11-01T12:00:00+00:00", "2026-11-01 12:00:00"),
         ],
     )
     conn.commit()
