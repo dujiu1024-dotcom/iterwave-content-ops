@@ -1858,9 +1858,6 @@ _original_produce_contents = RoundExecutor._produce_contents
 
 
 async def _produce_contents_with_task_recovery(self, round_id, scored, platforms, report, template_data=None):
-    if getattr(self, "_subplan_context", None):
-        from .production_task_recovery import install_safe_expired_recovery
-        install_safe_expired_recovery()
     try:
         return await _original_produce_contents(
             self, round_id, scored, platforms, report, template_data=template_data,
