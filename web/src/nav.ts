@@ -14,9 +14,15 @@ export function navigate(
   if (target?.type && target.id !== undefined && target.id !== null) {
     url.searchParams.set("target_type", target.type);
     url.searchParams.set("target_id", String(target.id));
+    if (target.type === "round") url.searchParams.set("focusRound", String(target.id));
+    else url.searchParams.delete("focusRound");
+    if (target.type === "content") url.searchParams.set("focusContent", String(target.id));
+    else url.searchParams.delete("focusContent");
   } else {
     url.searchParams.delete("target_type");
     url.searchParams.delete("target_id");
+    url.searchParams.delete("focusRound");
+    url.searchParams.delete("focusContent");
   }
   window.history.pushState({}, "", url.toString());
   window.dispatchEvent(new PopStateEvent("popstate"));
