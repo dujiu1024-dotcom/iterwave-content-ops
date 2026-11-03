@@ -838,6 +838,71 @@ class GlobalTaskQueue:
         finally:
             conn.close()
 
+    def dispatch_summary(
+        self, *, date_from: str | None = None, date_to: str | None = None,
+        tenant_id: str | None = None, task_type: str | None = None,
+    ) -> dict[str, Any]:
+        """Return bounded aggregate metrics and daily trends without loading task payloads."""
+        if date_from and date_to and date_from > date_to:
+            raise ValueError("date_from cannot be later than date_to")
+        where = ["1=1"]
+        params: list[object] = []
+        if date_from is not None:
+            where.append("substr(created_at, 1, 10) >= ?")
+            params.append(date_from)
+        if date_to is not None:
+            where.append("substr(created_at, 1, 10) <= ?")
+            params.append(date_to)
+        if tenant_id is not None:
+            where.append("tenant_id = ?")
+            params.append(tenant_id)
+        if task_type is not None:
+            if not task_type or len(task_type) > 80:
+                raise ValueError("task_type is invalid")
+            where.append("task_type = ?")
+            params.append(task_type)
+        clause = " AND ".join(where)
+        conn = self._connect()
+        try:
+            status_rows = conn.execute(
+                f"SELECT status, COUNT(*) AS n FROM global_task_queue WHERE {clause} GROUP BY status",
+                params,
+            ).fetchall()
+            statuses = {key: 0 for key in ("queued", "running", "succeeded", "failed", "cancelled", "interrupted")}
+            for row in status_rows:
+                statuses[str(row["status"])] = int(row["n"])
+            daily_rows = conn.execute(
+                f"SELECT substr(created_at,1,10) AS day, "
+                "SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END) AS succeeded, "
+                "SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed, "
+                "COUNT(*) AS total "
+                f"FROM global_task_queue WHERE {clause} GROUP BY substr(created_at,1,10) ORDER BY day",
+                params,
+            ).fetchall()
+            duration = conn.execute(
+                f"SELECT AVG((julianday(finished_at)-julianday(started_at))*86400.0) AS avg_seconds "
+                f"FROM global_task_queue WHERE {clause} AND started_at IS NOT NULL "
+                "AND finished_at IS NOT NULL AND status IN ('succeeded','failed','interrupted')",
+                params,
+            ).fetchone()
+            return {
+                "total": sum(statuses.values()),
+                "by_status": statuses,
+                "daily": [
+                    {"date": str(row["day"]), "total": int(row["total"]),
+                     "succeeded": int(row["succeeded"] or 0), "failed": int(row["failed"] or 0)}
+                    for row in daily_rows
+                ],
+                "average_duration_seconds": (
+                    round(float(duration["avg_seconds"]), 2)
+                    if duration and duration["avg_seconds"] is not None else None
+                ),
+                "filters": {"date_from": date_from, "date_to": date_to,
+                            "tenant_id": tenant_id, "task_type": task_type},
+            }
+        finally:
+            conn.close()
+
     def list(self, *, limit: int = 100, tenant_id: str | None = None) -> list[QueuedTask]:
         limit = max(1, min(int(limit), 500))
         conn = self._connect()
