@@ -155,3 +155,30 @@ def business_date_predicate(column: str, day: str, cfg=None) -> tuple[str, tuple
         f"OR (NOT {aware} AND datetime({column}) BETWEEN datetime(?) AND datetime(?)))"
     )
     return sql, (utc_start, utc_end, legacy_start, legacy_end)
+
+
+
+def parse_server_local_legacy_datetime(value) -> datetime | None:
+    """Parse pre-UTC naive state-machine timestamps written in the host's local timezone.
+
+    This is intentionally separate from parse_persisted_datetime: only columns with
+    confirmed historical server-local semantics should use this compatibility path.
+    Explicitly offset timestamps always retain their encoded instant.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(timezone.utc)
+    # datetime.timestamp() interprets a naive value in the process' local zone,
+    # including the host timezone's historical DST rules.
+    try:
+        return datetime.fromtimestamp(parsed.timestamp(), tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
