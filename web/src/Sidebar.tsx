@@ -20,6 +20,7 @@ export const NAV_ITEMS: NavItem[] = [
 
   // 计划管理是内容生产的上游入口，必须先于生产、审核、日历和资产模块。
   { page: "plan-center", label: "计划管理", icon: "▧", section: "内容作战" },
+  { page: "business-profile", label: "经营资料", icon: "▤", section: "内容作战" },
   { page: "production", label: "内容生产",   icon: "▤", section: "内容作战" },
   { page: "review",     label: "集中审核",   icon: "✓", section: "内容作战" },
   { page: "calendar",   label: "内容日历",   icon: "▦", section: "内容作战" },

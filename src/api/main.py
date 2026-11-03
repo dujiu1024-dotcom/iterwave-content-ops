@@ -9599,6 +9599,8 @@ def _register_routes(app: FastAPI) -> None:
     register_subplan_routes(app, _g)
     from src.api.production_lines import register_production_line_routes
     register_production_line_routes(app, _g)
+    from src.api.business_profile import register_business_profile_routes
+    register_business_profile_routes(app, _g)
 
 
 # ============================================================
