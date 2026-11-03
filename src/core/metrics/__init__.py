@@ -86,14 +86,16 @@ class Normalizer:
             "new_followers": "new_followers",
         }[metric]
 
-        from ..timezone import business_now
-        cutoff = (business_now(cfg) - timedelta(days=window_days)).isoformat(timespec="seconds")
+        from ..timezone import storage_now, storage_window_cutoffs, timestamp_since_sql
+        cutoff_utc, cutoff_legacy = storage_window_cutoffs(
+            storage_now() - timedelta(days=window_days), cfg,
+        )
         rows = self.db.execute(
             f"SELECT {col_name} FROM metrics "
             f"WHERE platform = ? AND fetch_status IN ('success','partial') "
             f"AND {col_name} IS NOT NULL "
-            f"AND fetched_at >= ?",
-            (platform.value, cutoff),
+            f"AND {timestamp_since_sql('fetched_at')}",
+            (platform.value, cutoff_utc, cutoff_legacy),
         ).fetchall()
 
         values = [r[0] for r in rows if r[0] is not None]

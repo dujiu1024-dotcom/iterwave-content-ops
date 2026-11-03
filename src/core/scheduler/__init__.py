@@ -38,7 +38,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.date import DateTrigger
 from zoneinfo import ZoneInfo
-from ..timezone import (business_now, storage_now, parse_persisted_datetime, business_zone as configured_business_zone, storage_window_cutoffs, timestamp_since_sql, timestamp_before_sql)
+from ..timezone import (business_now, storage_now, parse_persisted_datetime, business_zone as configured_business_zone, storage_window_cutoffs, timestamp_since_sql, timestamp_before_sql, business_date_predicate)
 from ..task_context import bind_task_context, business_timestamp, business_zone
 
 logger = logging.getLogger(__name__)
@@ -188,6 +188,17 @@ class SchedulerEngine:
                 else:
                     self._finish_tracked_task_run(task_run_id, "success", None)
         finally:
+            # Scheduler jobs execute on the API process' event-loop thread. If a job
+            # exits after an implicit write without its own rollback, clean it up here
+            # on the same owning thread before another in-process job can reuse conn.
+            if self.conn is not None and hasattr(self.conn, "rollback_if_open"):
+                try:
+                    if self.conn.rollback_if_open(timeout=2.0):
+                        logger.error("定时任务退出时发现未关闭的 SQLite 事务，已回滚 method=%s", method_name)
+                except TimeoutError:
+                    logger.error("定时任务退出时 SQLite 事务锁回滚兜底超时 method=%s", method_name)
+                except Exception:
+                    logger.exception("定时任务退出时 SQLite 事务回滚兜底失败 method=%s", method_name)
             self._active_job_count -= 1
 
     def _start_tracked_task_run(
@@ -633,10 +644,11 @@ class SchedulerEngine:
         with self.conn:
             self.conn.execute("BEGIN IMMEDIATE")
             today = business_now(self.cfg).strftime("%Y-%m-%d")
+            day_predicate, day_bounds = business_date_predicate("fetched_at", today, self.cfg)
             prev = self.conn.execute(
-                "SELECT id, attempt FROM metrics WHERE draft_id = ? AND platform = ? "
-                "AND substr(COALESCE(fetched_at, ''), 1, 10) = ?",
-                (draft_id, platform.value, today),
+                "SELECT id, attempt FROM metrics WHERE draft_id = ? AND platform = ? AND "
+                + day_predicate,
+                (draft_id, platform.value, *day_bounds),
             ).fetchone()
             if prev:
                 # 注意：这里的 metrics_attempt 是「当天第几次采集」，与作业重试 attempt 无关
