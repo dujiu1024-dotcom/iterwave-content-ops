@@ -239,7 +239,7 @@ def test_upsert_tracks_prev_and_peak(cfg, conn):
 def test_run_once_is_single_flight(cfg, conn, monkeypatch):
     hot_topic_service.reset_for_tests()
     monkeypatch.setattr(HotTopicCollector, "refresh",
-                        lambda self, on_progress=None: {"weibo": "collected"})
+                        lambda self, on_progress=None, collection_id=None: {"weibo": "collected"})
     res = hot_topic_service.run_once(cfg, conn, trigger="test")
     assert res["running"] is False and res["report"] == {"weibo": "collected"}
     assert res["progress"]["stage"] == "done" and res["progress"]["percent"] == 100
