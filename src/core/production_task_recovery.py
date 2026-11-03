@@ -52,10 +52,11 @@ def reconcile_round_tasks(
             # Only an explicitly retryable model-generation failure is safe to replay.
             # Image-provider, filesystem, OCR, DB and unknown failures are conservative:
             # the operator must inspect side effects before explicitly retrying.
-            from .content_pipeline import ContentGenerationError
-            retryable = isinstance(error, ContentGenerationError) and bool(error.retryable)
+            # Retry is opt-in: an exception must explicitly declare that replay
+            # is safe. Unknown exception types are never assumed idempotent.
+            retryable = bool(getattr(error, "retryable", False)) if error is not None else False
             code = (
-                str(getattr(error, "code", "content_generation_retryable"))
+                str(getattr(error, "code", "production_generation_retryable"))
                 if retryable else "interrupted_requires_review"
             )
             message = (
