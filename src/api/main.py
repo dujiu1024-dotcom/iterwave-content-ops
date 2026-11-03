@@ -112,34 +112,53 @@ logger = logging.getLogger(__name__)
 # =====================================================================
 
 class TransactionalAPIRoute(APIRoute):
-    """为同步写 API 提供请求级事务边界，异常时自动回滚并释放连接锁。
-
-    认证端点不依赖租户数据库，异步端点因可能跨线程 await 而单独审查，
-    不在此处自动包裹。
-    """
+    """Bound sync/async endpoint transactions and clean up implicit writes on exit."""
 
     def __init__(self, path: str, endpoint, **kwargs):
         methods = {str(method).upper() for method in (kwargs.get("methods") or [])}
-        if (
-            methods.intersection({"POST", "PUT", "PATCH", "DELETE"})
-            and not path.startswith("/api/auth/")
-            and not inspect.iscoroutinefunction(endpoint)
-            and not getattr(endpoint, "_manages_own_transaction", False)
-        ):
+        if not path.startswith("/api/auth/"):
             original = endpoint
+            use_request_transaction = (
+                methods.intersection({"POST", "PUT", "PATCH", "DELETE"})
+                and not inspect.iscoroutinefunction(original)
+                and not getattr(original, "_manages_own_transaction", False)
+            )
 
-            def transactional_endpoint(*args, **call_kwargs):
-                conn = _g_ctx.get("conn")
-                if conn is None:
-                    return original(*args, **call_kwargs)
-                with conn:
-                    return original(*args, **call_kwargs)
+            if inspect.iscoroutinefunction(original):
+                async def safe_async_endpoint(*args, **call_kwargs):
+                    conn = _g_ctx.get("conn")
+                    try:
+                        return await original(*args, **call_kwargs)
+                    finally:
+                        if conn is not None and hasattr(conn, "rollback_if_open"):
+                            conn.rollback_if_open(timeout=2.0)
 
-            transactional_endpoint.__name__ = getattr(original, "__name__", "transactional_endpoint")
-            transactional_endpoint.__doc__ = getattr(original, "__doc__", None)
-            transactional_endpoint.__annotations__ = getattr(original, "__annotations__", {})
-            transactional_endpoint.__signature__ = inspect.signature(original)
-            endpoint = transactional_endpoint
+                wrapped = safe_async_endpoint
+            else:
+                def safe_sync_endpoint(*args, **call_kwargs):
+                    conn = _g_ctx.get("conn")
+                    try:
+                        if conn is None:
+                            return original(*args, **call_kwargs)
+                        if use_request_transaction:
+                            with conn:
+                                return original(*args, **call_kwargs)
+                        return original(*args, **call_kwargs)
+                    finally:
+                        # Runs on the same worker thread that performed the SQL, so an
+                        # abandoned implicit transaction can release its retained lock.
+                        if conn is not None and hasattr(conn, "rollback_if_open"):
+                            conn.rollback_if_open(timeout=2.0)
+
+                wrapped = safe_sync_endpoint
+
+            wrapped.__name__ = getattr(original, "__name__", "transactional_endpoint")
+            wrapped.__doc__ = getattr(original, "__doc__", None)
+            wrapped.__annotations__ = getattr(original, "__annotations__", {})
+            wrapped.__signature__ = inspect.signature(original)
+            if getattr(original, "_manages_own_transaction", False):
+                wrapped._manages_own_transaction = True
+            endpoint = wrapped
         super().__init__(path, endpoint, **kwargs)
 
 
