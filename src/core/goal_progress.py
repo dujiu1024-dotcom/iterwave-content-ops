@@ -13,7 +13,7 @@ import logging
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from .timezone import business_date_cutoffs, business_now, timestamp_before_sql, timestamp_since_sql
+from .timezone import business_date_cutoffs, business_now, timestamp_before_exclusive_sql, timestamp_since_sql
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +103,7 @@ class GoalProgressUpdater:
             if row["metric_period_end"]:
                 end_exclusive = date.fromisoformat(str(row["metric_period_end"])) + timedelta(days=1)
                 utc_end, legacy_end = business_date_cutoffs(end_exclusive.isoformat(), self.cfg)
-                where.append(timestamp_before_sql("fetched_at"))
+                where.append(timestamp_before_exclusive_sql("fetched_at"))
                 params.extend((utc_end, legacy_end))
         except (TypeError, ValueError):
             period_valid = False
