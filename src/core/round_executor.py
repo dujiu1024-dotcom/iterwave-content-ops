@@ -1037,7 +1037,13 @@ class RoundExecutor:
                     if existing is not None:
                         if task["status"] == "running":
                             task_store.complete_task(task["id"], content_id=str(existing["id"]))
-                        elif task["status"] == "pending":
+                        elif task["status"] in {"pending", "failed"}:
+                            if task["status"] == "failed":
+                                if int(task["attempt_count"]) >= int(task["max_attempts"]):
+                                    task_store.extend_attempts(
+                                        task["id"], max_attempts=int(task["attempt_count"]) + 1,
+                                    )
+                                task_store.retry_task(task["id"], retry_failed=True)
                             task_store.claim_task(
                                 task["id"], worker_id=f"round-executor-{round_id}-artifact-adoption",
                                 lease_seconds=300,
