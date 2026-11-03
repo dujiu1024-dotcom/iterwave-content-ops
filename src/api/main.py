@@ -115,45 +115,85 @@ logger = logging.getLogger(__name__)
 # =====================================================================
 
 class TransactionalAPIRoute(APIRoute):
-    """为同步写 API 提供请求级事务边界，异常时自动回滚并释放连接锁。
-
-    认证端点不依赖租户数据库，异步端点因可能跨线程 await 而单独审查，
-    不在此处自动包裹。
-    """
+    """Bound endpoint transactions and clean up implicit writes on endpoint exit."""
 
     def __init__(self, path: str, endpoint, **kwargs):
-        methods = {str(method).upper() for method in (kwargs.get("methods") or [])}
         if (
-            methods.intersection({"POST", "PUT", "PATCH", "DELETE"})
-            and not path.startswith("/api/auth/")
-            and not inspect.iscoroutinefunction(endpoint)
+            not path.startswith("/api/auth/")
             and not getattr(endpoint, "_manages_own_transaction", False)
         ):
+            methods = {str(method).upper() for method in (kwargs.get("methods") or [])}
             original = endpoint
-
-            def transactional_endpoint(*args, **call_kwargs):
-                conn = _g_ctx.get("conn")
-                if conn is None:
-                    return original(*args, **call_kwargs)
-                with conn:
-                    return original(*args, **call_kwargs)
-
-            transactional_endpoint.__name__ = getattr(original, "__name__", "transactional_endpoint")
-            transactional_endpoint.__doc__ = getattr(original, "__doc__", None)
-            transactional_endpoint.__annotations__ = getattr(original, "__annotations__", {})
-            transactional_endpoint.__signature__ = inspect.signature(original)
-            endpoint = transactional_endpoint
+            use_request_transaction = (
+                methods.intersection({"POST", "PUT", "PATCH", "DELETE"})
+                and not inspect.iscoroutinefunction(original)
+                and not getattr(original, "_manages_own_transaction", False)
+            )
+            if inspect.iscoroutinefunction(original):
+                async def safe_async_endpoint(*args, **call_kwargs):
+                    conn = _g_ctx.get("conn")
+                    try:
+                        return await original(*args, **call_kwargs)
+                    finally:
+                        _finalize_endpoint_connection(conn, "异步请求")
+                wrapped = safe_async_endpoint
+            else:
+                def safe_sync_endpoint(*args, **call_kwargs):
+                    conn = _g_ctx.get("conn")
+                    try:
+                        if conn is None:
+                            return original(*args, **call_kwargs)
+                        if use_request_transaction:
+                            with conn:
+                                return original(*args, **call_kwargs)
+                        return original(*args, **call_kwargs)
+                    finally:
+                        _finalize_endpoint_connection(conn, "同步请求")
+                wrapped = safe_sync_endpoint
+            wrapped.__name__ = getattr(original, "__name__", "transactional_endpoint")
+            wrapped.__doc__ = getattr(original, "__doc__", None)
+            wrapped.__annotations__ = getattr(original, "__annotations__", {})
+            wrapped.__signature__ = inspect.signature(original)
+            if getattr(original, "_manages_own_transaction", False):
+                wrapped._manages_own_transaction = True
+            endpoint = wrapped
         super().__init__(path, endpoint, **kwargs)
 
 
-def manages_own_transaction(func):
-    """标记同步写路由自行分段管理事务（例如中途调用外部模型/浏览器数十秒），
+def _finalize_endpoint_connection(conn, label: str) -> None:
+    if conn is None or not hasattr(conn, "rollback_if_open"):
+        return
+    try:
+        if conn.rollback_if_open(timeout=2.0):
+            logger.error("%s结束时发现未关闭的 SQLite 事务，已执行回滚", label)
+    except TimeoutError:
+        logger.error("%s结束时 SQLite 事务回滚兜底超时", label)
+    except Exception:
+        logger.exception("%s结束时 SQLite 事务回滚兜底失败", label)
 
-    不被 TransactionalAPIRoute 包进请求级事务；路由内必须用短 ``with conn:`` 分段提交，
-    调外部服务期间不得持有写事务。
-    """
-    func._manages_own_transaction = True
-    return func
+
+def manages_own_transaction(func):
+    """Mark a route that performs slow external work outside short DB transactions."""
+    if inspect.iscoroutinefunction(func):
+        async def managed_endpoint(*args, **kwargs):
+            conn = _g_ctx.get("conn")
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                _finalize_endpoint_connection(conn, "自主管理事务的异步路由")
+    else:
+        def managed_endpoint(*args, **kwargs):
+            conn = _g_ctx.get("conn")
+            try:
+                return func(*args, **kwargs)
+            finally:
+                _finalize_endpoint_connection(conn, "自主管理事务的同步路由")
+    managed_endpoint.__name__ = getattr(func, "__name__", "managed_endpoint")
+    managed_endpoint.__doc__ = getattr(func, "__doc__", None)
+    managed_endpoint.__annotations__ = getattr(func, "__annotations__", {})
+    managed_endpoint.__signature__ = inspect.signature(func)
+    managed_endpoint._manages_own_transaction = True
+    return managed_endpoint
 
 
 _g_ctx: dict = {}
@@ -1049,6 +1089,15 @@ def _build_app() -> FastAPI:
                     tracked_request = False
             return response
         finally:
+            conn = _g_ctx.get("conn")
+            if conn is not None and hasattr(conn, "rollback_if_open"):
+                try:
+                    if conn.rollback_if_open(timeout=2.0):
+                        logger.error("请求结束时发现未关闭的 SQLite 事务，已执行回滚 path=%s", path)
+                except TimeoutError:
+                    logger.error("请求结束时 SQLite 事务锁仍被占用，回滚兜底超时 path=%s", path)
+                except Exception:
+                    logger.exception("请求结束时 SQLite 事务回滚兜底失败 path=%s", path)
             if tracked_request:
                 _tenant_switch_gate.leave_request()
 
@@ -2862,10 +2911,12 @@ def _register_routes(app: FastAPI) -> None:
         return get_media_generation_settings()
 
     @app.post("/api/media/generate", status_code=201)
+    @manages_own_transaction
     def generate_media_asset(req: MediaGenerationRequest):
         return _generate_media_asset(req)
 
     @app.post("/api/media/generate-for-content/{content_id}", status_code=201)
+    @manages_own_transaction
     def generate_media_for_content(content_id: str, usage_role: str = Query("cover", pattern="^(cover|illustration|background)$")):
         """根据现有内容生成候选配图；生成结果进入待审核状态，不自动分配。"""
         row = _g()["conn"].execute("SELECT id, title, body, platform FROM contents WHERE id = ?", (content_id,)).fetchone()
@@ -2886,6 +2937,7 @@ def _register_routes(app: FastAPI) -> None:
         ))
 
     @app.post("/api/media/{asset_id}/edit", status_code=201)
+    @manages_own_transaction
     def edit_media_asset(asset_id: int, req: MediaGenerationRequest):
         return _generate_media_asset(req, source_asset_id=asset_id)
 
@@ -2987,6 +3039,7 @@ def _register_routes(app: FastAPI) -> None:
         }
 
     @app.post("/api/media", status_code=201)
+    @manages_own_transaction
     def upload_media_asset(req: MediaAssetUploadRequest):
         registry = _g().get("tenant_registry")
         tenant_id = _g().get("runtime_tenant_id", "default")
@@ -3048,23 +3101,42 @@ def _register_routes(app: FastAPI) -> None:
             target.chmod(0o600)
         except OSError:
             pass
+        duplicate_after_processing = None
         try:
-            cur = conn.execute(
-                "INSERT INTO media_assets "
-                "(title, original_filename, stored_filename, mime_type, byte_size, sha256, "
-                "width, height, alt_text, tags, source_type, status, quality_score, quality_details) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'upload', 'active', ?, ?)",
-                (
-                    title, safe_filename, stored_filename, mime_type,
-                    len(raw), digest, width, height, req.alt_text.strip(),
-                    json.dumps(tags, ensure_ascii=False), quality["score"],
-                    json.dumps(quality, ensure_ascii=False),
-                ),
-            )
-            conn.commit()
+            # File decoding, quality scoring and disk I/O above intentionally happen
+            # without a tenant transaction. Recheck the digest under a short write
+            # transaction to preserve concurrent-upload idempotency.
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                duplicate_after_processing = conn.execute(
+                    "SELECT id, title, original_filename, mime_type, byte_size, width, height, "
+                    "alt_text, tags, status, review_status, review_note, created_at "
+                    "FROM media_assets WHERE sha256 = ? AND status = 'active' LIMIT 1",
+                    (digest,),
+                ).fetchone()
+                if duplicate_after_processing is None:
+                    cur = conn.execute(
+                        "INSERT INTO media_assets "
+                        "(title, original_filename, stored_filename, mime_type, byte_size, sha256, "
+                        "width, height, alt_text, tags, source_type, status, quality_score, quality_details) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'upload', 'active', ?, ?)",
+                        (
+                            title, safe_filename, stored_filename, mime_type,
+                            len(raw), digest, width, height, req.alt_text.strip(),
+                            json.dumps(tags, ensure_ascii=False), quality["score"],
+                            json.dumps(quality, ensure_ascii=False),
+                        ),
+                    )
         except Exception:
             target.unlink(missing_ok=True)
             raise
+        if duplicate_after_processing is not None:
+            target.unlink(missing_ok=True)
+            item = dict(duplicate_after_processing)
+            item["tags"] = json.loads(item["tags"] or "[]")
+            item["duplicate"] = True
+            item["file_url"] = f"/api/media/{item['id']}/file"
+            return item
         return {
             "id": cur.lastrowid, "title": title,
             "original_filename": Path(req.filename).name[:255],
@@ -5726,6 +5798,7 @@ def _register_routes(app: FastAPI) -> None:
         return {"runs": out}
 
     @app.post("/api/diagnostics")
+    @manages_own_transaction
     def run_diagnostics(req: DiagnoseRequest):
         """8 点端到端流程诊断（§21.3）。"""
         from src.core.orchestration import diagnose
@@ -8499,6 +8572,7 @@ def _register_routes(app: FastAPI) -> None:
         return kb_sources.list_sources(_g()["cfg"])
 
     @app.post("/api/kb/sources/upload")
+    @manages_own_transaction
     def kb_source_upload(req: dict):
         cfg = _g()["cfg"]
         try:
@@ -8516,6 +8590,7 @@ def _register_routes(app: FastAPI) -> None:
         return source
 
     @app.post("/api/kb/sources/server")
+    @manages_own_transaction
     def kb_source_server(req: dict):
         cfg = _g()["cfg"]
         try:
@@ -8530,6 +8605,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(422, str(e)) from e
 
     @app.post("/api/kb/sources/remote")
+    @manages_own_transaction
     def kb_source_remote(req: dict):
         cfg = _g()["cfg"]
         try:
@@ -8545,10 +8621,12 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(422, str(e)) from e
 
     @app.post("/api/kb/sources/default")
+    @manages_own_transaction
     def kb_source_default():
         return kb_sources.add_default_empty(_g()["cfg"])
 
     @app.patch("/api/kb/sources/{source_id}")
+    @manages_own_transaction
     def kb_source_update(source_id: str, req: dict):
         try:
             return kb_sources.update_source(_g()["cfg"], source_id, req or {})
@@ -8558,6 +8636,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(422, str(e)) from e
 
     @app.delete("/api/kb/sources/{source_id}")
+    @manages_own_transaction
     def kb_source_delete(source_id: str):
         try:
             return kb_sources.delete_source(_g()["cfg"], source_id)
@@ -8575,6 +8654,7 @@ def _register_routes(app: FastAPI) -> None:
         return {"total": total, "inserted": total - before}
 
     @app.post("/api/kb/sources/{source_id}/sync")
+    @manages_own_transaction
     def kb_source_sync(source_id: str):
         cfg = _g()["cfg"]
         source = next((s for s in kb_sources.load_registry(cfg) if s["id"] == source_id), None)
@@ -9123,6 +9203,7 @@ def _register_routes(app: FastAPI) -> None:
         return Response(status_code=204)
 
     @app.post("/api/accounts/{platform}/login")
+    @manages_own_transaction
     def start_platform_login(platform: str, restart: bool = Query(False)):
         """启动后台登录 subprocess（调 Easel vendor xhs_publish.py login / douyin_publish.py login / web_publisher.py login-qr）。
 
@@ -9145,12 +9226,14 @@ def _register_routes(app: FastAPI) -> None:
         return _read_account_identity(p, data_dir=_interactive_login_data_dir())
 
     @app.post("/api/accounts/{platform}/logout")
+    @manages_own_transaction
     def logout_platform(platform: str):
         """注销：清持久化 profile + storage_state + 登录标记（下次需重新扫码）。"""
         p = _valid_platform(platform)
         return _clear_login(p, data_dir=_interactive_login_data_dir())
 
     @app.post("/api/accounts/{platform}/sms")
+    @manages_own_transaction
     def submit_platform_sms(platform: str, req: SmsCodeRequest):
         """回填短信验证码（登录进入 sms_required 时由前端提交，runner 读走后继续登录）。"""
         p = _valid_platform(platform)
@@ -9160,6 +9243,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(400, str(e)) from e
 
     @app.post("/api/accounts/{platform}/cancel_login")
+    @manages_own_transaction
     def cancel_platform_login(platform: str):
         """取消进行中的登录（terminate subprocess + 清状态文件）。"""
         p = _valid_platform(platform)
