@@ -115,16 +115,18 @@ logger = logging.getLogger(__name__)
 # =====================================================================
 
 class TransactionalAPIRoute(APIRoute):
-    """Bound sync/async endpoint transactions and clean up implicit writes on exit."""
+    """Bound endpoint transactions and clean up implicit writes on endpoint exit."""
 
     def __init__(self, path: str, endpoint, **kwargs):
-        methods = {str(method).upper() for method in (kwargs.get("methods") or [])}
-        if not path.startswith("/api/auth/"):
+        if (
+            not path.startswith("/api/auth/")
+            and not getattr(endpoint, "_manages_own_transaction", False)
+        ):
+            methods = {str(method).upper() for method in (kwargs.get("methods") or [])}
             original = endpoint
             use_request_transaction = (
                 methods.intersection({"POST", "PUT", "PATCH", "DELETE"})
                 and not inspect.iscoroutinefunction(original)
-                and not getattr(original, "_manages_own_transaction", False)
             )
             if inspect.iscoroutinefunction(original):
                 async def safe_async_endpoint(*args, **call_kwargs):
@@ -132,13 +134,7 @@ class TransactionalAPIRoute(APIRoute):
                     try:
                         return await original(*args, **call_kwargs)
                     finally:
-                        if conn is not None and hasattr(conn, "rollback_if_open"):
-                            try:
-                                conn.rollback_if_open(timeout=2.0)
-                            except TimeoutError:
-                                logger.error("异步请求结束时 SQLite 事务回滚兜底超时")
-                            except Exception:
-                                logger.exception("异步请求结束时 SQLite 事务回滚兜底失败")
+                        _finalize_endpoint_connection(conn, "异步请求")
                 wrapped = safe_async_endpoint
             else:
                 def safe_sync_endpoint(*args, **call_kwargs):
@@ -151,32 +147,50 @@ class TransactionalAPIRoute(APIRoute):
                                 return original(*args, **call_kwargs)
                         return original(*args, **call_kwargs)
                     finally:
-                        if conn is not None and hasattr(conn, "rollback_if_open"):
-                            try:
-                                conn.rollback_if_open(timeout=2.0)
-                            except TimeoutError:
-                                logger.error("同步请求结束时 SQLite 事务回滚兜底超时")
-                            except Exception:
-                                logger.exception("同步请求结束时 SQLite 事务回滚兜底失败")
+                        _finalize_endpoint_connection(conn, "同步请求")
                 wrapped = safe_sync_endpoint
             wrapped.__name__ = getattr(original, "__name__", "transactional_endpoint")
             wrapped.__doc__ = getattr(original, "__doc__", None)
             wrapped.__annotations__ = getattr(original, "__annotations__", {})
             wrapped.__signature__ = inspect.signature(original)
-            if getattr(original, "_manages_own_transaction", False):
-                wrapped._manages_own_transaction = True
             endpoint = wrapped
         super().__init__(path, endpoint, **kwargs)
 
 
-def manages_own_transaction(func):
-    """标记同步写路由自行分段管理事务（例如中途调用外部模型/浏览器数十秒），
+def _finalize_endpoint_connection(conn, label: str) -> None:
+    if conn is None or not hasattr(conn, "rollback_if_open"):
+        return
+    try:
+        if conn.rollback_if_open(timeout=2.0):
+            logger.error("%s结束时发现未关闭的 SQLite 事务，已执行回滚", label)
+    except TimeoutError:
+        logger.error("%s结束时 SQLite 事务回滚兜底超时", label)
+    except Exception:
+        logger.exception("%s结束时 SQLite 事务回滚兜底失败", label)
 
-    不被 TransactionalAPIRoute 包进请求级事务；路由内必须用短 ``with conn:`` 分段提交，
-    调外部服务期间不得持有写事务。
-    """
-    func._manages_own_transaction = True
-    return func
+
+def manages_own_transaction(func):
+    """Mark a route that performs slow external work outside short DB transactions."""
+    if inspect.iscoroutinefunction(func):
+        async def managed_endpoint(*args, **kwargs):
+            conn = _g_ctx.get("conn")
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                _finalize_endpoint_connection(conn, "自主管理事务的异步路由")
+    else:
+        def managed_endpoint(*args, **kwargs):
+            conn = _g_ctx.get("conn")
+            try:
+                return func(*args, **kwargs)
+            finally:
+                _finalize_endpoint_connection(conn, "自主管理事务的同步路由")
+    managed_endpoint.__name__ = getattr(func, "__name__", "managed_endpoint")
+    managed_endpoint.__doc__ = getattr(func, "__doc__", None)
+    managed_endpoint.__annotations__ = getattr(func, "__annotations__", {})
+    managed_endpoint.__signature__ = inspect.signature(func)
+    managed_endpoint._manages_own_transaction = True
+    return managed_endpoint
 
 
 _g_ctx: dict = {}
