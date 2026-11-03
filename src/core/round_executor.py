@@ -1033,10 +1033,52 @@ class RoundExecutor:
                             "template": template_data,
                         },
                     )
-                    if task["status"] != "pending":
-                        existing = task_store.get_content_for_task(task["id"])
-                        if existing is not None and task["status"] == "running":
+                    existing = task_store.get_content_for_task(task["id"])
+                    if existing is not None:
+                        if task["status"] == "running":
                             task_store.complete_task(task["id"], content_id=str(existing["id"]))
+                        elif task["status"] == "pending":
+                            task_store.claim_task(
+                                task["id"], worker_id=f"round-executor-{round_id}-artifact-adoption",
+                                lease_seconds=300,
+                            )
+                            task_store.complete_task(task["id"], content_id=str(existing["id"]))
+                        else:
+                            raise RoundPreconditionError(
+                                f"生产任务 {task['id']} 状态为 {task['status']}，但已有成品；"
+                                "请通过任务恢复入口核对，不允许重新生成"
+                            )
+                        draft = self.conn.execute(
+                            "SELECT id FROM drafts WHERE content_id=? AND platform=? ORDER BY rowid DESC LIMIT 1",
+                            (str(existing["id"]), platform.value),
+                        ).fetchone()
+                        if draft is None:
+                            draft_id = f"draft-{uuid.uuid4().hex[:12]}"
+                            with self.conn:
+                                self.conn.execute(
+                                    "INSERT INTO drafts (id,content_id,platform,status) VALUES (?,?,?,'draft_pending')",
+                                    (draft_id, str(existing["id"]), platform.value),
+                                )
+                        else:
+                            draft_id = str(draft["id"])
+                        try:
+                            saved_tags = json.loads(existing["tags"] or "[]")
+                        except (TypeError, ValueError):
+                            saved_tags = []
+                        try:
+                            saved_images = json.loads(existing["image_paths"] or "[]")
+                        except (TypeError, ValueError):
+                            saved_images = []
+                        rows.append({
+                            "content_id": str(existing["id"]), "draft_id": draft_id,
+                            "platform": platform, "title": existing["title"] or "",
+                            "body": existing["body"] or "", "tags": saved_tags,
+                            "image_paths": saved_images,
+                        })
+                        report["contents_created"] += 1
+                        report["drafts_created"] += 1
+                        continue
+                    if task["status"] != "pending":
                         raise RoundPreconditionError(
                             f"生产任务 {task['id']} 当前状态为 {task['status']}，"
                             "拒绝重复生成；请先恢复或显式重试该任务"
@@ -1782,6 +1824,9 @@ _original_produce_contents = RoundExecutor._produce_contents
 
 
 async def _produce_contents_with_task_recovery(self, round_id, scored, platforms, report, template_data=None):
+    if getattr(self, "_subplan_context", None):
+        from .production_task_recovery import install_safe_expired_recovery
+        install_safe_expired_recovery()
     try:
         return await _original_produce_contents(
             self, round_id, scored, platforms, report, template_data=template_data,
