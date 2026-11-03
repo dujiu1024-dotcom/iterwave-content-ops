@@ -188,6 +188,17 @@ class SchedulerEngine:
                 else:
                     self._finish_tracked_task_run(task_run_id, "success", None)
         finally:
+            # Scheduler jobs execute on the API process' event-loop thread. If a job
+            # exits after an implicit write without its own rollback, clean it up here
+            # on the same owning thread before another in-process job can reuse conn.
+            if self.conn is not None and hasattr(self.conn, "rollback_if_open"):
+                try:
+                    if self.conn.rollback_if_open(timeout=2.0):
+                        logger.error("定时任务退出时发现未关闭的 SQLite 事务，已回滚 method=%s", method_name)
+                except TimeoutError:
+                    logger.error("定时任务退出时 SQLite 事务锁回滚兜底超时 method=%s", method_name)
+                except Exception:
+                    logger.exception("定时任务退出时 SQLite 事务回滚兜底失败 method=%s", method_name)
             self._active_job_count -= 1
 
     def _start_tracked_task_run(
