@@ -56,13 +56,29 @@ def active_subplan_stage(conn, *, today: str | None = None, advance: bool = Fals
         ).fetchall()
         for row in stages:
             stage = dict(row)
-            if stage["status"] in ("completed", "cancelled"):
+            if stage["status"] == "cancelled":
                 continue
             count = int(stage["confirmed_published_count"] or 0)
+            from .strategy_step_completion import completion_gate_state
+            gates = completion_gate_state(stage)
+            if gates["production_blocked"]:
+                stage["blocker"] = "strategy_condition_requires_adjustment"
+                stage["completion_gates"] = gates
+                stage.update({key: identity[key] for key in identity.keys() if key != "id"})
+                first_blocker = first_blocker or stage
+                break
+            if stage["status"] == "completed":
+                continue
             if count >= int(stage["target_count"]):
-                if not advance:
-                    stage["blocker"] = "stage_target_reached"
-                    stage["remaining_count"] = 0
+                from .strategy_step_completion import completion_gate_state
+                gates = completion_gate_state(stage)
+                stage["completion_gates"] = gates
+                stage["remaining_count"] = 0
+                if not advance or not gates["can_complete"]:
+                    stage["blocker"] = (
+                        "stage_target_reached" if not advance
+                        else "stage_completion_conditions_not_met"
+                    )
                     stage.update({key: identity[key] for key in identity.keys() if key != "id"})
                     first_blocker = first_blocker or stage
                     break
@@ -123,6 +139,15 @@ def stage_open_blocker(conn, stage: dict[str, Any] | None) -> dict[str, Any] | N
         return {"code": "stage_window_expired", "reason": "当前阶段执行窗口已结束"}
     if stage.get("blocker") == "stage_paused":
         return {"code": "stage_paused", "reason": "当前阶段已暂停"}
+    if stage.get("blocker") == "stage_completion_conditions_not_met":
+        return {"code": "stage_completion_conditions_not_met", "reason": "发布数量已达标，但业务完成或效果条件尚未通过",
+                "completion_gates": stage.get("completion_gates")}
+    if stage.get("blocker") == "stage_completion_conditions_pending":
+        return {"code": "stage_completion_conditions_pending", "reason": "策略步骤完成条件待确认",
+                "completion_gates": stage.get("completion_gates")}
+    if stage.get("blocker") == "strategy_condition_requires_adjustment":
+        return {"code": "strategy_condition_requires_adjustment", "reason": "业务或效果条件未通过/待复核，需先调整策略或完成复核",
+                "completion_gates": stage.get("completion_gates")}
     if stage.get("blocker") == "subplan_paused":
         return {"code": "subplan_paused", "reason": "子计划已暂停"}
     if int(stage.get("remaining_count") or 0) <= 0:

@@ -222,6 +222,15 @@ class RoundExecutor:
                     or identity is None or identity["status"] != "active" or stage_row is None
                     or stage_row["status"] in ("paused", "completed", "cancelled")):
                 raise RoundPreconditionError("轮次绑定的子计划授权或阶段快照无效")
+            # Re-check the live dependency and manual-review gates at execution time;
+            # a round created earlier must not bypass a later failed/review-pending decision.
+            from .plan_version_store import PlanVersionStore, PlanVersionError
+            try:
+                PlanVersionStore(self.conn).assert_stage_ready(
+                    int(round_row["sub_plan_stage_id"]), int(round_row["sub_plan_version_id"])
+                )
+            except PlanVersionError as exc:
+                raise RoundPreconditionError(str(exc)) from exc
             business_date = business_now(self.cfg).date().isoformat()
             if stage_row["start_date"] and business_date < stage_row["start_date"]:
                 raise RoundPreconditionError("轮次绑定阶段尚未到执行日期")

@@ -195,8 +195,91 @@ def test_round_is_pinned_to_effective_version_and_survives_new_draft(client):
     assert body["sub_plan_stage_snapshot"]["title"] == "阶段一"
 
 
-def test_manual_round_open_blocks_missing_predecessor_outcome_with_reason(client):
+
+
+def test_completed_stage_with_later_failed_effect_review_blocks_production(client):
     tc, conn, _ = client
+    store = PlanVersionStore(conn)
+    master = store.create_master_draft(dict(PLAN_BASE), author="test", source="user")
+    store.activate_master_version(int(master["id"]), reviewer="test")
+    store.create_subplan(
+        "completed-review-sub", master_plan_version_id=int(master["id"]),
+        platform="xhs", title="已完成阶段复核", author="test",
+    )
+    version = store.create_subplan_version(
+        "completed-review-sub", {"title": "已完成阶段复核", "platform": "xhs"},
+        master_plan_version_id=int(master["id"]),
+        stages=[{
+            "stage_key": "validate", "title": "效果验证", "target_count": 1,
+            "effect_evaluation": "有效反馈率达到目标",
+        }],
+    )
+    store.activate_subplan_version(int(version["id"]), reviewer="test")
+    stage = conn.execute(
+        "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=?", (int(version["id"]),)
+    ).fetchone()
+    conn.execute(
+        "UPDATE sub_plan_stages SET status='completed',effect_status='failed' WHERE id=?",
+        (int(stage["id"]),),
+    )
+    conn.commit()
+
+    from src.core.subplan_production import active_subplan_stage
+    active = active_subplan_stage(conn)
+
+    assert active is not None
+    assert active["blocker"] == "strategy_condition_requires_adjustment"
+    assert int(active["id"]) == int(stage["id"])
+
+
+def test_invalid_effect_review_does_not_mutate_stage_or_leave_partial_review(client):
+    tc, conn, _ = client
+    store = PlanVersionStore(conn)
+    master = store.create_master_draft(dict(PLAN_BASE), author="test", source="user")
+    store.activate_master_version(int(master["id"]), reviewer="test")
+    store.create_subplan(
+        "effect-review-sub", master_plan_version_id=int(master["id"]),
+        platform="xhs", title="效果审核子计划", author="test",
+    )
+    version = store.create_subplan_version(
+        "effect-review-sub", {"title": "效果审核子计划", "platform": "xhs"},
+        master_plan_version_id=int(master["id"]),
+        stages=[{
+            "stage_key": "validate", "title": "效果验证", "target_count": 1,
+            "effect_evaluation": "有效反馈率达到目标",
+        }],
+    )
+    store.activate_subplan_version(int(version["id"]), reviewer="test")
+    stage = conn.execute(
+        "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=?", (int(version["id"]),)
+    ).fetchone()
+
+    response = tc.post(
+        f"/api/subplans/effect-review-sub/stages/{int(stage['id'])}/condition-review",
+        json={
+            "condition_type": "effect", "decision": "failed",
+            "reason": "效果未达标", "confidence": "invalid",
+        },
+    )
+
+    assert response.status_code == 422
+    current = conn.execute(
+        "SELECT effect_status FROM sub_plan_stages WHERE id=?", (int(stage["id"]),)
+    ).fetchone()
+    assert current["effect_status"] == "pending"
+    assert int(conn.execute(
+        "SELECT COUNT(*) FROM strategy_step_condition_reviews WHERE stage_id=?",
+        (int(stage["id"]),),
+    ).fetchone()[0]) == 0
+    assert int(conn.execute(
+        "SELECT COUNT(*) FROM strategy_effect_reviews WHERE stage_id=?",
+        (int(stage["id"]),),
+    ).fetchone()[0]) == 0
+
+
+def test_manual_round_open_blocks_missing_predecessor_outcome_with_reason(client):
+    tc, conn, seed = client
+    round_id = seed.round()
     store = PlanVersionStore(conn)
     master = store.create_master_draft(dict(PLAN_BASE), author="test", source="user")
     store.activate_master_version(int(master["id"]), reviewer="test")
@@ -219,6 +302,20 @@ def test_manual_round_open_blocks_missing_predecessor_outcome_with_reason(client
         (int(version["id"]),),
     ).fetchall()
     store.update_stage_status(int(stages[0]["id"]), "in_progress")
+    conn.execute(
+        "INSERT INTO contents(id,round_id,platform,title,body) "
+        "VALUES('dependency-research-content',?,'xhs','调研内容','已发布的调研内容')",
+        (round_id,),
+    )
+    conn.execute(
+        "INSERT INTO drafts(id,content_id,platform,user_confirmed_at) "
+        "VALUES('dependency-research-published','dependency-research-content','xhs','2026-11-03')"
+    )
+    conn.execute(
+        "UPDATE spiral_rounds SET sub_plan_id='dependency-sub',sub_plan_version_id=?,sub_plan_stage_id=? WHERE id=?",
+        (int(version["id"]), int(stages[0]["id"]), round_id),
+    )
+    conn.commit()
     store.update_stage_status(int(stages[0]["id"]), "completed")
 
     before = int(conn.execute("SELECT COUNT(*) FROM spiral_rounds").fetchone()[0])

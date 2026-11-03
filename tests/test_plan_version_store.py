@@ -56,7 +56,11 @@ def _db(path=None):
             input_info TEXT NOT NULL DEFAULT '', expected_result TEXT NOT NULL DEFAULT '',
             completion_criteria TEXT NOT NULL DEFAULT '', effect_evaluation TEXT NOT NULL DEFAULT '',
             entry_condition TEXT NOT NULL DEFAULT '', entry_condition_met INTEGER NOT NULL DEFAULT 1,
-            dependencies_json TEXT NOT NULL DEFAULT '[]'
+            dependencies_json TEXT NOT NULL DEFAULT '[]',
+            business_completion_required INTEGER NOT NULL DEFAULT 0,
+            business_completion_status TEXT NOT NULL DEFAULT 'not_required',
+            effect_required INTEGER NOT NULL DEFAULT 0,
+            effect_status TEXT NOT NULL DEFAULT 'not_required'
         );
         CREATE TABLE sub_plan_stage_outcomes (
             id INTEGER PRIMARY KEY AUTOINCREMENT, sub_plan_id TEXT NOT NULL,
@@ -222,9 +226,14 @@ def test_stage_publish_stats_count_only_user_confirmed_drafts_and_stage_lifecycl
     conn.execute("INSERT INTO contents(id,round_id) VALUES('content-1',1)")
     conn.execute("INSERT INTO drafts(id,content_id,user_confirmed_at) VALUES('draft-1','content-1',NULL)")
     conn.execute("INSERT INTO drafts(id,content_id,user_confirmed_at) VALUES('draft-2','content-1','2026-01-04')")
+    for index in range(2, 9):
+        conn.execute(
+            "INSERT INTO drafts(id,content_id,user_confirmed_at) VALUES(?,?,?)",
+            (f"draft-{index + 1}", "content-1", f"2026-01-{index + 4:02d}"),
+        )
     conn.commit()
 
-    assert store.get_stage_publish_stats(stage_id)["confirmed_published_count"] == 1
+    assert store.get_stage_publish_stats(stage_id)["confirmed_published_count"] == 8
     store.update_stage_status(stage_id, "in_progress")
     store.update_stage_status(stage_id, "completed")
     assert conn.execute(
@@ -311,6 +320,19 @@ def test_strategy_steps_persist_dependencies_and_require_real_predecessor_outcom
         store.assert_stage_ready(rows[1]["id"], version["id"])
 
     store.update_stage_status(rows[0]["id"], "in_progress")
+    conn.execute("INSERT INTO contents(id,round_id) VALUES('research-content',1)")
+    conn.execute(
+        "INSERT INTO drafts(id,content_id,user_confirmed_at) VALUES('research-published','research-content','2026-11-03')"
+    )
+    conn.execute(
+        "UPDATE spiral_rounds SET sub_plan_id='sub-strategy',sub_plan_version_id=?,sub_plan_stage_id=? WHERE id=1",
+        (version["id"], rows[0]["id"]),
+    )
+    conn.execute(
+        "UPDATE sub_plan_stages SET business_completion_status='passed',effect_status='passed' WHERE id=?",
+        (rows[0]["id"],),
+    )
+    conn.commit()
     store.update_stage_status(rows[0]["id"], "completed")
     store.record_stage_outcome(
         rows[0]["id"], version["id"], {"published_count": 1, "feedback": "用户明确提出需求"},
@@ -332,6 +354,17 @@ def test_strategy_steps_persist_dependencies_and_require_real_predecessor_outcom
     )
     assert outcome["result"]["published_count"] == 1
     assert store.assert_stage_ready(rows[1]["id"], version["id"])["stage_key"] == "scale"
+
+    # A later failed review must invalidate an already-recorded predecessor outcome.
+    conn.execute(
+        "UPDATE sub_plan_stages SET effect_status='failed' WHERE id=?", (rows[0]["id"],)
+    )
+    with pytest.raises(PlanVersionError, match="业务完成或效果条件已失效"):
+        store.assert_stage_ready(rows[1]["id"], version["id"])
+    conn.execute(
+        "UPDATE sub_plan_stages SET effect_status='passed' WHERE id=?", (rows[0]["id"],)
+    )
+    conn.commit()
 
     store.activate_subplan_version(version["id"], reviewer="reviewer")
     lease = store.reserve_round_open(
