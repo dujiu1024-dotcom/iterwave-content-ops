@@ -35,8 +35,7 @@ def _cfg():
 
 def test_normalizer_uses_business_timezone_for_history_window(monkeypatch):
     cfg = _cfg()
-    observed = {}
-
+    
     def fixed_now():
         return datetime(2026, 11, 2, 12, 0, 0, tzinfo=timezone.timezone.utc)
 
