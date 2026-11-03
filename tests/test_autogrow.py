@@ -174,6 +174,22 @@ def _ctl(cfg, conn, executor=None):
             stages=[{"title": "test stage", "target_count": 100}],
         )
         store.activate_subplan_version(version["id"], reviewer="test")
+        from src.core.production_line_store import ProductionLineStore
+        stage = conn.execute(
+            "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order LIMIT 1",
+            (int(version["id"]),),
+        ).fetchone()
+        line_store = ProductionLineStore(conn)
+        line_draft = line_store.create_draft(
+            sub_id, int(version["id"]),
+            {"title": "autogrow test line", "stages": [{
+                "stage_key": str(stage["stage_key"]),
+                "batch_size": int(stage["target_count"]),
+                "production_goal": str(stage["title"]),
+            }]},
+            generation_source="manual", author="test",
+        )
+        line_store.activate(int(line_draft["id"]), reviewer="test")
     return AutogrowController(cfg, conn, executor or FakeExecutor(conn), pvm=FakePvm(),
                               guard=UltimateGoalChecker(cfg))
 

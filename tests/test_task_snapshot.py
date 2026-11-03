@@ -11,6 +11,35 @@ from src.core.task_snapshot import (
 )
 
 
+def _activate_test_production_line(conn, sub_plan_id: str, sub_plan_version_id: int) -> int:
+    from src.core.production_line_store import ProductionLineStore
+
+    rows = conn.execute(
+        "SELECT stage_key,title,target_count FROM sub_plan_stages "
+        "WHERE sub_plan_version_id=? ORDER BY stage_order,id",
+        (sub_plan_version_id,),
+    ).fetchall()
+    line_store = ProductionLineStore(conn)
+    draft = line_store.create_draft(
+        sub_plan_id,
+        sub_plan_version_id,
+        {
+            "title": "测试生产线",
+            "stages": [
+                {
+                    "stage_key": row["stage_key"],
+                    "batch_size": min(1, int(row["target_count"])),
+                    "production_goal": row["title"],
+                }
+                for row in rows
+            ],
+        },
+    )
+    effective = line_store.activate(draft["id"])
+    return int(effective["id"])
+
+
+
 def test_task_snapshot_removes_credentials_but_keeps_numeric_token_limits():
     safe = sanitize_snapshot({
         "api_key": "secret-api-key",
@@ -98,6 +127,9 @@ def test_queued_subplan_task_is_rejected_after_confirmed_publish_target_reached(
         stages=[{"title": "single publish", "target_count": 1}],
     )
     store.activate_subplan_version(version["id"], reviewer="test")
+    production_line_version_id = _activate_test_production_line(
+        conn, sub_id, int(version["id"]),
+    )
     stage = conn.execute(
         "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=?", (version["id"],)
     ).fetchone()
@@ -109,6 +141,7 @@ def test_queued_subplan_task_is_rejected_after_confirmed_publish_target_reached(
     )
     created = store.create_round_once(
         key, content_variants=[{"platform": "xhs"}], trigger_source="manual",
+        production_line_version_id=production_line_version_id,
     )
     round_id = int(created["round_id"])
     snapshot = build_execution_snapshot(
@@ -161,6 +194,9 @@ def test_queued_subplan_round_fails_closed_after_parent_master_superseded(cfg, c
         stages=[{"title": "stage", "target_count": 5}],
     )
     store.activate_subplan_version(version["id"], reviewer="test")
+    production_line_version_id = _activate_test_production_line(
+        conn, sub_id, int(version["id"]),
+    )
     stage = conn.execute(
         "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=?", (version["id"],)
     ).fetchone()
@@ -170,7 +206,9 @@ def test_queued_subplan_round_fails_closed_after_parent_master_superseded(cfg, c
         sub_plan_id=sub_id, sub_plan_version_id=int(version["id"]),
         sub_plan_stage_id=int(stage["id"]),
     )
-    round_id = int(store.create_round_once(key, trigger_source="auto")["round_id"])
+    round_id = int(store.create_round_once(
+        key, trigger_source="auto", production_line_version_id=production_line_version_id,
+    )["round_id"])
     snapshot = build_execution_snapshot(
         cfg, conn, round_id=round_id, parameters={"round_id": round_id},
     )
@@ -191,3 +229,52 @@ def test_queued_subplan_round_fails_closed_after_parent_master_superseded(cfg, c
         (round_id,),
     ).fetchone()
     assert tuple(old_round) == (master_id, int(version["id"]))
+
+
+def test_executor_rejects_legacy_subplan_round_without_approved_production_line(cfg, conn, seed):
+    import asyncio
+
+    from src.core.plan_version_store import PlanVersionStore
+    from src.core.round_executor import RoundExecutor, RoundPreconditionError
+
+    store = PlanVersionStore(conn)
+    active = conn.execute(
+        "SELECT id,plan_snapshot FROM master_plan_versions WHERE status='effective' LIMIT 1"
+    ).fetchone()
+    if active is None:
+        plan = PlanVersionManager(cfg, conn).load_plan()[0]
+        plan["enabled_platforms"] = list(dict.fromkeys([*(plan.get("enabled_platforms") or []), "xhs"]))
+        master = store.create_master_draft(plan, author="test", source="user")
+        master_id = int(store.activate_master_version(master["id"], reviewer="test")["id"])
+    else:
+        master_id = int(active["id"])
+
+    sub_plan_id = "legacy-round-without-production-line"
+    store.create_subplan(
+        sub_plan_id, master_plan_version_id=master_id,
+        platform="xhs", title="历史未绑定生产线轮次", author="test",
+    )
+    version = store.create_subplan_version(
+        sub_plan_id, {"title": "历史未绑定生产线轮次", "platform": "xhs"},
+        master_plan_version_id=master_id,
+        stages=[{"title": "历史阶段", "target_count": 5}],
+    )
+    store.activate_subplan_version(int(version["id"]), reviewer="test")
+    stage = conn.execute(
+        "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=?",
+        (int(version["id"]),),
+    ).fetchone()
+    round_id = seed.round(status="created")
+    conn.execute(
+        """UPDATE spiral_rounds
+           SET master_plan_version_id=?,sub_plan_id=?,sub_plan_version_id=?,
+               sub_plan_stage_id=?,sub_plan_snapshot='{}',
+               sub_plan_stage_snapshot='{}',production_line_version_id=NULL
+           WHERE id=?""",
+        (master_id, sub_plan_id, int(version["id"]), int(stage["id"]), round_id),
+    )
+    conn.commit()
+
+    executor = RoundExecutor(cfg, conn, None, None, {}, None, None)
+    with pytest.raises(RoundPreconditionError, match="缺少已确认的生产线版本"):
+        asyncio.run(executor._run_with_image_budget(round_id))

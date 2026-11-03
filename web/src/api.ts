@@ -1253,6 +1253,25 @@ export interface SubPlanRecord {
 export interface SubPlanDetail {
   subplan: SubPlanRecord; versions: SubPlanVersionRecord[];
 }
+export interface ProductionLineStageDefinition {
+  stage_key: string; stage_order: number; stage_title: string; batch_size: number;
+  production_goal: string; instructions: string; cadence: string;
+}
+export interface ProductionLineDefinition {
+  schema_version: number; title: string; description: string;
+  execution_mode: string; stages: ProductionLineStageDefinition[];
+}
+export interface ProductionLineVersion {
+  id: number; production_line_id: string; sub_plan_id: string;
+  sub_plan_version_id: number; version_no: number; status: string;
+  generation_source: "ai" | "manual" | "system";
+  definition: ProductionLineDefinition; created_at: string;
+}
+export interface ProductionLineRecord {
+  id: string; sub_plan_id: string; status: string; current_version_id: number | null;
+  platform: Platform; subplan_title: string; current_version_no?: number | null;
+  current_version_status?: string | null; is_stale?: boolean; versions?: ProductionLineVersion[];
+}
 export interface PlanSignatureHistory {
   plan_signature: string;
   plan_snapshot: MasterPlan | string;
@@ -1997,7 +2016,8 @@ export const api = {
       }),
     }),
   reviewMasterPlan: (versionId: number, action: "approve" | "reject", reason?: string) =>
-    fetchJson<{ version?: MasterPlanVersion; version_id?: number; status?: string; effective: boolean }>(
+    fetchJson<{ version?: MasterPlanVersion; version_id?: number; status?: string; effective: boolean;
+      subplan_generation?: { status: string; items: Array<{ subplan_id: string; version_id: number; platform: Platform }>; reason?: string } }>(
       `/api/plans/${versionId}/review`, { method: "POST", body: JSON.stringify({ action, reason }) },
     ),
   deleteMasterPlan: (versionId: number) =>
@@ -2052,8 +2072,32 @@ export const api = {
       method: "POST", body: JSON.stringify({ version_id: versionId, action, reason }),
     }),
   aiDraftSubplans: (masterPlanVersionId: number, platforms: Platform[]) =>
-    fetchJson<{ items: Array<{ subplan: SubPlanRecord; draft: SubPlanVersionRecord }>; effective: false; requires_human_review: true }>(
+    fetchJson<{ items: Array<{ subplan: SubPlanRecord; draft: SubPlanVersionRecord }>; effective: false; requires_human_review: true; already_exists?: boolean }>(
       "/api/subplans/ai-draft", { method: "POST", body: JSON.stringify({ master_plan_version_id: masterPlanVersionId, platforms }) },
+    ),
+  productionLine: (subPlanId: string) =>
+    fetchJson<{ production_line: ProductionLineRecord | null }>(
+      `/api/subplans/${encodeURIComponent(subPlanId)}/production-line`,
+    ),
+  aiDraftProductionLine: (subPlanId: string) =>
+    fetchJson<{ production_line: ProductionLineRecord; draft: ProductionLineVersion; effective: false; requires_human_review: true }>(
+      `/api/subplans/${encodeURIComponent(subPlanId)}/production-line/ai-draft`,
+      { method: "POST", body: JSON.stringify({}) },
+    ),
+  saveProductionLineDraft: (subPlanId: string, definition: ProductionLineDefinition, basedOnVersionId?: number) =>
+    fetchJson<{ draft: ProductionLineVersion; effective: false; requires_human_review: true }>(
+      `/api/subplans/${encodeURIComponent(subPlanId)}/production-line/draft`,
+      { method: "POST", body: JSON.stringify({ definition, based_on_version_id: basedOnVersionId }) },
+    ),
+  reviewProductionLine: (lineId: string, versionId: number, action: "approve" | "reject", reason?: string) =>
+    fetchJson<{ version: ProductionLineVersion; production_line: ProductionLineRecord; effective: boolean }>(
+      `/api/production-lines/${encodeURIComponent(lineId)}/versions/${versionId}/review`,
+      { method: "POST", body: JSON.stringify({ action, reason }) },
+    ),
+  setProductionLineStatus: (subPlanId: string, status: "active" | "paused" | "cancelled", reason?: string) =>
+    fetchJson<{ production_line: ProductionLineRecord }>(
+      `/api/subplans/${encodeURIComponent(subPlanId)}/production-line/status`,
+      { method: "PATCH", body: JSON.stringify({ status, reason }) },
     ),
   /** 复盘「采纳建议」：把缺口维度写回母计划（后端触发 R18 下游失效） */
   adoptGaps: (dimensions: string[]) =>

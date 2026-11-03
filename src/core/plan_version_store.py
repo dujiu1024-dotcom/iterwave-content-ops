@@ -128,6 +128,17 @@ class PlanVersionStore:
                        WHERE master_plan_version_id=? AND status='active'""",
                     (version_id, now, previous_effective["id"]),
                 )
+                if self.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='production_lines'").fetchone():
+                    self.conn.execute(
+                        """UPDATE production_lines SET status='paused',
+                               pause_reason='master_plan_switch',updated_at=?
+                           WHERE status='active' AND sub_plan_id IN (
+                               SELECT id FROM sub_plans
+                               WHERE master_plan_version_id=? AND status='paused'
+                                 AND paused_by_master_version_id=?
+                           )""",
+                        (now, previous_effective["id"], version_id),
+                    )
             self.conn.execute(
                 """UPDATE master_plan_versions
                    SET status='archived',superseded_at=? WHERE status='effective'""", (now,)
@@ -204,6 +215,17 @@ class PlanVersionStore:
                    WHERE master_plan_version_id=? AND status='active'""",
                 (version_id, now, version_id),
             )
+            if self.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='production_lines'").fetchone():
+                self.conn.execute(
+                    """UPDATE production_lines SET status='paused',
+                           pause_reason='master_plan_deleted',updated_at=?
+                       WHERE status='active' AND sub_plan_id IN (
+                           SELECT id FROM sub_plans
+                           WHERE master_plan_version_id=? AND status='paused'
+                             AND paused_by_master_version_id=?
+                       )""",
+                    (now, version_id, version_id),
+                )
             self.conn.execute(
                 """UPDATE master_plan_versions
                    SET status='archived',deleted_at=?,deleted_by=?,superseded_at=COALESCE(superseded_at,?)
@@ -231,6 +253,20 @@ class PlanVersionStore:
                      AND paused_by_master_version_id=?""",
                 (now, predecessor["id"], version_id),
             )
+            if self.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='production_lines'").fetchone():
+                self.conn.execute(
+                    """UPDATE production_lines SET status='active',pause_reason=NULL,updated_at=?
+                       WHERE status='paused' AND pause_reason='master_plan_switch'
+                         AND sub_plan_id IN (
+                             SELECT p.id FROM sub_plans p
+                             JOIN production_line_versions v
+                               ON v.id=(SELECT l.current_version_id FROM production_lines l WHERE l.sub_plan_id=p.id)
+                             WHERE p.master_plan_version_id=? AND p.status='active'
+                               AND p.current_version_id=v.sub_plan_version_id
+                               AND v.status='effective'
+                         )""",
+                    (now, predecessor["id"]),
+                )
             self.conn.execute(
                 """UPDATE plan_settings
                    SET plan_snapshot=?,plan_signature=?,updated_at=?,updated_by=?,active_version_id=?
@@ -894,6 +930,7 @@ class PlanVersionStore:
         content_variants: Optional[list[dict[str, Any]]] = None,
         trigger_source: str = "auto",
         applied_feedback: Optional[str] = None,
+        production_line_version_id: Optional[int] = None,
     ) -> dict[str, Any]:
         """Atomically create, bind and complete one leased round.
 
@@ -910,6 +947,13 @@ class PlanVersionStore:
             if lock is None:
                 raise PlanVersionError("自动开轮租约不存在")
             if lock["status"] == "created":
+                existing_round = self.conn.execute(
+                    "SELECT production_line_version_id FROM spiral_rounds WHERE id=?",
+                    (int(lock["round_id"]),),
+                ).fetchone()
+                if (existing_round is None
+                        or existing_round["production_line_version_id"] != production_line_version_id):
+                    raise PlanVersionError("幂等开轮记录绑定了不同的生产线版本")
                 self.conn.commit()
                 return {"status": "created", "round_id": lock["round_id"], "deduped": True}
             if lock["status"] != "reserved" or not lock["lease_until"] or lock["lease_until"] <= now:
@@ -937,6 +981,22 @@ class PlanVersionStore:
                     or version["subplan_status"] != "active"
                     or stage["status"] not in ("pending", "in_progress")):
                 raise PlanVersionError("自动开轮的主计划/子计划/阶段授权已失效")
+            if lock["sub_plan_id"] is not None and production_line_version_id is None:
+                raise PlanVersionError("子计划生产轮次必须绑定已确认的生产线版本")
+            if production_line_version_id is not None:
+                line = self.conn.execute(
+                    """SELECT l.status AS line_status,v.status AS version_status,
+                              v.sub_plan_version_id,l.sub_plan_id
+                       FROM production_line_versions v
+                       JOIN production_lines l ON l.id=v.production_line_id
+                       WHERE v.id=?""",
+                    (production_line_version_id,),
+                ).fetchone()
+                if (line is None or line["line_status"] != "active"
+                        or line["version_status"] != "effective"
+                        or line["sub_plan_id"] != lock["sub_plan_id"]
+                        or line["sub_plan_version_id"] != lock["sub_plan_version_id"]):
+                    raise PlanVersionError("生产线版本未生效或与子计划版本不匹配")
             if round_number is None:
                 round_number = int(self.conn.execute(
                     "SELECT COALESCE(MAX(round_number),0)+1 FROM spiral_rounds"
@@ -951,12 +1011,14 @@ class PlanVersionStore:
                 """INSERT INTO spiral_rounds(
                     goal_id,round_number,status,topic_ids,content_variants,trigger_source,applied_feedback,
                     master_plan_version_id,sub_plan_id,sub_plan_version_id,sub_plan_stage_id,
-                    sub_plan_snapshot,sub_plan_stage_snapshot,plan_signature,plan_attribution_status
-                ) VALUES(?,?,'created',?,?,?,?,?,?,?,?,?,?,?,'resolved')""",
+                    sub_plan_snapshot,sub_plan_stage_snapshot,plan_signature,plan_attribution_status,
+                    production_line_version_id
+                ) VALUES(?,?,'created',?,?,?,?,?,?,?,?,?,?,?,'resolved',?)""",
                 (goal_id, round_number, topics_json, variants_json, trigger_source, applied_feedback,
                  lock["master_plan_version_id"], lock["sub_plan_id"],
                  lock["sub_plan_version_id"], lock["sub_plan_stage_id"],
-                 version["snapshot_json"], stage_snapshot, version["plan_signature"]),
+                 version["snapshot_json"], stage_snapshot, version["plan_signature"],
+                 production_line_version_id),
             )
             round_id = int(cur.lastrowid)
             self.conn.execute(

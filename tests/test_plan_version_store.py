@@ -74,7 +74,20 @@ def _db(path=None):
             topic_ids TEXT, content_variants TEXT, trigger_source TEXT, applied_feedback TEXT,
             master_plan_version_id INTEGER, sub_plan_id TEXT, sub_plan_version_id INTEGER,
             sub_plan_stage_id INTEGER, sub_plan_snapshot TEXT, sub_plan_stage_snapshot TEXT,
-            plan_signature TEXT, plan_attribution_status TEXT
+            plan_signature TEXT, plan_attribution_status TEXT,
+            production_line_version_id INTEGER
+        );
+        CREATE TABLE production_lines (
+            id TEXT PRIMARY KEY, sub_plan_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL,
+            current_version_id INTEGER, created_at TEXT, updated_at TEXT, created_by TEXT,
+            activated_at TEXT, activated_by TEXT, pause_reason TEXT
+        );
+        CREATE TABLE production_line_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, production_line_id TEXT NOT NULL,
+            sub_plan_version_id INTEGER NOT NULL, version_no INTEGER NOT NULL,
+            status TEXT NOT NULL, definition_json TEXT NOT NULL,
+            generation_source TEXT NOT NULL DEFAULT 'manual', based_on_version_id INTEGER,
+            created_at TEXT, created_by TEXT, reviewed_at TEXT, reviewed_by TEXT, change_note TEXT
         );
         CREATE TABLE round_open_idempotency (
             idempotency_key TEXT PRIMARY KEY, request_hash TEXT NOT NULL,
@@ -133,10 +146,21 @@ def _active_subplan(store, master):
         stages=[{"title": "第一阶段", "target_count": 8, "direction": "AI教育"}],
     )
     store.activate_subplan_version(version["id"], reviewer="reviewer")
-    stage_id = store.conn.execute(
-        "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=?", (version["id"],)
-    ).fetchone()[0]
-    return version, stage_id
+    stage = store.conn.execute(
+        "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=?", (version["id"],)
+    ).fetchone()
+    from src.core.production_line_store import ProductionLineStore
+    line_store = ProductionLineStore(store.conn)
+    line_draft = line_store.create_draft(
+        "sub-xhs", int(version["id"]),
+        {"title": "小红书测试生产线", "stages": [{
+            "stage_key": str(stage["stage_key"]), "batch_size": int(stage["target_count"]),
+            "production_goal": str(stage["title"]),
+        }]},
+        generation_source="manual", author="test",
+    )
+    line_store.activate(int(line_draft["id"]), reviewer="reviewer")
+    return version, int(stage["id"])
 
 
 def test_master_plan_draft_requires_explicit_activation_and_preserves_previous_version():
@@ -270,9 +294,13 @@ def test_durable_round_open_lock_is_idempotent_and_rejects_key_reuse():
             sub_plan_version_id=subplan["id"], sub_plan_stage_id=stage_id,
         )
 
+    line_version_id = int(conn.execute(
+        "SELECT current_version_id FROM production_lines WHERE sub_plan_id='sub-xhs'"
+    ).fetchone()[0])
     completed = store.create_round_once(
         "auto:2026-11-02T10:00", goal_id="goal-1",
         topic_ids=["topic-1"], content_variants=[{"platform": "xhs"}],
+        production_line_version_id=line_version_id,
     )
     assert completed["status"] == "created"
     assert completed["deduped"] is False
@@ -364,16 +392,33 @@ def test_strategy_steps_persist_dependencies_and_require_real_predecessor_outcom
     conn.execute(
         "UPDATE sub_plan_stages SET effect_status='passed' WHERE id=?", (rows[0]["id"],)
     )
-    conn.commit()
 
     store.activate_subplan_version(version["id"], reviewer="reviewer")
+    from src.core.production_line_store import ProductionLineStore
+    line_stages = conn.execute(
+        "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order",
+        (version["id"],),
+    ).fetchall()
+    line_store = ProductionLineStore(conn)
+    line_draft = line_store.create_draft(
+        "sub-strategy", int(version["id"]),
+        {"title": "策略依赖测试生产线", "stages": [{
+            "stage_key": str(row["stage_key"]), "batch_size": int(row["target_count"]),
+            "production_goal": str(row["title"]),
+        } for row in line_stages]},
+        generation_source="manual", author="test",
+    )
+    line_store.activate(int(line_draft["id"]), reviewer="reviewer")
+    line_version_id = int(line_draft["id"])
     lease = store.reserve_round_open(
         "strategy-follow-up", "strategy-hash",
         master_plan_version_id=master["id"], sub_plan_id="sub-strategy",
         sub_plan_version_id=version["id"], sub_plan_stage_id=rows[1]["id"],
     )
     assert lease["acquired"] is True
-    created = store.create_round_once("strategy-follow-up")
+    created = store.create_round_once(
+        "strategy-follow-up", production_line_version_id=line_version_id,
+    )
     stage_snapshot = json.loads(conn.execute(
         "SELECT sub_plan_stage_snapshot FROM spiral_rounds WHERE id=?",
         (created["round_id"],),
@@ -571,10 +616,21 @@ def test_subplan_stage_resolver_advances_only_after_user_confirmed_publish():
     )
     store.activate_subplan_version(version["id"], reviewer="reviewer")
     stage_rows = conn.execute(
-        "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order",
+        "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order",
         (version["id"],),
     ).fetchall()
-    first_id, second_id = [int(row[0]) for row in stage_rows]
+    first_id, second_id = [int(row["id"]) for row in stage_rows]
+    from src.core.production_line_store import ProductionLineStore
+    line_store = ProductionLineStore(conn)
+    line_draft = line_store.create_draft(
+        "sub-stage", int(version["id"]),
+        {"title": "阶段推进测试生产线", "stages": [{
+            "stage_key": str(row["stage_key"]), "batch_size": int(row["target_count"]),
+            "production_goal": str(row["title"]),
+        } for row in stage_rows]},
+        generation_source="manual", author="test",
+    )
+    line_store.activate(int(line_draft["id"]), reviewer="reviewer")
 
     current = active_subplan_stage(conn, today="2026-11-02")
     assert current["id"] == first_id
@@ -619,8 +675,12 @@ def test_create_round_once_persists_trigger_metadata():
         master_plan_version_id=master["id"], sub_plan_id="sub-xhs",
         sub_plan_version_id=subplan["id"], sub_plan_stage_id=stage_id,
     )
+    line_version_id = int(conn.execute(
+        "SELECT current_version_id FROM production_lines WHERE sub_plan_id='sub-xhs'"
+    ).fetchone()[0])
     created = store.create_round_once(
         "metadata-key", trigger_source="auto", applied_feedback='{"ok":true}',
+        production_line_version_id=line_version_id,
     )
     row = conn.execute(
         "SELECT trigger_source,applied_feedback FROM spiral_rounds WHERE id=?",
@@ -731,6 +791,9 @@ def test_delete_latest_master_restores_predecessor_and_only_switch_paused_childr
         "SELECT status,pause_reason,paused_by_master_version_id FROM sub_plans WHERE id='sub-xhs'"
     ).fetchone()
     assert tuple(auto_paused) == ("paused", "master_plan_switch", second["id"])
+    assert tuple(conn.execute(
+        "SELECT status,pause_reason FROM production_lines WHERE sub_plan_id='sub-xhs'"
+    ).fetchone()) == ("paused", "master_plan_switch")
     assert conn.execute(
         "SELECT pause_reason FROM sub_plans WHERE id='sub-manual'"
     ).fetchone()[0] == "user"
@@ -762,6 +825,9 @@ def test_delete_latest_master_restores_predecessor_and_only_switch_paused_childr
     assert tuple(conn.execute(
         "SELECT status,pause_reason,paused_by_master_version_id FROM sub_plans WHERE id='sub-xhs'"
     ).fetchone()) == ("active", None, None)
+    assert tuple(conn.execute(
+        "SELECT status,pause_reason FROM production_lines WHERE sub_plan_id='sub-xhs'"
+    ).fetchone()) == ("active", None)
     assert tuple(conn.execute(
         "SELECT status,pause_reason FROM sub_plans WHERE id='sub-manual'"
     ).fetchone()) == ("paused", "user")

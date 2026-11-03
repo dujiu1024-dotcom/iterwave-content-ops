@@ -5872,7 +5872,7 @@ def _register_routes(app: FastAPI) -> None:
         return {"draft": draft, "requires_review": True, "effective": False}
 
     @app.post("/api/plans/{version_id}/review")
-    def review_master_plan(version_id: int, req: dict):
+    async def review_master_plan(version_id: int, req: dict):
         from src.core.plan_version_store import PlanVersionStore, PlanVersionError
         action = (req or {}).get("action", "approve")
         if action == "reject":
@@ -5896,7 +5896,23 @@ def _register_routes(app: FastAPI) -> None:
             result = PlanVersionStore(_g()["conn"]).activate_master_version(
                 version_id, reviewer="user",
             )
-            return {"version": result, "effective": True}
+            # The mother plan is already effective at this point. AI decomposition
+            # creates draft-only child plans; provider failure must not roll back the
+            # user's successful master-plan approval.
+            from src.core.master_plan_orchestrator import generate_subplan_drafts
+            try:
+                child_generation = await generate_subplan_drafts(
+                    _g()["conn"], _g()["cfg"], version_id,
+                )
+            except Exception as generation_exc:
+                logger.exception("母计划已生效，但自动 AI 子计划拆解未完成")
+                child_generation = {
+                    "status": "failed",
+                    "reason": type(generation_exc).__name__,
+                    "items": [],
+                }
+            return {"version": result, "effective": True,
+                    "subplan_generation": child_generation}
         except PlanVersionError as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -9741,6 +9757,8 @@ def _register_routes(app: FastAPI) -> None:
     # Platform subplan APIs use the same tenant-scoped runtime as all existing routes.
     from src.api.subplans import register_subplan_routes
     register_subplan_routes(app, _g)
+    from src.api.production_lines import register_production_line_routes
+    register_production_line_routes(app, _g)
 
 
 # ============================================================

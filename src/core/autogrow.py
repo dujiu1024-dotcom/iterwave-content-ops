@@ -396,6 +396,18 @@ class AutogrowController:
             return {"can_start": False, "action": "skipped",
                     "reason": "当前阶段已暂停",
                     "reason_code": "stage_paused"}
+        if stage.get("blocker") in {"production_line_missing", "production_line_paused",
+                                    "production_line_not_effective", "production_line_stage_invalid"}:
+            reasons = {
+                "production_line_missing": "当前子计划尚未建立并确认生产线",
+                "production_line_paused": "当前生产线已暂停",
+                "production_line_not_effective": "当前生产线未生效或绑定版本已过期",
+                "production_line_stage_invalid": "生产线未正确配置当前策略步骤",
+            }
+            code = stage["blocker"]
+            return {"can_start": False, "action": "skipped",
+                    "reason": reasons[code], "reason_code": code,
+                    "sub_plan_id": stage.get("sub_plan_id")}
         if stage.get("blocker") == "master_version_superseded":
             return {"can_start": False, "action": "stopped",
                     "reason": "子计划关联的主计划版本已被新版本替代，请重新审核子计划",
@@ -468,6 +480,7 @@ class AutogrowController:
             details.update({
                 "sub_plan_id": stage.get("sub_plan_id"),
                 "sub_plan_version_id": stage.get("current_version_id"),
+                "production_line_version_id": stage.get("production_line_version_id"),
                 "stage_id": stage.get("id"),
                 "platform": stage.get("platform"),
                 "target_count": stage.get("target_count"),
@@ -516,10 +529,15 @@ class AutogrowController:
         store = PlanVersionStore(self.conn)
         now = business_now(self.cfg)
         slot = now.replace(minute=0, second=0, microsecond=0).isoformat()
-        idempotency_key = f"round-open:{slot}"
-        topic_count = max(1, min(int(ag.topic_count), int(stage["remaining_count"])))
+        line_version_id = int(stage["production_line_version_id"])
+        idempotency_key = f"round-open:{slot}:{line_version_id}"
+        topic_count = max(1, min(
+            int(ag.topic_count), int(stage["remaining_count"]),
+            int(stage["production_line_batch_size"]),
+        ))
         request_payload = {
             "sub_plan_id": stage["sub_plan_id"], "sub_plan_version_id": stage["current_version_id"],
+            "production_line_version_id": line_version_id,
             "stage_id": stage["id"], "slot": slot, "topic_count": topic_count,
             "platforms": verdict["platforms"],
         }
@@ -555,6 +573,7 @@ class AutogrowController:
                 idempotency_key, goal_id=goal_row[0] if goal_row else None,
                 topic_ids=[], content_variants=[{"platform": stage["platform"]}],
                 trigger_source="auto", applied_feedback=feedback.to_json(),
+                production_line_version_id=line_version_id,
             )
             round_id = int(created["round_id"])
             if stage.get("status") == "pending":

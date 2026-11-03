@@ -15,12 +15,14 @@ def store():
     conn.execute("""CREATE TABLE spiral_rounds(
         id INTEGER PRIMARY KEY, master_plan_version_id INTEGER, sub_plan_id TEXT,
         sub_plan_version_id INTEGER, sub_plan_stage_id INTEGER,
-        sub_plan_snapshot TEXT, sub_plan_stage_snapshot TEXT
+        sub_plan_snapshot TEXT, sub_plan_stage_snapshot TEXT,
+        production_line_version_id INTEGER
     )""")
     conn.execute(
-        """INSERT INTO spiral_rounds VALUES(
-            7, 11, 'sub-a', 13, 17, '{"title":"frozen"}', '{"stage":"frozen"}'
-        )"""
+        """INSERT INTO spiral_rounds(
+            id,master_plan_version_id,sub_plan_id,sub_plan_version_id,sub_plan_stage_id,
+            sub_plan_snapshot,sub_plan_stage_snapshot
+        ) VALUES(7,11,'sub-a',13,17,'{"title":"frozen"}','{"stage":"frozen"}')"""
     )
     conn.executescript("""
         CREATE TABLE sub_plans(id TEXT PRIMARY KEY, platform TEXT);
@@ -39,7 +41,8 @@ def store():
         CREATE TABLE production_tasks (
             id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE, round_id INTEGER,
             master_plan_version_id INTEGER, sub_plan_id TEXT, sub_plan_version_id INTEGER,
-            strategy_step_id TEXT, platform TEXT, task_ordinal INTEGER, status TEXT,
+            strategy_step_id TEXT, platform TEXT, task_ordinal INTEGER,
+            production_line_version_id INTEGER, status TEXT,
             attempt_count INTEGER, max_attempts INTEGER, content_id TEXT,
             input_snapshot_json TEXT, error_code TEXT, error_message TEXT,
             available_at TEXT, started_at TEXT, finished_at TEXT,
@@ -87,6 +90,17 @@ def test_one_strategy_step_can_create_multiple_independent_tasks(store):
     assert tasks[0]["id"] != tasks[1]["id"]
     assert store.step_progress("step-stable-1")["total"] == 2
     assert store.round_progress(7)["active"] == 2
+
+
+def test_task_inherits_and_freezes_the_round_production_line_version(store):
+    store.conn.execute(
+        "UPDATE spiral_rounds SET production_line_version_id=77 WHERE id=7"
+    )
+    task = make_task(store)
+    assert task["production_line_version_id"] == 77
+    assert task["input_snapshot"]["round"]["production_line_version_id"] == 77
+    with pytest.raises(ProductionTaskError, match="版本与生产轮次绑定"):
+        make_task(store, idempotency_key="wrong-line-version", production_line_version_id=78)
 
 
 def test_create_requires_round_source_to_match(store):

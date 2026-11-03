@@ -52,6 +52,7 @@ class ProductionTaskStore:
         input_snapshot: dict[str, Any] | None = None,
         max_attempts: int = 3,
         available_at: str | None = None,
+        production_line_version_id: int | None = None,
     ) -> dict[str, Any]:
         """Create exactly one task for an idempotency key; return the existing task on replay."""
         if not idempotency_key or len(idempotency_key) > 200:
@@ -68,7 +69,8 @@ class ProductionTaskStore:
         round_row = self.conn.execute(
             """SELECT id, master_plan_version_id, sub_plan_id,
                       sub_plan_version_id, sub_plan_stage_id,
-                      sub_plan_snapshot, sub_plan_stage_snapshot
+                      sub_plan_snapshot, sub_plan_stage_snapshot,
+                      production_line_version_id
                FROM spiral_rounds WHERE id=?""",
             (round_id,),
         ).fetchone()
@@ -85,6 +87,14 @@ class ProductionTaskStore:
             if actual is None or str(actual) != str(supplied):
                 raise ProductionTaskError(f"任务来源与生产轮次不一致：{field}")
 
+        bound_line_version_id = source.get("production_line_version_id")
+        if production_line_version_id is None:
+            production_line_version_id = bound_line_version_id
+        if (bound_line_version_id is not None
+                and str(bound_line_version_id) != str(production_line_version_id)):
+            raise ProductionTaskError("任务生产线版本与生产轮次绑定的版本不一致")
+        if bound_line_version_id is None and production_line_version_id is not None:
+            raise ProductionTaskError("生产轮次未绑定生产线版本")
         # The task must point at the exact strategy step bound to this round's
         # immutable sub-plan version, not merely any step with a matching key.
         bound_stage_id = source.get("sub_plan_stage_id")
@@ -119,6 +129,7 @@ class ProductionTaskStore:
                 or row["strategy_step_id"] != str(strategy_step_id)
                 or row["platform"] != str(platform)
                 or row["task_ordinal"] != int(task_ordinal)
+                or row.get("production_line_version_id") != production_line_version_id
             ):
                 raise ProductionTaskError("幂等键已被不同生产任务占用")
             return row
@@ -132,6 +143,7 @@ class ProductionTaskStore:
                 "sub_plan_stage_id": source.get("sub_plan_stage_id"),
                 "sub_plan_snapshot": source.get("sub_plan_snapshot"),
                 "sub_plan_stage_snapshot": source.get("sub_plan_stage_snapshot"),
+                "production_line_version_id": bound_line_version_id,
             },
             "task_input": input_snapshot or {},
         }
@@ -145,14 +157,14 @@ class ProductionTaskStore:
                 """INSERT INTO production_tasks(
                     id,idempotency_key,round_id,master_plan_version_id,sub_plan_id,
                     sub_plan_version_id,strategy_step_id,platform,task_ordinal,
-                    status,attempt_count,max_attempts,input_snapshot_json,
+                    production_line_version_id,status,attempt_count,max_attempts,input_snapshot_json,
                     available_at,created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,'pending',0,?,?,?,?,?)""",
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,'pending',0,?,?,?,?,?)""",
                 (
                     task_id, idempotency_key, int(round_id),
                     int(master_plan_version_id), str(sub_plan_id),
                     int(sub_plan_version_id), str(strategy_step_id), str(platform),
-                    int(task_ordinal), int(max_attempts),
+                    int(task_ordinal), production_line_version_id, int(max_attempts),
                     json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
                     available_at or now, now, now,
                 ),
@@ -177,6 +189,7 @@ class ProductionTaskStore:
                 or row["strategy_step_id"] != str(strategy_step_id)
                 or row["platform"] != str(platform)
                 or row["task_ordinal"] != int(task_ordinal)
+                or row.get("production_line_version_id") != production_line_version_id
             ):
                 raise ProductionTaskError("幂等键已被不同生产任务占用")
             return row

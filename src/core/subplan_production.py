@@ -1,6 +1,7 @@
 """Stage-driven production eligibility for approved platform subplans."""
 from __future__ import annotations
 
+import json
 from datetime import date
 from typing import Any
 
@@ -22,10 +23,17 @@ def active_subplan_stage(conn, *, today: str | None = None, advance: bool = Fals
     identities = conn.execute(
         """SELECT p.id AS sub_plan_id,p.platform,p.title AS subplan_title,
                   p.master_plan_version_id,p.current_version_id,
-                  v.version_no,v.snapshot_json,m.plan_signature
+                  v.version_no,v.snapshot_json,m.plan_signature,
+                  pl.status AS production_line_status,
+                  pl.current_version_id AS production_line_version_id,
+                  plv.status AS production_line_version_status,
+                  plv.sub_plan_version_id AS production_line_subplan_version_id,
+                  plv.definition_json AS production_line_definition_json
            FROM sub_plans p
            JOIN sub_plan_versions v ON v.id=p.current_version_id AND v.status='effective'
            JOIN master_plan_versions m ON m.id=p.master_plan_version_id AND m.status='effective'
+           LEFT JOIN production_lines pl ON pl.sub_plan_id=p.id
+           LEFT JOIN production_line_versions plv ON plv.id=pl.current_version_id
            WHERE p.status='active'
            ORDER BY p.updated_at,p.id"""
     ).fetchall()
@@ -47,6 +55,15 @@ def active_subplan_stage(conn, *, today: str | None = None, advance: bool = Fals
         if paused:
             return {"blocker": "subplan_paused", "sub_plan_id": paused["id"]}
     for identity in identities:
+        if identity["production_line_status"] is None:
+            return {"blocker": "production_line_missing", "sub_plan_id": identity["sub_plan_id"]}
+        if identity["production_line_status"] == "paused":
+            return {"blocker": "production_line_paused", "sub_plan_id": identity["sub_plan_id"]}
+        if (identity["production_line_status"] != "active"
+                or identity["production_line_version_id"] is None
+                or identity["production_line_version_status"] != "effective"
+                or identity["production_line_subplan_version_id"] != identity["current_version_id"]):
+            return {"blocker": "production_line_not_effective", "sub_plan_id": identity["sub_plan_id"]}
         stages = conn.execute(
             """SELECT s.*,COALESCE(stats.confirmed_published_count,0) AS confirmed_published_count
                FROM sub_plan_stages s
@@ -104,6 +121,20 @@ def active_subplan_stage(conn, *, today: str | None = None, advance: bool = Fals
                 break
             stage.update({key: identity[key] for key in identity.keys() if key != "id"})
             stage["remaining_count"] = max(0, int(stage["target_count"]) - count)
+            try:
+                line_definition = json.loads(identity["production_line_definition_json"] or "{}")
+                line_stage = next(
+                    item for item in line_definition.get("stages", [])
+                    if item.get("stage_key") == stage["stage_key"]
+                )
+                stage["production_line_batch_size"] = int(line_stage["batch_size"])
+                stage["production_line_stage"] = line_stage
+            except (TypeError, ValueError, KeyError, StopIteration):
+                return {"blocker": "production_line_stage_invalid",
+                        "sub_plan_id": identity["sub_plan_id"]}
+            if stage["production_line_batch_size"] < 1:
+                return {"blocker": "production_line_stage_invalid",
+                        "sub_plan_id": identity["sub_plan_id"]}
             return stage
         # A platform subplan becomes completed only when every stage reached its
         # confirmed-publish target; cancelled/paused stages are not treated as success.
@@ -120,6 +151,11 @@ def active_subplan_stage(conn, *, today: str | None = None, advance: bool = Fals
             terminal_status = "completed" if completed == total else "cancelled"
             conn.execute(
                 "UPDATE sub_plans SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='active'",
+                (terminal_status, identity["sub_plan_id"]),
+            )
+            conn.execute(
+                """UPDATE production_lines SET status=?,updated_at=CURRENT_TIMESTAMP
+                   WHERE sub_plan_id=? AND status IN ('active','paused')""",
                 (terminal_status, identity["sub_plan_id"]),
             )
             conn.commit()
@@ -146,8 +182,15 @@ def stage_open_blocker(conn, stage: dict[str, Any] | None) -> dict[str, Any] | N
         return {"code": "stage_completion_conditions_pending", "reason": "策略步骤完成条件待确认",
                 "completion_gates": stage.get("completion_gates")}
     if stage.get("blocker") == "strategy_condition_requires_adjustment":
-        return {"code": "strategy_condition_requires_adjustment", "reason": "业务或效果条件未通过/待复核，需先调整策略或完成复核",
-                "completion_gates": stage.get("completion_gates")}
+        return {"code": "strategy_condition_requires_adjustment", "reason": "策略条件需要调整"}
+    if stage.get("blocker") == "production_line_missing":
+        return {"code": "production_line_missing", "reason": "当前子计划尚未建立并确认生产线"}
+    if stage.get("blocker") == "production_line_paused":
+        return {"code": "production_line_paused", "reason": "当前生产线已暂停"}
+    if stage.get("blocker") == "production_line_not_effective":
+        return {"code": "production_line_not_effective", "reason": "当前生产线未生效或绑定版本已过期"}
+    if stage.get("blocker") == "production_line_stage_invalid":
+        return {"code": "production_line_stage_invalid", "reason": "生产线未正确配置当前策略步骤"}
     if stage.get("blocker") == "subplan_paused":
         return {"code": "subplan_paused", "reason": "子计划已暂停"}
     if int(stage.get("remaining_count") or 0) <= 0:
