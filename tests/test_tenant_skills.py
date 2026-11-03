@@ -24,10 +24,12 @@ def test_registry_crud_versions_audit_and_persistence(conn):
     assert created["skill_id"] == "sample_skill"
     assert created["enabled"] == 0
     assert created["execution_enabled"] is False
+    assert created["validation"]["valid"] is True
     assert tenant_skills.list_versions(conn, "sample_skill")[0]["version"] == "1.0.0"
     assert tenant_skills.set_enabled(conn, "sample_skill", True)["enabled"] == 1
     updated = tenant_skills.update_skill(conn, "sample_skill", manifest("1.1.0", description="revised"))
     assert updated["version"] == "1.1.0"
+    assert updated["validation"]["valid"] is True
     assert [v["version"] for v in tenant_skills.list_versions(conn, "sample_skill")] == ["1.1.0","1.0.0"]
     assert tenant_skills.list_audit(conn, "sample_skill")
     assert tenant_skills.set_enabled(conn, "sample_skill", False)["enabled"] == 0
