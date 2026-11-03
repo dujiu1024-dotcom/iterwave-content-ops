@@ -509,8 +509,13 @@ class Database:
     # 验证工具
     # ------------------------------------------------------------------
 
-    def verify_schema(self) -> dict:
-        """返回各表的 CHECK 约束是否完整（R7/R14 验证用）。"""
+    def verify_schema(self, full_integrity: bool = False) -> dict:
+        """Audit required schema objects and SQLite integrity.
+
+        quick_check is the inexpensive default for routine health checks.
+        Set full_integrity=True during deployment/upgrade acceptance to run
+        SQLite's full integrity_check.
+        """
         conn = self.connect()
         try:
             result: dict = {}
@@ -547,6 +552,11 @@ class Database:
                 "app_settings", "autogrow_runs", "orchestration_settings",
                 "notify_rules", "platform_styles", "account_snapshots",
                 "platform_accounts", "hot_topic_import_audit",
+                # Durable review, strategy outcome and production-task tables
+                # introduced by migrations 133, 136 and 137.
+                "content_review_events", "strategy_effect_reviews",
+                "sub_plan_stage_outcomes", "production_tasks",
+                "production_task_attempts",
             }
             result["missing_tables"] = sorted(expected_tables - existing)
             result["existing_tables"] = sorted(existing & expected_tables)
@@ -623,6 +633,14 @@ class Database:
                 "idx_visual_jobs_version_page",
                 "idx_skill_audit_skill_time", "idx_skill_executions_skill_time",
                 "idx_draft_save_verifications_status",
+                # Review, strategy outcome and production task indexes (133/136/137).
+                "idx_drafts_review_status", "idx_drafts_publish_status",
+                "idx_content_review_events_content", "idx_content_review_events_round",
+                "idx_strategy_effect_reviews_stage",
+                "idx_sub_plan_stage_outcomes_lookup", "idx_sub_plan_stage_outcomes_version",
+                "idx_production_tasks_round_status", "idx_production_tasks_step_status",
+                "idx_production_tasks_recovery", "idx_production_task_attempts_task",
+                "idx_contents_production_task", "idx_production_tasks_content",
                 # Foreign-key child indexes added in migration 128.
                 "idx_ops_logs_round_id", "idx_contents_topic_id",
                 "idx_user_override_round_id",
@@ -694,6 +712,14 @@ class Database:
                 ("visual_jobs", "visual_version_id", "visual_design_versions", "id", "SET NULL"),
                 ("tenant_skill_references", "skill_id", "tenant_skill_registry", "skill_id", "CASCADE"),
                 ("draft_save_verifications", "draft_id", "drafts", "id", "CASCADE"),
+                ("content_review_events", "content_id", "contents", "id", "RESTRICT"),
+                ("content_review_events", "draft_id", "drafts", "id", "SET NULL"),
+                ("content_review_events", "round_id", "spiral_rounds", "id", "SET NULL"),
+                ("strategy_effect_reviews", "stage_id", "sub_plan_stages", "id", "RESTRICT"),
+                ("sub_plan_stage_outcomes", "sub_plan_id", "sub_plans", "id", "RESTRICT"),
+                ("sub_plan_stage_outcomes", "source_version_id", "sub_plan_versions", "id", "RESTRICT"),
+                ("sub_plan_stage_outcomes", "stage_id", "sub_plan_stages", "id", "RESTRICT"),
+                ("production_task_attempts", "task_id", "production_tasks", "id", "CASCADE"),
             }
             actual_foreign_keys = set()
             for table_name in existing:
@@ -737,6 +763,8 @@ class Database:
                 ("tenant_skill_references", ("skill_id", "reference_type", "reference_id")),
                 ("draft_save_verifications", ("draft_id",)),
                 ("schema_migration_checksums", ("version",)),
+                ("production_tasks", ("idempotency_key",)),
+                ("production_task_attempts", ("task_id", "attempt_no")),
             }
             actual_unique_constraints = set()
             for table_name in existing:
@@ -768,13 +796,214 @@ class Database:
                 expected_unique_constraints - actual_unique_constraints
             )
 
+            # Additive schema contract for the recent business migrations.
+            expected_columns = {
+                "drafts": {
+                    "publish_status": "TEXT", "published_at": "TEXT",
+                    "publish_result_note": "TEXT", "publish_time_source": "TEXT",
+                    "review_status": "TEXT",
+                },
+                "contents": {"production_task_id": "TEXT"},
+                "sub_plan_stages": {
+                    "strategy_goal": "TEXT", "current_problem": "TEXT",
+                    "execution_strategy": "TEXT", "prerequisites": "TEXT",
+                    "input_info": "TEXT", "expected_result": "TEXT",
+                    "completion_criteria": "TEXT", "effect_evaluation": "TEXT",
+                    "entry_condition": "TEXT", "entry_condition_met": "INTEGER",
+                    "dependencies_json": "TEXT",
+                },
+                "content_review_events": {
+                    "id": "INTEGER", "content_id": "TEXT", "draft_id": "TEXT",
+                    "round_id": "INTEGER", "event_type": "TEXT", "actor": "TEXT",
+                    "reason": "TEXT", "before_json": "TEXT", "after_json": "TEXT",
+                    "created_at": "TEXT",
+                },
+                "strategy_effect_reviews": {
+                    "id": "INTEGER", "stage_id": "INTEGER", "assessment": "TEXT",
+                    "recommendation": "TEXT", "evidence_note": "TEXT",
+                    "confidence": "TEXT", "evidence_json": "TEXT",
+                    "created_by": "TEXT", "created_at": "TEXT",
+                },
+                "sub_plan_stage_outcomes": {
+                    "id": "INTEGER", "sub_plan_id": "TEXT", "stage_key": "TEXT",
+                    "source_version_id": "INTEGER", "stage_id": "INTEGER",
+                    "result_json": "TEXT", "evaluation": "TEXT",
+                    "recorded_at": "TEXT", "recorded_by": "TEXT",
+                },
+                "production_tasks": {
+                    "id": "TEXT", "idempotency_key": "TEXT", "round_id": "INTEGER",
+                    "master_plan_version_id": "INTEGER", "sub_plan_id": "TEXT",
+                    "sub_plan_version_id": "INTEGER", "strategy_step_id": "TEXT",
+                    "platform": "TEXT", "task_ordinal": "INTEGER", "status": "TEXT",
+                    "attempt_count": "INTEGER", "max_attempts": "INTEGER",
+                    "content_id": "TEXT", "input_snapshot_json": "TEXT",
+                    "error_code": "TEXT", "error_message": "TEXT",
+                    "available_at": "TEXT", "started_at": "TEXT",
+                    "finished_at": "TEXT", "lease_expires_at": "TEXT",
+                    "created_at": "TEXT", "updated_at": "TEXT",
+                },
+                "production_task_attempts": {
+                    "id": "INTEGER", "task_id": "TEXT", "attempt_no": "INTEGER",
+                    "status": "TEXT", "worker_id": "TEXT", "started_at": "TEXT",
+                    "finished_at": "TEXT", "error_code": "TEXT",
+                    "error_message": "TEXT", "output_content_id": "TEXT",
+                },
+            }
+            missing_columns = []
+            column_type_mismatches = []
+            for table_name, required in expected_columns.items():
+                if table_name not in existing:
+                    continue
+                table_info = {
+                    row["name"]: str(row["type"] or "").upper()
+                    for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+                }
+                for column_name, expected_type in required.items():
+                    actual_type = table_info.get(column_name)
+                    if actual_type is None:
+                        missing_columns.append((table_name, column_name))
+                    elif actual_type != expected_type:
+                        column_type_mismatches.append(
+                            (table_name, column_name, expected_type, actual_type)
+                        )
+            result["missing_columns"] = sorted(missing_columns)
+            result["column_type_mismatches"] = sorted(column_type_mismatches)
+
+            expected_not_null_columns = {
+                "drafts": {"publish_status", "publish_time_source", "review_status"},
+                "sub_plan_stages": {
+                    "strategy_goal", "current_problem", "execution_strategy",
+                    "prerequisites", "input_info", "expected_result",
+                    "completion_criteria", "effect_evaluation", "entry_condition",
+                    "entry_condition_met", "dependencies_json",
+                },
+                "content_review_events": {
+                    "content_id", "event_type", "actor", "reason", "created_at",
+                },
+                "strategy_effect_reviews": {
+                    "stage_id", "assessment", "recommendation", "evidence_note",
+                    "confidence", "evidence_json", "created_by", "created_at",
+                },
+                "sub_plan_stage_outcomes": {
+                    "sub_plan_id", "stage_key", "source_version_id", "stage_id",
+                    "result_json", "evaluation", "recorded_at", "recorded_by",
+                },
+                "production_tasks": {
+                    "id", "idempotency_key", "round_id", "master_plan_version_id",
+                    "sub_plan_id", "sub_plan_version_id", "strategy_step_id",
+                    "platform", "task_ordinal", "status", "attempt_count",
+                    "max_attempts", "input_snapshot_json", "created_at", "updated_at",
+                },
+                "production_task_attempts": {
+                    "task_id", "attempt_no", "status", "started_at",
+                },
+            }
+            nullable_mismatches = []
+            for table_name, required_columns in expected_not_null_columns.items():
+                if table_name not in existing:
+                    continue
+                table_info = {
+                    row["name"]: row
+                    for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+                }
+                for column_name in required_columns:
+                    column = table_info.get(column_name)
+                    if column is not None and not bool(column["notnull"]):
+                        nullable_mismatches.append((table_name, column_name, "NOT NULL"))
+            result["nullable_mismatches"] = sorted(nullable_mismatches)
+
+            expected_defaults = {
+                "drafts": {
+                    "publish_status": "'not_published'",
+                    "publish_time_source": "'confirmation_time'",
+                    "review_status": "'pending'",
+                },
+                "sub_plan_stages": {
+                    "strategy_goal": "''", "current_problem": "''",
+                    "execution_strategy": "''", "prerequisites": "''",
+                    "input_info": "''", "expected_result": "''",
+                    "completion_criteria": "''", "effect_evaluation": "''",
+                    "entry_condition": "''", "entry_condition_met": "1",
+                    "dependencies_json": "'[]'",
+                },
+                "content_review_events": {"actor": "'web-ui'", "reason": "''"},
+                "strategy_effect_reviews": {
+                    "evidence_note": "''", "confidence": "'low'",
+                    "evidence_json": "'{}'", "created_by": "'web-ui'",
+                },
+                "sub_plan_stage_outcomes": {
+                    "evaluation": "''", "recorded_by": "'user'",
+                },
+                "production_tasks": {
+                    "task_ordinal": "1", "status": "'pending'",
+                    "attempt_count": "0", "max_attempts": "3",
+                    "input_snapshot_json": "'{}'",
+                },
+            }
+            default_mismatches = []
+            for table_name, defaults in expected_defaults.items():
+                if table_name not in existing:
+                    continue
+                table_info = {
+                    row["name"]: row
+                    for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+                }
+                for column_name, expected_default in defaults.items():
+                    column = table_info.get(column_name)
+                    if column is not None and column["dflt_value"] != expected_default:
+                        default_mismatches.append(
+                            (table_name, column_name, expected_default, column["dflt_value"])
+                        )
+            result["default_mismatches"] = sorted(default_mismatches)
+
+            expected_check_fragments = {
+                "drafts": (
+                    "publish_status IN ('not_published','published','failed')",
+                    "publish_time_source IN ('confirmation_time','user_supplied')",
+                    "review_status IN ('pending','approved','rejected')",
+                ),
+                "sub_plan_stages": ("entry_condition_met IN (0,1)",),
+                "production_tasks": (
+                    "status IN ('pending','running','succeeded','failed','cancelled')",
+                    "task_ordinal > 0", "attempt_count >= 0", "max_attempts > 0",
+                    "status != 'succeeded' OR content_id IS NOT NULL",
+                ),
+                "production_task_attempts": (
+                    "attempt_no > 0",
+                    "status IN ('running','succeeded','failed','cancelled','abandoned')",
+                ),
+                "content_review_events": (
+                    "event_type IN ('edited','approved','rejected','resubmitted')",
+                ),
+                "strategy_effect_reviews": (
+                    "assessment IN ('effective','mixed','ineffective','insufficient_data')",
+                    "length(trim(recommendation)) BETWEEN 1 AND 2000",
+                    "confidence IN ('low','medium','high')",
+                ),
+            }
+            missing_check_constraints = []
+            for table_name, fragments in expected_check_fragments.items():
+                if table_name not in existing:
+                    continue
+                row = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                    (table_name,),
+                ).fetchone()
+                ddl = " ".join((row["sql"] or "").lower().split()) if row else ""
+                for fragment in fragments:
+                    if " ".join(fragment.lower().split()) not in ddl:
+                        missing_check_constraints.append((table_name, fragment))
+            result["missing_check_constraints"] = sorted(missing_check_constraints)
+
             # SQLite 默认不会在每次读取时自动暴露历史孤儿记录；
             # 显式检查可发现旧迁移或外部写入留下的外键损坏。
             result["foreign_key_violations"] = [
                 tuple(row) for row in conn.execute("PRAGMA foreign_key_check").fetchall()
             ]
-            integrity = conn.execute("PRAGMA quick_check").fetchone()
+            integrity_mode = "integrity_check" if full_integrity else "quick_check"
+            integrity = conn.execute(f"PRAGMA {integrity_mode}").fetchone()
             result["integrity_check"] = integrity[0] if integrity else "no result"
+            result["integrity_check_mode"] = integrity_mode
 
             # drafts 表 CHECK 中 expired 不能漏（R14）
             if "drafts" in existing:
