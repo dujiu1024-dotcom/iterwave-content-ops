@@ -130,6 +130,20 @@ def business_date_cutoffs(day: str, cfg=None, *, end: bool = False) -> tuple[str
 
 
 
+
+def timestamp_before_exclusive_sql(column: str) -> str:
+    """SQLite predicate for timestamps strictly before a cutoff in mixed formats."""
+    if not re.fullmatch(r"(?:[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)?|COALESCE\\([A-Za-z_][A-Za-z0-9_]*,\\s*[A-Za-z_][A-Za-z0-9_]*\\))", column):
+        raise ValueError("invalid timestamp column")
+    aware = (
+        f"(instr(substr({column}, 20), '+') > 0 "
+        f"OR instr(substr({column}, 20), '-') > 0 OR substr({column}, -1) = 'Z')"
+    )
+    return (
+        f"(({aware} AND datetime({column}) < datetime(?)) "
+        f"OR (NOT {aware} AND datetime({column}) < datetime(?)))"
+    )
+
 def business_date_predicate(column: str, day: str, cfg=None) -> tuple[str, tuple[str, str, str, str]]:
     """Return a mixed-format SQL predicate and bounds for one business calendar day.
 
