@@ -10,10 +10,10 @@ R21 硬约束：
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
-from .timezone import business_now
+from .timezone import business_date_cutoffs, business_now, timestamp_before_sql, timestamp_since_sql
 
 logger = logging.getLogger(__name__)
 
@@ -89,12 +89,27 @@ class GoalProgressUpdater:
         if row["target_platform"]:
             where.append("platform = ?")
             params.append(row["target_platform"])
-        if row["metric_period_start"]:
-            where.append("fetched_at >= ?")
-            params.append(row["metric_period_start"])
-        if row["metric_period_end"]:
-            where.append("fetched_at <= ?")
-            params.append(row["metric_period_end"])
+        # Goal periods are business-calendar dates. Compare offset-aware rows as UTC
+        # instants and legacy naive metrics as business-local wall time, with an
+        # exclusive next-day upper bound so the whole end date is included.
+        period_valid = True
+        try:
+            if row["metric_period_start"]:
+                utc_start, legacy_start = business_date_cutoffs(
+                    date.fromisoformat(str(row["metric_period_start"])).isoformat(), self.cfg,
+                )
+                where.append(timestamp_since_sql("fetched_at"))
+                params.extend((utc_start, legacy_start))
+            if row["metric_period_end"]:
+                end_exclusive = date.fromisoformat(str(row["metric_period_end"])) + timedelta(days=1)
+                utc_end, legacy_end = business_date_cutoffs(end_exclusive.isoformat(), self.cfg)
+                where.append(timestamp_before_sql("fetched_at"))
+                params.extend((utc_end, legacy_end))
+        except (TypeError, ValueError):
+            period_valid = False
+            logger.warning("目标 %s 统计日期范围无效，当前值按无样本处理", row["id"])
+        if not period_valid:
+            where.append("0 = 1")
 
         sql = f"SELECT {agg.upper()}({column}) AS v, COUNT({column}) AS n FROM metrics WHERE " + " AND ".join(where)
         agg_row = self.conn.execute(sql, params).fetchone()
