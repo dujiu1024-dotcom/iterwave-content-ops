@@ -18,9 +18,8 @@ def test_marker_skips_request_level_transaction():
         return {"ok": True}
 
     route = api_main.TransactionalAPIRoute("/api/x", endpoint, methods=["POST"])
-    # Keep cleanup wrapper while skipping the request-level transaction.
-    assert route.endpoint is not endpoint
-    assert getattr(route.endpoint, "_manages_own_transaction", False)
+    # The decorator owns cleanup; APIRoute must not add a second wrapper.
+    assert route.endpoint is endpoint
     assert route.endpoint() == {"ok": True}
     assert calls == ["own"]
 
