@@ -11,6 +11,8 @@ interface AppContextType {
   refreshAuth: () => Promise<void>;
   toasts: Toast[];
   showToast: (text: string, type?: Toast["type"]) => void;
+  /** 手动关闭某个 toast */
+  dismissToast: (id: number) => void;
   /** G-11：进行中的操作集合（key 由调用方定义，如 "publish:12" / "run:3"） */
   pending: Record<string, boolean>;
   /** G-11：包一层 pending 标记 + 防重复触发，返回 fn 的返回值；同一 key 执行中再次调用直接返回 undefined */
@@ -53,9 +55,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const showToast = useCallback((text: string, type: Toast["type"] = "info") => {
     const id = Date.now() + Math.random();
     setToasts((prev) => [...prev, { id, text, type }]);
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 3500);
+  }, []);
+
+  const dismissToast = useCallback((id: number) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
   // 用 ref 做同步的"是否已在执行"判断：setState 更新是异步的，不能靠它去重
@@ -91,13 +94,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [auth?.authenticated, refreshStatus]);
 
   return (
-    <AppContext.Provider value={{ status, refreshStatus, auth, refreshAuth, toasts, showToast, pending, withPending, isPending }}>
+    <AppContext.Provider value={{ status, refreshStatus, auth, refreshAuth, toasts, showToast, dismissToast, pending, withPending, isPending }}>
       {children}
       <div className="toast-area" role="status" aria-live="polite">
         {toasts.map((t) => (
           <div key={t.id} className={`toast ${t.type || "info"}`}>
             <b>{t.type === "error" ? "需要处理" : t.type === "success" ? "已完成" : "提示"}</b>
             <span>{t.text}</span>
+            <button
+              type="button"
+              className="toast-close"
+              aria-label="关闭"
+              onClick={() => dismissToast(t.id)}
+              title="点击关闭"
+            >✕</button>
           </div>
         ))}
       </div>
