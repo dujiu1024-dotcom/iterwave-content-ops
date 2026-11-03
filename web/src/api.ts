@@ -677,6 +677,14 @@ export interface ScheduleEvent {
   platform: Platform;
   status: string;
   round_id: number | null;
+  master_plan_version_id?: number | null;
+  sub_plan_id?: string | null;
+  sub_plan_version_id?: number | null;
+  sub_plan_stage_id?: string | null;
+  stage_order?: number | null;
+  stage_title?: string | null;
+  stage_start_date?: string | null;
+  stage_end_date?: string | null;
   scheduled: string | null;
   saved_at: string | null;
   day: number | null;
@@ -731,8 +739,12 @@ export interface ScheduleResponse {
   start_date: string;
   end_date: string;
   items: ScheduleEvent[];
+  total?: number;
   /** 未排期草稿（scheduled_publish_at IS NULL），供日历直接挑选排期 */
   unscheduled?: UnscheduledDraft[];
+  unscheduled_total?: number;
+  unscheduled_page?: number;
+  unscheduled_page_size?: number;
 }
 
 export interface UnscheduledDraft {
@@ -741,6 +753,13 @@ export interface UnscheduledDraft {
   status: string;
   title: string | null;
   round_id: number | null;
+}
+
+export interface UnscheduledDraftPage {
+  items: UnscheduledDraft[];
+  total: number;
+  page: number;
+  page_size: number;
 }
 
 /** G-13 内容资产（外部参考 / 个人观点 / 内容模板） */
@@ -2075,12 +2094,16 @@ export const api = {
     fetchJson<any>(`/api/circuit_breaker/recover?platform=${platform}`, { method: "POST" }),
   resetCb: (platform: Platform) =>
     fetchJson<{ reset_count: number }>(`/api/circuit_breaker/reset?platform=${platform}`, { method: "POST" }),
-  schedule: (startDate?: string, endDate?: string) => {
+  schedule: (startDate?: string, endDate?: string, unscheduledPage = 1) => {
     const p = new URLSearchParams();
     if (startDate) p.set("start_date", startDate);
     if (endDate) p.set("end_date", endDate);
+    p.set("unscheduled_page", String(unscheduledPage));
+    p.set("unscheduled_page_size", "50");
     return fetchJson<ScheduleResponse>(`/api/schedule?${p}`);
   },
+  unscheduledScheduleDrafts: (page = 1) =>
+    fetchJson<UnscheduledDraftPage>(`/api/schedule/unscheduled?page=${page}&page_size=50`),
   // === G-13 排期写入口 ===
   scheduleDraft: (draft_id: string, scheduled_publish_at: string) =>
     fetchJson<{ draft_id: string; scheduled_publish_at: string | null; deduped?: boolean }>(

@@ -1620,15 +1620,16 @@ def _write_schedule(conn, draft_id: str, scheduled: Optional[str]) -> dict:
     return {"draft_id": draft_id, "scheduled_publish_at": value, "status": status}
 
 
-def _unscheduled_drafts(conn) -> list[dict]:
-    """未排期草稿（供 UI 直接挑选排期）。scheduled_publish_at IS NULL，不是空串。"""
+def _unscheduled_drafts(conn, limit: int = 50, offset: int = 0) -> list[dict]:
+    """分页返回未排期草稿；scheduled_publish_at IS NULL，不是空串。"""
     rows = conn.execute(
         "SELECT d.id, d.platform, d.status, c.title, c.round_id "
         "FROM drafts d JOIN contents c ON d.content_id = c.id "
         "LEFT JOIN draft_save_verifications v ON v.draft_id=d.id "
         "WHERE d.scheduled_publish_at IS NULL AND d.status IN ('draft_pending','draft_saved') "
         "AND COALESCE(v.status, '') != 'pending_verify' "
-        "ORDER BY d.created_at DESC LIMIT 50"
+        "ORDER BY d.created_at DESC, d.id DESC LIMIT ? OFFSET ?",
+        (limit, offset),
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -7996,6 +7997,8 @@ def _register_routes(app: FastAPI) -> None:
     def list_schedule(
         start_date: Optional[str] = Query(None, description="YYYY-MM-DD 起始日期"),
         end_date: Optional[str] = Query(None, description="YYYY-MM-DD 结束日期"),
+        unscheduled_page: int = Query(1, ge=1),
+        unscheduled_page_size: int = Query(50, ge=1, le=100),
     ):
         """按 scheduled_publish_at 返回排期事件（无排期时用 saved_at 兜底）。"""
         from datetime import datetime, timedelta
@@ -8028,7 +8031,15 @@ def _register_routes(app: FastAPI) -> None:
             "        AND DATE(d.saved_at) BETWEEN ? AND ?) "
         )
         params = [start_date, end_date, start_date, end_date]
-        sql += " ORDER BY COALESCE(d.scheduled_publish_at, d.saved_at) ASC LIMIT 200"
+        # The requested date window is already bounded by the calendar view.
+        # Do not silently truncate busy days/months: every matching draft must be visible.
+        count_sql = (
+            "SELECT COUNT(*) FROM drafts d JOIN contents c ON d.content_id = c.id "
+            "WHERE (d.scheduled_publish_at IS NOT NULL AND DATE(d.scheduled_publish_at) BETWEEN ? AND ?) "
+            "OR (d.scheduled_publish_at IS NULL AND d.saved_at IS NOT NULL AND DATE(d.saved_at) BETWEEN ? AND ?)"
+        )
+        total = int(conn.execute(count_sql, params).fetchone()[0] or 0)
+        sql += " ORDER BY COALESCE(d.scheduled_publish_at, d.saved_at) ASC"
 
         rows = conn.execute(sql, params).fetchall()
         items: list[dict] = []
@@ -8059,8 +8070,43 @@ def _register_routes(app: FastAPI) -> None:
                 "saved_at": row["saved_at"],
                 "day": day,
             })
-        return {"start_date": start_date, "end_date": end_date, "items": items,
-                "unscheduled": _unscheduled_drafts(conn)}
+        unscheduled_where = (
+            " FROM drafts d JOIN contents c ON d.content_id = c.id "
+            "LEFT JOIN draft_save_verifications v ON v.draft_id=d.id "
+            "WHERE d.scheduled_publish_at IS NULL AND d.status IN ('draft_pending','draft_saved') "
+            "AND COALESCE(v.status, '') != 'pending_verify'"
+        )
+        unscheduled_total = int(conn.execute(
+            "SELECT COUNT(*)" + unscheduled_where
+        ).fetchone()[0] or 0)
+        unscheduled = _unscheduled_drafts(
+            conn, limit=unscheduled_page_size,
+            offset=(unscheduled_page - 1) * unscheduled_page_size,
+        )
+        return {
+            "start_date": start_date, "end_date": end_date, "items": items,
+            "total": total, "unscheduled": unscheduled,
+            "unscheduled_total": unscheduled_total,
+            "unscheduled_page": unscheduled_page,
+            "unscheduled_page_size": unscheduled_page_size,
+        }
+
+    @app.get("/api/schedule/unscheduled")
+    def list_unscheduled_schedule_drafts(
+        page: int = Query(1, ge=1),
+        page_size: int = Query(50, ge=1, le=100),
+    ):
+        """分页读取待排期草稿，避免加载更多时重复查询整个日历日期范围。"""
+        conn = _g()["conn"]
+        where = (
+            " FROM drafts d JOIN contents c ON d.content_id = c.id "
+            "LEFT JOIN draft_save_verifications v ON v.draft_id=d.id "
+            "WHERE d.scheduled_publish_at IS NULL AND d.status IN ('draft_pending','draft_saved') "
+            "AND COALESCE(v.status, '') != 'pending_verify'"
+        )
+        total = int(conn.execute("SELECT COUNT(*)" + where).fetchone()[0] or 0)
+        items = _unscheduled_drafts(conn, limit=page_size, offset=(page - 1) * page_size)
+        return {"items": items, "total": total, "page": page, "page_size": page_size}
 
     @app.post("/api/schedule")
     def create_schedule(req: "ScheduleWriteRequest"):
