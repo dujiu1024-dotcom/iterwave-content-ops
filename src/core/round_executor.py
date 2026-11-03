@@ -35,6 +35,7 @@ from .config import PROJECT_ROOT
 
 from .timezone import business_now, storage_now
 from .task_context import bind_task_context
+from .production_task_store import ProductionTaskStore
 from .kb_reader import KbReader  # noqa: F401 — 兼容旧引用
 from .topic_pool import load_pool
 from .persona import effective_persona
@@ -227,6 +228,7 @@ class RoundExecutor:
             self._plan_source = "subplan_version"
             self._plan_sig = round_row["plan_signature"]
             self._subplan_context = {
+                "master_plan_version_id": round_row["master_plan_version_id"],
                 "sub_plan_id": round_row["sub_plan_id"],
                 "sub_plan_version_id": round_row["sub_plan_version_id"],
                 "stage_id": round_row["sub_plan_stage_id"],
@@ -937,6 +939,7 @@ class RoundExecutor:
                 "reason": "图文内容必须包含视觉素材；旧编排中的关闭设置不再跳过出图",
             })
         card_first = False
+        task_store = ProductionTaskStore(self.conn) if self._subplan_context else None
         if orch and orch.card_before_gate:
             report["steps"].append({"step": "image_card_order", "status": "overridden", "reason": "图片生成必须在 G2 内容质量检查通过后执行；忽略 card_first 配置"})
         for rank, st in enumerate(scored):
@@ -973,6 +976,55 @@ class RoundExecutor:
                         f"{platform.display_name} {_SKIP_REASON_CIRCUIT}"
                     )
                     continue
+
+                # Persist each strategy-step/topic/platform variant as an independently retryable task.
+                production_task_id = None
+                if task_store is not None:
+                    stage = self._subplan_context["stage"]
+                    strategy_step_id = str(stage.get("stage_key") or "").strip()
+                    if not strategy_step_id:
+                        raise RoundPreconditionError("当前策略步骤缺少稳定 stage_key，拒绝创建生产任务")
+                    task_store.recover_expired_tasks(round_id=round_id)
+                    task = task_store.create_task(
+                        round_id=round_id,
+                        master_plan_version_id=int(self._subplan_context["master_plan_version_id"]),
+                        sub_plan_id=str(self._subplan_context["sub_plan_id"]),
+                        sub_plan_version_id=int(self._subplan_context["sub_plan_version_id"]),
+                        strategy_step_id=strategy_step_id,
+                        platform=platform.value,
+                        task_ordinal=rank + 1,
+                        idempotency_key=(
+                            f"round:{round_id}:step:{strategy_step_id}:"
+                            f"topic:{topic.id}:platform:{platform.value}"
+                        ),
+                        input_snapshot={
+                            "topic": {
+                                "id": topic.id, "title": topic.title,
+                                "summary": topic.summary, "dimension": topic.dimension,
+                            },
+                            "strategy_step": {
+                                "stage_id": self._subplan_context["stage_id"],
+                                "title": stage.get("title"),
+                                "strategy_goal": stage.get("strategy_goal"),
+                                "execution_strategy": stage.get("execution_strategy"),
+                                "expected_result": stage.get("expected_result"),
+                            },
+                            "template": template_data,
+                        },
+                    )
+                    if task["status"] != "pending":
+                        existing = task_store.get_content_for_task(task["id"])
+                        if existing is not None and task["status"] == "running":
+                            task_store.complete_task(task["id"], content_id=str(existing["id"]))
+                        raise RoundPreconditionError(
+                            f"生产任务 {task['id']} 当前状态为 {task['status']}，"
+                            "拒绝重复生成；请先恢复或显式重试该任务"
+                        )
+                    task = task_store.claim_task(
+                        task["id"], worker_id=f"round-executor-{round_id}",
+                        lease_seconds=3600,
+                    )
+                    production_task_id = task["id"]
 
                 # ③ 文案生成 + ④ G2 终极目标检查（R2：FAIL 丢弃重生成，最多 2 次；
                 #    ERROR 不能默认通过）
@@ -1081,6 +1133,11 @@ class RoundExecutor:
                     )
                     report["errors"].append(msg)
                     self._notify_guard_give_up(platform, topic.title, msg)
+                    if production_task_id:
+                        task_store.fail_task(
+                            production_task_id, error_code="quality_gate_rejected",
+                            error_message=msg, retryable=False,
+                        )
                     continue
 
                 title, body, tags, outcome = accepted
@@ -1174,6 +1231,12 @@ class RoundExecutor:
                     stage_target = int(self._subplan_context["stage"].get("target_count") or 0)
                     if confirmed + int(report["contents_created"]) >= stage_target:
                         report["errors"].append("生成期间阶段确认发布目标已达成，丢弃当前候选内容")
+                        if production_task_id:
+                            task_store.fail_task(
+                                production_task_id, error_code="stage_quota_reached",
+                                error_message="阶段确认发布目标已达成，当前候选内容未落库",
+                                retryable=False,
+                            )
                         continue
                 # ⑥ 写 contents（DB CHECK 只允许 degraded/media_asset/generated）
                 has_ai = bool(cover_path) or body_ai_count > 0
@@ -1195,8 +1258,9 @@ class RoundExecutor:
                     self.conn.execute(
                         "INSERT INTO contents (id, round_id, topic_id, platform, title, body, "
                         "tags, image_paths, word_count, card_style, guard_outcome, guard_reason, "
-                        "visual_status, visual_reason, template_id, template_version, template_snapshot_json) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "visual_status, visual_reason, template_id, template_version, template_snapshot_json, "
+                        "production_task_id) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             content_id, round_id, topic.id, platform.value, title, body,
                             json.dumps(tags, ensure_ascii=False),
@@ -1206,8 +1270,11 @@ class RoundExecutor:
                             template_data["id"] if template_data else None,
                             template_data["version"] if template_data else None,
                             json.dumps(template_data, ensure_ascii=False) if template_data else None,
+                            production_task_id,
                         ),
                     )
+                if production_task_id:
+                    task_store.complete_task(production_task_id, content_id=content_id)
 
                 # 视觉版本与逐页任务留痕。版本绑定最终正文哈希，单页任务可独立追踪。
                 if image_paths:
@@ -1316,6 +1383,19 @@ class RoundExecutor:
             ),
         )
         self.conn.commit()
+        if task_store is not None:
+            stage = self._subplan_context["stage"]
+            progress = task_store.step_progress(
+                str(stage["stage_key"]),
+                sub_plan_id=str(self._subplan_context["sub_plan_id"]),
+                sub_plan_version_id=int(self._subplan_context["sub_plan_version_id"]),
+            )
+            report["strategy_step_progress"] = progress
+            report["steps"].append({
+                "step": "production_tasks",
+                "strategy_step_id": str(stage["stage_key"]),
+                **progress,
+            })
         return rows
 
     # ------------------------------------------------------------------
