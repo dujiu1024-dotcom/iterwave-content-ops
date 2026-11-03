@@ -10,6 +10,10 @@ from src.core.db import Database, LockedConnection
 from src.api import main as api_main
 
 
+def _locked(raw):
+    return LockedConnection(raw)
+
+
 def test_unrelated_thread_cannot_commit_another_threads_partial_write():
     raw = sqlite3.connect(":memory:", check_same_thread=False)
     conn = LockedConnection(raw)
