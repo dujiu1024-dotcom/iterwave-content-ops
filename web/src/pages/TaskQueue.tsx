@@ -357,6 +357,7 @@ export default function TaskQueue() {
         <div className="panel-head">
           <div><h2>最近任务</h2><div className="muted">支持按任务类型、失败状态、账号组 ID、失败原因和创建日期筛选；系统后台调度任务可单独查看。</div></div>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            {drilldown && <button className="btn sm soft" type="button" onClick={() => { setDrilldown(null); setHistoryPage(1); }}>清除图表钻取</button>}
             <select aria-label="历史任务类型" value={historyType} onChange={(event) => { setHistoryType(event.target.value as "all" | "round_run" | "scheduler_job"); setHistoryPage(1); }}>
               <option value="round_run">内容生产</option><option value="scheduler_job">系统后台任务</option><option value="all">全部任务类型</option>
             </select>
@@ -371,6 +372,7 @@ export default function TaskQueue() {
             <span className="muted">共 {historyTotal} 项 · 第 {historyPage}/{historyPages} 页</span>
           </div>
         </div>
+        {drilldown && <div className="notice" style={{ margin: "0 16px 10px" }}>图表钻取：{drilldown.status ? STATUS_LABEL[drilldown.status] : "全部状态"} · {drilldown.dateFrom || "不限日期"} 至 {drilldown.dateTo || "不限日期"} · 共 {historyTotal} 项</div>}
         {history.length ? <div>{history.map((task) => <TaskRow key={task.task_id} task={task} onCancel={cancel} cancelling={false} onRetry={requestRetry} retrying={retryingId === task.task_id} onResolve={requestResolve} resolving={resolvingId === task.task_id} onDetails={openDetails} />)}</div> : <div className="empty-state">暂无历史任务。</div>}
         <div className="panel-foot" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "12px 16px" }}>
           <span className="muted">每页 {historyPageSize} 条，历史记录与失败任务均由服务端分页读取。</span>
