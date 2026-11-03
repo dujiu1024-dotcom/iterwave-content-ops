@@ -18,7 +18,11 @@ def test_marker_skips_request_level_transaction():
         return {"ok": True}
 
     route = api_main.TransactionalAPIRoute("/api/x", endpoint, methods=["POST"])
-    assert route.endpoint is endpoint
+    # Keep cleanup wrapper while skipping the request-level transaction.
+    assert route.endpoint is not endpoint
+    assert getattr(route.endpoint, "_manages_own_transaction", False)
+    assert route.endpoint() == {"ok": True}
+    assert calls == ["own"]
 
 
 def test_unmarked_sync_write_route_is_wrapped():
