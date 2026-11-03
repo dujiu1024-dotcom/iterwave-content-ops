@@ -3272,3 +3272,72 @@ def test_goal_patch_blocks_demoting_north_star_with_children_and_clears_platform
     # 根目标已无子目标后允许降级。
     demoted = tc.patch(f"/api/goals/{root_id}", json={"goal_level": "platform"})
     assert demoted.status_code == 200, demoted.text
+
+
+@pytest.mark.parametrize(
+    ("saved", "expected_draft_status", "expected_verification_status"),
+    [
+        (True, "draft_saved", "verified_saved"),
+        (False, "draft_pending", "verified_missing"),
+    ],
+)
+def test_uncertain_draft_save_manual_verification_is_atomic_and_audited(
+    client, saved, expected_draft_status, expected_verification_status,
+):
+    tc, conn, seed = client
+    round_id = seed.round(status="completed")
+    draft_id = seed.draft(
+        round_id, platform="xhs", draft_status="draft_pending", fetch_status=None,
+    )
+    conn.execute(
+        "INSERT INTO draft_save_verifications "
+        "(draft_id, status, attempted_at, platform_draft_id, error_msg) "
+        "VALUES (?, 'pending_verify', ?, ?, ?)",
+        (draft_id, "2026-11-03T00:00:00", "platform-draft-123", "保存结果未确认"),
+    )
+    conn.commit()
+
+    response = tc.post(
+        f"/api/drafts/{draft_id}/verify_save",
+        json={"saved": saved, "note": "已在平台草稿箱逐项核实"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == expected_draft_status
+
+    draft = conn.execute(
+        "SELECT status, draft_id FROM drafts WHERE id=?", (draft_id,),
+    ).fetchone()
+    verification = conn.execute(
+        "SELECT status, verified_at, note FROM draft_save_verifications WHERE draft_id=?",
+        (draft_id,),
+    ).fetchone()
+    assert draft["status"] == expected_draft_status
+    assert verification["status"] == expected_verification_status
+    assert verification["verified_at"]
+    assert verification["note"] == "已在平台草稿箱逐项核实"
+
+    if saved:
+        assert draft["draft_id"] == "platform-draft-123"
+        replay = tc.post(
+            f"/api/drafts/{draft_id}/verify_save",
+            json={"saved": True, "note": "已在平台草稿箱逐项核实"},
+        )
+        assert replay.status_code == 200
+        assert replay.json()["already_verified"] is True
+    else:
+        assert draft["draft_id"] is None
+        replay = tc.post(
+            f"/api/drafts/{draft_id}/verify_save",
+            json={"saved": False, "note": "再次核实"},
+        )
+        assert replay.status_code == 409
+
+    audit = conn.execute(
+        "SELECT override_field, original_value, override_value, reason "
+        "FROM user_override WHERE round_id=? AND override_field='draft_save_verify'",
+        (round_id,),
+    ).fetchall()
+    assert len(audit) == 1
+    assert audit[0]["original_value"] == "pending_verify"
+    assert audit[0]["override_value"] == expected_draft_status
+    assert audit[0]["reason"] == "已在平台草稿箱逐项核实"
