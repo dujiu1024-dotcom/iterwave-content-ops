@@ -908,3 +908,23 @@ def test_queue_filtered_scope_supports_chart_drilldown(tmp_path):
         assert "status" in str(exc)
     else:
         raise AssertionError("unknown status must be rejected")
+
+def test_failed_task_persists_structured_execution_report(tmp_path):
+    queue = make_queue(tmp_path)
+    task, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={"round_id": 3})
+    claimed = queue.claim_next("worker-1")
+    assert claimed is not None and claimed.task_id == task.task_id
+    report = {
+        "final_status": "failed",
+        "steps": [{"step": "kb_read", "count": 4}, {"step": "score", "selected": 2}],
+        "errors": ["评分服务失败"],
+    }
+    assert queue.fail(
+        task.task_id, "worker-1", error_code="execution_failed",
+        error_message="TaskExecutionFailed: 评分服务失败", result=report,
+    )
+    saved = queue.get(task.task_id)
+    assert saved is not None
+    assert saved.status == "failed"
+    assert saved.result == report
+
