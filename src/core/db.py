@@ -556,6 +556,7 @@ class LockedConnection:
         """Best-effort request-finalizer safety net for an abandoned SQLite transaction."""
         self._acquire_lock(timeout=timeout)
         try:
+            self._recover_abandoned_state()
             if not self._conn.in_transaction:
                 return False
             self._conn.rollback()
