@@ -41,6 +41,8 @@ def test_duplicate_registration_and_same_version_update_rejected(conn):
         tenant_skills.create_skill(conn, manifest())
     with pytest.raises(ValueError):
         tenant_skills.update_skill(conn, "sample_skill", manifest())
+    with pytest.raises(ValueError):
+        tenant_skills.update_skill(conn, "sample_skill", manifest("0.9.0"))
 
 
 def test_delete_rejected_while_referenced(conn):
