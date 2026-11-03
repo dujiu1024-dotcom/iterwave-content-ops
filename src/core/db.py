@@ -552,6 +552,14 @@ class LockedConnection:
                 f"SQLite connection lock wait exceeded {timeout:.1f}s"
             )
 
+    def _acquire_lock_and_recover(self, timeout: float = 10.0) -> None:
+        self._acquire_lock(timeout=timeout)
+        try:
+            self._recover_abandoned_state()
+        except BaseException:
+            self._lock.release()
+            raise
+
     def rollback_if_open(self, timeout: float = 2.0) -> bool:
         """Best-effort request-finalizer safety net for an abandoned SQLite transaction."""
         owner = _threading.current_thread()
@@ -591,6 +599,14 @@ class LockedConnection:
         try:
             if self._conn.in_transaction:
                 self._conn.rollback()
+        except BaseException as exc:
+            # Never let a connection with an un-recoverable abandoned transaction
+            # continue serving statements that might later commit partial work.
+            try:
+                self._conn.close()
+            except Exception:
+                logger.exception("关闭无法回滚的 SQLite 连接失败")
+            raise RuntimeError("abandoned SQLite transaction rollback failed; connection closed") from exc
         finally:
             object.__setattr__(self, "_transaction_owner", None)
             object.__setattr__(self, "_context_owner", None)
@@ -598,8 +614,7 @@ class LockedConnection:
             object.__setattr__(self, "_rollback_only", False)
 
     def _run_locked(self, operation):
-        self._acquire_lock()
-        self._recover_abandoned_state()
+        self._acquire_lock_and_recover()
         owner = _threading.current_thread()
         retain_current = False
         release_retained = False
@@ -664,8 +679,7 @@ class LockedConnection:
         if self._context_owner == owner and self._context_depth > 0:
             # 请求/业务事务中的 commit 延迟到最外层 with conn 正常退出。
             return
-        self._acquire_lock()
-        self._recover_abandoned_state()
+        self._acquire_lock_and_recover()
         release_retained = False
         try:
             self._conn.commit()
@@ -727,8 +741,7 @@ class LockedConnection:
             self.__exit__(None, None, None)
 
     def close(self) -> None:
-        self._acquire_lock()
-        self._recover_abandoned_state()
+        self._acquire_lock_and_recover()
         owner = _threading.current_thread()
         release_retained = self._transaction_owner == owner
         try:
