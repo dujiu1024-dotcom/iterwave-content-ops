@@ -30,3 +30,10 @@ test("uses stable fallbacks for empty and non-JSON details", () => {
     "操作失败，内部诊断信息已记录，请检查配置或联系管理员",
   );
 });
+
+
+test("uses safe fallbacks for malformed non-string error details", () => {
+  assert.equal(clientErrorMessage(400, 42), "请求失败，请稍后重试");
+  assert.equal(clientErrorMessage(400, { message: "database password=secret" }), "请求失败，请稍后重试");
+  assert.equal(clientErrorMessage(503, { detail: "provider stack trace" }), "服务暂时不可用，请稍后重试");
+});

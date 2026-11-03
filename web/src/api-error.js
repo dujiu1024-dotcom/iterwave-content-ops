@@ -21,7 +21,7 @@ const INTERNAL_DETAIL_PATTERNS = [
 
 /** Convert an API error detail to a safe, user-facing message. */
 export function clientErrorMessage(status, rawDetail) {
-  const detail = (rawDetail ?? "").trim();
+  const detail = typeof rawDetail === "string" ? rawDetail.trim() : "";
   const generic = status >= 500
     ? "服务暂时不可用，请稍后重试"
     : "操作失败，内部诊断信息已记录，请检查配置或联系管理员";
