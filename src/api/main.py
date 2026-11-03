@@ -5743,6 +5743,7 @@ def _register_routes(app: FastAPI) -> None:
         return {"runs": out}
 
     @app.post("/api/diagnostics")
+    @manages_own_transaction
     def run_diagnostics(req: DiagnoseRequest):
         """8 点端到端流程诊断（§21.3）。"""
         from src.core.orchestration import diagnose
@@ -8547,6 +8548,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(422, str(e)) from e
 
     @app.post("/api/kb/sources/remote")
+    @manages_own_transaction
     def kb_source_remote(req: dict):
         cfg = _g()["cfg"]
         try:
@@ -9186,6 +9188,7 @@ def _register_routes(app: FastAPI) -> None:
         return Response(status_code=204)
 
     @app.post("/api/accounts/{platform}/login")
+    @manages_own_transaction
     def start_platform_login(platform: str, restart: bool = Query(False)):
         """启动后台登录 subprocess（调 Easel vendor xhs_publish.py login / douyin_publish.py login / web_publisher.py login-qr）。
 
@@ -9223,6 +9226,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(400, str(e)) from e
 
     @app.post("/api/accounts/{platform}/cancel_login")
+    @manages_own_transaction
     def cancel_platform_login(platform: str):
         """取消进行中的登录（terminate subprocess + 清状态文件）。"""
         p = _valid_platform(platform)
