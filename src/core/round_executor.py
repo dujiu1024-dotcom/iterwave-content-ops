@@ -1126,8 +1126,9 @@ class RoundExecutor:
                 else:
                     visual_reason = "AI 完整卡片生成失败，不允许模板降级"
                 visual_reason += (
-                    "；OCR 硬门通过，仍需人工审核" if visual_ocr.get("status") == "passed"
-                    else "；OCR 硬门未通过或不可用，需人工复核"
+                    "；OCR 粗检通过：已检查主要文字、数字和关键文本；OCR 不能保证逐字准确，最终发布前仍需人工审核"
+                    if visual_ocr.get("status") == "passed"
+                    else "；OCR 粗检未通过或不可用，需人工复核"
                 )
                 content_id = f"content-{uuid.uuid4().hex[:12]}"
                 with self.conn:

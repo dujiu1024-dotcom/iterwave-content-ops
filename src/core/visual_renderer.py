@@ -264,7 +264,7 @@ _OCR_REGION_SELECTOR = "h1,h2,.step-label,.visual-component p"
 _LAYOUT_JS = """() => {
   const root = document.querySelector('.canvas');
   const rootRect = root.getBoundingClientRect();
-  const selectors = '.eyebrow,h1,.rule,h2,.visual-component,.footer,.page';
+  const selectors = 'h1,h2,.visual-component';
   const elements = [...root.querySelectorAll(selectors)].filter(el => {
     const style = getComputedStyle(el); const rect = el.getBoundingClientRect();
     return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;

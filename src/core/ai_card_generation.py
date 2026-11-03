@@ -1,15 +1,17 @@
-"""AI-native full-card generation: the image API returns each final page.
-
-No HTML/CSS/Pillow text overlay is used. Each output image is the complete card,
-including Chinese typography, illustration, layout and decoration. OCR is a hard gate.
-"""
+"""AI-native full-card generation with isolated staging and validated per-page cache."""
 from __future__ import annotations
 
+import hashlib
+import json
 import re
+import shutil
 import uuid
 from pathlib import Path
 
-from .media_generation import generate_image_bytes
+from .media_generation import ImageGenerationError, generate_image_bytes, validate_image_bytes, validate_target_image_spec
+
+_PROMPT_VERSION = "ai-complete-card-v2"
+_LAYOUT_VERSION = "card-layout-v1"
 
 
 def _paginate_body(body: str, *, max_chars: int = 90, segments_per_page: int = 5) -> list[list[str]]:
@@ -32,10 +34,7 @@ def _paginate_body(body: str, *, max_chars: int = 90, segments_per_page: int = 5
             segments.append(part)
     if not segments:
         raise ValueError("正文分页为空，拒绝生成不完整卡片")
-    return [
-        segments[index:index + segments_per_page]
-        for index in range(0, len(segments), segments_per_page)
-    ]
+    return [segments[index:index + segments_per_page] for index in range(0, len(segments), segments_per_page)]
 
 
 def _page_prompt(*, title: str, subtitle: str, page_text: str, page_index: int,
@@ -63,12 +62,92 @@ def _page_prompt(*, title: str, subtitle: str, page_text: str, page_index: int,
     )
 
 
+def _canonical_hash(value: dict) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _cache_fingerprint(*, expected: str, prompt: str, settings: dict, brand_profile: dict,
+                       platform: str, page_index: int, cfg, allow_fallback: bool | None) -> str:
+    from .visual_ocr import _OCR_RULES_VERSION
+    media = getattr(cfg, "media_generation", None)
+    quality = getattr(cfg, "media_quality", None)
+    return _canonical_hash({
+        "expected_text": expected,
+        "prompt": prompt,
+        "prompt_version": _PROMPT_VERSION,
+        "model": settings.get("model"),
+        "model_version": settings.get("model_version") or settings.get("model"),
+        "image_provider": getattr(media, "provider", None),
+        "image_base_url": getattr(media, "base_url", None),
+        "configured_image_model": getattr(media, "model", None),
+        "watermark": getattr(media, "watermark", None),
+        "max_dimension": getattr(media, "max_dimension", None),
+        "max_pixels": getattr(media, "max_pixels", None),
+        "fallback_provider": getattr(media, "fallback_provider", None),
+        "fallback_base_url": getattr(media, "fallback_base_url", None),
+        "fallback_model": getattr(media, "fallback_model", None),
+        "fallback_enabled": getattr(media, "fallback_enabled", None),
+        "allow_fallback_override": allow_fallback,
+        "media_quality": {
+            "portrait_ratio_min": getattr(quality, "portrait_ratio_min", None),
+            "portrait_ratio_max": getattr(quality, "portrait_ratio_max", None),
+            "square_ratio_max": getattr(quality, "square_ratio_max", None),
+            "landscape_ratio_max": getattr(quality, "landscape_ratio_max", None),
+        },
+        "brand_profile": brand_profile,
+        "size": settings.get("size"),
+        "platform": platform,
+        "layout_version": _LAYOUT_VERSION,
+        "layout_parameters": settings.get("layout_parameters") or {"max_chars": 60, "segments_per_page": 3},
+        "ocr_rules_version": _OCR_RULES_VERSION,
+        "page_index": page_index,
+    })
+
+
+def _safe_remove_tree(path: Path, root: Path) -> None:
+    resolved_root = root.resolve()
+    resolved_path = path.resolve()
+    if resolved_root not in resolved_path.parents:
+        raise ValueError("拒绝清理媒体目录之外的路径")
+    if resolved_path.exists():
+        shutil.rmtree(resolved_path)
+
+
+def _validate_cached_page(cache_dir: Path, fingerprint: str, expected: str, size: str, cfg, critical: bool = False) -> Path | None:
+    manifest_path = cache_dir / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        image_name = str(manifest["image"])
+        if Path(image_name).name != image_name:
+            return None
+        image_path = cache_dir / image_name
+        if (
+            manifest.get("fingerprint") != fingerprint
+            or not image_path.is_file()
+            or cache_dir.resolve() not in image_path.resolve().parents
+        ):
+            return None
+        raw = image_path.read_bytes()
+        _mime, _suffix, width, height = validate_image_bytes(raw, cfg=cfg)
+        validate_target_image_spec(width, height, size, cfg=cfg)
+        from .visual_ocr import validate_rendered_pages
+        report = validate_rendered_pages(
+            [image_path], [expected], cache_dir / "ocr_report.json", critical_pages=[critical],
+        )
+        if report.get("status") == "passed" and report.get("gate") == "passed":
+            return image_path
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError, ImageGenerationError):
+        return None
+    return None
+
+
 def generate_ai_card_set(
     *, title: str, subtitle: str, body: str, output_dir: Path, platform,
     cfg, settings: dict, allow_fallback: bool | None = None,
     brand_profile: dict | None = None,
 ) -> tuple[list[Path], list[str]]:
-    """Generate cover + all body pages as complete AI images, then require OCR pass."""
+    """Generate only missing/invalid pages, then atomically deliver a complete validated set."""
     from .visual_ocr import validate_rendered_pages
 
     body_pages = _paginate_body(body, max_chars=60, segments_per_page=3)
@@ -89,67 +168,165 @@ def generate_ai_card_set(
         from .visual_catalog import validate_brand_profile
         validate_brand_profile(brand_profile)
         brand_rules = [
-            f"品牌名称（仅作为视觉识别，不得擅自添加额外文案）：{brand_profile.get('brand_name')}"
-            if brand_profile.get("brand_name") else "",
+            f"品牌名称（仅作为视觉识别，不得擅自添加额外文案）：{brand_profile.get('brand_name')}" if brand_profile.get("brand_name") else "",
             f"主色：{brand_profile.get('primary_color')}" if brand_profile.get("primary_color") else "",
             f"辅助色：{brand_profile.get('secondary_color')}" if brand_profile.get("secondary_color") else "",
             f"背景色：{brand_profile.get('background_color')}" if brand_profile.get("background_color") else "",
             f"文字色：{brand_profile.get('text_color')}" if brand_profile.get("text_color") else "",
             f"视觉风格：{brand_profile.get('style_key')}" if brand_profile.get("style_key") else "",
             f"组件风格：{brand_profile.get('component_style')}" if brand_profile.get("component_style") else "",
-            f"避免风格：{'、'.join(brand_profile.get('forbidden_styles') or [])}"
-            if brand_profile.get("forbidden_styles") else "",
+            f"避免风格：{'、'.join(brand_profile.get('forbidden_styles') or [])}" if brand_profile.get("forbidden_styles") else "",
         ]
-        brand_prefix = "账号品牌视觉规范（只约束画面风格，不得更改正文）：\n" + "\n".join(
-            item for item in brand_rules if item
-        )
+        brand_prefix = "账号品牌视觉规范（只约束画面风格，不得更改正文）：\n" + "\n".join(item for item in brand_rules if item)
         prefix = "\n\n".join(item for item in (prefix, brand_prefix) if item)
     if prefix:
         prompts = [f"{prefix}\n\n{prompt}" for prompt in prompts]
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    paths: list[Path] = []
-    for index, prompt in enumerate(prompts):
-        accepted_path = None
-        last_error = "OCR 未通过"
-        for attempt in range(3):
-            retry_prompt = prompt if attempt == 0 else (
-                prompt + "\n上一版文字识别未通过。请优先保证所有指定中文逐字准确、清晰、完整，"
-                "减少装饰和文字数量，增大字号，重新设计整页成品。"
-            )
-            raw, _mime, suffix, _width, _height = generate_image_bytes(
-                retry_prompt, model=settings["model"], size=settings["size"], cfg=cfg,
+
+    output_dir = Path(output_dir).resolve()
+    media_root = output_dir / "media"
+    staging_root = media_root / "staging"
+    validated_root = media_root / "validated"
+    task_id = uuid.uuid4().hex
+    staging_dir = staging_root / task_id
+    validated_root.mkdir(parents=True, exist_ok=True)
+    staging_dir.mkdir(parents=True, exist_ok=False)
+    accepted_cache: list[Path] = []
+    delivered: list[Path] = []
+    published_dir: Path | None = None
+    try:
+        for index, prompt in enumerate(prompts):
+            fingerprint = _cache_fingerprint(
+                expected=expected[index], prompt=prompt, settings=settings,
+                brand_profile=brand_profile, platform=platform.value, page_index=index, cfg=cfg,
                 allow_fallback=allow_fallback,
             )
-            path = output_dir / f"ai_card_{platform.value}_{uuid.uuid4().hex[:12]}{suffix}"
-            path.write_bytes(raw)
-            try:
-                path.chmod(0o600)
-            except OSError:
-                pass
-            page_report = output_dir / f"visual_ocr_{path.stem}.json"
-            try:
-                result = validate_rendered_pages([path], [expected[index]], page_report)
-            except ValueError as exc:
-                last_error = str(exc)
-                path.unlink(missing_ok=True)
-                continue
-            if result.get("status") == "passed" and result.get("gate") == "passed":
-                accepted_path = path
-                break
-            last_error = str(result.get("reason") or result.get("status") or "OCR 未通过")
-            path.unlink(missing_ok=True)
-        if accepted_path is None:
-            raise ValueError(
-                f"第 {index + 1} 张 AI 完整卡片连续 3 次未通过 OCR，拒绝模板降级：{last_error}"
+            cache_dir = validated_root / fingerprint
+            critical = index <= 1 or bool(re.search(r"\d|禁止|不|没|无|非|未", expected[index]))
+            cached = _validate_cached_page(
+                cache_dir, fingerprint, expected[index], settings["size"], cfg, critical=critical,
             )
-        paths.append(accepted_path)
+            if cached is not None:
+                accepted_cache.append(cached)
+                continue
 
-    report_path = output_dir / f"visual_ocr_{paths[0].stem}.json"
-    report = validate_rendered_pages(paths, expected, report_path)
-    if report.get("status") != "passed" or report.get("gate") != "passed":
-        raise ValueError(
-            f"AI 完整卡片 OCR 硬门未通过（{report.get('status')}）；"
-            "图片已生成但不得作为合格成品交付"
+            if cache_dir.exists():
+                concurrent_cache = _validate_cached_page(
+                    cache_dir, fingerprint, expected[index], settings["size"], cfg, critical=critical,
+                )
+                if concurrent_cache is not None:
+                    accepted_cache.append(concurrent_cache)
+                    continue
+                _safe_remove_tree(cache_dir, validated_root)
+            last_error = "OCR 未通过"
+            accepted_stage = None
+            for attempt in range(3):
+                retry_prompt = prompt if attempt == 0 else (
+                    prompt + "\n上一版文字识别未通过。请优先保证所有指定中文逐字准确、清晰、完整，"
+                    "减少装饰和文字数量，增大字号，重新设计整页成品。"
+                )
+                raw, _mime, suffix, width, height = generate_image_bytes(
+                    retry_prompt, model=settings["model"], size=settings["size"], cfg=cfg,
+                    allow_fallback=allow_fallback,
+                )
+                validate_target_image_spec(width, height, settings["size"], cfg=cfg)
+                staged_image = staging_dir / f"page_{index:03d}_{attempt}{suffix}"
+                staged_image.write_bytes(raw)
+                try:
+                    staged_image.chmod(0o600)
+                except OSError:
+                    pass
+                report_path = staging_dir / f"page_{index:03d}_{attempt}.json"
+                try:
+                    report = validate_rendered_pages(
+                        [staged_image], [expected[index]], report_path,
+                        critical_pages=[critical],
+                    )
+                except ValueError as exc:
+                    last_error = str(exc)
+                    staged_image.unlink(missing_ok=True)
+                    report_path.unlink(missing_ok=True)
+                    continue
+                if report.get("status") == "passed" and report.get("gate") == "passed":
+                    accepted_stage = staged_image
+                    break
+                last_error = str(report.get("reason") or report.get("status") or "OCR 未通过")
+                staged_image.unlink(missing_ok=True)
+                report_path.unlink(missing_ok=True)
+            if accepted_stage is None:
+                raise ValueError(f"第 {index + 1} 张 AI 完整卡片连续 3 次未通过 OCR，拒绝模板降级：{last_error}")
+
+            cache_temp = staging_dir / f"cache_{fingerprint}"
+            cache_temp.mkdir(parents=True, exist_ok=False)
+            staged_cache_image = cache_temp / f"image{accepted_stage.suffix}"
+            shutil.copy2(accepted_stage, staged_cache_image)
+            staged_ocr_report = staging_dir / f"page_{index:03d}_{attempt}.json"
+            if staged_ocr_report.is_file():
+                shutil.copy2(staged_ocr_report, cache_temp / "ocr_report.json")
+            (cache_temp / "manifest.json").write_text(
+                json.dumps({"fingerprint": fingerprint, "image": staged_cache_image.name,
+                            "ocr_rules_version": "ocr-semantic-v2"}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            try:
+                cache_temp.replace(cache_dir)
+            except OSError:
+                _safe_remove_tree(cache_temp, staging_dir)
+                concurrent_cache = _validate_cached_page(
+                    cache_dir, fingerprint, expected[index], settings["size"], cfg, critical=critical,
+                )
+                if concurrent_cache is None:
+                    raise
+                accepted_cache.append(concurrent_cache)
+                continue
+            accepted_cache.append(cache_dir / staged_cache_image.name)
+
+        # Validate the complete page set once more before making any output visible.
+        complete_report_path = staging_dir / "complete_ocr_report.json"
+        critical_pages = [
+            index <= 1 or bool(re.search(r"\d|禁止|不|没|无|非|未", expected[index]))
+            for index in range(len(expected))
+        ]
+        report = validate_rendered_pages(
+            accepted_cache, expected, complete_report_path, critical_pages=critical_pages,
         )
-    return paths, page_texts
+        if report.get("status") != "passed" or report.get("gate") != "passed":
+            raise ValueError("AI 完整卡片整组 OCR 粗检未通过；拒绝交付")
+        if not complete_report_path.is_file():
+            complete_report_path.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8",
+            )
+
+        # Stage the complete delivery set in one directory, then publish it with one atomic rename.
+        delivery_stage = staging_dir / "delivery"
+        delivery_stage.mkdir()
+        staged_paths: list[Path] = []
+        for index, source in enumerate(accepted_cache):
+            target = delivery_stage / f"ai_card_{platform.value}_{uuid.uuid4().hex[:12]}{source.suffix}"
+            shutil.copy2(source, target)
+            staged_paths.append(target)
+        final_report = delivery_stage / f"visual_ocr_{staged_paths[0].stem}.json"
+        report_pages = report.get("pages") if isinstance(report.get("pages"), list) else []
+        mapped_pages = [
+            {
+                **page,
+                "image": staged_paths[index].name if index < len(staged_paths) else page.get("image"),
+            }
+            for index, page in enumerate(report_pages)
+        ]
+        delivery_report = {**report, "pages": mapped_pages}
+        final_report.write_text(
+            json.dumps(delivery_report, ensure_ascii=False, indent=2), encoding="utf-8",
+        )
+        sets_root = media_root / "sets"
+        sets_root.mkdir(parents=True, exist_ok=True)
+        target_dir = sets_root / task_id
+        delivery_stage.replace(target_dir)
+        published_dir = target_dir
+        delivered = [published_dir / path.name for path in staged_paths]
+        return delivered, page_texts
+    except Exception:
+        if published_dir is not None and published_dir.exists():
+            _safe_remove_tree(published_dir, media_root / "sets")
+        raise
+    finally:
+        _safe_remove_tree(staging_dir, staging_root)
