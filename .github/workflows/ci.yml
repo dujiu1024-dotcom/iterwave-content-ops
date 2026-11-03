@@ -27,8 +27,12 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng fonts-noto-cjk
       - name: Install Chromium for visual renderer tests
         run: python -m playwright install --with-deps chromium
+      - name: Run transaction regression tests
+        timeout-minutes: 5
+        run: python -m pytest -vv tests/test_request_transaction_nesting.py --durations=20 -o faulthandler_timeout=240
       - name: Run tests
-        run: python -m pytest -q
+        timeout-minutes: 5
+        run: python -m pytest -vv --durations=20 -o faulthandler_timeout=240
       - name: Compile Python sources
         run: python -m compileall -q src tests
       - name: Lint security boundary imports and names
