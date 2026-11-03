@@ -72,6 +72,7 @@ from src.api.response_utils import (
 )
 # Keep NotifyRuleRequest in this module namespace: FastAPI resolves the wrapped route signature here.
 from src.api.notify_rules import NotifyRuleRequest, build_notify_rules_router  # noqa: F401
+from src.api.platform_styles import build_platform_styles_router
 from src.core.tenant_registry import TenantRegistry, TenantError
 from src.core.task_queue import GlobalTaskQueue, TaskQueueError
 from src.core.tenant_switch_gate import TenantSwitchGate, TenantSwitchInProgress
@@ -1300,15 +1301,6 @@ class CreateRoundRequest(BaseModel):
     # 内容计划 ID/版本仅参与请求去重键，不改变生产配置来源。
     content_plan_id: Optional[str] = None
     content_plan_version: Optional[int] = None
-
-class PlatformStyleUpdate(BaseModel):
-    """平台文案风格（platform_styles 表）：只提交改动字段。"""
-
-    title_style: Optional[str] = Field(None, max_length=200)
-    body_style: Optional[str] = Field(None, max_length=200)
-    tone: Optional[str] = Field(None, max_length=200)
-    hashtags: Optional[list[str]] = Field(None, max_length=10)
-
 
 class PublishConfirmRequest(BaseModel):
     """发布确认补充：笔记链接；质检/人工审核/平台版本异常均需单独说明例外原因。"""
@@ -9026,97 +9018,9 @@ def _register_routes(app: FastAPI) -> None:
         _g, _now, route_class=TransactionalAPIRoute,
     ))
 
-    # --- 平台文案风格（platform_styles 表，migrations/016）---
-    @app.get("/api/platform_styles")
-    def list_platform_styles():
-        conn = _g()["conn"]
-        rows = conn.execute(
-            "SELECT platform, title_style, body_style, tone, hashtags, "
-            "updated_at, updated_by FROM platform_styles ORDER BY platform"
-        ).fetchall()
-        items = []
-        for r in rows:
-            try:
-                tags = json.loads(r["hashtags"] or "[]")
-            except (TypeError, ValueError):
-                tags = []
-            items.append({
-                "platform": r["platform"],
-                "title_style": r["title_style"],
-                "body_style": r["body_style"],
-                "tone": r["tone"],
-                # 存的是不带 # 的标签；空数组 = 只带选题维度标签
-                "hashtags": tags if isinstance(tags, list) else [],
-                "updated_at": r["updated_at"],
-                "updated_by": r["updated_by"],
-            })
-        return {"items": items}
-
-    @app.patch("/api/platform_styles/{platform}")
-    def update_platform_style(platform: str, req: PlatformStyleUpdate):
-        """改平台风格 / 话题标签：立即生效，逐字段写 config_changes 审计。"""
-        conn = _g()["conn"]
-        if platform not in {p.value for p in Platform}:
-            raise HTTPException(400, "platform 只能是 xhs / douyin / kuaishou / wechat_channels")
-        row = conn.execute(
-            "SELECT title_style, body_style, tone, hashtags FROM platform_styles "
-            "WHERE platform = ?",
-            (platform,),
-        ).fetchone()
-        if row is None:
-            raise HTTPException(
-                404, f"{platform} 尚无平台风格记录（请确认迁移 016 已执行）"
-            )
-
-        new_values: dict[str, str] = {}
-        for field in ("title_style", "body_style", "tone"):
-            value = getattr(req, field)
-            if value is None:
-                continue
-            text = value.strip()
-            if not text:
-                raise HTTPException(422, f"{field} 不能为空")
-            new_values[field] = text
-        if req.hashtags is not None:
-            tags: list[str] = []
-            for raw in req.hashtags:
-                tag = str(raw).strip().lstrip("#")
-                if tag and tag not in tags:
-                    tags.append(tag)
-            new_values["hashtags"] = json.dumps(tags, ensure_ascii=False)
-
-        old_values = {
-            "title_style": row["title_style"],
-            "body_style": row["body_style"],
-            "tone": row["tone"],
-            "hashtags": row["hashtags"] or "[]",
-        }
-        changed = [
-            (k, old_values[k], v) for k, v in new_values.items() if old_values[k] != v
-        ]
-        if not changed:
-            return {"platform": platform, "changed": 0, "message": "没有改动"}
-
-        now = _storage_now().isoformat(timespec="seconds")  # UTC 持久化时间
-        for key, old, new in changed:
-            # 审计口径与 config_changes 一致：platform_styles.<platform>.<field>
-            conn.execute(
-                "INSERT INTO config_changes (key, old_value, new_value, changed_at) "
-                "VALUES (?, ?, ?, ?)",
-                (f"platform_styles.{platform}.{key}", str(old), str(new), now),
-            )
-        assignments = ", ".join(f"{k} = ?" for k in new_values)
-        conn.execute(
-            f"UPDATE platform_styles SET {assignments}, updated_at = ?, updated_by = ? "
-            "WHERE platform = ?",
-            (*new_values.values(), now, "settings_ui", platform),
-        )
-        conn.commit()
-        return {
-            "platform": platform,
-            "changed": len(changed),
-            "fields": {key: new for key, _old, new in changed},
-        }
+    app.include_router(build_platform_styles_router(
+        _g, _now, Platform, HTTPException, route_class=TransactionalAPIRoute,
+    ))
 
     # ============================================================
     # P1 — AI 证据审计链（对比报告缺口）
