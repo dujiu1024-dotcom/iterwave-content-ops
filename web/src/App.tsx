@@ -11,6 +11,7 @@ import Goals from "./pages/Goals";
 import Production from "./pages/Production";
 import Review from "./pages/Review";
 import PlanCenter from "./pages/PlanCenter";
+import BusinessDiagnosis from "./pages/BusinessDiagnosis";
 import Operations from "./pages/Operations";
 import Calendar from "./pages/Calendar";
 import Analytics from "./pages/Analytics";
@@ -28,6 +29,7 @@ const ROUTABLE_PAGES = new Set<string>([
   ...NAV_ITEMS.map((item) => item.page),
   "accounts",
   "settings",
+  "business-diagnosis",
 ]);
 
 function Router() {
@@ -74,6 +76,7 @@ function Router() {
       case "production": return <Production />;
       case "review": return <Review />;
       case "plan-center": return <PlanCenter />;
+      case "business-diagnosis": return <BusinessDiagnosis />;
       case "operations": return <Operations />;
       case "calendar": return <Calendar />;
       case "analytics": return <Analytics />;

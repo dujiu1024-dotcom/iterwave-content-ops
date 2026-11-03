@@ -5819,6 +5819,22 @@ def _register_routes(app: FastAPI) -> None:
     def update_plan(req: UpdatePlanRequest):
         """创建母计划草稿；只有显式审核通过后才切换生效版本。"""
         from src.core.plan_version_store import PlanVersionStore, PlanVersionError
+        alloc_total = sum(req.dimension_allocation.values())
+        if alloc_total > req.topic_count_per_platform:
+            raise HTTPException(400, f"维度分配合计 {alloc_total} 条，超过每平台选题数 {req.topic_count_per_platform}")
+        conn = _g()["conn"]
+        from src.core.business_diagnosis import collect_business_context
+        latest_diagnosis = conn.execute(
+            "SELECT * FROM business_diagnosis_reports ORDER BY version_no DESC LIMIT 1"
+        ).fetchone()
+        if latest_diagnosis is None or latest_diagnosis["status"] != "confirmed":
+            raise HTTPException(409, "请先完成并确认 AI 经营分析报告，再制定母计划")
+        current_sources = collect_business_context(conn, _g()["cfg"])
+        if latest_diagnosis["source_fingerprint"] != current_sources["fingerprint"]:
+            conn.execute("UPDATE business_diagnosis_reports SET status='stale' WHERE id=?",
+                         (latest_diagnosis["id"],))
+            conn.commit()
+            raise HTTPException(409, "经营资料或素材已变化，请重新分析并确认经营分析报告")
         pvm = _g()["plan_version_manager"]
         cfg = _g()["cfg"]
         platforms = req.enabled_platforms or cfg.platforms.enabled_keys()
@@ -9831,6 +9847,8 @@ def _register_routes(app: FastAPI) -> None:
         return [dict(r) for r in rows]
     
     # Platform subplan APIs use the same tenant-scoped runtime as all existing routes.
+    from src.api.business_diagnosis import build_business_diagnosis_router
+    app.include_router(build_business_diagnosis_router(_g))
     from src.api.subplans import register_subplan_routes
     register_subplan_routes(app, _g)
     from src.api.production_lines import register_production_line_routes

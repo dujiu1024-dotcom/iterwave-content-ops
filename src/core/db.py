@@ -558,7 +558,8 @@ class Database:
                 # Durable review, strategy outcome and production-task tables
                 # introduced by migrations 133, 136 and 137.
                 "content_review_events", "strategy_effect_reviews",
-                "sub_plan_stage_outcomes", "production_tasks",
+                "sub_plan_stage_outcomes",
+                "business_diagnosis_reports", "production_tasks",
                 "production_task_attempts", "strategy_step_condition_reviews",
                 "plan_change_audit",
             }

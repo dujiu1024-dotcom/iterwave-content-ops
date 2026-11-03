@@ -821,6 +821,18 @@ export interface UnscheduledDraftPage {
   page_size: number;
 }
 
+export interface BusinessDiagnosisReport {
+  id: number; version_no: number; status: "draft" | "confirmed" | "superseded" | "stale";
+  report: Record<string, any>;
+  source_snapshot: { inventory_summary: Record<string, number>; source_references: Array<{ source_type: string; source_id: string; label: string }> };
+  source_fingerprint: string; model_name: string; created_at: string; updated_at: string;
+  confirmed_at: string | null; source_is_current: boolean;
+}
+export interface BusinessDiagnosisVersion {
+  id: number; version_no: number; status: string; model_name: string;
+  created_at: string; updated_at: string; confirmed_at: string | null; change_note: string;
+}
+
 /** G-13 内容资产（外部参考 / 个人观点 / 内容模板） */
 export type AssetType = "reference" | "voice" | "template";
 
@@ -2134,6 +2146,17 @@ export const api = {
   /** 待处理/阻塞事项（Dashboard KPI + 待我处理列表用） */
   actionItems: () =>
     fetchJson<{ items: ActionItem[]; total: number }>("/api/action_items"),
+  businessDiagnosis: () => fetchJson<{ report: BusinessDiagnosisReport | null }>("/api/business-diagnosis"),
+  businessDiagnosisVersions: () => fetchJson<{ items: BusinessDiagnosisVersion[] }>("/api/business-diagnosis/versions"),
+  runBusinessDiagnosis: () => fetchJson<{ report: BusinessDiagnosisReport }>("/api/business-diagnosis/analyze", { method: "POST" }),
+  updateBusinessDiagnosis: (id: number, report: Record<string, any>) =>
+    fetchJson<{ report: BusinessDiagnosisReport }>(`/api/business-diagnosis/${id}`, { method: "PATCH", body: JSON.stringify({ report }) }),
+  confirmBusinessDiagnosis: (id: number) =>
+    fetchJson<{ report: BusinessDiagnosisReport }>(`/api/business-diagnosis/${id}/confirm`, { method: "POST" }),
+  ignoreBusinessDiagnosisRecommendation: (id: number, recommendation_key: string, reason: string) =>
+    fetchJson<{ report: BusinessDiagnosisReport }>(`/api/business-diagnosis/${id}/ignore`, {
+      method: "POST", body: JSON.stringify({ recommendation_key, reason }),
+    }),
   createPlanDraft: (plan: MasterPlan) =>
     fetchJson<{ draft: MasterPlanVersion; requires_review: true; effective: false }>("/api/plans", {
       method: "POST", body: JSON.stringify({
