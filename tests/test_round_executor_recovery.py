@@ -512,3 +512,71 @@ def test_unexpected_draft_adapter_exception_is_not_persisted_verbatim(cfg, conn,
     assert "internal.example" not in stored
     assert "secret" not in stored
     assert "平台存草稿操作异常" in stored
+
+
+def test_uncertain_draft_save_is_not_retried_and_remains_for_human_verification(
+    cfg, conn, seed, monkeypatch,
+):
+    from src.adapters.base import DraftResult
+    from src.core import login_manager
+
+    monkeypatch.setattr(login_manager, "has_login_state", lambda _platform: True)
+    round_id = seed.round(status="producing")
+    draft_id = seed.draft(
+        round_id, platform="xhs", draft_status="draft_pending", fetch_status=None,
+    )
+
+    class UncertainAdapter:
+        def __init__(self):
+            self.calls = 0
+
+        async def save_draft(self, payload):
+            self.calls += 1
+            return DraftResult(
+                success=False,
+                needs_human_verify=True,
+                platform_draft_id=None,
+                platform_draft_id_missing=True,
+                error_msg="点击保存后未取得平台确认信号",
+            )
+
+    adapter = UncertainAdapter()
+    executor = _executor(cfg, conn, {Platform.XHS: adapter})
+    content_id = conn.execute(
+        "SELECT content_id FROM drafts WHERE id=?", (draft_id,),
+    ).fetchone()[0]
+    report = {"drafts_failed": 0, "drafts_saved": 0, "steps": []}
+    rows = [{
+        "content_id": content_id,
+        "draft_id": draft_id,
+        "platform": Platform.XHS,
+        "title": "不确定保存结果",
+        "body": "测试正文",
+        "tags": [],
+        "image_paths": [],
+    }]
+
+    asyncio.run(executor._save_all_drafts(rows, round_id, report))
+
+    verification = conn.execute(
+        "SELECT status, platform_draft_id FROM draft_save_verifications WHERE draft_id=?",
+        (draft_id,),
+    ).fetchone()
+    assert verification is not None
+    assert verification["status"] == "pending_verify"
+    assert verification["platform_draft_id"] is None
+    assert conn.execute(
+        "SELECT status FROM drafts WHERE id=?", (draft_id,),
+    ).fetchone()[0] == "draft_pending"
+    assert report["drafts_needs_human_verify"] == 1
+    assert report["drafts_failed"] == 0
+
+    # Recovery must not submit the same platform save a second time until a human
+    # has explicitly confirmed that the first attempt did not create a draft.
+    try:
+        asyncio.run(executor.save_pending_drafts(round_id))
+    except ValueError as exc:
+        assert "没有待存草稿" in str(exc)
+    else:
+        raise AssertionError("pending_verify draft must be excluded from automatic retry")
+    assert adapter.calls == 1
