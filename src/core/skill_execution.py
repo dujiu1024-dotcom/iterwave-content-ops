@@ -51,3 +51,13 @@ def request_execution(conn: sqlite3.Connection, skill: dict, payload: Any) -> di
     )
     return {"execution_id": execution_id, "diagnostic_id": diagnostic_id,
             "status": "rejected", "reason_code": reason, "execution_enabled": False}
+
+
+def list_executions(conn: sqlite3.Connection, skill_id: str, limit: int = 100) -> list[dict]:
+    """Return metadata-only execution history; never includes submitted input."""
+    return [dict(row) for row in conn.execute(
+        """SELECT execution_id,skill_version,status,reason_code,input_bytes,requested_at,
+                  finished_at,diagnostic_id
+           FROM tenant_skill_executions WHERE skill_id=? ORDER BY requested_at DESC LIMIT ?""",
+        (skill_id, limit),
+    ).fetchall()]

@@ -93,6 +93,13 @@ def build_tenant_skills_router(get_context: Callable[[], dict]) -> APIRouter:
             raise HTTPException(404, "Skill 不存在")
         return {"items": tenant_skills.list_audit(conn, skill_id, limit)}
 
+    @router.get("/api/skills/{skill_id}/executions")
+    def executions(skill_id: str, limit: int = Query(100, ge=1, le=500)):
+        conn = get_context()["conn"]
+        if tenant_skills.get_skill(conn, skill_id) is None:
+            raise HTTPException(404, "Skill 不存在")
+        return {"items": skill_execution.list_executions(conn, skill_id, limit)}
+
     @router.post("/api/skills/{skill_id}/execute")
     def execute_skill(skill_id: str, request: dict):
         conn = get_context()["conn"]

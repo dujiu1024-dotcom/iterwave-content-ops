@@ -162,6 +162,7 @@ def delete_skill(conn: sqlite3.Connection, skill_id: str, actor: str = "system")
     if refs:
         raise RuntimeError("Skill 正在被引用，不能删除")
     _audit(conn, skill_id, "deleted", actor=actor)
+    conn.execute("DELETE FROM tenant_skill_versions WHERE skill_id=?", (skill_id,))
     conn.execute("DELETE FROM tenant_skill_registry WHERE skill_id=?", (skill_id,))
     return True
 
