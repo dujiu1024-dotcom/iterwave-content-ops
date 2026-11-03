@@ -7,6 +7,11 @@ from types import SimpleNamespace
 import pytest
 
 from src.core.db import Database, LockedConnection
+from src.api import main as api_main
+
+
+def _locked(raw):
+    return LockedConnection(raw)
 
 
 def test_unrelated_thread_cannot_commit_another_threads_partial_write():
@@ -347,3 +352,136 @@ def test_connection_transaction_supports_raw_sqlite_connection():
 
     assert conn.execute("SELECT value FROM events").fetchall() == [("committed",)]
     conn.close()
+
+
+
+def test_abandoned_worker_transaction_is_rolled_back_and_lock_recovered(tmp_path):
+    import threading
+
+    conn = LockedConnection(sqlite3.connect(tmp_path / "abandoned.db", check_same_thread=False))
+    conn.execute("CREATE TABLE t (v INTEGER)")
+    conn.commit()
+    finished = threading.Event()
+
+    def abandon_after_insert():
+        conn.execute("INSERT INTO t VALUES (99)")
+        # Deliberately exit with an implicit SQLite transaction still open.
+        finished.set()
+
+    worker = threading.Thread(target=abandon_after_insert)
+    worker.start()
+    worker.join(timeout=2)
+    assert finished.is_set()
+    assert not worker.is_alive()
+
+    # The next owner detects the dead worker, rolls back its transaction, and proceeds.
+    count = conn.execute("SELECT COUNT(*) FROM t").fetchone()[0]
+    assert count == 0
+
+
+def test_transactional_route_respects_own_transaction_marker():
+    def endpoint():
+        return {"ok": True}
+
+    managed = api_main.manages_own_transaction(endpoint)
+    route = api_main.TransactionalAPIRoute("/managed", managed, methods=["POST"])
+    assert route.endpoint is not managed
+    assert getattr(route.endpoint, "_manages_own_transaction", False)
+
+    plain_route = api_main.TransactionalAPIRoute("/plain", endpoint, methods=["POST"])
+    assert plain_route.endpoint is not endpoint
+
+
+
+def test_sync_get_endpoint_finalizer_rolls_back_implicit_write(tmp_path):
+    raw = sqlite3.connect(tmp_path / "get-write.db", check_same_thread=False)
+    conn = LockedConnection(raw)
+    conn.execute("CREATE TABLE t (v INTEGER)")
+    conn.commit()
+    saved = dict(api_main._g_ctx)
+    api_main._g_ctx.clear()
+    api_main._g_ctx["conn"] = conn
+
+    def legacy_get_route():
+        conn.execute("INSERT INTO t VALUES (7)")
+        return {"ok": True}
+
+    try:
+        route = api_main.TransactionalAPIRoute("/legacy-get", legacy_get_route, methods=["GET"])
+        assert route.endpoint() == {"ok": True}
+        assert conn.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 0
+
+        completed = threading.Event()
+        reader = threading.Thread(
+            target=lambda: (conn.execute("SELECT COUNT(*) FROM t").fetchone(), completed.set())
+        )
+        reader.start()
+        reader.join(timeout=1)
+        assert completed.is_set(), "endpoint finalizer leaked the retained transaction lock"
+    finally:
+        api_main._g_ctx.clear()
+        api_main._g_ctx.update(saved)
+
+
+
+def test_slow_managed_endpoint_does_not_block_unrelated_read(tmp_path):
+    import threading
+    import time
+
+    conn = _locked(sqlite3.connect(tmp_path / "slow-managed.db", check_same_thread=False))
+    conn.execute("CREATE TABLE t (v INTEGER)")
+    conn.commit()
+    saved = dict(api_main._g_ctx)
+    api_main._g_ctx.clear()
+    api_main._g_ctx["conn"] = conn
+    started = threading.Event()
+    read_done = threading.Event()
+
+    def slow_external_endpoint():
+        started.set()
+        time.sleep(0.3)  # Represents remote HTTP/model work before any SQL transaction.
+        return {"ok": True}
+
+    managed = api_main.manages_own_transaction(slow_external_endpoint)
+    route = api_main.TransactionalAPIRoute("/slow-managed", managed, methods=["POST"])
+    worker = threading.Thread(target=route.endpoint)
+    try:
+        worker.start()
+        assert started.wait(timeout=1)
+        reader = threading.Thread(
+            target=lambda: (conn.execute("SELECT COUNT(*) FROM t").fetchone(), read_done.set())
+        )
+        reader.start()
+        reader.join(timeout=0.15)
+        assert read_done.is_set(), "slow non-database work blocked an unrelated tenant read"
+        worker.join(timeout=1)
+        assert not worker.is_alive()
+    finally:
+        api_main._g_ctx.clear()
+        api_main._g_ctx.update(saved)
+
+
+
+def test_connection_lock_wait_has_a_bounded_timeout(tmp_path):
+    import threading
+
+    conn = _locked(sqlite3.connect(tmp_path / "lock-timeout.db", check_same_thread=False))
+    owner_ready = threading.Event()
+    release_owner = threading.Event()
+
+    def hold_lock():
+        conn._lock.acquire()
+        owner_ready.set()
+        release_owner.wait(timeout=2)
+        conn._lock.release()
+
+    worker = threading.Thread(target=hold_lock)
+    worker.start()
+    try:
+        assert owner_ready.wait(timeout=1)
+        with pytest.raises(TimeoutError, match="SQLite connection lock wait exceeded"):
+            conn._acquire_lock(timeout=0.02)
+    finally:
+        release_owner.set()
+        worker.join(timeout=1)
+    assert not worker.is_alive()

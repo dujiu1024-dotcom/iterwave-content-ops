@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone as dt_timezone
 from types import SimpleNamespace
 
 import pytest
@@ -23,16 +23,13 @@ def _connection():
     return conn
 
 
-def test_prune_uses_business_timezone_and_enforces_retention_and_row_cap(monkeypatch):
+def test_prune_uses_utc_storage_window_and_enforces_retention_and_row_cap(monkeypatch):
     conn = _connection()
     cfg = SimpleNamespace(business_timezone="Asia/Shanghai")
-    observed = {}
+    def fixed_now():
+        return datetime(2026, 11, 2, 12, 0, 0, tzinfo=dt_timezone.utc)
 
-    def fixed_now(received_cfg):
-        observed["cfg"] = received_cfg
-        return datetime(2026, 11, 2, 12, 0, 0)
-
-    monkeypatch.setattr(timezone, "business_now", fixed_now)
+    monkeypatch.setattr(timezone, "storage_now", fixed_now)
     conn.executemany(
         "INSERT INTO hot_topics(id, discovered_at, last_seen_at, duplicate_of) VALUES(?,?,?,?)",
         [
@@ -45,7 +42,6 @@ def test_prune_uses_business_timezone_and_enforces_retention_and_row_cap(monkeyp
 
     deleted = prune(conn, retention_days=7, max_rows=1, cfg=cfg)
 
-    assert observed["cfg"] is cfg
     assert deleted == 2
     assert conn.execute("SELECT id FROM hot_topics").fetchall() == [("recent-b",)]
     conn.close()
@@ -54,8 +50,8 @@ def test_prune_uses_business_timezone_and_enforces_retention_and_row_cap(monkeyp
 def test_prune_rolls_back_all_deletes_when_dangling_link_cleanup_fails(monkeypatch):
     conn = _connection()
     monkeypatch.setattr(
-        timezone, "business_now",
-        lambda _cfg=None: datetime(2026, 11, 2, 12, 0, 0),
+        timezone, "storage_now",
+        lambda: datetime(2026, 11, 2, 12, 0, 0, tzinfo=dt_timezone.utc),
     )
     conn.executemany(
         "INSERT INTO hot_topics(id, discovered_at, last_seen_at, duplicate_of) VALUES(?,?,?,?)",
@@ -142,7 +138,7 @@ def test_cross_platform_dedup_updates_are_transactional():
 
     conn = _dedup_connection()
     cfg = SimpleNamespace(business_timezone="Asia/Shanghai")
-    now = timezone.business_now(cfg).strftime("%Y-%m-%dT%H:%M:%S")
+    now = timezone.storage_now().replace(tzinfo=None).isoformat(timespec="seconds")
     conn.executemany(
         "INSERT INTO hot_topics(id,platform,title_norm,evidence_status,discovered_at,last_seen_at) "
         "VALUES(?,?,?,?,?,?)",
@@ -169,3 +165,44 @@ def test_cross_platform_dedup_updates_are_transactional():
         "SELECT duplicate_of FROM hot_topics WHERE id='second'"
     ).fetchone()[0] is None
     conn.close()
+
+
+
+def test_cross_platform_window_uses_utc_for_aware_and_legacy_naive_rows(monkeypatch):
+    from datetime import timezone as dt_timezone
+    from src.core.hot_topic_dedup import mark_cross_platform
+
+    conn = _dedup_connection()
+    cfg = SimpleNamespace(business_timezone="Asia/Shanghai")
+    monkeypatch.setattr(
+        timezone, "storage_now",
+        lambda: datetime(2026, 11, 3, 12, 0, 0, tzinfo=dt_timezone.utc),
+    )
+    conn.executemany(
+        "INSERT INTO hot_topics(id,platform,title_norm,evidence_status,discovered_at,last_seen_at) "
+        "VALUES(?,?,?,?,?,?)",
+        [
+            ("old-aware", "xhs", "outsidewindow", "collected",
+             "2026-11-01T11:59:59+00:00", "2026-11-01T11:59:59+00:00"),
+            ("old-naive", "douyin", "outsidewindow", "collected",
+             "2026-11-01T11:59:59+00:00", "2026-11-01 11:59:59"),
+            ("recent-aware", "xhs", "sameevent", "collected",
+             "2026-11-01T12:00:00+00:00", "2026-11-01T12:00:00+00:00"),
+            ("recent-naive", "douyin", "sameevent", "collected",
+             "2026-11-01T12:00:00+00:00", "2026-11-01 12:00:00"),
+        ],
+    )
+    conn.commit()
+
+    merged = mark_cross_platform(
+        conn, threshold=0.9, window_hours=48,
+        length_prefilter_ratio=0.5, cfg=cfg,
+    )
+
+    assert merged == 1
+    assert conn.execute(
+        "SELECT duplicate_of FROM hot_topics WHERE id='recent-naive'"
+    ).fetchone()[0] == "recent-aware"
+    assert conn.execute(
+        "SELECT duplicate_of FROM hot_topics WHERE id='old-naive'"
+    ).fetchone()[0] is None
