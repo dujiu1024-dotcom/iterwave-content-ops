@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections import Counter
 from difflib import SequenceMatcher
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -187,20 +188,79 @@ def compare_expected_text(
 
 
 
+def preflight_ocr(*, languages: str = "chi_sim+eng", timeout: int = 45) -> dict:
+    """Check Tesseract, permissions, language packs and timeout before paid image calls."""
+    executable = shutil.which("tesseract")
+    if not executable:
+        return {"status": "unavailable", "reason": "tesseract_not_installed"}
+    executable_path = Path(executable)
+    if not executable_path.is_file() or not os.access(executable_path, os.X_OK):
+        return {"status": "unavailable", "reason": "tesseract_not_executable"}
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 300:
+        return {"status": "unavailable", "reason": "ocr_timeout_invalid"}
+    try:
+        from .image_generation_budget import remaining_budget_seconds
+        remaining = remaining_budget_seconds()
+    except RuntimeError:
+        return {"status": "unavailable", "reason": "image_generation_hard_timeout"}
+    if remaining is not None:
+        if remaining < 1:
+            return {"status": "unavailable", "reason": "image_generation_hard_timeout"}
+        timeout = min(timeout, int(remaining))
+    required = list(dict.fromkeys(["chi_sim", "eng", *[x.strip() for x in str(languages or "").split("+") if x.strip()]]))
+    try:
+        version = subprocess.run([executable, "--version"], check=True, capture_output=True, text=True, timeout=min(timeout, 10))
+        remaining = remaining_budget_seconds()
+        if remaining is not None:
+            if remaining < 1:
+                return {"status": "unavailable", "reason": "image_generation_hard_timeout"}
+            timeout = min(timeout, int(remaining))
+        listed = subprocess.run([executable, "--list-langs"], check=True, capture_output=True, text=True, timeout=min(timeout, 15))
+    except subprocess.TimeoutExpired:
+        return {"status": "unavailable", "reason": "ocr_preflight_timeout"}
+    except (OSError, subprocess.CalledProcessError):
+        return {"status": "unavailable", "reason": "tesseract_not_executable"}
+    available = {line.strip() for line in (listed.stdout or "").splitlines() if line.strip() and not line.lower().startswith("list of")}
+    missing = [language for language in required if language not in available]
+    if missing:
+        return {"status": "unavailable", "reason": "ocr_language_missing", "missing_languages": missing}
+    return {"status": "available", "executable": executable, "languages": required, "version": (version.stdout or "").splitlines()[0][:120], "timeout_seconds": timeout}
+
+
 def run_ocr(
-    image_path: Path, *, language: str = "chi_sim+eng",
-    timeout: int = 45, page_segmentation_mode: int = 6,
+    image_path: Path, *, language: str | None = None,
+    timeout: float | int | None = None, page_segmentation_mode: int = 6,
     extra_config: tuple[str, ...] = (),
 ) -> dict:
     executable = shutil.which("tesseract")
     if not executable:
         return {"status": "unavailable", "reason": "tesseract_not_installed", "text": ""}
+    try:
+        from .task_context import current_config
+        cfg = current_config()
+        if cfg is None:
+            from .config import get_config
+            cfg = get_config()
+    except Exception:
+        cfg = None
+    if language is None:
+        language = str(getattr(getattr(cfg, "media_generation", None), "ocr_languages", "chi_sim+eng"))
+    if timeout is None:
+        timeout = int(getattr(getattr(cfg, "media_generation", None), "ocr_timeout_seconds", 45))
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not 0 < timeout <= 300:
+        return {"status": "unavailable", "reason": "ocr_timeout_invalid", "text": ""}
+    try:
+        from .image_generation_budget import remaining_budget_seconds
+        remaining = remaining_budget_seconds()
+    except RuntimeError:
+        return {"status": "unavailable", "reason": "image_generation_hard_timeout", "text": ""}
+    if remaining is not None:
+        if remaining <= 0:
+            return {"status": "unavailable", "reason": "image_generation_hard_timeout", "text": ""}
+        timeout = min(float(timeout), remaining)
     with tempfile.TemporaryDirectory(prefix="iterwave-ocr-") as temp_dir:
         output = Path(temp_dir) / "recognized"
-        command = [
-            executable, str(image_path), str(output), "-l", language,
-            "--oem", "1", "--psm", str(page_segmentation_mode),
-        ]
+        command = [executable, str(image_path), str(output), "-l", language, "--oem", "1", "--psm", str(page_segmentation_mode)]
         for item in extra_config:
             command += ["-c", item]
         try:
@@ -208,18 +268,11 @@ def run_ocr(
         except subprocess.TimeoutExpired:
             return {"status": "unavailable", "reason": "ocr_timeout", "text": ""}
         except subprocess.CalledProcessError as exc:
-            detail = (exc.stderr or "")[-500:]
-            return {
-                "status": "unavailable", "reason": "ocr_execution_failed",
-                "detail": detail, "text": "",
-            }
+            return {"status": "unavailable", "reason": "ocr_execution_failed", "detail": (exc.stderr or "")[-500:], "text": ""}
         txt_path = output.with_suffix(".txt")
         if not txt_path.exists():
             return {"status": "unavailable", "reason": "ocr_output_missing", "text": ""}
-        return {
-            "status": "available",
-            "text": txt_path.read_text(encoding="utf-8", errors="replace"),
-        }
+        return {"status": "available", "text": txt_path.read_text(encoding="utf-8", errors="replace")}
 
 
 def _is_light(css_color: str) -> bool:
@@ -373,7 +426,7 @@ def _whole_page_ocr(image_path: Path, expected: str) -> tuple[dict, int]:
         return first_pass, 1
     alternate = run_ocr(Path(image_path), page_segmentation_mode=11)
     if alternate["status"] != "available":
-        return first_pass, 2
+        return alternate, 2
     alt = compare_expected_text(expected, alternate["text"])
     better = (alt["recall"], alt["sequence_similarity"]) > (
         comparison["recall"], comparison["sequence_similarity"])

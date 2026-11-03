@@ -96,6 +96,38 @@ class RoundExecutor:
         feedback=None,
         template_data: Optional[dict] = None,
     ) -> dict:
+        """Execute the complete round under one shared image API budget."""
+        from .image_generation_budget import image_generation_run
+        policy = self.cfg.media_generation
+        with image_generation_run(
+            max_calls=getattr(policy, "max_api_calls_per_run", 30),
+            timeout_seconds=getattr(policy, "hard_timeout_seconds", 300),
+            max_concurrency=getattr(policy, "max_concurrency", 2),
+        ) as budget:
+            report = await self._run_with_image_budget(
+                round_id, topic_count, platform_values, save_drafts, feedback, template_data,
+            )
+            if isinstance(report, dict):
+                report["image_generation_budget"] = budget.snapshot()
+                try:
+                    self.conn.execute(
+                        "UPDATE spiral_rounds SET run_report = ? WHERE id = ?",
+                        (json.dumps(report, ensure_ascii=False, default=str), round_id),
+                    )
+                    self.conn.commit()
+                except Exception:
+                    logger.exception("图片预算用量写入轮次报告失败 round=%s", round_id)
+            return report
+
+    async def _run_with_image_budget(
+        self,
+        round_id: int,
+        topic_count: Optional[int] = None,
+        platform_values: Optional[list[str]] = None,
+        save_drafts: Optional[bool] = None,
+        feedback=None,
+        template_data: Optional[dict] = None,
+    ) -> dict:
         """执行一轮。返回结构化执行报告（不抛业务异常，失败写进 report）。
 
         feedback：上一轮复盘结论（StrategyFeedback）。不传且 autogrow.apply_feedback 开启时
@@ -889,7 +921,9 @@ class RoundExecutor:
                 "status": "forced_enabled",
                 "reason": "图文内容必须包含视觉素材；旧编排中的关闭设置不再跳过出图",
             })
-        card_first = bool(orch and orch.card_before_gate and make_cards)
+        card_first = False
+        if orch and orch.card_before_gate:
+            report["steps"].append({"step": "image_card_order", "status": "overridden", "reason": "图片生成必须在 G2 内容质量检查通过后执行；忽略 card_first 配置"})
         for rank, st in enumerate(scored):
             if self._subplan_context:
                 confirmed = int(self.conn.execute(

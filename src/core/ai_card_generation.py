@@ -10,12 +10,13 @@ import uuid
 from pathlib import Path
 
 from .media_generation import ImageGenerationError, generate_image_bytes, validate_image_bytes, validate_target_image_spec
+from .image_generation_budget import article_budget, image_generation_run, page_budget
 
 _PROMPT_VERSION = "ai-complete-card-v2"
 _LAYOUT_VERSION = "card-layout-v1"
 
 
-def _paginate_body(body: str, *, max_chars: int = 90, segments_per_page: int = 5) -> list[list[str]]:
+def _paginate_body(body: str, *, max_chars: int = 90, segments_per_page: int = 5, max_pages: int = 9) -> list[list[str]]:
     """Split all source text on sentence boundaries without truncating long sentences."""
     text = str(body or "").strip()
     if not text:
@@ -35,7 +36,10 @@ def _paginate_body(body: str, *, max_chars: int = 90, segments_per_page: int = 5
             segments.append(part)
     if not segments:
         raise ValueError("正文分页为空，拒绝生成不完整卡片")
-    return [segments[index:index + segments_per_page] for index in range(0, len(segments), segments_per_page)]
+    pages = [segments[index:index + segments_per_page] for index in range(0, len(segments), segments_per_page)]
+    if len(pages) + 1 > max_pages:
+        raise ValueError(f"内容分页需要 {len(pages) + 1} 页，超过单篇最大 {max_pages} 页；拒绝截断或先出图后截断")
+    return pages
 
 
 def _page_prompt(*, title: str, subtitle: str, page_text: str, page_index: int,
@@ -136,6 +140,8 @@ def _validate_cached_page(cache_dir: Path, fingerprint: str, expected: str, size
         report = validate_rendered_pages(
             [image_path], [expected], cache_dir / "ocr_report.json", critical_pages=[critical],
         )
+        if report.get("status") == "unavailable":
+            raise RuntimeError(f"OCR 执行过程中不可用（{report.get('reason') or 'unknown'}），立即终止图片生成")
         if report.get("status") == "passed" and report.get("gate") == "passed":
             return image_path
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError, ImageGenerationError):
@@ -143,17 +149,21 @@ def _validate_cached_page(cache_dir: Path, fingerprint: str, expected: str, size
     return None
 
 
-def generate_ai_card_set(
+def _generate_ai_card_set(
     *, title: str, subtitle: str, body: str, output_dir: Path, platform,
     cfg, settings: dict, allow_fallback: bool | None = None,
     brand_profile: dict | None = None, task_id: str | None = None,
     account_group: str | None = None,
 ) -> tuple[list[Path], list[str]]:
     """Generate validated AI pages with durable task checkpoints and atomic delivery."""
-    from .visual_ocr import validate_rendered_pages
+    from .visual_ocr import preflight_ocr, validate_rendered_pages
     from .visual_task_store import VisualTaskStore
 
-    body_pages = _paginate_body(body, max_chars=60, segments_per_page=3)
+    policy = getattr(cfg, "media_generation", None)
+    preflight = preflight_ocr(languages=getattr(policy, "ocr_languages", "chi_sim+eng"), timeout=getattr(policy, "ocr_timeout_seconds", 45))
+    if preflight.get("status") != "available":
+        raise RuntimeError(f"OCR 前置预检失败（{preflight.get('reason')}），已阻止图片 API 调用")
+    body_pages = _paginate_body(body, max_chars=60, segments_per_page=3, max_pages=getattr(policy, "max_pages_per_article", 9))
     page_texts = ["".join(page) for page in body_pages]
     expected = [f"{title}\n{subtitle}", *page_texts]
     prompts = [
@@ -249,46 +259,55 @@ def generate_ai_card_set(
             last_error = "OCR 未通过"
             accepted_stage = None
             store.start_page(task_id, index)
-            for attempt in range(3):
-                check_deadline(page_deadline, "图片单页")
-                if not store.heartbeat(task_id, owner, lease_seconds=900):
-                    raise RuntimeError("图片生成任务租约已失效，停止继续调用图片 API")
-                retry_prompt = prompt if attempt == 0 else (
-                    prompt + "\n上一版文字识别未通过。请优先保证所有指定中文逐字准确、清晰、完整，"
-                    "减少装饰和文字数量，增大字号，重新设计整页成品。"
-                )
-                raw, _mime, suffix, width, height = generate_image_bytes(
-                    retry_prompt, model=settings["model"], size=settings["size"], cfg=cfg,
-                    allow_fallback=allow_fallback,
-                )
-                check_deadline(page_deadline, "图片单页")
-                validate_target_image_spec(width, height, settings["size"], cfg=cfg)
-                staged_image = staging_dir / f"page_{index:03d}_{attempt}{suffix}"
-                staged_image.write_bytes(raw)
-                try:
-                    staged_image.chmod(0o600)
-                except OSError:
-                    pass
-                report_path = staging_dir / f"page_{index:03d}_{attempt}.json"
-                try:
-                    report = validate_rendered_pages(
-                        [staged_image], [expected[index]], report_path,
-                        critical_pages=[critical],
+            with page_budget():
+                for attempt in range(3):
+                    check_deadline(page_deadline, "图片单页")
+                    if not store.heartbeat(task_id, owner, lease_seconds=900):
+                        raise RuntimeError("图片生成任务租约已失效，停止继续调用图片 API")
+                    retry_prompt = prompt if attempt == 0 else (
+                        prompt + "\n上一版文字识别未通过。请优先保证所有指定中文逐字准确、清晰、完整，"
+                        "减少装饰和文字数量，增大字号，重新设计整页成品。"
                     )
-                    check_deadline(page_deadline, "图片单页 OCR")
-                except ValueError as exc:
-                    last_error = str(exc)
+                    raw, _mime, suffix, width, height = generate_image_bytes(
+                        retry_prompt, model=settings["model"], size=settings["size"], cfg=cfg,
+                        allow_fallback=allow_fallback,
+                    )
+                    check_deadline(page_deadline, "图片单页")
+                    validate_target_image_spec(width, height, settings["size"], cfg=cfg)
+                    staged_image = staging_dir / f"page_{index:03d}_{attempt}{suffix}"
+                    staged_image.write_bytes(raw)
+                    try:
+                        staged_image.chmod(0o600)
+                    except OSError:
+                        pass
+                    report_path = staging_dir / f"page_{index:03d}_{attempt}.json"
+                    try:
+                        report = validate_rendered_pages(
+                            [staged_image], [expected[index]], report_path,
+                            critical_pages=[critical],
+                        )
+                        check_deadline(page_deadline, "图片单页 OCR")
+                    except ValueError as exc:
+                        last_error = str(exc)
+                        staged_image.unlink(missing_ok=True)
+                        report_path.unlink(missing_ok=True)
+                        store.fail_page(task_id, index, last_error)
+                        continue
+                    if report.get("status") == "unavailable":
+                        last_error = str(report.get("reason") or "OCR unavailable")
+                        staged_image.unlink(missing_ok=True)
+                        report_path.unlink(missing_ok=True)
+                        store.fail_page(task_id, index, last_error)
+                        raise RuntimeError(
+                            f"OCR 执行过程中不可用（{last_error}），立即终止，不再进行付费重试"
+                        )
+                    if report.get("status") == "passed" and report.get("gate") == "passed":
+                        accepted_stage = staged_image
+                        break
+                    last_error = str(report.get("reason") or report.get("status") or "OCR 未通过")
                     staged_image.unlink(missing_ok=True)
                     report_path.unlink(missing_ok=True)
                     store.fail_page(task_id, index, last_error)
-                    continue
-                if report.get("status") == "passed" and report.get("gate") == "passed":
-                    accepted_stage = staged_image
-                    break
-                last_error = str(report.get("reason") or report.get("status") or "OCR 未通过")
-                staged_image.unlink(missing_ok=True)
-                report_path.unlink(missing_ok=True)
-                store.fail_page(task_id, index, last_error)
 
             if accepted_stage is None:
                 raise ValueError(
@@ -378,3 +397,28 @@ def generate_ai_card_set(
         raise
     finally:
         _safe_remove_tree(staging_dir, staging_root)
+
+
+def generate_ai_card_set(
+    *, title: str, subtitle: str, body: str, output_dir: Path, platform,
+    cfg, settings: dict, allow_fallback: bool | None = None,
+    brand_profile: dict | None = None, task_id: str | None = None,
+    account_group: str | None = None,
+) -> tuple[list[Path], list[str]]:
+    """Run durable article generation under the configured shared API budget."""
+    policy = getattr(cfg, "media_generation", None)
+    with image_generation_run(
+        max_calls=int(getattr(policy, "max_api_calls_per_run", 30)),
+        timeout_seconds=int(getattr(policy, "hard_timeout_seconds", 300)),
+        max_concurrency=int(getattr(policy, "max_concurrency", 2)),
+    ):
+        with article_budget(
+            max_calls=int(getattr(policy, "max_api_calls_per_article", 27)),
+            page_max_calls=int(getattr(policy, "max_api_calls_per_page", 3)),
+        ):
+            return _generate_ai_card_set(
+                title=title, subtitle=subtitle, body=body, output_dir=output_dir,
+                platform=platform, cfg=cfg, settings=settings,
+                allow_fallback=allow_fallback, brand_profile=brand_profile,
+                task_id=task_id, account_group=account_group,
+            )
