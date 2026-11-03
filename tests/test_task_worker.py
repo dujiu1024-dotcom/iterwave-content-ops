@@ -695,13 +695,16 @@ def test_worker_marks_structured_failed_round_report_as_queue_failure(tmp_path):
         def close(self):
             return None
 
+    failed_report = {
+        "round_id": 501,
+        "final_status": "failed",
+        "steps": [{"step": "topic_selection", "selected": 0}],
+        "errors": ["模型服务未配置"],
+    }
+
     class FailedExecutor:
         async def run(self, round_id, **kwargs):
-            return {
-                "round_id": round_id,
-                "final_status": "failed",
-                "errors": ["模型服务未配置"],
-            }
+            return failed_report
 
     context = {
         "cfg": SimpleNamespace(
@@ -723,6 +726,7 @@ def test_worker_marks_structured_failed_round_report_as_queue_failure(tmp_path):
     assert saved.status == "failed"
     assert saved.error_code == "task_execution_failed"
     assert "模型服务未配置" in (saved.error_message or "")
+    assert saved.result == failed_report
 
 
 def test_worker_marks_scheduler_task_run_failed_for_structured_failure_report(tmp_path):
