@@ -72,6 +72,7 @@ from src.api.response_utils import (
 )
 # Keep NotifyRuleRequest in this module namespace: FastAPI resolves the wrapped route signature here.
 from src.api.notify_rules import NotifyRuleRequest, build_notify_rules_router  # noqa: F401
+from src.api.platform_progress import build_platform_progress_router
 from src.api.platform_styles import build_platform_styles_router
 from src.core.tenant_registry import TenantRegistry, TenantError
 from src.core.task_queue import GlobalTaskQueue, TaskQueueError
@@ -8856,33 +8857,9 @@ def _register_routes(app: FastAPI) -> None:
     # Dashboard 补齐（对比报告 3.1 🔴 后端真缺失）
     # ============================================================
 
-    # --- 四平台进度聚合（Dashboard #11：四个平台独立进度）---
-    @app.get("/api/platform_progress")
-    def platform_progress():
-        """返回全部 4 个平台的：是否启用 / 总草稿数 / 各状态分布 / 熔断状态。
-
-        启用判定与 /api/status 共用 cfg.platforms.enabled_keys()，避免两处口径不一致；
-        未启用的平台也返回（enabled=false），前端四平台 lane 不必自行补齐。
-        """
-        conn = _g()["conn"]
-        cfg = _g()["cfg"]
-        platform_status = _platform_status_snapshot(cfg, conn)
-        result = {}
-        for p in [pl.value for pl in Platform]:
-            # 各状态计数
-            status_rows = conn.execute(
-                "SELECT status, COUNT(*) as cnt FROM drafts WHERE platform=? GROUP BY status",
-                (p,),
-            ).fetchall()
-            status_map = {r[0]: r[1] for r in status_rows}
-            # 总数
-            total = sum(status_map.values())
-            result[p] = {
-                **platform_status[p],
-                "total_drafts": total,
-                "status_breakdown": status_map,
-            }
-        return result
+    app.include_router(build_platform_progress_router(
+        _g, Platform, _platform_status_snapshot,
+    ))
 
     # --- 决策待办聚合（Dashboard #9：需要你决策的事项）---
     @app.get("/api/action_items")
