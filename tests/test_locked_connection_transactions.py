@@ -455,3 +455,29 @@ def test_slow_managed_endpoint_does_not_block_unrelated_read(tmp_path):
     finally:
         api_main._g_ctx.clear()
         api_main._g_ctx.update(saved)
+
+
+
+def test_connection_lock_wait_has_a_bounded_timeout(tmp_path):
+    import threading
+
+    conn = _locked(sqlite3.connect(tmp_path / "lock-timeout.db", check_same_thread=False))
+    owner_ready = threading.Event()
+    release_owner = threading.Event()
+
+    def hold_lock():
+        conn._lock.acquire()
+        owner_ready.set()
+        release_owner.wait(timeout=2)
+        conn._lock.release()
+
+    worker = threading.Thread(target=hold_lock)
+    worker.start()
+    try:
+        assert owner_ready.wait(timeout=1)
+        with pytest.raises(TimeoutError, match="SQLite connection lock wait exceeded"):
+            conn._acquire_lock(timeout=0.02)
+    finally:
+        release_owner.set()
+        worker.join(timeout=1)
+    assert not worker.is_alive()
