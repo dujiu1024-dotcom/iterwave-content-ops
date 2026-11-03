@@ -4350,7 +4350,7 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/api/task-queue")
     def list_global_task_queue(
         limit: int = Query(500, ge=1, le=500),
-        scope: str = Query("all", pattern="^(all|active|history|failed)$"),
+        scope: str = Query("all", pattern="^(all|active|history|failed|filtered)$"),
         page: int = Query(1, ge=1),
         page_size: int = Query(20, ge=1, le=100),
         task_type: str | None = Query(None, min_length=1, max_length=80),
@@ -4358,6 +4358,7 @@ def _register_routes(app: FastAPI) -> None:
         error_keyword: str | None = Query(None, min_length=1, max_length=120),
         date_from: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
         date_to: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        status: str | None = Query(None, pattern="^(queued|running|succeeded|failed|cancelled|interrupted)$"),
     ):
         if _task_queue is None:
             raise HTTPException(503, "全局任务队列尚未初始化")
@@ -4373,7 +4374,7 @@ def _register_routes(app: FastAPI) -> None:
                 page_size=page_size,
                 scope=scope, task_type=task_type,
                 tenant_id=tenant_id, error_keyword=error_keyword,
-                date_from=date_from, date_to=date_to,
+                date_from=date_from, date_to=date_to, status=status,
             )
         items = []
         round_numbers = _resolve_task_round_numbers(registry, tasks)
@@ -4417,6 +4418,25 @@ def _register_routes(app: FastAPI) -> None:
                 response["tenant_status_counts"] = _task_queue.status_counts(scope="failed")["by_tenant"]
         return response
 
+    @app.get("/api/task-queue/summary")
+    def global_task_queue_summary(
+        date_from: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        date_to: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        tenant_id: str | None = Query(None, min_length=1, max_length=100),
+        task_type: str | None = Query(None, min_length=1, max_length=80),
+        status: str | None = Query(None, pattern="^(queued|running|succeeded|failed|cancelled|interrupted)$"),
+    ):
+        """Aggregate global queue metrics using indexed SQL; task payloads are never loaded."""
+        if _task_queue is None:
+            raise HTTPException(503, "全局任务队列尚未初始化")
+        try:
+            return _task_queue.dispatch_summary(
+                date_from=date_from, date_to=date_to,
+                tenant_id=tenant_id, task_type=task_type, status=status,
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     @app.get("/api/task-queue/{task_id}")
     def get_global_task(task_id: str):
         if _task_queue is None:
@@ -4426,12 +4446,42 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(404, "任务不存在")
         round_id = _round_id_from_aggregate(task.task_type, task.aggregate_id)
         round_numbers = _resolve_task_round_numbers(_g().get("tenant_registry"), [task])
+        raw_steps = task.result.get("steps", []) if isinstance(task.result, dict) else []
+        execution_log = []
+        if isinstance(raw_steps, list):
+            for index, item in enumerate(raw_steps[:200], start=1):
+                if not isinstance(item, dict):
+                    continue
+                step_name = item.get("step") or item.get("name") or item.get("stage") or f"步骤 {index}"
+                safe_fields = (
+                    "status", "count", "scheduled", "saved", "failed", "pending",
+                    "attempted", "selected", "mode", "source", "shortfall",
+                    "allocation", "dimension_allocation", "skipped", "copy_hint_count",
+                    "dropped_hints", "file_type", "kb_count", "extra_count", "excluded_count",
+                )
+                safe_detail = {key: item[key] for key in safe_fields if key in item}
+                step_status = item.get("status") or ("partial" if item.get("failed") else "completed")
+                detail = item.get("message") or item.get("detail") or item.get("error") or (
+                    json.dumps(safe_detail, ensure_ascii=False, default=str) if safe_detail else ""
+                )
+                execution_log.append({
+                    "step": str(step_name)[:120],
+                    "status": str(step_status)[:40],
+                    "detail": str(detail)[:500],
+                })
+        if not execution_log and task.error_message:
+            execution_log.append({
+                "step": "任务执行失败",
+                "status": "failed",
+                "detail": task.error_message[:500],
+            })
         return {
+            "execution_log": execution_log,
             "queue_order": task.queue_order,
             "task_id": task.task_id, "task_type": task.task_type,
             "tenant_id": task.tenant_id, "aggregate_id": task.aggregate_id,
             "round_number": round_numbers.get((task.tenant_id, round_id)) if round_id is not None else None,
-            "status": task.status, "payload": task.payload, "result": task.result,
+            "status": task.status,
             "created_at": task.created_at, "available_at": task.available_at,
             "started_at": task.started_at,
             "finished_at": task.finished_at, "attempts": task.attempts,
@@ -4497,13 +4547,25 @@ def _register_routes(app: FastAPI) -> None:
             "confirmation_note": task.retry_confirmation_note,
         }
 
-    @app.post("/api/task-queue/{task_id}/cancel")
-    def cancel_global_task(task_id: str):
+    @app.get("/api/task-queue/{task_id}/audit")
+    def list_global_task_audit(task_id: str):
         if _task_queue is None:
             raise HTTPException(503, "全局任务队列尚未初始化")
         if _task_queue.get(task_id) is None:
             raise HTTPException(404, "任务不存在")
-        if not _task_queue.cancel(task_id):
+        return {"items": _task_queue.list_admin_audit(task_id)}
+
+    @app.post("/api/task-queue/{task_id}/cancel")
+    def cancel_global_task(task_id: str, request: Request):
+        if _task_queue is None:
+            raise HTTPException(503, "全局任务队列尚未初始化")
+        if _task_queue.get(task_id) is None:
+            raise HTTPException(404, "任务不存在")
+        try:
+            cancelled = _task_queue.cancel(task_id, actor=auth.audit_actor(request))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if not cancelled:
             raise HTTPException(409, "任务已开始执行或已结束，当前不能取消")
         return {"task_id": task_id, "status": "cancelled"}
 

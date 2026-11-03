@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, GlobalTaskQueueItem } from "../api";
 import { useApp } from "../AppContext";
 import { roundTaskLabel } from "../roundLabel";
+import TaskDispatchMetrics from "../components/TaskDispatchMetrics";
 
 const STATUS_LABEL: Record<GlobalTaskQueueItem["status"], string> = {
   queued: "等待执行",
@@ -60,6 +61,7 @@ function TaskRow({
   retrying,
   onResolve,
   resolving,
+  onDetails,
 }: {
   task: GlobalTaskQueueItem;
   onCancel: (task: GlobalTaskQueueItem) => void;
@@ -68,6 +70,7 @@ function TaskRow({
   retrying: boolean;
   onResolve: (task: GlobalTaskQueueItem, action: "handled" | "ignored") => void;
   resolving: boolean;
+  onDetails: (task: GlobalTaskQueueItem) => void;
 }) {
   const active = task.status === "queued" || task.status === "running";
   return (
@@ -77,6 +80,7 @@ function TaskRow({
         <div className="muted" style={{ fontSize: 12, marginTop: 4, overflowWrap: "anywhere" }}>
           {task.tenant_name} · {aggregateLabel(task)}
         </div>
+        <button className="btn sm ghost" type="button" style={{ marginTop: 6 }} onClick={() => onDetails(task)}>查看详情</button>
       </div>
       <div>
         <span className={`status-pill ${task.status === "failed" || task.status === "interrupted" ? "failed" : task.status === "running" ? "producing" : task.status === "succeeded" ? "completed" : task.status === "cancelled" ? "cancelled" : "creating"}`}>
@@ -92,6 +96,7 @@ function TaskRow({
         )}
         {task.finished_at && <div style={{ marginTop: 4 }}>结束：{timeLabel(task.finished_at)}</div>}
         {task.started_at && task.finished_at && <div>耗时：{Math.max(0, (new Date(task.finished_at).getTime() - new Date(task.started_at).getTime()) / 1000).toFixed(1)} 秒</div>}
+        {task.status === "running" && task.started_at && <div>已运行：{Math.max(0, (Date.now() - new Date(task.started_at).getTime()) / 1000).toFixed(1)} 秒</div>}
       </div>
       <div>
         {task.status === "queued" && (
@@ -159,12 +164,22 @@ export default function TaskQueue() {
   const [resolutionAction, setResolutionAction] = useState<"handled" | "ignored">("handled");
   const [resolutionNote, setResolutionNote] = useState("");
   const [resolvingId, setResolvingId] = useState<string | null>(null);
+  const [detailTask, setDetailTask] = useState<import("../api").GlobalTaskQueueDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState("");
+  const [detailAudit, setDetailAudit] = useState<import("../api").GlobalTaskQueueAuditItem[]>([]);
+  const [drilldown, setDrilldown] = useState<{ status?: GlobalTaskQueueItem["status"]; dateFrom?: string; dateTo?: string; tenantId?: string; taskType?: string } | null>(null);
 
   const refresh = useCallback(async () => {
     try {
       const [activeResponse, historyResponse] = await Promise.all([
         api.taskQueue({ scope: "active", page: activePage, pageSize: activePageSize }),
-        api.taskQueue({
+        api.taskQueue(drilldown ? {
+          scope: "filtered", status: drilldown.status,
+          page: historyPage, pageSize: historyPageSize,
+          taskType: drilldown.taskType, tenantId: drilldown.tenantId,
+          dateFrom: drilldown.dateFrom, dateTo: drilldown.dateTo,
+        } : {
           scope: historyStatus === "failed" ? "failed" : "history",
           page: historyPage, pageSize: historyPageSize,
           taskType: historyType === "all" ? undefined : historyType,
@@ -194,11 +209,12 @@ export default function TaskQueue() {
     } finally {
       setLoading(false);
     }
-  }, [activePage, historyPage, historyType, historyStatus, historyTenantId, historyErrorKeyword, historyDateFrom, historyDateTo]);
+  }, [activePage, historyPage, historyType, historyStatus, historyTenantId, historyErrorKeyword, historyDateFrom, historyDateTo, drilldown]);
 
   useEffect(() => {
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 2500);
+    // 全局队列列表使用低频刷新；统计图表仅在手动刷新或筛选时请求。
+    const timer = window.setInterval(() => void refresh(), 10000);
     return () => window.clearInterval(timer);
   }, [refresh]);
 
@@ -212,6 +228,25 @@ export default function TaskQueue() {
     [activeItems],
   );
   const history = historyItems;
+
+  const openDetails = async (task: GlobalTaskQueueItem) => {
+    setDetailTask(null);
+    setDetailAudit([]);
+    setDetailError("");
+    setDetailLoading(true);
+    try {
+      const [detail, audit] = await Promise.all([
+        api.taskQueueDetail(task.task_id),
+        api.taskQueueAudit(task.task_id),
+      ]);
+      setDetailTask(detail);
+      setDetailAudit(audit.items ?? []);
+    } catch (err) {
+      setDetailError((err as Error).message || "任务详情读取失败");
+    } finally {
+      setDetailLoading(false);
+    }
+  };
 
   const cancel = async (task: GlobalTaskQueueItem) => {
     setCancellingId(task.task_id);
@@ -291,6 +326,8 @@ export default function TaskQueue() {
         <button className="btn sm soft" type="button" onClick={() => void refresh()}>立即刷新</button>
       </div>
 
+      <TaskDispatchMetrics onDrilldown={(filters) => { setDrilldown(filters); setHistoryPage(1); }} />
+
       <div className="queue-summary-grid" style={{ marginBottom: 18 }}>
         <div className="panel stat-card"><div className="muted">排队与执行</div><div className="stat-value">{activeCounts.queued + activeCounts.running}</div></div>
         <div className="panel stat-card"><div className="muted">正在执行</div><div className="stat-value">{activeCounts.running}</div></div>
@@ -304,7 +341,7 @@ export default function TaskQueue() {
           <span className="muted">共 {activeTotal} 项 · 第 {activePage}/{activePages} 页</span>
         </div>
         {loading ? <div className="empty-state">正在读取队列…</div> : active.length ? (
-          <div>{active.map((task) => <TaskRow key={task.task_id} task={task} onCancel={cancel} cancelling={cancellingId === task.task_id} onRetry={requestRetry} retrying={retryingId === task.task_id} onResolve={requestResolve} resolving={resolvingId === task.task_id} />)}</div>
+          <div>{active.map((task) => <TaskRow key={task.task_id} task={task} onCancel={cancel} cancelling={cancellingId === task.task_id} onRetry={requestRetry} retrying={retryingId === task.task_id} onResolve={requestResolve} resolving={resolvingId === task.task_id} onDetails={openDetails} />)}</div>
         ) : <div className="empty-state">当前没有等待或执行中的任务。</div>}
         <div className="panel-foot" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "12px 16px" }}>
           <span className="muted">每页 {activePageSize} 条，队列列表由服务端分页读取。</span>
@@ -320,6 +357,7 @@ export default function TaskQueue() {
         <div className="panel-head">
           <div><h2>最近任务</h2><div className="muted">支持按任务类型、失败状态、账号组 ID、失败原因和创建日期筛选；系统后台调度任务可单独查看。</div></div>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            {drilldown && <button className="btn sm soft" type="button" onClick={() => { setDrilldown(null); setHistoryPage(1); }}>清除图表钻取</button>}
             <select aria-label="历史任务类型" value={historyType} onChange={(event) => { setHistoryType(event.target.value as "all" | "round_run" | "scheduler_job"); setHistoryPage(1); }}>
               <option value="round_run">内容生产</option><option value="scheduler_job">系统后台任务</option><option value="all">全部任务类型</option>
             </select>
@@ -334,7 +372,8 @@ export default function TaskQueue() {
             <span className="muted">共 {historyTotal} 项 · 第 {historyPage}/{historyPages} 页</span>
           </div>
         </div>
-        {history.length ? <div>{history.map((task) => <TaskRow key={task.task_id} task={task} onCancel={cancel} cancelling={false} onRetry={requestRetry} retrying={retryingId === task.task_id} onResolve={requestResolve} resolving={resolvingId === task.task_id} />)}</div> : <div className="empty-state">暂无历史任务。</div>}
+        {drilldown && <div className="notice" style={{ margin: "0 16px 10px" }}>图表钻取：{drilldown.status ? STATUS_LABEL[drilldown.status] : "全部状态"} · {drilldown.dateFrom || "不限日期"} 至 {drilldown.dateTo || "不限日期"} · 共 {historyTotal} 项</div>}
+        {history.length ? <div>{history.map((task) => <TaskRow key={task.task_id} task={task} onCancel={cancel} cancelling={false} onRetry={requestRetry} retrying={retryingId === task.task_id} onResolve={requestResolve} resolving={resolvingId === task.task_id} onDetails={openDetails} />)}</div> : <div className="empty-state">暂无历史任务。</div>}
         <div className="panel-foot" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "12px 16px" }}>
           <span className="muted">每页 {historyPageSize} 条，历史记录与失败任务均由服务端分页读取。</span>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -397,6 +436,68 @@ export default function TaskQueue() {
                 {retryingId ? "正在创建…" : "确认创建恢复任务"}
               </button>
             </div>
+          </section>
+        </div>
+      )}
+
+      {(detailLoading || detailError || detailTask) && (
+        <div role="presentation" onClick={(event) => { if (event.target === event.currentTarget && !detailLoading) { setDetailTask(null); setDetailError(""); } }}
+          style={{ position: "fixed", inset: 0, zIndex: 1002, background: "rgba(15, 23, 42, .48)", display: "grid", placeItems: "center", padding: 20 }}>
+          <section role="dialog" aria-modal="true" aria-labelledby="task-detail-title" className="panel"
+            style={{ width: "min(640px, 100%)", maxHeight: "85vh", overflowY: "auto", padding: 22, boxShadow: "0 20px 60px rgba(0,0,0,.24)" }}>
+            <div className="panel-head">
+              <h2 id="task-detail-title">任务详情</h2>
+              <button className="btn sm" type="button" disabled={detailLoading} onClick={() => { setDetailTask(null); setDetailError(""); }}>关闭</button>
+            </div>
+            {detailLoading ? <div className="empty-state">正在读取任务详情…</div> : detailError ? <div className="notice danger" role="alert">{detailError}</div> : detailTask && (
+              <>
+                <div className="grid two">
+                  <div><div className="muted">任务 ID</div><code>{detailTask.task_id}</code></div>
+                  <div><div className="muted">队列序号</div><strong>#{detailTask.queue_order}</strong></div>
+                  <div><div className="muted">所属账号组</div><strong>{detailTask.tenant_id}</strong></div>
+                  <div><div className="muted">任务类型 / 状态</div><strong>{detailTask.task_type} · {STATUS_LABEL[detailTask.status]}</strong></div>
+                  <div><div className="muted">创建时间</div>{timeLabel(detailTask.created_at)}</div>
+                  <div><div className="muted">开始时间</div>{timeLabel(detailTask.started_at)}</div>
+                  <div><div className="muted">结束时间</div>{timeLabel(detailTask.finished_at)}</div>
+                  <div><div className="muted">执行次数</div>{detailTask.attempts}</div>
+                </div>
+                {detailTask.error_code && <div className="notice danger" style={{ marginTop: 14 }}>错误代码：{detailTask.error_code}</div>}
+                {detailTask.error_message && <div style={{ marginTop: 10, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{detailTask.error_message}</div>}
+                {detailTask.retry_of_task_id && <div className="muted" style={{ marginTop: 12 }}>恢复自任务：{detailTask.retry_of_task_id}</div>}
+                {detailTask.retry_confirmation_note && <div className="muted" style={{ marginTop: 6 }}>恢复核验：{detailTask.retry_confirmation_note}</div>}
+                {detailTask.resolution_action && <div className="muted" style={{ marginTop: 12 }}>
+                  处理记录：{detailTask.resolution_action === "handled" ? "已处理" : "已忽略"} · {detailTask.resolution_actor || "操作人未知"} · {timeLabel(detailTask.resolution_at)}
+                  {detailTask.resolution_note && <div>{detailTask.resolution_note}</div>}
+                </div>}
+                <section style={{ marginTop: 16 }}>
+                  <h3>执行步骤日志</h3>
+                  {detailTask.execution_log?.length ? <div className="list">
+                    {detailTask.execution_log.map((entry, index) => <div className="task-row" key={index}>
+                      <div className="task-main">
+                        <strong>{entry.step}</strong>
+                        <div className="tiny">{entry.status}</div>
+                        {entry.detail && <div className="tiny" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{entry.detail}</div>}
+                      </div>
+                    </div>)}
+                  </div> : <div className="empty-state">该任务没有持久化步骤明细；运行中任务的实时步骤流尚不可用。</div>}
+                </section>
+                <section style={{ marginTop: 16 }}>
+                  <h3>操作审计</h3>
+                  {detailAudit.length ? <div className="list">
+                    {detailAudit.map((entry) => <div className="task-row" key={entry.id}>
+                      <div className="task-main">
+                        <strong>{entry.action}</strong>
+                        <div className="tiny">{entry.actor} · {timeLabel(entry.acted_at)}</div>
+                        {typeof entry.details.note === "string" && <div className="tiny">{entry.details.note}</div>}
+                        {typeof entry.details.confirmation_note === "string" && <div className="tiny">恢复核验：{entry.details.confirmation_note}</div>}
+                        {typeof entry.details.retry_task_id === "string" && <div className="tiny">恢复任务：{entry.details.retry_task_id}</div>}
+                      </div>
+                    </div>)}
+                  </div> : <div className="empty-state">暂无管理操作审计记录。</div>}
+                </section>
+                <div className="tiny" style={{ marginTop: 16 }}>步骤明细来自任务执行报告中持久化的 steps 字段；不伪造实时进度。未产出步骤报告的失败任务仅展示已持久化错误。</div>
+              </>
+            )}
           </section>
         </div>
       )}
