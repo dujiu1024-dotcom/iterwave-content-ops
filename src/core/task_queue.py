@@ -407,16 +407,17 @@ class GlobalTaskQueue:
 
     def fail(
         self, task_id: str, owner: str, *, error_code: str,
-        error_message: str,
+        error_message: str, result: dict[str, Any] | None = None,
     ) -> bool:
+        result_json = json.dumps(result, ensure_ascii=False, sort_keys=True) if result is not None else None
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute(
                 "UPDATE global_task_queue SET status='failed',finished_at=?,error_code=?,"
-                "error_message=?,lease_owner=NULL,lease_expires_at=NULL "
+                "error_message=?,result_json=COALESCE(?,result_json),lease_owner=NULL,lease_expires_at=NULL "
                 "WHERE task_id=? AND status='running' AND lease_owner=?",
-                (_stamp(), error_code[:80], error_message[:500], task_id, owner),
+                (_stamp(), error_code[:80], error_message[:500], result_json, task_id, owner),
             )
             conn.commit()
             return cursor.rowcount == 1
