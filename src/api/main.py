@@ -4991,90 +4991,12 @@ def _register_routes(app: FastAPI) -> None:
 
     @app.post("/api/content-plans/{plan_id}/start", status_code=202)
     async def start_content_plan(plan_id: str):
-        conn = _g()["conn"]
-        plan = conn.execute("SELECT * FROM content_plans WHERE id=?", (plan_id,)).fetchone()
-        if plan is None:
-            raise HTTPException(404, "计划不存在")
-        if plan["status"] not in ("planned", "failed"):
-            raise HTTPException(409, "只有待执行或失败的计划可以加入生产队列")
-        try:
-            platforms = json.loads(plan["platforms_json"] or "[]")
-        except (TypeError, ValueError):
-            platforms = []
-        if not platforms:
-            platforms = _g()["cfg"].platforms.enabled_keys()
-        if not platforms:
-            raise HTTPException(422, "计划没有目标平台，当前也没有启用的平台")
-        allowed_platforms = set(_g()["cfg"].platforms.model_dump().keys())
-        if any(p not in allowed_platforms for p in platforms):
-            raise HTTPException(422, "计划包含当前账号组未配置的平台")
-        round_result = create_round(CreateRoundRequest(
-            topic_count=int(plan["planned_count"]), platforms=platforms,
-            content_plan_id=plan_id, content_plan_version=int(plan["version"]),
-        ))
-        round_id = int(round_result["id"])
-        now = _storage_now().isoformat(timespec="seconds")
-        try:
-            # Async routes are not wrapped by TransactionalAPIRoute. Use the connection-level
-            # transaction guard explicitly so BEGIN/UPDATE/INSERT/COMMIT cannot interleave
-            # with another request using this tenant's shared LockedConnection.
-            with connection_transaction(conn, immediate=True):
-                cursor = conn.execute(
-                    "UPDATE content_plans SET status='generating',platforms_json=?,version=version+1,updated_at=? "
-                    "WHERE id=? AND version=? AND status IN ('planned','failed')",
-                    (json.dumps(platforms, ensure_ascii=False), now, plan_id, int(plan["version"])),
-                )
-                if cursor.rowcount != 1:
-                    raise HTTPException(409, "计划已在其他窗口启动，请刷新后重试")
-                conn.execute(
-                    "INSERT INTO content_plan_rounds(plan_id,round_id,created_at) VALUES(?,?,?)",
-                    (plan_id, round_id, now),
-                )
-        except Exception:
-            # connection_transaction has already rolled back the failed plan update/link.
-            # create_round's short dedupe may return a shared round; only cancel a newly-created one.
-            if not round_result.get("deduped"):
-                with connection_transaction(conn, immediate=True):
-                    conn.execute(
-                        "UPDATE spiral_rounds SET status='cancelled' WHERE id=? AND status='created'",
-                        (round_id,),
-                    )
-            raise
-        try:
-            queued = await run_round(round_id, RunRoundRequest(
-                topic_count=int(plan["planned_count"]), platforms=platforms, save_drafts=True,
-            ))
-        except Exception as exc:
-            # 入队失败时 Worker 尚未开始执行；计划和未启动轮次必须一起补偿。
-            try:
-                with connection_transaction(conn, immediate=True):
-                    conn.execute(
-                        "UPDATE content_plans SET status='failed',version=version+1,updated_at=? "
-                        "WHERE id=? AND status='generating'",
-                        (_storage_now().isoformat(timespec="seconds"), plan_id),
-                    )
-                    conn.execute(
-                        "UPDATE spiral_rounds SET status='cancelled' "
-                        "WHERE id=? AND status='created'",
-                        (round_id,),
-                    )
-            except Exception as compensation_error:
-                logger.exception(
-                    "内容计划启动失败后的轮次补偿失败 plan_id=%s round_id=%s",
-                    plan_id, round_id,
-                )
-                raise HTTPException(503, "计划启动失败，且状态补偿未完成，请检查计划和轮次状态") from compensation_error
-            if isinstance(exc, HTTPException):
-                raise
-            logger.exception("内容计划加入全局队列失败 plan_id=%s round_id=%s", plan_id, round_id)
-            raise HTTPException(503, "计划加入生产队列失败，已回滚本次启动状态") from exc
-        with conn:
-            conn.execute(
-                "UPDATE content_plan_rounds SET task_id=? WHERE plan_id=? AND round_id=?",
-                (queued["task_id"], plan_id, round_id),
-            )
-        return {"plan_id": plan_id, "round_id": round_id, "task_id": queued["task_id"],
-                "status": queued["status"], "queued": queued["queued"]}
+        # ContentPlan is a legacy calendar/batch projection. New production must
+        # always be opened from an approved production line and strategy stage.
+        raise HTTPException(
+            409,
+            "内容日历不再启动独立生产；请在计划管理的已审核生产线中按策略步骤开轮",
+        )
 
     @app.get("/api/rounds/{round_id}/run_status")
     def round_run_status(round_id: int):
@@ -7652,7 +7574,7 @@ def _register_routes(app: FastAPI) -> None:
         conn.commit()
         return {"skill_id": skill_id, "deleted": True}
 
-    # --- 内容计划（tenant-scoped；计划本身永不触发发布）---
+    # --- 历史内容批次只读投影（新计划和生产入口统一归计划管理）---
     def _sync_content_plan_task_state(conn, plan_row):
         """队列恢复/进程重启后，按共享队列终态修复计划状态，避免卡在 generating。"""
         if plan_row is None or plan_row["status"] != "generating" or _task_queue is None:
@@ -7741,122 +7663,53 @@ def _register_routes(app: FastAPI) -> None:
 
     @app.post("/api/content-plans")
     def create_content_plan(req: dict):
-        body = req or {}
-        title = str(body.get("title") or "").strip()
-        topic = str(body.get("topic") or "").strip()
-        notes = str(body.get("notes") or "").strip()
-        scheduled_date = str(body.get("scheduled_date") or "").strip()
-        platforms = body.get("platforms") or []
-        planned_count = body.get("planned_count", 1)
-        if not title or len(title) > 160:
-            raise HTTPException(422, "计划标题必填，且不能超过 160 个字符")
-        if len(topic) > 500 or len(notes) > 4000:
-            raise HTTPException(422, "选题或备注内容过长")
-        try:
-            datetime.strptime(scheduled_date, "%Y-%m-%d")
-        except ValueError as exc:
-            raise HTTPException(422, "计划日期必须为 YYYY-MM-DD") from exc
-        if not isinstance(platforms, list) or len(platforms) > 8:
-            raise HTTPException(422, "平台必须为数组，最多选择 8 个")
-        allowed_platforms = set(_g()["cfg"].platforms.model_dump().keys())
-        normalized_platforms = sorted({str(p) for p in platforms})
-        if any(p not in allowed_platforms for p in normalized_platforms):
-            raise HTTPException(422, "包含未配置的平台")
-        try:
-            planned_count = int(planned_count)
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(422, "计划产出数量必须是整数") from exc
-        if not 1 <= planned_count <= 50:
-            raise HTTPException(422, "计划产出数量必须在 1 到 50 之间")
-        now = _storage_now().isoformat(timespec="seconds")
-        plan_id = uuid.uuid4().hex
-        conn = _g()["conn"]
-        conn.execute(
-            "INSERT INTO content_plans(id,title,topic,platforms_json,planned_count,scheduled_date,status,notes,version,created_at,updated_at) "
-            "VALUES(?,?,?,?,?,?,'planned',?,1,?,?)",
-            (plan_id, title, topic, json.dumps(normalized_platforms, ensure_ascii=False), planned_count,
-             scheduled_date, notes, now, now),
+        # Keep the route explicit so older clients receive a deterministic
+        # migration response instead of silently creating an unowned plan.
+        raise HTTPException(
+            409,
+            "内容日历仅展示排期和历史批次；请先在计划管理中创建并审核母计划",
         )
-        conn.commit()
-        return {"id": plan_id, "title": title, "topic": topic, "platforms": normalized_platforms,
-                "planned_count": planned_count, "scheduled_date": scheduled_date, "status": "planned",
-                "notes": notes, "version": 1, "created_at": now, "updated_at": now}
 
     @app.patch("/api/content-plans/{plan_id}")
     def update_content_plan(plan_id: str, req: dict):
+        """Only the legacy batch display date remains editable; strategy fields are read-only."""
         body = req or {}
         try:
             expected_version = int(body.get("version"))
         except (TypeError, ValueError) as exc:
-            raise HTTPException(422, "更新计划必须提供当前 version") from exc
-        conn = _g()["conn"]
-        existing = conn.execute("SELECT * FROM content_plans WHERE id = ?", (plan_id,)).fetchone()
-        if existing is None:
-            raise HTTPException(404, "计划不存在")
-        if int(existing["version"]) != expected_version:
-            raise HTTPException(409, "计划已被其他窗口修改，请刷新后重试")
-        allowed_fields = {"title", "topic", "platforms", "planned_count", "scheduled_date", "status", "notes"}
-        unknown = set(body) - allowed_fields - {"version"}
+            raise HTTPException(422, "更新排期必须提供当前 version") from exc
+        unknown = set(body) - {"version", "scheduled_date"}
         if unknown:
-            raise HTTPException(422, "包含不支持的字段")
-        values = dict(existing)
-        for key in allowed_fields.intersection(body):
-            values[key] = body[key]
-        title = str(values["title"] or "").strip()
-        if not title or len(title) > 160:
-            raise HTTPException(422, "计划标题必填，且不能超过 160 个字符")
+            raise HTTPException(422, "内容日历只允许调整排期日期，计划目标和策略必须在计划管理中修改")
+        scheduled_date = str(body.get("scheduled_date") or "").strip()
         try:
-            datetime.strptime(str(values["scheduled_date"]), "%Y-%m-%d")
+            datetime.strptime(scheduled_date, "%Y-%m-%d")
         except ValueError as exc:
-            raise HTTPException(422, "计划日期必须为 YYYY-MM-DD") from exc
-        status_values = {"planned", "generating", "generated", "reviewed", "archived", "cancelled", "failed"}
-        if values["status"] not in status_values:
-            raise HTTPException(422, "无效的计划状态")
-        current_status = str(existing["status"])
-        next_status = str(values["status"])
-        # 生产生命周期只能由 start API / 全局 Worker 推进；PATCH 仅允许人工编辑状态。
-        transitions = {
-            "planned": {"planned", "cancelled"},
-            "generating": {"generating"},
-            "generated": {"generated", "reviewed", "cancelled"},
-            "failed": {"failed", "cancelled"},
-            "reviewed": {"reviewed", "archived", "cancelled"},
-            "archived": {"archived"},
-            "cancelled": {"cancelled"},
-        }
-        if next_status not in transitions[current_status]:
-            raise HTTPException(409, f"计划状态不允许从 {current_status} 变更为 {next_status}")
-        platforms = values["platforms"] if "platforms" in values else json.loads(values["platforms_json"] or "[]")
-        if not isinstance(platforms, list) or len(platforms) > 8:
-            raise HTTPException(422, "平台必须为数组，最多选择 8 个")
-        allowed_platforms = set(_g()["cfg"].platforms.model_dump().keys())
-        platforms = sorted({str(p) for p in platforms})
-        if any(p not in allowed_platforms for p in platforms):
-            raise HTTPException(422, "包含未配置的平台")
-        try:
-            planned_count = int(values["planned_count"])
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(422, "计划产出数量必须是整数") from exc
-        if not 1 <= planned_count <= 100:
-            raise HTTPException(422, "计划产出数量必须在 1 到 100 之间")
-        if len(str(values["topic"] or "")) > 500 or len(str(values["notes"] or "")) > 4000:
-            raise HTTPException(422, "选题或备注内容过长")
+            raise HTTPException(422, "排期日期必须为 YYYY-MM-DD") from exc
+        conn = _g()["conn"]
+        existing = conn.execute(
+            "SELECT * FROM content_plans WHERE id=?", (plan_id,),
+        ).fetchone()
+        if existing is None:
+            raise HTTPException(404, "历史批次不存在")
+        if int(existing["version"]) != expected_version:
+            raise HTTPException(409, "批次已被其他窗口修改，请刷新后重试")
         now = _storage_now().isoformat(timespec="seconds")
         cursor = conn.execute(
-            "UPDATE content_plans SET title=?,topic=?,platforms_json=?,planned_count=?,scheduled_date=?,status=?,notes=?,version=version+1,updated_at=? "
-            "WHERE id=? AND version=?",
-            (title, str(values["topic"] or "")[:500], json.dumps(platforms, ensure_ascii=False), planned_count,
-             str(values["scheduled_date"]), str(values["status"]), str(values["notes"] or "")[:4000],
-             now, plan_id, expected_version),
+            """UPDATE content_plans
+               SET scheduled_date=?,version=version+1,updated_at=?
+               WHERE id=? AND version=?""",
+            (scheduled_date, now, plan_id, expected_version),
         )
         conn.commit()
         if cursor.rowcount != 1:
-            raise HTTPException(409, "计划已被其他窗口修改，请刷新后重试")
-        return {"id": plan_id, "title": title, "topic": str(values["topic"] or ""),
-                "platforms": platforms, "planned_count": planned_count,
-                "scheduled_date": str(values["scheduled_date"]), "status": str(values["status"]),
-                "notes": str(values["notes"] or ""), "version": expected_version + 1,
-                "created_at": existing["created_at"], "updated_at": now}
+            raise HTTPException(409, "批次排期已变化，请刷新后重试")
+        item = dict(existing)
+        item["scheduled_date"] = scheduled_date
+        item["version"] = expected_version + 1
+        item["updated_at"] = now
+        item["platforms"] = json.loads(item.pop("platforms_json") or "[]")
+        return item
 
     @app.get("/api/content-plans/{plan_id}")
     def get_content_plan(plan_id: str):
@@ -7875,138 +7728,125 @@ def _register_routes(app: FastAPI) -> None:
             (plan_id,),
         ).fetchall()
         rounds = conn.execute(
-            "SELECT cpr.round_id,r.round_number,cpr.task_id,cpr.created_at "
-            "FROM content_plan_rounds cpr LEFT JOIN spiral_rounds r ON r.id=cpr.round_id "
-            "WHERE cpr.plan_id=? ORDER BY cpr.created_at DESC",
+            """SELECT cpr.round_id,r.round_number,cpr.task_id,cpr.created_at,
+                      cpr.master_plan_version_id,cpr.sub_plan_id,cpr.sub_plan_version_id,
+                      cpr.sub_plan_stage_id,cpr.strategy_step_id,
+                      cpr.production_line_version_id,cpr.attribution_status
+               FROM content_plan_rounds cpr
+               LEFT JOIN spiral_rounds r ON r.id=cpr.round_id
+               WHERE cpr.plan_id=? ORDER BY cpr.created_at DESC""",
             (plan_id,),
         ).fetchall()
         item["drafts"] = [dict(r) for r in linked]
         item["rounds"] = [dict(r) for r in rounds]
         return item
 
+    @app.get("/api/production-batches")
+    def list_production_batches(
+        start_date: Optional[str] = Query(..., description="YYYY-MM-DD 起始日期"),
+        end_date: Optional[str] = Query(..., description="YYYY-MM-DD 结束日期"),
+    ):
+        for label, value in (("start_date", start_date), ("end_date", end_date)):
+            try:
+                datetime.strptime(value, "%Y-%m-%d")
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(422, f"{label} 必须为 YYYY-MM-DD") from exc
+        if end_date < start_date:
+            raise HTTPException(422, "end_date 不能早于 start_date")
+        conn = _g()["conn"]
+        rows = conn.execute(
+            """SELECT r.id AS round_id,r.round_number,r.status AS round_status,r.created_at,
+                      r.master_plan_version_id,r.sub_plan_id,p.title AS sub_plan_title,
+                      p.platform,r.sub_plan_version_id,s.stage_key AS strategy_step_id,
+                      s.title AS strategy_step_title,r.production_line_version_id,
+                      CASE WHEN mp.id IS NOT NULL AND p.id IS NOT NULL
+                                  AND sv.id IS NOT NULL AND s.id IS NOT NULL
+                                  AND plv.id IS NOT NULL AND pl.id IS NOT NULL
+                           THEN 'attributed' ELSE 'manual_review' END AS attribution_status,
+                      COUNT(t.id) AS task_count,
+                      COALESCE(SUM(CASE WHEN t.status='pending' THEN 1 ELSE 0 END),0) AS pending_task_count,
+                      COALESCE(SUM(CASE WHEN t.status='running' THEN 1 ELSE 0 END),0) AS running_task_count,
+                      COALESCE(SUM(CASE WHEN t.status='succeeded' THEN 1 ELSE 0 END),0) AS succeeded_task_count,
+                      COALESCE(SUM(CASE WHEN t.status='failed' THEN 1 ELSE 0 END),0) AS failed_task_count,
+                      COALESCE(SUM(CASE WHEN t.status='cancelled' THEN 1 ELSE 0 END),0) AS cancelled_task_count
+               FROM spiral_rounds r
+               LEFT JOIN master_plan_versions mp ON mp.id=r.master_plan_version_id
+               LEFT JOIN sub_plans p ON p.id=r.sub_plan_id
+                   AND p.master_plan_version_id=r.master_plan_version_id
+               LEFT JOIN sub_plan_versions sv ON sv.id=r.sub_plan_version_id
+                   AND sv.sub_plan_id=r.sub_plan_id
+                   AND sv.master_plan_version_id=r.master_plan_version_id
+               LEFT JOIN sub_plan_stages s ON s.id=r.sub_plan_stage_id
+                   AND s.sub_plan_version_id=r.sub_plan_version_id
+               LEFT JOIN production_line_versions plv ON plv.id=r.production_line_version_id
+                   AND plv.sub_plan_version_id=r.sub_plan_version_id
+               LEFT JOIN production_lines pl ON pl.id=plv.production_line_id
+                   AND pl.sub_plan_id=r.sub_plan_id
+               LEFT JOIN production_tasks t ON t.round_id=r.id
+               WHERE substr(r.created_at,1,10) BETWEEN ? AND ?
+               GROUP BY r.id
+               ORDER BY r.created_at DESC,r.id DESC""",
+            (start_date, end_date),
+        ).fetchall()
+        return {"items": [dict(row) for row in rows], "total": len(rows)}
+
+    @app.get("/api/production-batches/{round_id}")
+    def get_production_batch(round_id: int):
+        conn = _g()["conn"]
+        batch = conn.execute(
+            """SELECT r.id AS round_id,r.round_number,r.status AS round_status,r.created_at,
+                      r.master_plan_version_id,r.sub_plan_id,p.title AS sub_plan_title,
+                      p.platform,r.sub_plan_version_id,s.stage_key AS strategy_step_id,
+                      s.title AS strategy_step_title,r.production_line_version_id,
+                      CASE WHEN mp.id IS NOT NULL AND p.id IS NOT NULL
+                                  AND sv.id IS NOT NULL AND s.id IS NOT NULL
+                                  AND plv.id IS NOT NULL AND pl.id IS NOT NULL
+                           THEN 'attributed' ELSE 'manual_review' END AS attribution_status
+               FROM spiral_rounds r
+               LEFT JOIN master_plan_versions mp ON mp.id=r.master_plan_version_id
+               LEFT JOIN sub_plans p ON p.id=r.sub_plan_id
+                   AND p.master_plan_version_id=r.master_plan_version_id
+               LEFT JOIN sub_plan_versions sv ON sv.id=r.sub_plan_version_id
+                   AND sv.sub_plan_id=r.sub_plan_id
+                   AND sv.master_plan_version_id=r.master_plan_version_id
+               LEFT JOIN sub_plan_stages s ON s.id=r.sub_plan_stage_id
+                   AND s.sub_plan_version_id=r.sub_plan_version_id
+               LEFT JOIN production_line_versions plv ON plv.id=r.production_line_version_id
+                   AND plv.sub_plan_version_id=r.sub_plan_version_id
+               LEFT JOIN production_lines pl ON pl.id=plv.production_line_id
+                   AND pl.sub_plan_id=r.sub_plan_id
+               WHERE r.id=?""",
+            (round_id,),
+        ).fetchone()
+        if batch is None:
+            raise HTTPException(404, "生产批次不存在")
+        tasks = conn.execute(
+            """SELECT t.id,t.strategy_step_id,t.platform,t.task_ordinal,t.status,
+                      t.attempt_count,t.max_attempts,t.error_code,t.error_message,
+                      t.content_id,c.title AS content_title,t.created_at,t.updated_at
+               FROM production_tasks t
+               LEFT JOIN contents c ON c.id=t.content_id
+               WHERE t.round_id=?
+               ORDER BY t.task_ordinal,t.created_at,t.id""",
+            (round_id,),
+        ).fetchall()
+        return {"batch": dict(batch), "tasks": [dict(row) for row in tasks]}
+
     @app.post("/api/content-plans/{plan_id}/drafts")
     def link_content_plan_drafts(plan_id: str, req: dict):
-        body = req or {}
-        draft_ids = body.get("draft_ids")
-        if not isinstance(draft_ids, list) or not draft_ids or len(draft_ids) > 100:
-            raise HTTPException(422, "draft_ids 必须是 1 到 100 项的数组")
-        normalized_ids = list(dict.fromkeys(str(value).strip() for value in draft_ids if str(value).strip()))
-        if len(normalized_ids) != len(draft_ids):
-            raise HTTPException(422, "draft_ids 不能包含空值")
-        conn = _g()["conn"]
-        linked_now = []
-        now = _storage_now().isoformat(timespec="seconds")
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            plan = conn.execute("SELECT status FROM content_plans WHERE id=?", (plan_id,)).fetchone()
-            if plan is None:
-                raise HTTPException(404, "计划不存在")
-            if plan["status"] not in ("planned", "generating", "generated"):
-                raise HTTPException(409, "当前计划状态不允许关联草稿")
-            drafts = {}
-            for draft_id in normalized_ids:
-                draft = conn.execute(
-                    "SELECT d.id,c.round_id FROM drafts d JOIN contents c ON c.id=d.content_id WHERE d.id=?",
-                    (draft_id,),
-                ).fetchone()
-                if draft is None:
-                    raise HTTPException(404, f"草稿不存在：{draft_id}")
-                drafts[draft_id] = draft
-            for draft_id, draft in drafts.items():
-                cursor = conn.execute(
-                    "INSERT OR IGNORE INTO content_plan_drafts(plan_id,draft_id,round_id,created_at) VALUES(?,?,?,?)",
-                    (plan_id, draft_id, draft["round_id"], now),
-                )
-                if cursor.rowcount:
-                    linked_now.append(draft_id)
-            conn.execute(
-                "UPDATE content_plans SET status='generated',version=version+1,updated_at=? WHERE id=? AND status IN ('planned','generating')",
-                (now, plan_id),
-            )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        return {"plan_id": plan_id, "linked_now": linked_now, "linked_count": len(linked_now), "status": "generated"}
+        raise HTTPException(409, "内容日历只读展示历史关联；新内容必须通过生产任务自动关联，不能手工挂接历史批次")
 
     @app.delete("/api/content-plans/{plan_id}")
     def cancel_content_plan(plan_id: str, version: int = Query(..., ge=1)):
-        conn = _g()["conn"]
-        row = conn.execute(
-            "SELECT * FROM content_plans WHERE id=? AND version=?", (plan_id, version),
-        ).fetchone()
-        if row is not None:
-            row = _sync_content_plan_task_state(conn, row)
-            if int(row["version"]) != version:
-                raise HTTPException(409, "计划状态已同步更新，请刷新后重试")
-        if row is None:
-            exists = conn.execute("SELECT 1 FROM content_plans WHERE id=?", (plan_id,)).fetchone()
-            if exists is None:
-                raise HTTPException(404, "计划不存在")
-            raise HTTPException(409, "计划状态已变化，请刷新后重试")
-        if row["status"] == "generating":
-            link = conn.execute(
-                "SELECT task_id FROM content_plan_rounds WHERE plan_id=? ORDER BY created_at DESC LIMIT 1",
-                (plan_id,),
-            ).fetchone()
-            if link is None or not link["task_id"] or _task_queue is None or not _task_queue.cancel(link["task_id"]):
-                raise HTTPException(409, "该计划对应任务已开始执行或任务状态不可取消，请到全局任务队列查看")
-        elif row["status"] not in ("planned", "failed"):
-            raise HTTPException(409, "当前计划状态不能取消")
-        cursor = conn.execute(
-            "UPDATE content_plans SET status='cancelled',version=version+1,updated_at=? "
-            "WHERE id=? AND version=? AND status IN ('planned','failed','generating')",
-            (_storage_now().isoformat(timespec="seconds"), plan_id, version),
-        )
-        conn.commit()
-        if cursor.rowcount != 1:
-            raise HTTPException(409, "计划状态已变化，请刷新后重试")
-        return {"id": plan_id, "status": "cancelled"}
+        raise HTTPException(409, "内容日历不负责变更批次生命周期；请在计划管理中处理策略，生产任务异常请到任务监控处理")
 
     @app.post("/api/content-plans/{plan_id}/archive")
     def archive_content_plan(plan_id: str, version: int = Query(..., ge=1)):
-        """归档已结束计划；只做状态变更，保留所有历史关联。"""
-        conn = _g()["conn"]
-        row = conn.execute("SELECT status, version FROM content_plans WHERE id=?", (plan_id,)).fetchone()
-        if row is None:
-            raise HTTPException(404, "计划不存在")
-        if int(row["version"]) != version:
-            raise HTTPException(409, "计划已被其他窗口修改，请刷新后重试")
-        if row["status"] not in ("generated", "reviewed", "failed", "cancelled"):
-            raise HTTPException(409, "只有已结束的计划可以归档")
-        now = _storage_now().isoformat(timespec="seconds")
-        cursor = conn.execute(
-            "UPDATE content_plans SET status='archived',version=version+1,updated_at=? "
-            "WHERE id=? AND version=? AND status IN ('generated','reviewed','failed','cancelled')",
-            (now, plan_id, version),
-        )
-        conn.commit()
-        if cursor.rowcount != 1:
-            raise HTTPException(409, "计划状态已变化，请刷新后重试")
-        return {"id": plan_id, "status": "archived", "version": version + 1}
+        raise HTTPException(409, "内容日历只读展示历史批次，不提供批次归档操作")
 
     @app.post("/api/content-plans/{plan_id}/restore")
     def restore_content_plan(plan_id: str, version: int = Query(..., ge=1)):
-        """恢复归档或已停用计划；历史轮次、任务和草稿关联保持不变。"""
-        conn = _g()["conn"]
-        row = conn.execute("SELECT status, version FROM content_plans WHERE id=?", (plan_id,)).fetchone()
-        if row is None:
-            raise HTTPException(404, "计划不存在")
-        if int(row["version"]) != version:
-            raise HTTPException(409, "计划已被其他窗口修改，请刷新后重试")
-        restore_to = {"archived": "reviewed", "cancelled": "planned"}.get(str(row["status"]))
-        if restore_to is None:
-            raise HTTPException(409, "只有已归档或已停用的计划可以恢复")
-        now = _storage_now().isoformat(timespec="seconds")
-        cursor = conn.execute(
-            "UPDATE content_plans SET status=?,version=version+1,updated_at=? "
-            "WHERE id=? AND version=? AND status=?",
-            (restore_to, now, plan_id, version, row["status"]),
-        )
-        conn.commit()
-        if cursor.rowcount != 1:
-            raise HTTPException(409, "计划状态已变化，请刷新后重试")
-        return {"id": plan_id, "status": restore_to, "version": version + 1}
+        raise HTTPException(409, "内容日历只读展示历史批次，不提供批次恢复操作")
 
     # --- 内容日历排期（§24.3）---
     @app.get("/api/schedule")
