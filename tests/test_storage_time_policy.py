@@ -95,3 +95,52 @@ def test_api_datetime_preserves_explicit_offset():
 
 def test_api_datetime_preserves_unparseable_values():
     assert api_datetime("not-a-date") == "not-a-date"
+
+def test_storage_window_cutoffs_preserve_legacy_business_wall_clock(cfg):
+    from src.core.timezone import storage_window_cutoffs
+    utc_cutoff, legacy_cutoff = storage_window_cutoffs(
+        "2026-11-02T02:00:00+00:00", cfg,
+    )
+    assert utc_cutoff == "2026-11-02 02:00:00+00:00"
+    assert legacy_cutoff == "2026-11-02 10:00:00"
+
+
+def test_timestamp_since_sql_matches_aware_and_legacy_naive_rows():
+    from src.core.timezone import timestamp_since_sql
+    sql = timestamp_since_sql("ops_logs.executed_at")
+    assert "datetime(ops_logs.executed_at) >= datetime(?)" in sql
+    assert "instr(substr(ops_logs.executed_at, 20), '+')" in sql
+
+
+def test_timestamp_sql_rejects_untrusted_identifiers():
+    from src.core.timezone import timestamp_since_sql
+    with pytest.raises(ValueError, match="invalid timestamp column"):
+        timestamp_since_sql("executed_at); DROP TABLE ops_logs; --")
+
+
+def test_mixed_timestamp_query_keeps_legacy_local_and_aware_utc_rows_in_same_window(cfg):
+    import sqlite3
+    from src.core.timezone import storage_window_cutoffs, timestamp_since_sql
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE events (created_at TEXT NOT NULL)")
+    conn.executemany(
+        "INSERT INTO events(created_at) VALUES (?)",
+        [
+            ("2026-11-02 09:59:59",),
+            ("2026-11-02 10:00:00",),
+            ("2026-11-02T01:59:59+00:00",),
+            ("2026-11-02T02:00:00+00:00",),
+        ],
+    )
+    cutoff_utc, cutoff_legacy = storage_window_cutoffs(
+        "2026-11-02T02:00:00+00:00", cfg,
+    )
+    rows = conn.execute(
+        "SELECT created_at FROM events WHERE " + timestamp_since_sql("created_at")
+        + " ORDER BY created_at",
+        (cutoff_utc, cutoff_legacy),
+    ).fetchall()
+    assert {row[0] for row in rows} == {
+        "2026-11-02 10:00:00",
+        "2026-11-02T02:00:00+00:00",
+    }
