@@ -2863,10 +2863,12 @@ def _register_routes(app: FastAPI) -> None:
         return get_media_generation_settings()
 
     @app.post("/api/media/generate", status_code=201)
+    @manages_own_transaction
     def generate_media_asset(req: MediaGenerationRequest):
         return _generate_media_asset(req)
 
     @app.post("/api/media/generate-for-content/{content_id}", status_code=201)
+    @manages_own_transaction
     def generate_media_for_content(content_id: str, usage_role: str = Query("cover", pattern="^(cover|illustration|background)$")):
         """根据现有内容生成候选配图；生成结果进入待审核状态，不自动分配。"""
         row = _g()["conn"].execute("SELECT id, title, body, platform FROM contents WHERE id = ?", (content_id,)).fetchone()
@@ -2887,6 +2889,7 @@ def _register_routes(app: FastAPI) -> None:
         ))
 
     @app.post("/api/media/{asset_id}/edit", status_code=201)
+    @manages_own_transaction
     def edit_media_asset(asset_id: int, req: MediaGenerationRequest):
         return _generate_media_asset(req, source_asset_id=asset_id)
 
@@ -8573,6 +8576,7 @@ def _register_routes(app: FastAPI) -> None:
         return {"total": total, "inserted": total - before}
 
     @app.post("/api/kb/sources/{source_id}/sync")
+    @manages_own_transaction
     def kb_source_sync(source_id: str):
         cfg = _g()["cfg"]
         source = next((s for s in kb_sources.load_registry(cfg) if s["id"] == source_id), None)
