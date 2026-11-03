@@ -127,7 +127,7 @@ export default function ProductionPlanMonitor() {
         {taskError && <div role="alert" className="tiny" style={{ color: "var(--orange)" }}>{taskError}</div>}
         {failedTasks.length === 0 ? <div className="empty-state">当前没有失败的独立生产任务。</div> : <div className="list">
           {failedTasks.map((task) => <div className="task-row" key={task.id}>
-            <div className="task-main"><div className="task-title">生产任务 {task.id}</div><div className="task-desc">{PLATFORM_LABEL[task.platform] ?? task.platform} · 轮次 #{task.round_id} · 策略步骤 {task.strategy_step_id} · 尝试 {task.attempt_count}/{task.max_attempts}</div><div className="task-desc">{task.error_code || "unknown_error"}：{task.error_message || "未提供错误信息"}</div>{task.content_id && <div className="tiny">成品 ID：{task.content_id}</div>}</div>
+            <div className="task-main"><div className="task-title">生产任务 {task.id}</div><div className="task-desc">{PLATFORM_LABEL[task.platform] ?? task.platform} · 轮次 #{task.round_id} · 策略步骤 {data.platforms.flatMap((subplan) => subplan.stages).find((stage) => stage.stage_key === task.strategy_step_id)?.title ?? task.strategy_step_id} · 尝试 {task.attempt_count}/{task.max_attempts}</div><div className="task-desc">{task.error_code || "unknown_error"}：{task.error_message || "未提供错误信息"}</div>{task.content_id && <div className="tiny">成品 ID：{task.content_id}</div>}</div>
             <button className="btn sm" disabled={taskBusy} onClick={async () => { setTaskBusy(true); try { setSelectedTask(await api.productionTask(task.id)); } catch (err) { setTaskError(err instanceof Error ? err.message : String(err)); } finally { setTaskBusy(false); } }}>查看详情</button>
           </div>)}
         </div>}
