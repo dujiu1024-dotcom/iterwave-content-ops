@@ -1,8 +1,8 @@
 # IterWave — Espace de gestion de contenu visuel assisté par IA
 
-[简体中文](README.md) · [English](README.en.md) · [Русский](README.ru.md) · [日本語](README.ja.md) · [Français](README.fr.md) · [Deutsch](README.de.md)
+[English](README.md) · [Chinois simplifié](README.zh-CN.md) · [Russe](README.ru.md) · [Japonais](README.ja.md) · [Français](README.fr.md) · [Allemand](README.de.md)
 
-> **Early Preview** — Projet open source en développement actif. L’état réel des fonctionnalités doit être évalué à partir du code, des tests et des validations dans l’environnement cible.
+> **Version préliminaire** — Projet open source en développement actif. L’état réel des fonctionnalités doit être évalué à partir du code, des tests et des validations dans l’environnement cible.
 
 IterWave est un espace de travail destiné aux créateurs qui publient du contenu mêlant texte et images sur plusieurs plateformes. Il relie la découverte de sujets, la planification, la production adaptée à chaque plateforme, le contrôle qualité, la validation humaine avant publication et l’analyse des résultats dans un flux traçable.
 
