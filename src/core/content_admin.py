@@ -107,6 +107,9 @@ def _delete_contents_in_transaction(conn, ids: list[str]) -> tuple[dict, list]:
         )
         conn.execute("DELETE FROM metrics WHERE content_id = ?", (cid,))
         conn.execute("DELETE FROM drafts WHERE content_id = ?", (cid,))
+        # 审核事件对内容采用 RESTRICT 外键；内容硬删除时同步清理其专属审计事件。
+        # user_override 的轮次级历史仍保留，避免删除内容时破坏其他轮次审计。
+        _optional_execute(conn, "DELETE FROM content_review_events WHERE content_id = ?", (cid,))
         conn.execute("DELETE FROM contents WHERE id = ?", (cid,))
         file_manifests.append(row["image_paths"])
         deleted.append(cid)

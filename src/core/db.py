@@ -269,7 +269,13 @@ class Database:
                 if expected is None:
                     continue  # Older applied migrations are baselined after migration 129.
                 actual = hashlib.sha256(migration.path.read_bytes()).hexdigest()
-                if actual != expected:
+                # A parallel historical branch briefly shipped media-generation
+                # budget columns as migration 131. Accept only that exact checksum
+                # for version 131; forward migration 135 restores master-plan fields.
+                legacy_checksums = {
+                    131: {"db83577353daffd3ebc4ce8707b544bdf3ddd6cfcc20fdf505f8e49e0d1dc4db"}
+                }
+                if actual != expected and expected not in legacy_checksums.get(migration.version, set()):
                     raise RuntimeError(
                         f"已应用迁移 {migration.version} ({migration.name}) 的 SQL 文件发生变化；"
                         "为避免静默 schema drift，已停止启动。请新增迁移，不要修改历史迁移文件。"

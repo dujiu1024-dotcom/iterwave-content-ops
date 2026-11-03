@@ -125,3 +125,29 @@ def test_delete_contents_cleans_notifications_and_snapshots_then_files(cfg, conn
     assert conn.execute(
         "SELECT 1 FROM spiral_rounds WHERE id = ?", (round_id,)
     ).fetchone() is None
+
+
+def test_delete_contents_removes_content_scoped_review_events(cfg, conn, seed):
+    """Review events use ON DELETE RESTRICT and must be removed with their hard-deleted content."""
+    _, content_id, image = _content_with_image(cfg, conn, seed)
+    draft_id = conn.execute(
+        "SELECT id FROM drafts WHERE content_id = ?", (content_id,)
+    ).fetchone()[0]
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(
+        "INSERT INTO content_review_events "
+        "(content_id,draft_id,event_type,actor,reason,created_at) "
+        "VALUES(?,?,'approved','tester','reviewed','2026-11-03T10:00:00')",
+        (content_id, draft_id),
+    )
+    conn.commit()
+
+    result = delete_contents(cfg, conn, [content_id])
+
+    assert result["deleted"] == [content_id]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM content_review_events WHERE content_id = ?", (content_id,)
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT 1 FROM contents WHERE id = ?", (content_id,)
+    ).fetchone() is None

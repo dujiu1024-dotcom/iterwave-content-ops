@@ -1,4 +1,6 @@
 import pytest
+from pathlib import Path
+from types import SimpleNamespace
 
 from src.core import visual_ocr
 from src.core.visual_ocr import compare_expected_text, normalize_ocr_text, load_ocr_report
@@ -49,7 +51,7 @@ def test_ocr_gate_keeps_numeric_values_strict_when_text_is_noisy():
         "新增用户100人，转化率提升26%",
     )
     assert result["passed"] is False
-    assert result["missing_numbers"] == ["25"]
+    assert result["missing_numbers"] == ["25%"]
 
 
 def test_ocr_gate_rejects_substantial_copy_loss():
@@ -79,3 +81,98 @@ def test_ocr_hard_gate_reports_quality_metrics(tmp_path, monkeypatch):
         visual_ocr.validate_rendered_pages(
             [image], ["需要完整呈现的正文2026"], tmp_path / "report.json",
         )
+
+
+def test_ocr_gate_rejects_extra_numeric_tokens_and_occurrences():
+    result = compare_expected_text("增长25%，新增100人", "增长25%，新增100人，另有2026年")
+    assert result["passed"] is False
+    assert result["extra_numbers"] == ["2026年"]
+
+
+def test_ocr_gate_preserves_decimal_percent_date_and_units():
+    expected = "转化率提升2.5%，日期为2026-11-03，新增100人"
+    assert compare_expected_text(expected, expected)["passed"] is True
+    assert compare_expected_text(expected, "转化率提升25%，日期为2026-11-04，新增100人")["passed"] is False
+    assert compare_expected_text("预算为3.5万元", "预算为3.5元")["passed"] is False
+
+
+def test_ocr_gate_rejects_negation_moved_to_another_semantic_segment():
+    expected = "这个方案不允许发布。普通说明内容。"
+    recognized = "这个方案允许发布。普通说明内容不。"
+    result = compare_expected_text(expected, recognized)
+    assert result["passed"] is False
+    assert result["negation_mismatches"]
+
+
+def test_ocr_gate_rejects_text_over_120_percent_of_expected():
+    result = compare_expected_text("核心结论只有十个字", "核心结论只有十个字以及大量额外说明文字")
+    assert result["passed"] is False
+    assert result["length_ratio"] > 1.2
+
+
+def test_critical_text_requires_exact_normalized_match():
+    assert compare_expected_text("核心结论必须准确", "核心结论必须准确", critical=True)["passed"] is True
+    assert compare_expected_text("核心结论必须准确", "核心结论必须大致准确", critical=True)["passed"] is False
+
+
+def test_ocr_gate_checks_numeric_occurrence_counts_and_equivalent_date_formats():
+    assert visual_ocr._numeric_tokens("2026年11月3日") == visual_ocr._numeric_tokens("2026-11-03")
+    assert compare_expected_text("共有两个数字25%和25%", "共有一个数字25%")["passed"] is False
+
+
+def test_ocr_gate_preserves_negative_numeric_sign():
+    assert compare_expected_text("下降-5%", "下降5%")["passed"] is False
+
+
+def test_ocr_gate_distinguishes_thousands_separator_from_decimal_point():
+    assert compare_expected_text("曝光量128,450次", "曝光量128.450次")["passed"] is False
+
+
+def test_ocr_gate_rejects_unexpected_negation_inserted_into_copy():
+    result = compare_expected_text("这个方案允许发布。", "这个方案不允许发布。")
+    assert result["passed"] is False
+    assert result["negation_mismatches"]
+
+
+def test_ocr_preflight_rejects_missing_chinese_language_pack(monkeypatch):
+    calls = []
+    monkeypatch.setattr(visual_ocr.shutil, "which", lambda _name: "/usr/bin/tesseract")
+    monkeypatch.setattr(Path, "is_file", lambda _self: True)
+    monkeypatch.setattr(visual_ocr.os, "access", lambda *_args: True)
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        if command[-1] == "--version":
+            return SimpleNamespace(stdout="tesseract 5.3.0")
+        return SimpleNamespace(stdout="List of available languages (1):\neng\n")
+
+    monkeypatch.setattr(visual_ocr.subprocess, "run", fake_run)
+    result = visual_ocr.preflight_ocr(languages="chi_sim+eng", timeout=45)
+    assert result["status"] == "unavailable"
+    assert result["reason"] == "ocr_language_missing"
+    assert result["missing_languages"] == ["chi_sim"]
+    assert len(calls) == 2
+
+
+def test_ocr_preflight_rejects_non_executable_tesseract(monkeypatch):
+    monkeypatch.setattr(visual_ocr.shutil, "which", lambda _name: "/usr/bin/tesseract")
+    monkeypatch.setattr(Path, "is_file", lambda _self: True)
+    monkeypatch.setattr(visual_ocr.os, "access", lambda *_args: False)
+    monkeypatch.setattr(
+        visual_ocr.subprocess, "run",
+        lambda *_args, **_kwargs: pytest.fail("must not execute a non-executable binary"),
+    )
+    result = visual_ocr.preflight_ocr()
+    assert result == {"status": "unavailable", "reason": "tesseract_not_executable"}
+
+
+def test_ocr_preflight_rejects_invalid_timeout_before_subprocess(monkeypatch):
+    monkeypatch.setattr(visual_ocr.shutil, "which", lambda _name: "/usr/bin/tesseract")
+    monkeypatch.setattr(Path, "is_file", lambda _self: True)
+    monkeypatch.setattr(visual_ocr.os, "access", lambda *_args: True)
+    monkeypatch.setattr(
+        visual_ocr.subprocess, "run",
+        lambda *_args, **_kwargs: pytest.fail("invalid timeout must be rejected before execution"),
+    )
+    result = visual_ocr.preflight_ocr(timeout=0)
+    assert result == {"status": "unavailable", "reason": "ocr_timeout_invalid"}

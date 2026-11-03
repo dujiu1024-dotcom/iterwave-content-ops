@@ -101,6 +101,16 @@ class PlanVersionStore:
                 raise PlanVersionError("主计划版本不存在")
             if row["status"] != "draft":
                 raise PlanVersionError("只有草稿版本可以审核生效")
+            if row["deleted_at"] is not None:
+                raise PlanVersionError("已删除的主计划不能审核生效")
+            latest = self.conn.execute(
+                """SELECT id FROM master_plan_versions
+                   WHERE deleted_at IS NULL
+                     AND (status IN ('draft','effective') OR effective_at IS NOT NULL)
+                   ORDER BY version_no DESC LIMIT 1"""
+            ).fetchone()
+            if latest is None or int(latest["id"]) != int(version_id):
+                raise PlanVersionError("只有最新的未删除主计划可以审核生效")
             snapshot = json.loads(row["plan_snapshot"])
             signature = self._signer.compute_signature(snapshot)
             if signature != row["plan_signature"]:
@@ -112,9 +122,11 @@ class PlanVersionStore:
                 # A new mother plan pauses child plans still based on the superseded
                 # version. Existing rounds and child snapshots remain untouched.
                 self.conn.execute(
-                    """UPDATE sub_plans SET status='paused',updated_at=?
+                    """UPDATE sub_plans
+                       SET status='paused',pause_reason='master_plan_switch',
+                           paused_by_master_version_id=?,updated_at=?
                        WHERE master_plan_version_id=? AND status='active'""",
-                    (now, previous_effective["id"]),
+                    (version_id, now, previous_effective["id"]),
                 )
             self.conn.execute(
                 """UPDATE master_plan_versions
@@ -148,6 +160,101 @@ class PlanVersionStore:
             return dict(self.conn.execute(
                 "SELECT * FROM master_plan_versions WHERE id=?", (version_id,)
             ).fetchone())
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def delete_master_version(self, version_id: int, *, actor: str = "user") -> dict[str, Any]:
+        """Soft-delete the latest effective master and atomically restore its predecessor."""
+        now = _now()
+        self._begin()
+        try:
+            current = self.conn.execute(
+                "SELECT * FROM master_plan_versions WHERE id=?", (version_id,)
+            ).fetchone()
+            if current is None:
+                raise PlanVersionError("主计划版本不存在")
+            if current["deleted_at"] is not None:
+                raise PlanVersionError("主计划已经删除")
+            if current["status"] != "effective":
+                raise PlanVersionError("只能删除当前生效的最新主计划")
+            latest = self.conn.execute(
+                """SELECT id FROM master_plan_versions
+                   WHERE deleted_at IS NULL
+                     AND (status IN ('draft','effective') OR effective_at IS NOT NULL)
+                   ORDER BY version_no DESC LIMIT 1"""
+            ).fetchone()
+            if latest is None or int(latest["id"]) != int(version_id):
+                raise PlanVersionError("只能删除最新的未删除主计划")
+            predecessor = self.conn.execute(
+                """SELECT * FROM master_plan_versions
+                   WHERE deleted_at IS NULL AND id<>? AND version_no<?
+                     AND status='archived' AND effective_at IS NOT NULL
+                   ORDER BY version_no DESC LIMIT 1""",
+                (version_id, current["version_no"]),
+            ).fetchone()
+            if predecessor is None:
+                raise PlanVersionError("没有可恢复的上一份未删除主计划，拒绝删除以避免系统无生效母计划")
+
+            # The deleted master's currently active children must stop producing.
+            self.conn.execute(
+                """UPDATE sub_plans
+                   SET status='paused',pause_reason='master_plan_deleted',
+                       paused_by_master_version_id=?,updated_at=?
+                   WHERE master_plan_version_id=? AND status='active'""",
+                (version_id, now, version_id),
+            )
+            self.conn.execute(
+                """UPDATE master_plan_versions
+                   SET status='archived',deleted_at=?,deleted_by=?,superseded_at=COALESCE(superseded_at,?)
+                   WHERE id=? AND status='effective' AND deleted_at IS NULL""",
+                (now, actor, now, version_id),
+            )
+            if self.conn.execute("SELECT changes()").fetchone()[0] != 1:
+                raise PlanVersionError("主计划状态已变化，请刷新后重试")
+
+            self.conn.execute(
+                """UPDATE master_plan_versions
+                   SET status='effective',reviewed_at=COALESCE(reviewed_at,?),
+                       reviewed_by=COALESCE(reviewed_by,?),effective_at=COALESCE(effective_at,?)
+                   WHERE id=? AND status='archived' AND deleted_at IS NULL""",
+                (now, actor, now, predecessor["id"]),
+            )
+            if self.conn.execute("SELECT changes()").fetchone()[0] != 1:
+                raise PlanVersionError("上一份主计划无法恢复")
+            # Restore only children paused by this exact master-plan switch.
+            self.conn.execute(
+                """UPDATE sub_plans
+                   SET status='active',pause_reason=NULL,paused_by_master_version_id=NULL,updated_at=?
+                   WHERE master_plan_version_id=? AND status='paused'
+                     AND pause_reason='master_plan_switch'
+                     AND paused_by_master_version_id=?""",
+                (now, predecessor["id"], version_id),
+            )
+            self.conn.execute(
+                """UPDATE plan_settings
+                   SET plan_snapshot=?,plan_signature=?,updated_at=?,updated_by=?,active_version_id=?
+                   WHERE id=1""",
+                (predecessor["plan_snapshot"], predecessor["plan_signature"],
+                 now, actor, predecessor["id"]),
+            )
+            if self.conn.execute("SELECT changes()").fetchone()[0] != 1:
+                raise PlanVersionError("母计划设置记录缺失，无法安全恢复")
+            self.conn.execute(
+                """INSERT INTO signature_history(
+                       plan_signature,plan_snapshot,round_id,created_at,author
+                   ) VALUES(?,?,NULL,?,?)""",
+                (predecessor["plan_signature"], predecessor["plan_snapshot"], now, actor),
+            )
+            self.conn.commit()
+            return {
+                "deleted_version": dict(self.conn.execute(
+                    "SELECT * FROM master_plan_versions WHERE id=?", (version_id,)
+                ).fetchone()),
+                "restored_version": dict(self.conn.execute(
+                    "SELECT * FROM master_plan_versions WHERE id=?", (predecessor["id"],)
+                ).fetchone()),
+            }
         except Exception:
             self.conn.rollback()
             raise
@@ -251,6 +358,56 @@ class PlanVersionStore:
                     ).fetchall()
                 }
 
+            # Assign stable keys before validating dependency edges. Existing stages
+            # carry their keys forward; newly added stages receive new stable keys.
+            normalized_stages = []
+            for index, raw_stage in enumerate(stages, start=1):
+                if not isinstance(raw_stage, dict):
+                    raise PlanVersionError("阶段条目必须是对象")
+                stage = dict(raw_stage)
+                stage_key = str(stage.get("stage_key") or uuid.uuid4().hex).strip()
+                if not stage_key or len(stage_key) > 100:
+                    raise PlanVersionError("阶段稳定标识无效")
+                if based_on_version_id is not None and stage_key not in base_stage_keys:
+                    foreign_owner = self.conn.execute(
+                        """SELECT 1 FROM sub_plan_stages s
+                           JOIN sub_plan_versions v ON v.id=s.sub_plan_version_id
+                           WHERE s.stage_key=? AND v.sub_plan_id<>? LIMIT 1""",
+                        (stage_key, sub_plan_id),
+                    ).fetchone()
+                    if foreign_owner is not None:
+                        raise PlanVersionError("阶段稳定标识必须继承自当前子计划，不能引用其他子计划的阶段")
+                # Existing stages retain their keys; newly added stages may introduce a fresh key.
+                stage["stage_key"] = stage_key
+                deps = stage.get("dependencies", stage.get("depends_on", []))
+                if not isinstance(deps, list) or any(not isinstance(dep, str) or not dep.strip() for dep in deps):
+                    raise PlanVersionError("阶段依赖必须是稳定阶段标识数组")
+                deps = [dep.strip() for dep in deps]
+                if len(set(deps)) != len(deps) or stage_key in deps:
+                    raise PlanVersionError("阶段依赖不能重复或依赖自身")
+                stage["dependencies"] = deps
+                normalized_stages.append(stage)
+            all_keys = {stage["stage_key"] for stage in normalized_stages}
+            if len(all_keys) != len(normalized_stages):
+                raise PlanVersionError("阶段稳定标识无效或重复")
+            graph = {stage["stage_key"]: stage["dependencies"] for stage in normalized_stages}
+            for key, deps in graph.items():
+                if any(dep not in all_keys for dep in deps):
+                    raise PlanVersionError(f"阶段 {key} 引用了不存在的前置阶段")
+            visiting, visited = set(), set()
+            def visit(key):
+                if key in visiting:
+                    raise PlanVersionError("阶段依赖关系存在循环")
+                if key in visited:
+                    return
+                visiting.add(key)
+                for dep in graph[key]:
+                    visit(dep)
+                visiting.remove(key)
+                visited.add(key)
+            for key in graph:
+                visit(key)
+
             version_no = int(self.conn.execute(
                 "SELECT COALESCE(MAX(version_no),0)+1 FROM sub_plan_versions WHERE sub_plan_id=?",
                 (sub_plan_id,),
@@ -266,14 +423,9 @@ class PlanVersionStore:
             )
             version_id = int(cur.lastrowid)
             seen_stage_keys: set[str] = set()
-            for index, stage in enumerate(stages, start=1):
-                if not isinstance(stage, dict):
-                    raise PlanVersionError("阶段条目必须是对象")
-                supplied_stage_key = stage.get("stage_key")
-                if supplied_stage_key and str(supplied_stage_key) not in base_stage_keys:
-                    raise PlanVersionError("阶段稳定标识必须继承自当前子计划的基准版本")
-                stage_key = str(supplied_stage_key or uuid.uuid4().hex).strip()
-                if not stage_key or len(stage_key) > 100 or stage_key in seen_stage_keys:
+            for index, stage in enumerate(normalized_stages, start=1):
+                stage_key = stage["stage_key"]
+                if stage_key in seen_stage_keys:
                     raise PlanVersionError("阶段稳定标识无效或重复")
                 seen_stage_keys.add(stage_key)
                 title = str(stage.get("title") or "").strip()
@@ -305,15 +457,34 @@ class PlanVersionStore:
                 stage_status = str(stage.get("status") or "pending")
                 if stage_status not in {"pending", "in_progress", "completed", "paused", "cancelled"}:
                     raise PlanVersionError("阶段状态无效")
+                entry_met = stage.get("entry_condition_met", True)
+                if isinstance(entry_met, int) and not isinstance(entry_met, bool) and entry_met in (0, 1):
+                    entry_met = bool(entry_met)
+                if not isinstance(entry_met, bool):
+                    raise PlanVersionError("阶段进入条件状态必须是布尔值")
                 self.conn.execute(
                     """INSERT INTO sub_plan_stages(
                         sub_plan_version_id,stage_key,stage_order,title,direction,target_count,
-                        start_date,end_date,completion_condition,status,notes,created_at,updated_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        start_date,end_date,completion_condition,status,notes,created_at,updated_at,
+                        strategy_goal,current_problem,execution_strategy,prerequisites,input_info,
+                        expected_result,completion_criteria,effect_evaluation,entry_condition,
+                        entry_condition_met,dependencies_json
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (version_id, stage_key, stage_order, title,
                      str(stage.get("direction") or ""), target_count,
                      start_date, end_date, str(stage.get("completion_condition") or ""),
-                     stage_status, str(stage.get("notes") or ""), now, now),
+                     stage_status, str(stage.get("notes") or ""), now, now,
+                     str(stage.get("strategy_goal") or "")[:4000],
+                     str(stage.get("current_problem") or "")[:4000],
+                     str(stage.get("execution_strategy") or "")[:8000],
+                     str(stage.get("prerequisites") or "")[:4000],
+                     str(stage.get("input_info") or "")[:4000],
+                     str(stage.get("expected_result") or "")[:4000],
+                     str(stage.get("completion_criteria") or stage.get("completion_condition") or "")[:4000],
+                     str(stage.get("effect_evaluation") or "")[:4000],
+                     str(stage.get("entry_condition") or "")[:4000],
+                     1 if entry_met else 0,
+                     json.dumps(stage.get("dependencies") or [], ensure_ascii=False)),
                 )
             row = dict(self.conn.execute(
                 "SELECT * FROM sub_plan_versions WHERE id=?", (version_id,)
@@ -480,8 +651,11 @@ class PlanVersionStore:
                 ).fetchone()
                 if stage is None:
                     raise PlanVersionError("阶段不属于指定的子计划版本")
+                ready_stage = self.assert_stage_ready(
+                    int(sub_plan_stage_id), int(sub_plan_version_id)
+                )
                 sub_snapshot = version["snapshot_json"]
-                stage_snapshot = json.dumps(dict(stage), ensure_ascii=False, sort_keys=True)
+                stage_snapshot = json.dumps(ready_stage, ensure_ascii=False, sort_keys=True)
 
             desired_binding = (master_plan_version_id, sub_plan_id, sub_plan_version_id, sub_plan_stage_id)
             existing_binding = tuple(existing_round)
@@ -499,6 +673,90 @@ class PlanVersionStore:
             if cur.rowcount != 1:
                 raise PlanVersionError("轮次不存在")
             self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def assert_stage_ready(self, stage_id: int, version_id: int) -> dict[str, Any]:
+        """Reject execution until all declared predecessors have completed and reported outcomes."""
+        stage = self.conn.execute(
+            """SELECT s.*,v.sub_plan_id FROM sub_plan_stages s
+               JOIN sub_plan_versions v ON v.id=s.sub_plan_version_id
+               WHERE s.id=? AND s.sub_plan_version_id=?""",
+            (stage_id, version_id),
+        ).fetchone()
+        if stage is None:
+            raise PlanVersionError("阶段不属于指定子计划版本")
+        if not bool(stage["entry_condition_met"]):
+            raise PlanVersionError("阶段进入条件尚未满足")
+        try:
+            dependencies = json.loads(stage["dependencies_json"] or "[]")
+        except (TypeError, ValueError) as exc:
+            raise PlanVersionError("阶段依赖快照损坏") from exc
+        if not isinstance(dependencies, list):
+            raise PlanVersionError("阶段依赖快照格式无效")
+        dependency_outcomes = {}
+        for dependency_key in dependencies:
+            predecessor = self.conn.execute(
+                """SELECT status FROM sub_plan_stages
+                   WHERE sub_plan_version_id=? AND stage_key=?""",
+                (version_id, dependency_key),
+            ).fetchone()
+            outcome = self.conn.execute(
+                """SELECT result_json,evaluation,recorded_at FROM sub_plan_stage_outcomes
+                   WHERE sub_plan_id=? AND stage_key=?
+                   ORDER BY recorded_at DESC,id DESC LIMIT 1""",
+                (stage["sub_plan_id"], dependency_key),
+            ).fetchone()
+            if predecessor is None or predecessor["status"] != "completed" or outcome is None:
+                raise PlanVersionError(
+                    f"前置阶段 {dependency_key} 尚未完成或缺少实际效果记录"
+                )
+            try:
+                dependency_outcomes[dependency_key] = {
+                    "result": json.loads(outcome["result_json"]),
+                    "evaluation": outcome["evaluation"],
+                    "recorded_at": outcome["recorded_at"],
+                }
+            except (TypeError, ValueError) as exc:
+                raise PlanVersionError(f"前置阶段 {dependency_key} 的实际结果损坏") from exc
+        ready = dict(stage)
+        ready["dependency_outcomes"] = dependency_outcomes
+        return ready
+
+    def record_stage_outcome(
+        self, stage_id: int, version_id: int, result: dict[str, Any], *,
+        evaluation: str = "", author: str = "user",
+    ) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            raise PlanVersionError("阶段实际结果必须是对象")
+        stage = self.conn.execute(
+            """SELECT s.stage_key,s.status,v.sub_plan_id
+               FROM sub_plan_stages s JOIN sub_plan_versions v ON v.id=s.sub_plan_version_id
+               WHERE s.id=? AND s.sub_plan_version_id=?""",
+            (stage_id, version_id),
+        ).fetchone()
+        if stage is None:
+            raise PlanVersionError("阶段不属于指定子计划版本")
+        if stage["status"] != "completed":
+            raise PlanVersionError("只有已完成的阶段才能记录实际效果")
+        self._begin()
+        try:
+            cur = self.conn.execute(
+                """INSERT INTO sub_plan_stage_outcomes(
+                    sub_plan_id,stage_key,source_version_id,stage_id,result_json,
+                    evaluation,recorded_at,recorded_by
+                ) VALUES(?,?,?,?,?,?,?,?)""",
+                (stage["sub_plan_id"], stage["stage_key"], version_id, stage_id,
+                 json.dumps(result, ensure_ascii=False, sort_keys=True),
+                 str(evaluation or "")[:4000], _now(), str(author or "user")[:120]),
+            )
+            row = dict(self.conn.execute(
+                "SELECT * FROM sub_plan_stage_outcomes WHERE id=?", (cur.lastrowid,)
+            ).fetchone())
+            row["result"] = json.loads(row.pop("result_json"))
+            self.conn.commit()
+            return row
         except Exception:
             self.conn.rollback()
             raise
@@ -530,12 +788,13 @@ class PlanVersionStore:
             (sub_plan_version_id, sub_plan_id, master_plan_version_id, master_plan_version_id),
         ).fetchone()
         stage = self.conn.execute(
-            """SELECT 1 FROM sub_plan_stages
+            """SELECT id FROM sub_plan_stages
                WHERE id=? AND sub_plan_version_id=? AND status IN ('pending','in_progress')""",
             (sub_plan_stage_id, sub_plan_version_id),
         ).fetchone()
         if version is None or stage is None:
             raise PlanVersionError("自动开轮必须绑定有效子计划版本及可执行阶段")
+        self.assert_stage_ready(sub_plan_stage_id, sub_plan_version_id)
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat(timespec="seconds")
         lease_until = (now_dt + timedelta(seconds=max(30, min(int(lease_seconds), 3600)))).isoformat(timespec="seconds")
@@ -635,7 +894,10 @@ class PlanVersionStore:
                 round_number = int(self.conn.execute(
                     "SELECT COALESCE(MAX(round_number),0)+1 FROM spiral_rounds"
                 ).fetchone()[0])
-            stage_snapshot = json.dumps(dict(stage), ensure_ascii=False, sort_keys=True)
+            ready_stage = self.assert_stage_ready(
+                int(lock["sub_plan_stage_id"]), int(lock["sub_plan_version_id"])
+            )
+            stage_snapshot = json.dumps(ready_stage, ensure_ascii=False, sort_keys=True)
             topics_json = json.dumps(topic_ids or [], ensure_ascii=False)
             variants_json = json.dumps(content_variants or [], ensure_ascii=False)
             cur = self.conn.execute(

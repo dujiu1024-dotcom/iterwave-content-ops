@@ -6,7 +6,7 @@ import EmptyHint from "../components/EmptyHint";
 
 type Tab = "master" | "platforms" | "stages";
 type StageStatus = "pending" | "active" | "completed" | "paused" | "cancelled";
-type Stage = { id: string; name: string; direction: string; count: number; start: string; end: string; rule: string; status: StageStatus; confirmed: number };
+type Stage = { id: string; name: string; direction: string; count: number; start: string; end: string; rule: string; status: StageStatus; confirmed: number; strategyGoal: string; currentProblem: string; executionStrategy: string; prerequisites: string; inputInfo: string; expectedResult: string; completionCriteria: string; effectEvaluation: string; entryCondition: string; entryConditionMet: boolean; dependencies: string[]; latestOutcome?: SubPlanStageRecord["latest_outcome"] };
 type Child = { id: string; platform: Platform; name: string; direction: string; count: number; status: "draft" | "review" | "effective"; signature: string; versionId: number; versionNo: number; stageRecords: SubPlanStageRecord[] };
 const stageLabels: Record<StageStatus, string> = { pending: "待执行", active: "执行中", completed: "已完成", paused: "已暂停", cancelled: "已取消" };
 const childLabels = { draft: "草稿", review: "待审核", effective: "已生效" };
@@ -59,6 +59,16 @@ export default function PlanCenter() {
   const [stageStart, setStageStart] = useState(today());
   const [stageEnd, setStageEnd] = useState(dateAfterDays(30));
   const [stageRule, setStageRule] = useState("达到计划篇数，且所有内容完成审核");
+  const [stageStrategyGoal, setStageStrategyGoal] = useState("");
+  const [stageCurrentProblem, setStageCurrentProblem] = useState("");
+  const [stageExecutionStrategy, setStageExecutionStrategy] = useState("");
+  const [stagePrerequisites, setStagePrerequisites] = useState("");
+  const [stageInputInfo, setStageInputInfo] = useState("");
+  const [stageExpectedResult, setStageExpectedResult] = useState("");
+  const [stageEffectEvaluation, setStageEffectEvaluation] = useState("");
+  const [stageEntryCondition, setStageEntryCondition] = useState("");
+  const [stageEntryConditionMet, setStageEntryConditionMet] = useState(true);
+  const [stageDependencies, setStageDependencies] = useState<string[]>([]);
   const [editingStage, setEditingStage] = useState<Stage | null>(null);
 
   const load = async (preferredChildId?: string) => {
@@ -107,6 +117,13 @@ export default function PlanCenter() {
         rule: stage.completion_condition ?? "",
         status: stage.status === "in_progress" ? "active" : stage.status,
         confirmed: Number(stage.confirmed_published_count ?? 0),
+        strategyGoal: stage.strategy_goal ?? "", currentProblem: stage.current_problem ?? "",
+        executionStrategy: stage.execution_strategy ?? "", prerequisites: stage.prerequisites ?? "",
+        inputInfo: stage.input_info ?? "", expectedResult: stage.expected_result ?? "",
+        completionCriteria: stage.completion_criteria ?? stage.completion_condition ?? "",
+        effectEvaluation: stage.effect_evaluation ?? "", entryCondition: stage.entry_condition ?? "",
+        entryConditionMet: Number(stage.entry_condition_met ?? 1) !== 0, dependencies: stage.dependencies ?? [],
+        latestOutcome: stage.latest_outcome,
       })));
       try { setReview(await api.gaps()); } catch { setReview(null); }
       setDirty(false); setSaved(false); setError("");
@@ -133,6 +150,21 @@ export default function PlanCenter() {
       showToast("母计划已审核生效", "success");
       await load();
     } catch (e) { showToast("母计划审核失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
+  };
+  const deleteMasterPlan = async () => {
+    if (!masterVersionId) return;
+    const confirmed = window.confirm(
+      "确认删除当前生效母计划？系统会保留历史生产记录，并自动恢复上一份曾经生效且未删除的母计划。只有因本次切换暂停的子计划会恢复；人工暂停、已完成和已取消的子计划不会恢复。没有可恢复版本时，删除会被拒绝。"
+    );
+    if (!confirmed) return;
+    try {
+      const result = await api.deleteMasterPlan(masterVersionId);
+      setMasterDraftVersionId(null);
+      showToast(`当前母计划已软删除，已恢复母计划 v${result.restored_version.version_no}`, "success");
+      await load();
+    } catch (e) {
+      showToast("删除母计划失败：" + (e instanceof Error ? e.message : String(e)), "error");
+    }
   };
   const resetDraft = () => { if (data) { setDraft(structuredClone(data.plan)); setDirty(false); setSaved(false); } };
   const adoptGap = async (dimension: string) => {
@@ -175,6 +207,12 @@ export default function PlanCenter() {
           title: stage.title, direction: stage.direction, target_count: stage.target_count,
           start_date: stage.start_date, end_date: stage.end_date,
           completion_condition: stage.completion_condition, notes: stage.notes,
+          strategy_goal: stage.strategy_goal, current_problem: stage.current_problem,
+          execution_strategy: stage.execution_strategy, prerequisites: stage.prerequisites,
+          input_info: stage.input_info, expected_result: stage.expected_result,
+          completion_criteria: stage.completion_criteria, effect_evaluation: stage.effect_evaluation,
+          entry_condition: stage.entry_condition, entry_condition_met: stage.entry_condition_met,
+          dependencies: stage.dependencies ?? [],
         })),
         change_note: "计划中心编辑子计划",
       });
@@ -202,9 +240,17 @@ export default function PlanCenter() {
         stage: {
           title: stageName.trim(), direction: stageDirection, target_count: Math.max(1, stageCount),
           start_date: stageStart, end_date: stageEnd, completion_condition: stageRule,
+          strategy_goal: stageStrategyGoal, current_problem: stageCurrentProblem,
+          execution_strategy: stageExecutionStrategy, prerequisites: stagePrerequisites,
+          input_info: stageInputInfo, expected_result: stageExpectedResult,
+          completion_criteria: stageRule, effect_evaluation: stageEffectEvaluation,
+          entry_condition: stageEntryCondition, entry_condition_met: stageEntryConditionMet, dependencies: stageDependencies,
         },
       });
       setStageForm(false); setStageName(""); setStageDirection("");
+      setStageStrategyGoal(""); setStageCurrentProblem(""); setStageExecutionStrategy("");
+      setStagePrerequisites(""); setStageInputInfo(""); setStageExpectedResult("");
+      setStageEffectEvaluation(""); setStageEntryCondition(""); setStageEntryConditionMet(true); setStageDependencies([]);
       showToast("阶段已写入新的子计划草稿版本，需重新审核", "success");
       await load();
     } catch (e) { showToast("创建阶段失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
@@ -220,6 +266,12 @@ export default function PlanCenter() {
           title: editingStage.name, direction: editingStage.direction,
           target_count: editingStage.count, start_date: editingStage.start || null,
           end_date: editingStage.end || null, completion_condition: editingStage.rule,
+          strategy_goal: editingStage.strategyGoal, current_problem: editingStage.currentProblem,
+          execution_strategy: editingStage.executionStrategy, prerequisites: editingStage.prerequisites,
+          input_info: editingStage.inputInfo, expected_result: editingStage.expectedResult,
+          completion_criteria: editingStage.completionCriteria, effect_evaluation: editingStage.effectEvaluation,
+          entry_condition: editingStage.entryCondition, entry_condition_met: editingStage.entryConditionMet,
+          dependencies: editingStage.dependencies,
         },
       });
       setEditingStage(null); showToast("阶段修改已保存为新草稿版本，需重新审核", "success");
@@ -232,8 +284,32 @@ export default function PlanCenter() {
     const existingTarget = Number(selected?.count ?? 0);
     setStageCount(Math.max(1, existingTarget || configuredTarget || 1));
     setStageStart(today());
-    setStageEnd(dateAfterDays(30));
+    setStageEnd(dateAfterDays(30)); setStageEntryConditionMet(true); setStageDependencies([]);
     setStageForm(true);
+  };
+  const moveStage = async (stageId: string, delta: number) => {
+    const child = children.find((item) => item.id === selectedChildId);
+    if (!child) return;
+    const ordered = [...child.stageRecords].sort((a, b) => a.stage_order - b.stage_order);
+    const index = ordered.findIndex((item) => String(item.id) === stageId), target = index + delta;
+    if (index < 0 || target < 0 || target >= ordered.length) return;
+    [ordered[index], ordered[target]] = [ordered[target], ordered[index]];
+    try {
+      await api.reorderSubplanStages(child.id, { based_on_version_id: child.versionId, expected_version_no: child.versionNo, stage_ids: ordered.map((item) => item.id) });
+      showToast("策略步骤顺序已保存为新草稿版本，需重新审核", "success"); await load(child.id);
+    } catch (e) { showToast("排序失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
+  };
+  const recordStageOutcome = async (stage: Stage) => {
+    const child = children.find((item) => item.id === selectedChildId);
+    if (!child) return;
+    const raw = window.prompt("输入阶段实际结果 JSON（例如发布数据、用户反馈、关键指标）");
+    if (!raw) return;
+    try {
+      const result = JSON.parse(raw) as Record<string, unknown>;
+      const evaluation = window.prompt("输入效果评价（可留空）") ?? "";
+      await api.recordSubplanStageOutcome(child.id, Number(stage.id), { version_id: child.versionId, result, evaluation });
+      showToast("阶段实际结果已记录，可供后续步骤引用", "success"); await load(child.id);
+    } catch (e) { showToast("结果记录失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
   };
   const deleteStage = async (stage: Stage) => {
     const child = children.find((item) => item.id === selectedChildId);
@@ -264,7 +340,7 @@ export default function PlanCenter() {
         </div>
         <div className="panel-head" style={{ marginTop: 16 }}><div><div className="panel-title">主计划草稿编辑</div><div className="panel-sub">保存会创建服务端不可变草稿版本；只有审核通过后才切换生效计划。</div></div><span className={"tag " + (dirty ? "orange" : saved ? "green" : "gray")}>{dirty ? "有未保存修改" : saved ? "草稿已暂存" : "与当前版本一致"}</span></div>
         <div className="grid two"><div><label className="form-label">每个平台默认选题数</label><input className="field" type="number" min={1} max={50} value={draft.topic_count_per_platform} onChange={(e) => changeDraft({ ...draft, topic_count_per_platform: Math.max(1, Number(e.target.value) || 1) })}/><label className="form-label" style={{ marginTop: 12 }}>关联目标</label><select className="field" value={draft.cadence?.goal_id ?? ""} onChange={(e) => changeDraft({ ...draft, cadence: { ...draft.cadence, goal_id: e.target.value || undefined } })}><option value="">暂不关联</option>{goals.map((g) => <option key={g.id} value={g.id}>{g.goal_text}</option>)}</select><label className="form-label" style={{ marginTop: 12 }}>内容形式</label><select className="field" value={draft.content_format} onChange={(e) => changeDraft({ ...draft, content_format: e.target.value })}><option value="image_text">图文</option><option value="video">视频</option><option value="mixed">混合</option></select></div><div><label className="form-label">启用平台</label><div className="plan-platform-toggles">{ALL_PLATFORMS.map((p) => <label className="plan-platform-toggle" key={p}><input type="checkbox" checked={draft.enabled_platforms.includes(p)} onChange={(e) => changeDraft({ ...draft, enabled_platforms: e.target.checked ? [...draft.enabled_platforms, p] : draft.enabled_platforms.filter((v) => v !== p) })}/><span>{platformMeta(p).label}</span></label>)}</div><label className="form-label" style={{ marginTop: 12 }}>选题方向配额</label>{Object.entries(draft.dimension_allocation).map(([name, count]) => <div className="plan-dimension-row" key={name}><span>{name}</span><input className="field" type="number" min={0} value={count} onChange={(e) => changeDraft({ ...draft, dimension_allocation: { ...draft.dimension_allocation, [name]: Math.max(0, Number(e.target.value) || 0) } })}/><button className="btn sm" onClick={() => { const next = { ...draft.dimension_allocation }; delete next[name]; changeDraft({ ...draft, dimension_allocation: next }); }}>移除</button></div>)}<button className="btn sm" style={{ marginTop: 8 }} onClick={() => { const name = window.prompt("输入选题方向名称"); if (name?.trim()) changeDraft({ ...draft, dimension_allocation: { ...draft.dimension_allocation, [name.trim()]: 1 } }); }}>＋ 添加方向</button></div></div>
-        <div className="plan-form-actions"><button className="btn" onClick={resetDraft} disabled={!dirty && !saved}>放弃修改</button><button className="btn primary" onClick={saveDraft} disabled={!dirty}>保存草稿</button><button className="btn" onClick={() => void submitMasterReview()} disabled={!masterDraftVersionId}>审核并生效</button></div>
+        <div className="plan-form-actions"><button className="btn" onClick={resetDraft} disabled={!dirty && !saved}>放弃修改</button><button className="btn primary" onClick={saveDraft} disabled={!dirty}>保存草稿</button><button className="btn" onClick={() => void submitMasterReview()} disabled={!masterDraftVersionId}>审核并生效</button><button className="btn danger" onClick={() => void deleteMasterPlan()} disabled={!masterVersionId || dirty || saved}>删除当前母计划并恢复上一版本</button></div>
         {data.stale_rounds.length > 0 && <div className="note" style={{ marginTop: 12, color: "var(--orange)" }}>{data.stale_rounds.length} 个活跃轮次仍基于旧计划，可到内容生产 → 轮次状态查看。</div>}
       </div>
       <div className="panel"><div className="panel-head"><div><div className="panel-title">版本历史</div><div className="panel-sub">来自服务端 signature_history；可查看历史计划快照。</div></div><span className="tag gray">{data.history.length} 条记录</span></div>{data.history.length === 0 ? <EmptyHint next="保存母计划后，系统会记录计划签名">暂无版本历史</EmptyHint> : <div className="table-wrap"><table><thead><tr><th>版本</th><th>关联范围</th><th>来源</th><th>记录时间</th><th>操作</th></tr></thead><tbody>{data.history.map((h, i) => <tr key={h.plan_signature + i}><td><code>{h.plan_signature.slice(0, 14)}…</code></td><td>{h.round_number != null ? "第 " + h.round_number + " 轮" : h.round_id != null ? "历史轮次" : "主计划"}</td><td>{h.author ?? "系统"}</td><td>{h.created_at}</td><td><button className="btn sm" onClick={() => setVersion(h)}>查看快照</button></td></tr>)}</tbody></table></div>}{version && <div className="plan-version-detail"><div className="panel-head"><b>版本快照 · {version.plan_signature.slice(0, 14)}…</b><button className="btn sm" onClick={() => setVersion(null)}>关闭</button></div>{snapshot(version) ? <div className="plan-version-grid"><span>默认篇数：{snapshot(version)?.topic_count_per_platform}</span><span>启用平台：{snapshot(version)?.enabled_platforms.map((p) => platformMeta(p as Platform).label).join("、")}</span><span>内容形式：{snapshot(version)?.content_format}</span><span>方向配额：{Object.entries(snapshot(version)?.dimension_allocation ?? {}).map(([k,v]) => k + " " + v).join("、") || "未设置"}</span></div> : <div className="note">历史快照无法解析。</div>}</div>}</div>
@@ -276,9 +352,12 @@ export default function PlanCenter() {
       {editingChild && <div className="panel"><div className="panel-head"><b>编辑子计划 · {platformMeta(editingChild.platform).label}</b><button className="btn sm" onClick={() => setEditingChild(null)}>取消</button></div><label className="form-label">名称</label><input className="field" value={editingChild.name} onChange={(e) => setEditingChild({ ...editingChild, name: e.target.value })}/><label className="form-label" style={{ marginTop: 10 }}>方向</label><textarea className="field" rows={3} value={editingChild.direction} onChange={(e) => setEditingChild({ ...editingChild, direction: e.target.value })}/><div className="note">子计划总目标篇数由各阶段目标合计；请在「阶段管理」中调整阶段篇数。</div><div className="plan-form-actions"><button className="btn primary" onClick={saveChild}>保存修改</button></div></div>}
     </>}
 
-    {!loading && !error && tab === "stages" && <div className="panel"><div className="panel-head"><div><div className="panel-title">阶段管理</div><div className="panel-sub">按阶段管理方向、目标篇数、时间和完成条件；不使用复杂步骤或依赖图。</div></div><div className="head-actions"><button className="btn" onClick={() => setShowStageHistory((v) => !v)}>{showStageHistory ? "返回当前阶段" : "查看历史阶段"}</button><button className="btn primary" onClick={openStageForm}>＋ 新建阶段</button></div></div><div className="note">阶段变更会创建不可变子计划草稿版本；需要重新审核后才生效。已确认发布数来自阶段发布统计。</div><div className="form-row"><label className="form-label" htmlFor="stage-subplan-select">所属平台子计划</label><select id="stage-subplan-select" className="field" value={selectedChildId} onChange={(e) => { setSelectedChildId(e.target.value); const child = children.find((item) => item.id === e.target.value); setStages((child?.stageRecords ?? []).map((stage) => ({ id: String(stage.id), name: stage.title, direction: stage.direction ?? "", count: Number(stage.target_count), start: stage.start_date ?? "", end: stage.end_date ?? "", rule: stage.completion_condition ?? "", status: stage.status === "in_progress" ? "active" : stage.status, confirmed: Number(stage.confirmed_published_count ?? 0) }))); setShowStageHistory(false); }}><option value="">请选择子计划</option>{children.map((child) => <option key={child.id} value={child.id}>{platformMeta(child.platform).label} · {child.name}</option>)}</select></div>{stages.filter((s) => showStageHistory ? s.status === "completed" || s.status === "paused" || s.status === "cancelled" : s.status === "pending" || s.status === "active").length === 0 ? <EmptyHint next="新建阶段并配置方向、篇数、时间段和完成条件">{showStageHistory ? "暂无历史阶段" : "暂无当前阶段"}</EmptyHint> : <div className="plan-stage-list">{stages.filter((s) => showStageHistory ? s.status === "completed" || s.status === "paused" || s.status === "cancelled" : s.status === "pending" || s.status === "active").map((s) => <div className="plan-stage-card" key={s.id}><div className="panel-head"><div><b>{s.name}</b><div className="tiny">{s.start} — {s.end}</div></div><span className="tag gray">{stageLabels[s.status]}</span></div><p>{s.direction || "未填写方向"}</p><div className="plan-stage-metrics"><div><b>{s.count}</b><small>计划篇数</small></div><div><b>{s.confirmed}</b><small>已确认发布</small></div><div><b>{Math.min(100, Math.round(s.confirmed / Math.max(1, s.count) * 100))}%</b><small>发布目标进度</small></div></div><div className="tiny">完成条件：{s.rule}</div><div className="plan-form-actions"><button className="btn sm" onClick={() => setEditingStage({ ...s })}>编辑</button><button className="btn sm danger" onClick={() => void deleteStage(s)}>删除</button></div></div>)}</div>}
-      {stageForm && <div className="plan-stage-editor"><div className="panel-head"><b>新建阶段</b><button className="btn sm" onClick={() => setStageForm(false)}>取消</button></div><div className="grid two"><div><label className="form-label">阶段名称</label><input className="field" value={stageName} onChange={(e) => setStageName(e.target.value)}/><label className="form-label" style={{ marginTop: 10 }}>选题方向</label><textarea className="field" rows={3} value={stageDirection} onChange={(e) => setStageDirection(e.target.value)}/></div><div><label className="form-label">目标篇数</label><input className="field" type="number" min={1} value={stageCount} onChange={(e) => setStageCount(Math.max(1, Number(e.target.value) || 1))}/><div className="grid two"><div><label className="form-label">开始日期</label><input className="field" type="date" value={stageStart} onChange={(e) => setStageStart(e.target.value)}/></div><div><label className="form-label">结束日期</label><input className="field" type="date" value={stageEnd} onChange={(e) => setStageEnd(e.target.value)}/></div></div><label className="form-label" style={{ marginTop: 10 }}>完成条件</label><input className="field" value={stageRule} onChange={(e) => setStageRule(e.target.value)}/></div></div><div className="plan-form-actions"><button className="btn primary" onClick={createStage}>保存阶段草稿</button></div></div>}
-      {editingStage && <div className="plan-stage-editor"><div className="panel-head"><b>编辑阶段 · {editingStage.name}</b><button className="btn sm" onClick={() => setEditingStage(null)}>取消</button></div><label className="form-label">阶段名称</label><input className="field" value={editingStage.name} onChange={(e) => setEditingStage({ ...editingStage, name: e.target.value })}/><label className="form-label" style={{ marginTop: 10 }}>选题方向</label><textarea className="field" rows={3} value={editingStage.direction} onChange={(e) => setEditingStage({ ...editingStage, direction: e.target.value })}/><label className="form-label" style={{ marginTop: 10 }}>目标篇数</label><input className="field" type="number" min={1} value={editingStage.count} onChange={(e) => setEditingStage({ ...editingStage, count: Math.max(1, Number(e.target.value) || 1) })}/><div className="grid two"><div><label className="form-label">开始日期</label><input className="field" type="date" value={editingStage.start} onChange={(e) => setEditingStage({ ...editingStage, start: e.target.value })}/></div><div><label className="form-label">结束日期</label><input className="field" type="date" value={editingStage.end} onChange={(e) => setEditingStage({ ...editingStage, end: e.target.value })}/></div></div><label className="form-label" style={{ marginTop: 10 }}>完成条件</label><input className="field" value={editingStage.rule} onChange={(e) => setEditingStage({ ...editingStage, rule: e.target.value })}/><div className="plan-form-actions"><button className="btn primary" onClick={saveStage}>保存修改</button></div></div>}
+    {!loading && !error && tab === "stages" && <div className="panel"><div className="panel-head"><div><div className="panel-title">阶段管理</div><div className="panel-sub">按策略步骤管理目标、问题、执行方法、依赖、进入条件、预期结果与实际效果。</div></div><div className="head-actions"><button className="btn" onClick={() => setShowStageHistory((v) => !v)}>{showStageHistory ? "返回当前阶段" : "查看历史阶段"}</button><button className="btn primary" onClick={openStageForm}>＋ 新建阶段</button></div></div><div className="note">阶段变更会创建不可变子计划草稿版本；需要重新审核后才生效。已确认发布数来自阶段发布统计。</div><div className="form-row"><label className="form-label" htmlFor="stage-subplan-select">所属平台子计划</label><select id="stage-subplan-select" className="field" value={selectedChildId} onChange={(e) => { setSelectedChildId(e.target.value); const child = children.find((item) => item.id === e.target.value); setStages((child?.stageRecords ?? []).map((stage) => ({ id: String(stage.id), name: stage.title, direction: stage.direction ?? "", count: Number(stage.target_count), start: stage.start_date ?? "", end: stage.end_date ?? "", rule: stage.completion_condition ?? "", status: stage.status === "in_progress" ? "active" : stage.status, confirmed: Number(stage.confirmed_published_count ?? 0), strategyGoal: stage.strategy_goal ?? "", currentProblem: stage.current_problem ?? "", executionStrategy: stage.execution_strategy ?? "", prerequisites: stage.prerequisites ?? "", inputInfo: stage.input_info ?? "", expectedResult: stage.expected_result ?? "", completionCriteria: stage.completion_criteria ?? stage.completion_condition ?? "", effectEvaluation: stage.effect_evaluation ?? "", entryCondition: stage.entry_condition ?? "", entryConditionMet: Number(stage.entry_condition_met ?? 1) !== 0, dependencies: stage.dependencies ?? [], latestOutcome: stage.latest_outcome }))); setShowStageHistory(false); }}><option value="">请选择子计划</option>{children.map((child) => <option key={child.id} value={child.id}>{platformMeta(child.platform).label} · {child.name}</option>)}</select></div>{stages.filter((s) => showStageHistory ? s.status === "completed" || s.status === "paused" || s.status === "cancelled" : s.status === "pending" || s.status === "active").length === 0 ? <EmptyHint next="新建阶段并配置方向、篇数、时间段和完成条件">{showStageHistory ? "暂无历史阶段" : "暂无当前阶段"}</EmptyHint> : <div className="plan-stage-list">{stages.filter((s) => showStageHistory ? s.status === "completed" || s.status === "paused" || s.status === "cancelled" : s.status === "pending" || s.status === "active").map((s) => <div className="plan-stage-card" key={s.id}><div className="panel-head"><div><b>{s.name}</b><div className="tiny">{s.start} — {s.end}</div></div><span className="tag gray">{stageLabels[s.status]}</span></div><p>{s.direction || "未填写方向"}</p><div className="plan-stage-metrics"><div><b>{s.count}</b><small>计划篇数</small></div><div><b>{s.confirmed}</b><small>已确认发布</small></div><div><b>{Math.min(100, Math.round(s.confirmed / Math.max(1, s.count) * 100))}%</b><small>发布目标进度</small></div></div><div className="tiny">完成条件：{s.rule}</div>{s.strategyGoal && <div className="tiny">策略目标：{s.strategyGoal}</div>}{s.executionStrategy && <p>{s.executionStrategy}</p>}{s.dependencies.length > 0 && <div className="tiny">前置步骤：{s.dependencies.join("、")}</div>}{s.latestOutcome && <div className="note">最近实际结果：{JSON.stringify(s.latestOutcome.result)} · {s.latestOutcome.evaluation}</div>}<div className="plan-form-actions"><button className="btn sm" onClick={() => setEditingStage({ ...s })}>编辑策略</button><button className="btn sm" disabled={s.status !== "completed"} onClick={() => void recordStageOutcome(s)}>记录实际结果</button><button className="btn sm" disabled={stages.findIndex((v) => v.id === s.id) === 0} onClick={() => void moveStage(s.id, -1)}>上移</button><button className="btn sm" disabled={stages.findIndex((v) => v.id === s.id) === stages.length - 1} onClick={() => void moveStage(s.id, 1)}>下移</button><button className="btn sm danger" onClick={() => void deleteStage(s)}>删除</button></div></div>)}</div>}
+      {stageForm && <div className="plan-stage-editor"><div className="panel-head"><b>新建阶段</b><button className="btn sm" onClick={() => setStageForm(false)}>取消</button></div><div className="grid two"><div><label className="form-label">阶段名称</label><input className="field" value={stageName} onChange={(e) => setStageName(e.target.value)}/><label className="form-label" style={{ marginTop: 10 }}>选题方向</label><textarea className="field" rows={3} value={stageDirection} onChange={(e) => setStageDirection(e.target.value)}/></div><div><label className="form-label">目标篇数</label><input className="field" type="number" min={1} value={stageCount} onChange={(e) => setStageCount(Math.max(1, Number(e.target.value) || 1))}/><div className="grid two"><div><label className="form-label">开始日期</label><input className="field" type="date" value={stageStart} onChange={(e) => setStageStart(e.target.value)}/></div><div><label className="form-label">结束日期</label><input className="field" type="date" value={stageEnd} onChange={(e) => setStageEnd(e.target.value)}/></div></div><label className="form-label" style={{ marginTop: 10 }}>完成条件</label><input className="field" value={stageRule} onChange={(e) => setStageRule(e.target.value)}/></div></div>
+      <div className="grid two" style={{ marginTop: 12 }}><div><label className="form-label">策略目标</label><textarea className="field" rows={2} value={stageStrategyGoal} onChange={(e) => setStageStrategyGoal(e.target.value)}/><label className="form-label">当前问题</label><textarea className="field" rows={2} value={stageCurrentProblem} onChange={(e) => setStageCurrentProblem(e.target.value)}/><label className="form-label">执行策略</label><textarea className="field" rows={3} value={stageExecutionStrategy} onChange={(e) => setStageExecutionStrategy(e.target.value)}/><label className="form-label">前置条件</label><textarea className="field" rows={2} value={stagePrerequisites} onChange={(e) => setStagePrerequisites(e.target.value)}/></div><div><label className="form-label">输入信息</label><textarea className="field" rows={2} value={stageInputInfo} onChange={(e) => setStageInputInfo(e.target.value)}/><label className="form-label">预期结果</label><textarea className="field" rows={2} value={stageExpectedResult} onChange={(e) => setStageExpectedResult(e.target.value)}/><label className="form-label">效果评估方法</label><textarea className="field" rows={2} value={stageEffectEvaluation} onChange={(e) => setStageEffectEvaluation(e.target.value)}/><label className="form-label">进入条件</label><textarea className="field" rows={2} value={stageEntryCondition} onChange={(e) => setStageEntryCondition(e.target.value)}/><label className="plan-platform-toggle"><input type="checkbox" checked={stageEntryConditionMet} onChange={(e) => setStageEntryConditionMet(e.target.checked)}/>进入条件已满足</label><label className="form-label">前置步骤</label><select className="field" multiple value={stageDependencies} onChange={(e) => setStageDependencies(Array.from(e.target.selectedOptions, (o) => o.value))}>{(children.find((item) => item.id === selectedChildId)?.stageRecords ?? []).map((v) => <option key={v.stage_key} value={v.stage_key}>{v.title}</option>)}</select></div></div><div className="plan-form-actions"><button className="btn primary" onClick={createStage}>保存阶段草稿</button></div></div>}
+      {editingStage && <div className="plan-stage-editor"><div className="panel-head"><b>编辑阶段 · {editingStage.name}</b><button className="btn sm" onClick={() => setEditingStage(null)}>取消</button></div><label className="form-label">阶段名称</label><input className="field" value={editingStage.name} onChange={(e) => setEditingStage({ ...editingStage, name: e.target.value })}/><label className="form-label" style={{ marginTop: 10 }}>选题方向</label><textarea className="field" rows={3} value={editingStage.direction} onChange={(e) => setEditingStage({ ...editingStage, direction: e.target.value })}/><label className="form-label" style={{ marginTop: 10 }}>目标篇数</label><input className="field" type="number" min={1} value={editingStage.count} onChange={(e) => setEditingStage({ ...editingStage, count: Math.max(1, Number(e.target.value) || 1) })}/><div className="grid two"><div><label className="form-label">开始日期</label><input className="field" type="date" value={editingStage.start} onChange={(e) => setEditingStage({ ...editingStage, start: e.target.value })}/></div><div><label className="form-label">结束日期</label><input className="field" type="date" value={editingStage.end} onChange={(e) => setEditingStage({ ...editingStage, end: e.target.value })}/></div></div><label className="form-label" style={{ marginTop: 10 }}>完成条件</label><input className="field" value={editingStage.rule} onChange={(e) => setEditingStage({ ...editingStage, rule: e.target.value, completionCriteria: e.target.value })}/>
+      <div className="grid two" style={{ marginTop: 12 }}><div><label className="form-label">策略目标</label><textarea className="field" rows={2} value={editingStage.strategyGoal} onChange={(e) => setEditingStage({ ...editingStage, strategyGoal: e.target.value })}/><label className="form-label">当前问题</label><textarea className="field" rows={2} value={editingStage.currentProblem} onChange={(e) => setEditingStage({ ...editingStage, currentProblem: e.target.value })}/><label className="form-label">执行策略</label><textarea className="field" rows={3} value={editingStage.executionStrategy} onChange={(e) => setEditingStage({ ...editingStage, executionStrategy: e.target.value })}/><label className="form-label">前置条件</label><textarea className="field" rows={2} value={editingStage.prerequisites} onChange={(e) => setEditingStage({ ...editingStage, prerequisites: e.target.value })}/></div>
+      <div><label className="form-label">输入信息</label><textarea className="field" rows={2} value={editingStage.inputInfo} onChange={(e) => setEditingStage({ ...editingStage, inputInfo: e.target.value })}/><label className="form-label">预期结果</label><textarea className="field" rows={2} value={editingStage.expectedResult} onChange={(e) => setEditingStage({ ...editingStage, expectedResult: e.target.value })}/><label className="form-label">效果评估方法</label><textarea className="field" rows={2} value={editingStage.effectEvaluation} onChange={(e) => setEditingStage({ ...editingStage, effectEvaluation: e.target.value })}/><label className="form-label">进入条件</label><textarea className="field" rows={2} value={editingStage.entryCondition} onChange={(e) => setEditingStage({ ...editingStage, entryCondition: e.target.value })}/><label className="form-label">前置步骤</label><select className="field" multiple value={editingStage.dependencies} onChange={(e) => setEditingStage({ ...editingStage, dependencies: Array.from(e.target.selectedOptions, (o) => o.value) })}>{(children.find((item) => item.id === selectedChildId)?.stageRecords ?? []).filter((v) => String(v.id) !== editingStage.id).map((v) => <option key={v.stage_key} value={v.stage_key}>{v.title}</option>)}</select><label className="plan-platform-toggle"><input type="checkbox" checked={editingStage.entryConditionMet} onChange={(e) => setEditingStage({ ...editingStage, entryConditionMet: e.target.checked })}/>进入条件已满足</label></div></div><div className="plan-form-actions"><button className="btn primary" onClick={saveStage}>保存修改</button></div></div>}
     </div>}
   </div>;
 }

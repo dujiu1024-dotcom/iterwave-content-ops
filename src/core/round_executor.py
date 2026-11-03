@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import uuid
@@ -34,7 +35,7 @@ from .config import PROJECT_ROOT
 
 from .timezone import business_now, storage_now
 from .task_context import bind_task_context
-from .task_progress import fail_current, start_progress, update_detail, update_step
+from .production_task_store import ProductionTaskStore
 from .kb_reader import KbReader  # noqa: F401 — 兼容旧引用
 from .topic_pool import load_pool
 from .persona import effective_persona
@@ -88,6 +89,38 @@ class RoundExecutor:
     # ------------------------------------------------------------------
 
     async def run(
+        self,
+        round_id: int,
+        topic_count: Optional[int] = None,
+        platform_values: Optional[list[str]] = None,
+        save_drafts: Optional[bool] = None,
+        feedback=None,
+        template_data: Optional[dict] = None,
+    ) -> dict:
+        """Execute the complete round under one shared image API budget."""
+        from .image_generation_budget import image_generation_run
+        policy = self.cfg.media_generation
+        with image_generation_run(
+            max_calls=getattr(policy, "max_api_calls_per_run", 30),
+            timeout_seconds=getattr(policy, "hard_timeout_seconds", 300),
+            max_concurrency=getattr(policy, "max_concurrency", 2),
+        ) as budget:
+            report = await self._run_with_image_budget(
+                round_id, topic_count, platform_values, save_drafts, feedback, template_data,
+            )
+            if isinstance(report, dict):
+                report["image_generation_budget"] = budget.snapshot()
+                try:
+                    self.conn.execute(
+                        "UPDATE spiral_rounds SET run_report = ? WHERE id = ?",
+                        (json.dumps(report, ensure_ascii=False, default=str), round_id),
+                    )
+                    self.conn.commit()
+                except Exception:
+                    logger.exception("图片预算用量写入轮次报告失败 round=%s", round_id)
+            return report
+
+    async def _run_with_image_budget(
         self,
         round_id: int,
         topic_count: Optional[int] = None,
@@ -195,6 +228,7 @@ class RoundExecutor:
             self._plan_source = "subplan_version"
             self._plan_sig = round_row["plan_signature"]
             self._subplan_context = {
+                "master_plan_version_id": round_row["master_plan_version_id"],
                 "sub_plan_id": round_row["sub_plan_id"],
                 "sub_plan_version_id": round_row["sub_plan_version_id"],
                 "stage_id": round_row["sub_plan_stage_id"],
@@ -291,12 +325,27 @@ class RoundExecutor:
                 stage = self._subplan_context["stage"]
                 subplan = self._subplan_context["subplan"]
                 context_lines = [
-                    "已审核平台子计划执行约束：内容必须符合当前子计划和阶段方向。",
+                    "已审核平台子计划执行约束：内容必须符合当前子计划和策略步骤。",
                     f"子计划：{subplan.get('title') or ''}",
                     f"阶段：{stage.get('title') or ''}",
                     f"阶段方向：{stage.get('direction') or ''}",
-                    f"阶段完成条件：{stage.get('completion_condition') or ''}",
+                    f"策略目标：{stage.get('strategy_goal') or ''}",
+                    f"当前问题：{stage.get('current_problem') or ''}",
+                    f"执行策略：{stage.get('execution_strategy') or ''}",
+                    f"前置条件：{stage.get('prerequisites') or ''}",
+                    f"输入信息：{stage.get('input_info') or ''}",
+                    f"预期结果：{stage.get('expected_result') or ''}",
+                    f"完成标准：{stage.get('completion_criteria') or stage.get('completion_condition') or ''}",
+                    f"效果评估方法：{stage.get('effect_evaluation') or ''}",
+                    f"进入条件：{stage.get('entry_condition') or ''}",
                 ]
+                for dependency_key, outcome in (stage.get("dependency_outcomes") or {}).items():
+                    context_lines.append(
+                        f"前置步骤 {dependency_key} 实际结果："
+                        + json.dumps(outcome.get("result"), ensure_ascii=False, sort_keys=True)
+                    )
+                    if outcome.get("evaluation"):
+                        context_lines.append(f"前置步骤 {dependency_key} 效果评价：{outcome['evaluation']}")
                 for key in ("positioning", "audience", "content_strategy", "tone", "key_points"):
                     value = subplan.get(key)
                     if value:
@@ -907,11 +956,10 @@ class RoundExecutor:
                 "status": "forced_enabled",
                 "reason": "图文内容必须包含视觉素材；旧编排中的关闭设置不再跳过出图",
             })
-        card_first = bool(orch and orch.card_before_gate and make_cards)
-        update_step(
-            "copywriting", status="running",
-            detail=f"准备生成：{len(scored)} 个选题 × {len(platforms)} 个平台",
-        )
+        card_first = False
+        task_store = ProductionTaskStore(self.conn) if self._subplan_context else None
+        if orch and orch.card_before_gate:
+            report["steps"].append({"step": "image_card_order", "status": "overridden", "reason": "图片生成必须在 G2 内容质量检查通过后执行；忽略 card_first 配置"})
         for rank, st in enumerate(scored):
             if self._subplan_context:
                 confirmed = int(self.conn.execute(
@@ -949,6 +997,55 @@ class RoundExecutor:
                         f"{platform.display_name} {_SKIP_REASON_CIRCUIT}"
                     )
                     continue
+
+                # Persist each strategy-step/topic/platform variant as an independently retryable task.
+                production_task_id = None
+                if task_store is not None:
+                    stage = self._subplan_context["stage"]
+                    strategy_step_id = str(stage.get("stage_key") or "").strip()
+                    if not strategy_step_id:
+                        raise RoundPreconditionError("当前策略步骤缺少稳定 stage_key，拒绝创建生产任务")
+                    task_store.recover_expired_tasks(round_id=round_id)
+                    task = task_store.create_task(
+                        round_id=round_id,
+                        master_plan_version_id=int(self._subplan_context["master_plan_version_id"]),
+                        sub_plan_id=str(self._subplan_context["sub_plan_id"]),
+                        sub_plan_version_id=int(self._subplan_context["sub_plan_version_id"]),
+                        strategy_step_id=strategy_step_id,
+                        platform=platform.value,
+                        task_ordinal=rank + 1,
+                        idempotency_key=(
+                            f"round:{round_id}:step:{strategy_step_id}:"
+                            f"topic:{topic.id}:platform:{platform.value}"
+                        ),
+                        input_snapshot={
+                            "topic": {
+                                "id": topic.id, "title": topic.title,
+                                "summary": topic.summary, "dimension": topic.dimension,
+                            },
+                            "strategy_step": {
+                                "stage_id": self._subplan_context["stage_id"],
+                                "title": stage.get("title"),
+                                "strategy_goal": stage.get("strategy_goal"),
+                                "execution_strategy": stage.get("execution_strategy"),
+                                "expected_result": stage.get("expected_result"),
+                            },
+                            "template": template_data,
+                        },
+                    )
+                    if task["status"] != "pending":
+                        existing = task_store.get_content_for_task(task["id"])
+                        if existing is not None and task["status"] == "running":
+                            task_store.complete_task(task["id"], content_id=str(existing["id"]))
+                        raise RoundPreconditionError(
+                            f"生产任务 {task['id']} 当前状态为 {task['status']}，"
+                            "拒绝重复生成；请先恢复或显式重试该任务"
+                        )
+                    task = task_store.claim_task(
+                        task["id"], worker_id=f"round-executor-{round_id}",
+                        lease_seconds=3600,
+                    )
+                    production_task_id = task["id"]
 
                 # ③ 文案生成 + ④ G2 终极目标检查（R2：FAIL 丢弃重生成，最多 2 次；
                 #    ERROR 不能默认通过）
@@ -1001,7 +1098,11 @@ class RoundExecutor:
                             cfg=self.cfg, settings=image_settings,
                             allow_fallback=image_settings.get("fallback_enabled"),
                             brand_profile=self._visual_brand_profile(),
-                            allow_ocr_failure=True,
+                            task_id=hashlib.sha256(json.dumps({
+                                "round_id": round_id, "platform": platform.value, "topic_id": topic.id,
+                                "title": title, "subtitle": topic.dimension, "body": body, "image_settings": image_settings,
+                                "brand_profile": self._visual_brand_profile(),
+                            }, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
                         )
                         cover_path = str(image_paths[0])
                         body_page_count = len(image_paths) - 1
@@ -1053,6 +1154,11 @@ class RoundExecutor:
                     )
                     report["errors"].append(msg)
                     self._notify_guard_give_up(platform, topic.title, msg)
+                    if production_task_id:
+                        task_store.fail_task(
+                            production_task_id, error_code="quality_gate_rejected",
+                            error_message=msg, retryable=False,
+                        )
                     continue
 
                 title, body, tags, outcome = accepted
@@ -1072,7 +1178,11 @@ class RoundExecutor:
                             cfg=self.cfg, settings=image_settings,
                             allow_fallback=image_settings.get("fallback_enabled"),
                             brand_profile=self._visual_brand_profile(),
-                            allow_ocr_failure=True,
+                            task_id=hashlib.sha256(json.dumps({
+                                "round_id": round_id, "platform": platform.value, "topic_id": topic.id,
+                                "title": title, "body": body, "image_settings": image_settings,
+                                "brand_profile": self._visual_brand_profile(),
+                            }, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
                         )
                         cover_path = str(image_paths[0])
                         body_page_count = len(image_paths) - 1
@@ -1142,6 +1252,12 @@ class RoundExecutor:
                     stage_target = int(self._subplan_context["stage"].get("target_count") or 0)
                     if confirmed + int(report["contents_created"]) >= stage_target:
                         report["errors"].append("生成期间阶段确认发布目标已达成，丢弃当前候选内容")
+                        if production_task_id:
+                            task_store.fail_task(
+                                production_task_id, error_code="stage_quota_reached",
+                                error_message="阶段确认发布目标已达成，当前候选内容未落库",
+                                retryable=False,
+                            )
                         continue
                 # ⑥ 写 contents（DB CHECK 只允许 degraded/media_asset/generated）
                 has_ai = bool(cover_path) or body_ai_count > 0
@@ -1154,16 +1270,18 @@ class RoundExecutor:
                 else:
                     visual_reason = "AI 完整卡片生成失败，不允许模板降级"
                 visual_reason += (
-                    "；OCR 硬门通过，仍需人工审核" if visual_ocr.get("status") == "passed"
-                    else "；OCR 硬门未通过或不可用，需人工复核"
+                    "；OCR 粗检通过：已检查主要文字、数字和关键文本；OCR 不能保证逐字准确，最终发布前仍需人工审核"
+                    if visual_ocr.get("status") == "passed"
+                    else "；OCR 粗检未通过或不可用，需人工复核"
                 )
                 content_id = f"content-{uuid.uuid4().hex[:12]}"
                 with self.conn:
                     self.conn.execute(
                         "INSERT INTO contents (id, round_id, topic_id, platform, title, body, "
                         "tags, image_paths, word_count, card_style, guard_outcome, guard_reason, "
-                        "visual_status, visual_reason, template_id, template_version, template_snapshot_json) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "visual_status, visual_reason, template_id, template_version, template_snapshot_json, "
+                        "production_task_id) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             content_id, round_id, topic.id, platform.value, title, body,
                             json.dumps(tags, ensure_ascii=False),
@@ -1173,8 +1291,11 @@ class RoundExecutor:
                             template_data["id"] if template_data else None,
                             template_data["version"] if template_data else None,
                             json.dumps(template_data, ensure_ascii=False) if template_data else None,
+                            production_task_id,
                         ),
                     )
+                if production_task_id:
+                    task_store.complete_task(production_task_id, content_id=content_id)
 
                 # 视觉版本与逐页任务留痕。版本绑定最终正文哈希，单页任务可独立追踪。
                 if image_paths:
@@ -1295,6 +1416,19 @@ class RoundExecutor:
             ),
         )
         self.conn.commit()
+        if task_store is not None:
+            stage = self._subplan_context["stage"]
+            progress = task_store.step_progress(
+                str(stage["stage_key"]),
+                sub_plan_id=str(self._subplan_context["sub_plan_id"]),
+                sub_plan_version_id=int(self._subplan_context["sub_plan_version_id"]),
+            )
+            report["strategy_step_progress"] = progress
+            report["steps"].append({
+                "step": "production_tasks",
+                "strategy_step_id": str(stage["stage_key"]),
+                **progress,
+            })
         return rows
 
     # ------------------------------------------------------------------
@@ -1359,15 +1493,30 @@ class RoundExecutor:
             )
             try:
                 result = await adapter.save_draft(payload)
-            except Exception as exc:  # noqa: BLE001 — 单篇失败不影响整轮
-                logger.exception("存草稿异常 platform=%s", platform.value)
-                report["drafts_failed"] += 1
-                safe_error = "平台存草稿操作异常，请检查登录状态、网络连接或平台页面后重试"
-                self._mark_draft_failed(row["draft_id"], safe_error)
-                self._notify_failed(
-                    platform, row["title"], safe_error,
-                    draft_id=row["draft_id"], round_id=round_id,
+            except Exception:  # noqa: BLE001 — 调用期间异常时，平台侧结果可能不确定
+                logger.exception("存草稿调用异常，转人工核实 platform=%s draft=%s",
+                                 platform.value, row["draft_id"])
+                # 即使适配器抛出异常，也不能推断平台未保存：请求可能已到达平台，
+                # 仅确认响应在本地丢失。保留 draft_pending 并阻止自动重试，避免重复草稿。
+                from src.core.timezone import storage_now
+                safe_error = "平台存草稿调用异常，保存结果不确定；请先到平台草稿箱核实，确认未保存后再恢复"
+                self.conn.execute(
+                    "INSERT INTO draft_save_verifications "
+                    "(draft_id, status, attempted_at, platform_draft_id, error_msg) "
+                    "VALUES (?, 'pending_verify', ?, NULL, ?) "
+                    "ON CONFLICT(draft_id) DO UPDATE SET "
+                    "status='pending_verify', attempted_at=excluded.attempted_at, "
+                    "verified_at=NULL, platform_draft_id=NULL, error_msg=excluded.error_msg, note=NULL",
+                    (row["draft_id"], storage_now().isoformat(timespec="seconds"), safe_error),
                 )
+                self.conn.commit()
+                report.setdefault("drafts_needs_human_verify", 0)
+                report["drafts_needs_human_verify"] += 1
+                if self.notifier:
+                    self.notifier.emit(
+                        "needs_human_verify",
+                        f"{platform.display_name} 存草稿结果不确定（需人工核实）：{row['title'][:30]}",
+                    )
                 continue
 
             if result.success:
