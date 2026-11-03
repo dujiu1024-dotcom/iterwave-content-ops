@@ -380,7 +380,31 @@ def test_transactional_route_respects_own_transaction_marker():
 
     managed = api_main.manages_own_transaction(endpoint)
     route = api_main.TransactionalAPIRoute("/managed", managed, methods=["POST"])
-    assert route.endpoint is managed
+    assert route.endpoint is not managed
+    assert getattr(route.endpoint, "_manages_own_transaction", False)
 
     plain_route = api_main.TransactionalAPIRoute("/plain", endpoint, methods=["POST"])
     assert plain_route.endpoint is not endpoint
+
+
+
+def test_sync_get_endpoint_finalizer_rolls_back_implicit_write(tmp_path):
+    raw = sqlite3.connect(tmp_path / "get-write.db", check_same_thread=False)
+    conn = _locked(raw)
+    conn.execute("CREATE TABLE t (v INTEGER)")
+    conn.commit()
+    saved = dict(api_main._g_ctx)
+    api_main._g_ctx.clear()
+    api_main._g_ctx["conn"] = conn
+
+    def legacy_get_route():
+        conn.execute("INSERT INTO t VALUES (7)")
+        return {"ok": True}
+
+    try:
+        route = api_main.TransactionalAPIRoute("/legacy-get", legacy_get_route, methods=["GET"])
+        assert route.endpoint() == {"ok": True}
+        assert conn.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 0
+    finally:
+        api_main._g_ctx.clear()
+        api_main._g_ctx.update(saved)
