@@ -19,12 +19,14 @@ export default function Calendar() {
   const { showToast, withPending, isPending } = useApp();
   const today = new Date();
   const [cursorDate, setCursorDate] = useState(() => new Date(today));
-  const [viewMode, setViewMode] = useState<"month" | "week" | "day">("week");
+  const [viewMode, setViewMode] = useState<"month" | "week" | "day">("month");
   const year = cursorDate.getFullYear();
   const month = cursorDate.getMonth();
 
   const [events, setEvents] = useState<ScheduleEvent[]>([]);
   const [platformFilter, setPlatformFilter] = useState<Platform | "all">("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [searchQuery, setSearchQuery] = useState("");
   const [plans, setPlans] = useState<ContentPlan[]>([]);
   const [planDetail, setPlanDetail] = useState<(ContentPlan & { drafts: Array<{ draft_id: string; platform: Platform; status: string; title: string; round_id: number | null; round_number: number | null }>; rounds: Array<{ round_id: number; round_number: number | null; task_id: string | null; created_at: string }> }) | null>(null);
   const [planDetailLoading, setPlanDetailLoading] = useState(false);
@@ -39,6 +41,9 @@ export default function Calendar() {
   const [editingPlanId, setEditingPlanId] = useState<string | null>(null);
   const [editingPlanVersion, setEditingPlanVersion] = useState<number | null>(null);
   const [unscheduled, setUnscheduled] = useState<UnscheduledDraft[]>([]);
+  const [unscheduledTotal, setUnscheduledTotal] = useState(0);
+  const [unscheduledPage, setUnscheduledPage] = useState(1);
+  const [loadingMoreUnscheduled, setLoadingMoreUnscheduled] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // 行内排期编辑：selected 为草稿 id，draftTime 为 datetime-local 值
@@ -104,15 +109,27 @@ export default function Calendar() {
     d.setDate(d.getDate() + (6 - d.getDay()) + 1);
     return d;
   }, [viewMode, visibleStart, year, month]);
+  const filteredEvents = useMemo(() => events.filter((event) =>
+    (statusFilter === "all" || event.status === statusFilter) &&
+    (!searchQuery.trim() || event.title.toLocaleLowerCase().includes(searchQuery.trim().toLocaleLowerCase()))
+  ), [events, statusFilter, searchQuery]);
+  const filteredPlans = useMemo(() => plans.filter((plan) =>
+    !searchQuery.trim() || plan.title.toLocaleLowerCase().includes(searchQuery.trim().toLocaleLowerCase())
+  ), [plans, searchQuery]);
+  const filteredUnscheduled = useMemo(() => unscheduled.filter((draft) =>
+    (platformFilter === "all" || draft.platform === platformFilter) &&
+    (statusFilter === "all" || draft.status === statusFilter) &&
+    (!searchQuery.trim() || (draft.title ?? "").toLocaleLowerCase().includes(searchQuery.trim().toLocaleLowerCase()))
+  ), [unscheduled, platformFilter, statusFilter, searchQuery]);
   const days = useMemo(() => {
     const result: { date: Date; key: string; events: ScheduleEvent[]; plans: ContentPlan[]; inMonth: boolean }[] = [];
     for (let d = new Date(visibleStart); d < visibleEndExclusive; d.setDate(d.getDate() + 1)) {
       const date = new Date(d);
       const key = _fmt(date);
-      result.push({ date, key, events: events.filter((event) => _eventDate(event) === key && (platformFilter === "all" || event.platform === platformFilter)), plans: plans.filter((plan) => plan.scheduled_date === key && (platformFilter === "all" || plan.platforms.length === 0 || plan.platforms.includes(platformFilter)) && (showArchivedPlans || (plan.status !== "cancelled" && plan.status !== "archived"))), inMonth: date.getMonth() === month });
+      result.push({ date, key, events: filteredEvents.filter((event) => _eventDate(event) === key && (platformFilter === "all" || event.platform === platformFilter)), plans: filteredPlans.filter((plan) => plan.scheduled_date === key && (platformFilter === "all" || plan.platforms.length === 0 || plan.platforms.includes(platformFilter)) && (showArchivedPlans || (plan.status !== "cancelled" && plan.status !== "archived"))), inMonth: date.getMonth() === month });
     }
     return result;
-  }, [visibleStart, visibleEndExclusive, events, plans, month, showArchivedPlans, platformFilter]);
+  }, [visibleStart, visibleEndExclusive, filteredEvents, filteredPlans, month, showArchivedPlans, platformFilter]);
 
   const openPlanDetails = async (planId: string) => {
     setPlanDetailLoading(true);
@@ -183,10 +200,28 @@ export default function Calendar() {
       setEvents(r.items);
       setPlans(planResult.items);
       setUnscheduled(r.unscheduled ?? []);
+      setUnscheduledTotal(r.unscheduled_total ?? (r.unscheduled ?? []).length);
+      setUnscheduledPage(1);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadMoreUnscheduled = async () => {
+    if (loadingMoreUnscheduled || unscheduled.length >= unscheduledTotal) return;
+    setLoadingMoreUnscheduled(true);
+    try {
+      const nextPage = unscheduledPage + 1;
+      const result = await api.unscheduledScheduleDrafts(nextPage);
+      setUnscheduled((current) => [...current, ...result.items]);
+      setUnscheduledPage(result.page);
+      setUnscheduledTotal(result.total);
+    } catch (e) {
+      showToast(`加载更多待排期草稿失败：${e instanceof Error ? e.message : String(e)}`, "error");
+    } finally {
+      setLoadingMoreUnscheduled(false);
     }
   };
 
@@ -267,9 +302,9 @@ export default function Calendar() {
           <div className="eyebrow">内容生产 · 排期视图</div>
           <h1 className="page-title">内容排期日历</h1>
           <div className="page-desc">
-            以内容、平台和发布时间为核心查看排期；系统永不自动触发发布动作。计划归属字段接入后，将在此显示主计划、平台子计划和阶段。
+            按日期、平台、状态和标题查找内容；系统永不自动触发发布动作。
             {!loading && <span className="tag teal" style={{ marginLeft: 8 }}>
-              当前{viewMode === "month" ? "月" : viewMode === "week" ? "周" : "日"} {events.length} 条
+              当前视图 {filteredEvents.length} 篇
             </span>}
           </div>
         </div>
@@ -286,6 +321,10 @@ export default function Calendar() {
           <button className="btn sm" onClick={() => setCursorDate((d) => shiftCalendarDate(d, viewMode, 1))}>下一{viewMode === "month" ? "月" : viewMode === "week" ? "周" : "日"}</button>
           <input aria-label="选择日历日期" className="field calendar-date-picker" type="date" value={_fmt(cursorDate)} onChange={(e) => { if (e.target.value) { const [y, m, d] = e.target.value.split("-").map(Number); setCursorDate(new Date(y, m - 1, d)); } }} />
           <button className="btn sm primary" onClick={() => { setPlanDate(_fmt(cursorDate)); setPlanFormOpen(true); }}>＋ 新建计划</button>
+          <input className="field calendar-search" type="search" aria-label="搜索内容标题" placeholder="搜索标题…" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
+          <select className="field" aria-label="按状态筛选内容" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+            <option value="all">全部状态</option><option value="draft_pending">待存草稿</option><option value="draft_saved">草稿已存</option><option value="user_published">用户确认</option><option value="published">已发布</option>
+          </select>
           <select className="field" aria-label="按平台筛选排期" value={platformFilter} onChange={(e) => setPlatformFilter(e.target.value as Platform | "all")} style={{ maxWidth: 150 }}>
             <option value="all">全部平台</option>
             {ALL_PLATFORMS.map((p) => <option key={p} value={p}>{platformMeta(p).label}</option>)}
@@ -305,7 +344,7 @@ export default function Calendar() {
       </div>}
 
       <div className="note" style={{ marginBottom: 12, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-        <span>当前排期接口提供内容计划与草稿排期，尚未返回主计划版本、平台子计划 ID、阶段 ID；因此暂不显示未经确认的关联关系。</span>
+        <span>已加载 {filteredEvents.length} 篇内容（共 {events.length} 篇）；内容关联信息以实际生产轮次数据为准。</span>
         <button className="btn sm" onClick={() => { window.location.search = "?page=plan-center"; }}>打开计划管理</button>
       </div>
       <div className="panel">
@@ -338,7 +377,7 @@ export default function Calendar() {
                     </button>
                     <button type="button" className="calendar-day-add" aria-label={`在 ${d.key} 新建计划`} onClick={() => { setPlanDate(d.key); setPlanFormOpen(true); }}>＋</button>
                     {loading && <div className="loading" style={{ marginTop: 6, fontSize: 11, color: "var(--muted)" }}><div className="spinner" />加载中...</div>}
-                    {d.plans.slice(0, 1).map((plan) => (
+                    {d.plans.slice(0, 2).map((plan) => (
                       <button type="button" key={plan.id} className="calendar-plan-chip" title={`${plan.title} · ${plan.planned_count} 篇/平台`} onClick={() => void openPlanDetails(plan.id)}>
                         <strong>计划</strong><span>{plan.title}</span>
                       </button>
@@ -353,13 +392,13 @@ export default function Calendar() {
                           onClick={() => { setSelected({ id: e.id, title: e.title }); setDraftTime(_toLocalInput(e.scheduled || e.saved_at)); }}
                           style={{ borderLeft: `3px solid ${platformColors[e.platform] || "#666"}`, outline: selected?.id === e.id || targetDraftId === e.id ? "2px solid var(--blue)" : "none" }}>
                           <span className="calendar-event-title">{e.title}</span>
-                          <span className="calendar-event-meta">{e.scheduled ? e.scheduled.slice(11, 16) : "未排期"}{statusLabel[e.status] ? ` · ${statusLabel[e.status]}` : ""}</span>
+                          <span className="calendar-event-meta">{platformMeta(e.platform).label} · {e.scheduled ? e.scheduled.slice(11, 16) : "未排期"}{statusLabel[e.status] ? ` · ${statusLabel[e.status]}` : ""}</span>{e.stage_title && <span className="calendar-event-meta">{e.stage_title}</span>}
                         </button>
                       );
                     })}
-                    {(Math.max(0, d.plans.length - 1) + Math.max(0, d.events.length - 2) > 0) && (
+                    {(Math.max(0, d.plans.length - 2) + Math.max(0, d.events.length - 2) > 0) && (
                       <button type="button" className="calendar-more-link" onClick={() => { setCursorDate(d.date); setViewMode("day"); }}>
-                        还有 {Math.max(0, d.plans.length - 1) + Math.max(0, d.events.length - 2)} 项 · 查看当天
+                        还有 {Math.max(0, d.plans.length - 2) + Math.max(0, d.events.length - 2)} 项 · 查看当天
                       </button>
                     )}
                   </div>
@@ -399,7 +438,7 @@ export default function Calendar() {
                       onClick={() => { setSelected({ id: e.id, title: e.title }); setDraftTime(_toLocalInput(e.scheduled || e.saved_at)); }}>
                       <span className="calendar-agenda-time">{e.scheduled ? e.scheduled.slice(11, 16) : "—"}</span>
                       <span className="calendar-agenda-color" style={{ background: platformColors[e.platform] || "#666" }} />
-                      <span className="calendar-agenda-copy"><strong>{e.title}</strong><small>{platformMeta(e.platform).label} · {statusLabel[e.status] ?? e.status}</small></span>
+                      <span className="calendar-agenda-copy"><strong>{e.title}</strong><small>{platformMeta(e.platform).label} · {statusLabel[e.status] ?? e.status}{e.stage_title ? ` · ${e.stage_title}` : ""}</small></span>
                       <span className="calendar-agenda-action">{editable ? "编辑排期" : "不可编辑"}</span>
                     </button>
                   );
@@ -474,7 +513,6 @@ export default function Calendar() {
             </div>
             {planDetail.topic && <div className="note">{planDetail.topic}</div>}
             {planDetail.notes && <div className="note">备注：{planDetail.notes}</div>}
-            <div className="note" style={{ marginBottom: 12 }}><strong>计划归属</strong><div>主计划版本：待接入关联字段</div><div>平台子计划：待接入关联字段</div><div>所属阶段：待接入关联字段</div></div>
             <div className="calendar-plan-detail-grid">
               <div><strong>生产轮次（{planDetail.rounds.length}）</strong>
                 {planDetail.rounds.length ? planDetail.rounds.map((round) => <div className="calendar-plan-detail-row" key={round.round_id}>{round.round_number != null ? `第 ${round.round_number} 轮` : "轮次信息不可用"} · {round.task_id ? `任务 ${round.task_id.slice(0, 8)}` : "尚未入队"}</div>) : <div className="note">尚未启动生产</div>}
@@ -528,11 +566,11 @@ export default function Calendar() {
       <div className="panel">
         <div className="panel-head">
           <div>
-            <div className="panel-title"><span className="icon">◷</span>未排期草稿 · {unscheduled.length} 篇</div>
+            <div className="panel-title"><span className="icon">◷</span>未排期草稿 · {unscheduledTotal} 篇</div>
             <div className="panel-sub">还没有发布时间的草稿</div>
           </div>
         </div>
-        {unscheduled.length === 0 ? (
+        {unscheduledTotal === 0 ? (
           <EmptyHint next="到「内容生产 → 生产线」运行一轮并存草稿，草稿会出现在这里">当前没有待排期草稿</EmptyHint>
         ) : (
           <div className="table-wrap">
@@ -541,7 +579,7 @@ export default function Calendar() {
                 <tr><th>类型</th><th>标题</th><th>平台</th><th>状态</th><th>排期时间（北京时间）</th><th>操作</th></tr>
               </thead>
               <tbody>
-                {unscheduled.filter((d) => platformFilter === "all" || d.platform === platformFilter).map((d) => (
+                {filteredUnscheduled.map((d) => (
                   <tr key={d.id} style={targetDraftId === d.id ? { background: "var(--surface-2)", outline: "2px solid var(--blue)" } : undefined}>
                     <td style={{ fontSize: 11, color: "var(--subtle)" }}>草稿</td>
                     <td>{d.title ?? <span style={{ color: "var(--subtle)" }}>—</span>}</td>
@@ -571,8 +609,17 @@ export default function Calendar() {
                     </td>
                   </tr>
                 ))}
+                {filteredUnscheduled.length === 0 && <tr><td colSpan={6}>当前已加载草稿中没有符合筛选条件的内容。</td></tr>}
               </tbody>
             </table>
+          </div>
+        )}
+        {unscheduled.length < unscheduledTotal && (
+          <div className="calendar-load-more">
+            <span>已加载 {unscheduled.length} / {unscheduledTotal} 篇</span>
+            <button className="btn secondary sm" disabled={loadingMoreUnscheduled} onClick={loadMoreUnscheduled}>
+              {loadingMoreUnscheduled ? "加载中…" : "加载更多待排期草稿"}
+            </button>
           </div>
         )}
       </div>
