@@ -1539,20 +1539,50 @@ def _parse_schedule_time(raw: str) -> str:
 def _write_schedule(conn, draft_id: str, scheduled: Optional[str]) -> dict:
     """写 drafts.scheduled_publish_at。只允许 draft_pending / draft_saved 改排期。"""
     row = conn.execute(
-        "SELECT status FROM drafts WHERE id = ?", (draft_id,)
+        "SELECT status, platform FROM drafts WHERE id = ?", (draft_id,)
     ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail=f"草稿不存在：{draft_id}")
-    status = dict(row)["status"]
+    draft = dict(row)
+    status = draft["status"]
     if status not in ("draft_pending", "draft_saved"):
         raise HTTPException(
             status_code=409,
             detail=f"草稿状态 {status} 不允许改排期（仅 draft_pending / draft_saved）",
         )
     value = _parse_schedule_time(scheduled) if scheduled else None
-    conn.execute(
-        "UPDATE drafts SET scheduled_publish_at = ? WHERE id = ?", (value, draft_id)
-    )
+    if value is not None:
+        # 将冲突判断放进同一条 UPDATE，避免两个并发请求同时通过先查后写检查。
+        # 当前连接已绑定请求租户，因此检查范围天然限定在当前租户内。
+        cursor = conn.execute(
+            "UPDATE drafts SET scheduled_publish_at = ? "
+            "WHERE id = ? AND NOT EXISTS ("
+            "SELECT 1 FROM drafts other WHERE other.id != drafts.id "
+            "AND other.platform = drafts.platform "
+            "AND other.status IN ('draft_pending','draft_saved') "
+            "AND other.scheduled_publish_at IS NOT NULL "
+            "AND datetime(other.scheduled_publish_at) = datetime(?)"
+            ")",
+            (value, draft_id, value),
+        )
+        if cursor.rowcount != 1:
+            conflict = conn.execute(
+                "SELECT id FROM drafts WHERE id != ? AND platform = ? "
+                "AND status IN ('draft_pending','draft_saved') "
+                "AND scheduled_publish_at IS NOT NULL "
+                "AND datetime(scheduled_publish_at) = datetime(?) LIMIT 1",
+                (draft_id, draft["platform"], value),
+            ).fetchone()
+            if conflict is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"该平台在 {value} 已有排期（草稿 {dict(conflict)['id']}），请调整时间",
+                )
+            raise HTTPException(status_code=404, detail=f"草稿不存在：{draft_id}")
+    else:
+        conn.execute(
+            "UPDATE drafts SET scheduled_publish_at = ? WHERE id = ?", (None, draft_id)
+        )
     conn.commit()
     return {"draft_id": draft_id, "scheduled_publish_at": value, "status": status}
 
@@ -4351,7 +4381,7 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/api/task-queue")
     def list_global_task_queue(
         limit: int = Query(500, ge=1, le=500),
-        scope: str = Query("all", pattern="^(all|active|history|failed)$"),
+        scope: str = Query("all", pattern="^(all|active|history|failed|filtered)$"),
         page: int = Query(1, ge=1),
         page_size: int = Query(20, ge=1, le=100),
         task_type: str | None = Query(None, min_length=1, max_length=80),
@@ -4359,6 +4389,7 @@ def _register_routes(app: FastAPI) -> None:
         error_keyword: str | None = Query(None, min_length=1, max_length=120),
         date_from: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
         date_to: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        status: str | None = Query(None, pattern="^(queued|running|succeeded|failed|cancelled|interrupted)$"),
     ):
         if _task_queue is None:
             raise HTTPException(503, "全局任务队列尚未初始化")
@@ -4374,7 +4405,7 @@ def _register_routes(app: FastAPI) -> None:
                 page_size=page_size,
                 scope=scope, task_type=task_type,
                 tenant_id=tenant_id, error_keyword=error_keyword,
-                date_from=date_from, date_to=date_to,
+                date_from=date_from, date_to=date_to, status=status,
             )
         items = []
         round_numbers = _resolve_task_round_numbers(registry, tasks)
@@ -4418,6 +4449,25 @@ def _register_routes(app: FastAPI) -> None:
                 response["tenant_status_counts"] = _task_queue.status_counts(scope="failed")["by_tenant"]
         return response
 
+    @app.get("/api/task-queue/summary")
+    def global_task_queue_summary(
+        date_from: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        date_to: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        tenant_id: str | None = Query(None, min_length=1, max_length=100),
+        task_type: str | None = Query(None, min_length=1, max_length=80),
+        status: str | None = Query(None, pattern="^(queued|running|succeeded|failed|cancelled|interrupted)$"),
+    ):
+        """Aggregate global queue metrics using indexed SQL; task payloads are never loaded."""
+        if _task_queue is None:
+            raise HTTPException(503, "全局任务队列尚未初始化")
+        try:
+            return _task_queue.dispatch_summary(
+                date_from=date_from, date_to=date_to,
+                tenant_id=tenant_id, task_type=task_type, status=status,
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     @app.get("/api/task-queue/{task_id}")
     def get_global_task(task_id: str):
         if _task_queue is None:
@@ -4427,12 +4477,42 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(404, "任务不存在")
         round_id = _round_id_from_aggregate(task.task_type, task.aggregate_id)
         round_numbers = _resolve_task_round_numbers(_g().get("tenant_registry"), [task])
+        raw_steps = task.result.get("steps", []) if isinstance(task.result, dict) else []
+        execution_log = []
+        if isinstance(raw_steps, list):
+            for index, item in enumerate(raw_steps[:200], start=1):
+                if not isinstance(item, dict):
+                    continue
+                step_name = item.get("step") or item.get("name") or item.get("stage") or f"步骤 {index}"
+                safe_fields = (
+                    "status", "count", "scheduled", "saved", "failed", "pending",
+                    "attempted", "selected", "mode", "source", "shortfall",
+                    "allocation", "dimension_allocation", "skipped", "copy_hint_count",
+                    "dropped_hints", "file_type", "kb_count", "extra_count", "excluded_count",
+                )
+                safe_detail = {key: item[key] for key in safe_fields if key in item}
+                step_status = item.get("status") or ("partial" if item.get("failed") else "completed")
+                detail = item.get("message") or item.get("detail") or item.get("error") or (
+                    json.dumps(safe_detail, ensure_ascii=False, default=str) if safe_detail else ""
+                )
+                execution_log.append({
+                    "step": str(step_name)[:120],
+                    "status": str(step_status)[:40],
+                    "detail": str(detail)[:500],
+                })
+        if not execution_log and task.error_message:
+            execution_log.append({
+                "step": "任务执行失败",
+                "status": "failed",
+                "detail": task.error_message[:500],
+            })
         return {
+            "execution_log": execution_log,
             "queue_order": task.queue_order,
             "task_id": task.task_id, "task_type": task.task_type,
             "tenant_id": task.tenant_id, "aggregate_id": task.aggregate_id,
             "round_number": round_numbers.get((task.tenant_id, round_id)) if round_id is not None else None,
-            "status": task.status, "payload": task.payload, "result": task.result,
+            "status": task.status,
             "created_at": task.created_at, "available_at": task.available_at,
             "started_at": task.started_at,
             "finished_at": task.finished_at, "attempts": task.attempts,
@@ -4498,13 +4578,25 @@ def _register_routes(app: FastAPI) -> None:
             "confirmation_note": task.retry_confirmation_note,
         }
 
-    @app.post("/api/task-queue/{task_id}/cancel")
-    def cancel_global_task(task_id: str):
+    @app.get("/api/task-queue/{task_id}/audit")
+    def list_global_task_audit(task_id: str):
         if _task_queue is None:
             raise HTTPException(503, "全局任务队列尚未初始化")
         if _task_queue.get(task_id) is None:
             raise HTTPException(404, "任务不存在")
-        if not _task_queue.cancel(task_id):
+        return {"items": _task_queue.list_admin_audit(task_id)}
+
+    @app.post("/api/task-queue/{task_id}/cancel")
+    def cancel_global_task(task_id: str, request: Request):
+        if _task_queue is None:
+            raise HTTPException(503, "全局任务队列尚未初始化")
+        if _task_queue.get(task_id) is None:
+            raise HTTPException(404, "任务不存在")
+        try:
+            cancelled = _task_queue.cancel(task_id, actor=auth.audit_actor(request))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if not cancelled:
             raise HTTPException(409, "任务已开始执行或已结束，当前不能取消")
         return {"task_id": task_id, "status": "cancelled"}
 
@@ -5900,6 +5992,153 @@ def _register_routes(app: FastAPI) -> None:
             items.append(row)
         return {"round_id": round_id, "items": items}
 
+    @app.get("/api/review-queue")
+    def list_review_queue(
+        status: str = Query("pending", pattern="^(pending|approved|rejected|all)$"),
+        platform: Optional[str] = Query(None, pattern="^(xhs|douyin|kuaishou|wechat_channels)$"),
+        task_type: Optional[str] = Query(None, max_length=40),
+        from_date: Optional[str] = Query(None, alias="from"),
+        to_date: Optional[str] = Query(None, alias="to"),
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+    ):
+        """跨生产轮次集中审核队列；只读，不触发生产或发布。"""
+        conn = _g()["conn"]
+        for label, value in (("from", from_date), ("to", to_date)):
+            if value:
+                try:
+                    datetime.strptime(value, "%Y-%m-%d")
+                except (TypeError, ValueError) as exc:
+                    raise HTTPException(422, f"{label} 必须为 YYYY-MM-DD") from exc
+        if from_date and to_date and to_date < from_date:
+            raise HTTPException(422, "to 不能早于 from")
+
+        where = ["d.id IS NOT NULL"]
+        params: list = []
+        if platform:
+            where.append("c.platform = ?")
+            params.append(platform)
+        if task_type:
+            where.append("d.status = ?")
+            params.append(task_type)
+        if from_date:
+            where.append("date(c.created_at) >= date(?)")
+            params.append(from_date)
+        if to_date:
+            where.append("date(c.created_at) <= date(?)")
+            params.append(to_date)
+        status_expr = (
+            "CASE WHEN c.review_rejected = 1 THEN 'rejected' "
+            "WHEN (SELECT u.override_field FROM user_override u "
+            "WHERE u.round_id = c.round_id "
+            "AND u.override_field IN ('review_approve','review_reject','review_resubmit') "
+            "AND CASE WHEN json_valid(u.original_value) "
+            "THEN json_extract(u.original_value, '$.content_id') ELSE NULL END = c.id "
+            "ORDER BY u.overridden_at DESC, u.rowid DESC LIMIT 1) = 'review_approve' "
+            "THEN 'approved' ELSE 'pending' END"
+        )
+        if status != "all":
+            where.append(f"({status_expr}) = ?")
+            params.append(status)
+        where_sql = " AND ".join(where)
+        base = (
+            " FROM contents c JOIN drafts d ON d.content_id = c.id "
+            "LEFT JOIN spiral_rounds r ON r.id = c.round_id WHERE " + where_sql
+        )
+        total = int(conn.execute("SELECT COUNT(*)" + base, params).fetchone()[0])
+        rows = conn.execute(
+            "SELECT c.id, c.round_id, r.round_number, r.status AS round_status, "
+            "c.topic_id, c.platform, c.title, c.body, c.tags, c.image_paths, "
+            "c.guard_outcome, c.guard_reason, "
+            "c.review_rejected, c.review_rejection_reason, c.created_at, "
+            "d.id AS draft_id, d.status AS draft_status, d.error_msg AS draft_error, "
+            "d.saved_at, d.scheduled_publish_at, "
+            + status_expr + " AS review_status "
+            + base + " ORDER BY c.created_at DESC, c.id DESC LIMIT ? OFFSET ?",
+            [*params, page_size, (page - 1) * page_size],
+        ).fetchall()
+        items = []
+        for raw in rows:
+            item = dict(raw)
+            try:
+                item["tags"] = json.loads(item.get("tags") or "[]")
+                if not isinstance(item["tags"], list):
+                    item["tags"] = []
+            except (TypeError, ValueError):
+                item["tags"] = []
+            try:
+                image_paths = json.loads(item.get("image_paths") or "[]")
+                item["image_count"] = len(image_paths) if isinstance(image_paths, list) else 0
+            except (TypeError, ValueError):
+                item["image_count"] = 0
+            # 不向集中列表暴露服务器绝对路径；图片只通过受保护的内容图片 API 读取。
+            item.pop("image_paths", None)
+            events = conn.execute(
+                "SELECT override_field, reason, overridden_by, overridden_at, override_value "
+                "FROM user_override WHERE round_id = ? "
+                "AND override_field IN ('review_approve','review_reject','review_resubmit') "
+                "AND CASE WHEN json_valid(original_value) "
+                "THEN json_extract(original_value, '$.content_id') ELSE NULL END = ? "
+                "ORDER BY overridden_at DESC, rowid DESC LIMIT 10",
+                (item["round_id"], item["id"]),
+            ).fetchall()
+            item["review_history"] = [dict(event) for event in events]
+            item["review_rejected"] = bool(item["review_rejected"])
+            items.append(item)
+        return {
+            "items": items, "total": total, "page": page,
+            "page_size": page_size, "pages": (total + page_size - 1) // page_size,
+        }
+
+    @app.post("/api/contents/{content_id}/approve")
+    def approve_content_review(content_id: str, req: dict):
+        """记录明确的人工审核通过；不执行发布，也不覆盖 G2 质量门禁。"""
+        conn = _g()["conn"]
+        row = _content_row(conn, content_id)
+        _ensure_content_round_idle(row, "审核通过")
+        if row["guard_outcome"] != "pass":
+            raise HTTPException(409, "内容必须先通过 G2 质量检查才能审核通过")
+        if bool(row["review_rejected"]):
+            raise HTTPException(409, "已驳回内容必须先通过重新提交审核流程，不能直接改为通过")
+        if conn.execute(
+            "SELECT COUNT(*) FROM drafts WHERE content_id = ? "
+            "AND (user_confirmed_at IS NOT NULL "
+            "OR status IN ('user_published','data_fetching','published'))",
+            (content_id,),
+        ).fetchone()[0]:
+            raise HTTPException(409, "该内容已有发布历史，不能作为待审核内容处理")
+        eligible = conn.execute(
+            "SELECT COUNT(*) FROM drafts WHERE content_id = ? "
+            "AND status IN ('draft_pending','draft_saved')",
+            (content_id,),
+        ).fetchone()[0]
+        if not eligible:
+            raise HTTPException(409, "当前内容没有可审核的待存内容或平台草稿")
+        reason = str((req or {}).get("reason") or "人工审核通过").strip()[:500]
+        # 将“最近一次审核决策不是通过”作为 INSERT 条件，避免并发重复点击生成多条通过记录。
+        inserted = conn.execute(
+            "INSERT INTO user_override (round_id, override_field, original_value, "
+            "override_value, reason, overridden_by, overridden_at) "
+            "SELECT ?, ?, ?, ?, ?, ?, ? WHERE COALESCE(("
+            "SELECT u.override_field FROM user_override u WHERE u.round_id IS ? "
+            "AND u.override_field IN ('review_approve','review_reject','review_resubmit') "
+            "AND CASE WHEN json_valid(u.original_value) "
+            "THEN json_extract(u.original_value, '$.content_id') ELSE NULL END = ? "
+            "ORDER BY u.overridden_at DESC, u.rowid DESC LIMIT 1"
+            "), '') != 'review_approve'",
+            (
+                row["round_id"], "review_approve",
+                json.dumps({"content_id": content_id, "title": row["title"]}, ensure_ascii=False)[:500],
+                "approved", reason, "web-ui", _storage_now().isoformat(timespec="seconds"),
+                row["round_id"], content_id,
+            ),
+        )
+        conn.commit()
+        return {
+            "id": content_id, "review_status": "approved",
+            "deduped": inserted.rowcount == 0,
+        }
+
     @app.get("/api/contents/{content_id}/images/{index}")
     def get_content_image(content_id: str, index: int, download: bool = Query(False)):
         """G-36：读取已生成的卡片图（只允许该内容登记过、且在本项目 output 目录下的文件）。
@@ -6517,12 +6756,17 @@ def _register_routes(app: FastAPI) -> None:
         ).fetchall()
         if not eligible:
             raise HTTPException(409, "当前内容没有可驳回的待存内容或平台草稿")
+        if bool(row["review_rejected"]):
+            raise HTTPException(409, "该内容已被驳回，请勿重复提交审核操作")
         reason = req.reason.strip()
         message = f"[已驳回] {reason}"
-        conn.execute(
-            "UPDATE contents SET review_rejected = 1, review_rejection_reason = ? WHERE id = ?",
+        changed = conn.execute(
+            "UPDATE contents SET review_rejected = 1, review_rejection_reason = ? "
+            "WHERE id = ? AND COALESCE(review_rejected, 0) = 0",
             (reason, content_id),
         )
+        if changed.rowcount != 1:
+            raise HTTPException(409, "内容审核状态已被其他操作更新，请刷新后重试")
         cur = conn.execute(
             "UPDATE drafts SET error_msg = ? "
             "WHERE content_id = ? AND status IN ('draft_pending','draft_saved')",
@@ -6534,7 +6778,7 @@ def _register_routes(app: FastAPI) -> None:
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 row["round_id"], "review_reject",
-                json.dumps({"title": row["title"]}, ensure_ascii=False)[:500],
+                json.dumps({"content_id": content_id, "title": row["title"]}, ensure_ascii=False)[:500],
                 "rejected", reason, "web-ui",
                 _storage_now().isoformat(timespec="seconds"),
             ),
@@ -6588,7 +6832,7 @@ def _register_routes(app: FastAPI) -> None:
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 row["round_id"], "review_resubmit",
-                json.dumps({"review_rejection_reason": row["review_rejection_reason"]}, ensure_ascii=False)[:500],
+                json.dumps({"content_id": content_id, "review_rejection_reason": row["review_rejection_reason"]}, ensure_ascii=False)[:500],
                 "resubmitted", reason, "web-ui",
                 _storage_now().isoformat(timespec="seconds"),
             ),
@@ -7236,6 +7480,13 @@ def _register_routes(app: FastAPI) -> None:
             start_date = _now().strftime("%Y-%m-%d")
         if end_date is None:
             end_date = (_now() + timedelta(days=30)).strftime("%Y-%m-%d")
+        for label, value in (("start_date", start_date), ("end_date", end_date)):
+            try:
+                datetime.strptime(value, "%Y-%m-%d")
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(422, f"{label} 必须为 YYYY-MM-DD") from exc
+        if end_date < start_date:
+            raise HTTPException(422, "end_date 不能早于 start_date")
 
         sql = (
             "SELECT d.id, d.platform, d.status, d.scheduled_publish_at, d.saved_at, "

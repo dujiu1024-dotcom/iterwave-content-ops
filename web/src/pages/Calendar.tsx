@@ -3,6 +3,7 @@ import { useApp } from "../AppContext";
 import EmptyHint from "../components/EmptyHint";
 import { api, ContentPlan, Platform, ScheduleEvent, UnscheduledDraft } from "../api";
 import { ALL_PLATFORMS, platformMeta } from "../platforms";
+import { formatCalendarDate as _fmt, shiftCalendarDate } from "../calendarDate.mjs";
 
 const PLAN_STATUS_LABEL: Record<ContentPlan["status"], string> = {
   planned: "待执行",
@@ -207,7 +208,7 @@ export default function Calendar() {
     published: "已发布",
   };
 
-  /** 保存排期：datetime-local 的值是 "YYYY-MM-DDTHH:MM"，后端按本地时间解释（R5） */
+  /** 保存排期：datetime-local 是无时区墙上时间，明确按 Asia/Shanghai（UTC+8）解释。 */
   const saveSchedule = async (draftId: string, value: string) => {
     if (!value) { showToast("请先选择排期时间", "error"); return; }
     try {
@@ -414,7 +415,7 @@ export default function Calendar() {
             <div className="panel-head">
               <div>
                 <div className="panel-title"><span className="icon">✎</span>排期编辑 · {selected.title}</div>
-                <div className="panel-sub">仅保存计划发布时间，不会自动触发平台发布</div>
+                <div className="panel-sub">仅保存计划发布时间；时间按 Asia/Shanghai（UTC+8）解释，不会自动触发平台发布</div>
               </div>
               <div className="head-actions" style={{ display: "flex", gap: 8 }}>
                 <input
@@ -537,7 +538,7 @@ export default function Calendar() {
           <div className="table-wrap">
             <table>
               <thead>
-                <tr><th>类型</th><th>标题</th><th>平台</th><th>状态</th><th>排期时间</th><th>操作</th></tr>
+                <tr><th>类型</th><th>标题</th><th>平台</th><th>状态</th><th>排期时间（北京时间）</th><th>操作</th></tr>
               </thead>
               <tbody>
                 {unscheduled.filter((d) => platformFilter === "all" || d.platform === platformFilter).map((d) => (
@@ -577,20 +578,6 @@ export default function Calendar() {
       </div>
     </>
   );
-}
-
-function shiftCalendarDate(date: Date, mode: "month" | "week" | "day", direction: number): Date {
-  if (mode === "month") return new Date(date.getFullYear(), date.getMonth() + direction, 1);
-  const next = new Date(date);
-  next.setDate(next.getDate() + (mode === "week" ? 7 : 1) * direction);
-  return next;
-}
-
-function _fmt(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${dd}`;
 }
 
 function _eventDate(e: ScheduleEvent): string {
