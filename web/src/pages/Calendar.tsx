@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useApp } from "../AppContext";
 import EmptyHint from "../components/EmptyHint";
 import { api, ContentPlan, Platform, ScheduleEvent, UnscheduledDraft } from "../api";
-import { platformMeta } from "../platforms";
+import { ALL_PLATFORMS, platformMeta } from "../platforms";
+import { formatCalendarDate as _fmt, shiftCalendarDate } from "../calendarDate.mjs";
 
 const PLAN_STATUS_LABEL: Record<ContentPlan["status"], string> = {
   planned: "待执行",
@@ -23,6 +24,7 @@ export default function Calendar() {
   const month = cursorDate.getMonth();
 
   const [events, setEvents] = useState<ScheduleEvent[]>([]);
+  const [platformFilter, setPlatformFilter] = useState<Platform | "all">("all");
   const [plans, setPlans] = useState<ContentPlan[]>([]);
   const [planDetail, setPlanDetail] = useState<(ContentPlan & { drafts: Array<{ draft_id: string; platform: Platform; status: string; title: string; round_id: number | null; round_number: number | null }>; rounds: Array<{ round_id: number; round_number: number | null; task_id: string | null; created_at: string }> }) | null>(null);
   const [planDetailLoading, setPlanDetailLoading] = useState(false);
@@ -107,10 +109,10 @@ export default function Calendar() {
     for (let d = new Date(visibleStart); d < visibleEndExclusive; d.setDate(d.getDate() + 1)) {
       const date = new Date(d);
       const key = _fmt(date);
-      result.push({ date, key, events: events.filter((event) => _eventDate(event) === key), plans: plans.filter((plan) => plan.scheduled_date === key && (showArchivedPlans || (plan.status !== "cancelled" && plan.status !== "archived"))), inMonth: date.getMonth() === month });
+      result.push({ date, key, events: events.filter((event) => _eventDate(event) === key && (platformFilter === "all" || event.platform === platformFilter)), plans: plans.filter((plan) => plan.scheduled_date === key && (platformFilter === "all" || plan.platforms.length === 0 || plan.platforms.includes(platformFilter)) && (showArchivedPlans || (plan.status !== "cancelled" && plan.status !== "archived"))), inMonth: date.getMonth() === month });
     }
     return result;
-  }, [visibleStart, visibleEndExclusive, events, plans, month, showArchivedPlans]);
+  }, [visibleStart, visibleEndExclusive, events, plans, month, showArchivedPlans, platformFilter]);
 
   const openPlanDetails = async (planId: string) => {
     setPlanDetailLoading(true);
@@ -206,7 +208,7 @@ export default function Calendar() {
     published: "已发布",
   };
 
-  /** 保存排期：datetime-local 的值是 "YYYY-MM-DDTHH:MM"，后端按本地时间解释（R5） */
+  /** 保存排期：datetime-local 是无时区墙上时间，明确按 Asia/Shanghai（UTC+8）解释。 */
   const saveSchedule = async (draftId: string, value: string) => {
     if (!value) { showToast("请先选择排期时间", "error"); return; }
     try {
@@ -262,10 +264,10 @@ export default function Calendar() {
     <>
       <div className="page-head">
         <div>
-          <div className="eyebrow">发布日历</div>
-          <h1 className="page-title">内容日历与排期</h1>
+          <div className="eyebrow">内容生产 · 排期视图</div>
+          <h1 className="page-title">内容排期日历</h1>
           <div className="page-desc">
-            以「内容 × 平台 × 发布时间」为最小排期单元。系统永不自动触发发布动作。
+            以内容、平台和发布时间为核心查看排期；系统永不自动触发发布动作。计划归属字段接入后，将在此显示主计划、平台子计划和阶段。
             {!loading && <span className="tag teal" style={{ marginLeft: 8 }}>
               当前{viewMode === "month" ? "月" : viewMode === "week" ? "周" : "日"} {events.length} 条
             </span>}
@@ -284,6 +286,10 @@ export default function Calendar() {
           <button className="btn sm" onClick={() => setCursorDate((d) => shiftCalendarDate(d, viewMode, 1))}>下一{viewMode === "month" ? "月" : viewMode === "week" ? "周" : "日"}</button>
           <input aria-label="选择日历日期" className="field calendar-date-picker" type="date" value={_fmt(cursorDate)} onChange={(e) => { if (e.target.value) { const [y, m, d] = e.target.value.split("-").map(Number); setCursorDate(new Date(y, m - 1, d)); } }} />
           <button className="btn sm primary" onClick={() => { setPlanDate(_fmt(cursorDate)); setPlanFormOpen(true); }}>＋ 新建计划</button>
+          <select className="field" aria-label="按平台筛选排期" value={platformFilter} onChange={(e) => setPlatformFilter(e.target.value as Platform | "all")} style={{ maxWidth: 150 }}>
+            <option value="all">全部平台</option>
+            {ALL_PLATFORMS.map((p) => <option key={p} value={p}>{platformMeta(p).label}</option>)}
+          </select>
           <label className="calendar-plan-check" title="在日历中同时显示已归档和已取消的计划">
             <input type="checkbox" checked={showArchivedPlans} onChange={(e) => setShowArchivedPlans(e.target.checked)} />显示已归档
           </label>
@@ -298,6 +304,10 @@ export default function Calendar() {
         </div>
       </div>}
 
+      <div className="note" style={{ marginBottom: 12, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <span>当前排期接口提供内容计划与草稿排期，尚未返回主计划版本、平台子计划 ID、阶段 ID；因此暂不显示未经确认的关联关系。</span>
+        <button className="btn sm" onClick={() => { window.location.search = "?page=plan-center"; }}>打开计划管理</button>
+      </div>
       <div className="panel">
         <div className="panel-head">
           <div>
@@ -405,7 +415,7 @@ export default function Calendar() {
             <div className="panel-head">
               <div>
                 <div className="panel-title"><span className="icon">✎</span>排期编辑 · {selected.title}</div>
-                <div className="panel-sub">仅保存计划发布时间，不会自动触发平台发布</div>
+                <div className="panel-sub">仅保存计划发布时间；时间按 Asia/Shanghai（UTC+8）解释，不会自动触发平台发布</div>
               </div>
               <div className="head-actions" style={{ display: "flex", gap: 8 }}>
                 <input
@@ -464,6 +474,7 @@ export default function Calendar() {
             </div>
             {planDetail.topic && <div className="note">{planDetail.topic}</div>}
             {planDetail.notes && <div className="note">备注：{planDetail.notes}</div>}
+            <div className="note" style={{ marginBottom: 12 }}><strong>计划归属</strong><div>主计划版本：待接入关联字段</div><div>平台子计划：待接入关联字段</div><div>所属阶段：待接入关联字段</div></div>
             <div className="calendar-plan-detail-grid">
               <div><strong>生产轮次（{planDetail.rounds.length}）</strong>
                 {planDetail.rounds.length ? planDetail.rounds.map((round) => <div className="calendar-plan-detail-row" key={round.round_id}>{round.round_number != null ? `第 ${round.round_number} 轮` : "轮次信息不可用"} · {round.task_id ? `任务 ${round.task_id.slice(0, 8)}` : "尚未入队"}</div>) : <div className="note">尚未启动生产</div>}
@@ -527,10 +538,10 @@ export default function Calendar() {
           <div className="table-wrap">
             <table>
               <thead>
-                <tr><th>类型</th><th>标题</th><th>平台</th><th>状态</th><th>排期时间</th><th>操作</th></tr>
+                <tr><th>类型</th><th>标题</th><th>平台</th><th>状态</th><th>排期时间（北京时间）</th><th>操作</th></tr>
               </thead>
               <tbody>
-                {unscheduled.map((d) => (
+                {unscheduled.filter((d) => platformFilter === "all" || d.platform === platformFilter).map((d) => (
                   <tr key={d.id} style={targetDraftId === d.id ? { background: "var(--surface-2)", outline: "2px solid var(--blue)" } : undefined}>
                     <td style={{ fontSize: 11, color: "var(--subtle)" }}>草稿</td>
                     <td>{d.title ?? <span style={{ color: "var(--subtle)" }}>—</span>}</td>
@@ -567,20 +578,6 @@ export default function Calendar() {
       </div>
     </>
   );
-}
-
-function shiftCalendarDate(date: Date, mode: "month" | "week" | "day", direction: number): Date {
-  if (mode === "month") return new Date(date.getFullYear(), date.getMonth() + direction, 1);
-  const next = new Date(date);
-  next.setDate(next.getDate() + (mode === "week" ? 7 : 1) * direction);
-  return next;
-}
-
-function _fmt(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${dd}`;
 }
 
 function _eventDate(e: ScheduleEvent): string {

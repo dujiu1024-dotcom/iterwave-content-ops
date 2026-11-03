@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from src.core.timezone import business_now
+from src.core.timezone import storage_now
 from typing import Any
 
 from src.core.industry_presets import PRESETS
@@ -11,7 +11,7 @@ SEED_MARKER = "industry_presets_builtin_seed_v1"
 
 
 def _now(cfg=None) -> str:
-    return business_now(cfg).isoformat(timespec="seconds")
+    return storage_now().isoformat(timespec="seconds")
 
 
 def _decode(row) -> dict[str, Any]:

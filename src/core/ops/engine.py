@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import Optional
 
 from ..redact import redact as _redact_exc  # R23 异常日志脱敏
@@ -23,7 +23,7 @@ from ...adapters.base import (
 from .circuit_breaker import CircuitBreakerEngine
 from .pause import is_ops_paused
 
-from ..timezone import business_now
+from ..timezone import business_now, business_zone, storage_now, storage_window_cutoffs, timestamp_since_sql
 from ..task_context import current_round_id, current_task_run_id
 
 logger = logging.getLogger(__name__)
@@ -102,8 +102,8 @@ class OperationsEngine:
         exists = self.db.execute(
             "SELECT 1 FROM ops_logs WHERE platform = ? AND action_type = 'passive_reply' "
             "AND target_url = ? AND target_author = ? "
-            "AND status IN ('success','pending_verify') AND executed_at >= ?",
-            (platform.value, draft_id, comment_id, self._today_start()),
+            "AND status IN ('success','pending_verify') AND " + timestamp_since_sql("executed_at"),
+            (platform.value, draft_id, comment_id, *self._today_cutoffs()),
         ).fetchone()
         if exists:
             logger.info("幂等命中：%s 已回复过 draft=%s comment=%s",
@@ -117,8 +117,8 @@ class OperationsEngine:
             return False
         used = self.db.execute(
             "SELECT COUNT(*) FROM ops_logs WHERE platform = ? AND action_type = 'passive_reply' "
-            "AND status IN ('success','pending_verify') AND executed_at >= ?",
-            (platform.value, self._today_start()),
+            "AND status IN ('success','pending_verify') AND " + timestamp_since_sql("executed_at"),
+            (platform.value, *self._today_cutoffs()),
         ).fetchone()[0]
         quotas = self.cfg.rhythm.daily_quotas.get(platform.value) if hasattr(self, "cfg") else None
         if quotas is not None and hasattr(self.rhythm, "daily_quota_remaining") \
@@ -200,8 +200,8 @@ class OperationsEngine:
         # 幂等检查（R16：同一目标今日已发过 → 不重复发）
         seen = self.db.execute(
             "SELECT 1 FROM ops_logs WHERE platform = ? AND action_type = 'active_comment' "
-            "AND target_url = ? AND status IN ('success','pending_verify') AND executed_at >= ?",
-            (platform.value, target_url, self._today_start()),
+            "AND target_url = ? AND status IN ('success','pending_verify') AND " + timestamp_since_sql("executed_at"),
+            (platform.value, target_url, *self._today_cutoffs()),
         ).fetchone()
         if seen:
             logger.info("幂等命中：%s 今日已在该目标下评论过 %s", platform.value, target_url)
@@ -274,8 +274,8 @@ class OperationsEngine:
         already = self.db.execute(
             "SELECT 1 FROM ops_logs WHERE platform = ? AND action_type = 'follow' "
             "AND target_author = ? AND status IN ('success','pending_verify') "
-            "AND executed_at >= ?",
-            (platform.value, user_id, self._today_start()),
+            "AND " + timestamp_since_sql("executed_at"),
+            (platform.value, user_id, *self._today_cutoffs()),
         ).fetchone()
         if already:
             logger.info("幂等命中：%s 今日已关注过 %s", platform.value, user_id)
@@ -328,21 +328,22 @@ class OperationsEngine:
             "content, schedule_time, executed_at, status, error_msg, rhythm_wait_seconds) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (current_round_id(), current_task_run_id(), platform.value, action_type, target_url, target_author,
-             content, business_now(self.cfg).isoformat(), business_now(self.cfg).isoformat(),
+             content, storage_now().isoformat(), storage_now().isoformat(),
              status, error_msg, rhythm_wait_seconds),
         )
         self.db.commit()
 
-    def _today_start(self) -> str:
-        """本地时区当日 00:00（R5：SQLite 的 date('now') 是 UTC，差 8 小时会算错天）。"""
-        return business_now(self.cfg).replace(
+    def _today_cutoffs(self) -> tuple[str, str]:
+        """UTC cutoff for new rows and business-local cutoff for legacy naive rows."""
+        local_midnight = business_now(self.cfg).replace(
             hour=0, minute=0, second=0, microsecond=0,
-        ).isoformat()
+        ).replace(tzinfo=business_zone(self.cfg))
+        return storage_window_cutoffs(local_midnight.astimezone(timezone.utc), self.cfg)
 
     def _today_action_count(self, platform: Platform, action_type: str) -> int:
         row = self.db.execute(
             "SELECT COUNT(*) FROM ops_logs WHERE platform = ? AND action_type = ? "
-            "AND executed_at >= ? AND status IN ('success','pending_verify')",
-            (platform.value, action_type, self._today_start()),
+            "AND " + timestamp_since_sql("executed_at") + " AND status IN ('success','pending_verify')",
+            (platform.value, action_type, *self._today_cutoffs()),
         ).fetchone()
         return row[0] if row else 0

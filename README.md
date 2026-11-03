@@ -1,182 +1,112 @@
-# IterWave — AI 图文内容运营工作台
+# IterWave — AI Visual Content Operations
 
-> **Early Preview — 设计方案 + 可交互原型 + 持续开发中的开源项目**
+[English](README.md) · [简体中文](README.zh-CN.md) · [Русский](README.ru.md) · [日本語](README.ja.md) · [Français](README.fr.md) · [Deutsch](README.de.md)
 
-从热点发现、图文生产，到发布复盘，让内容持续迭代。
+> **Early Preview** — An open-source project under active development. Consult the code, tests, and deployment validation for the actual status of each capability.
 
-IterWave 是一款面向多平台图文创作者的开源内容运营工作台，帮助用户将选题发现、总体计划、平台分项计划、AI 图文生产、质量检查、人工发布确认与数据复盘串联成可追溯的工作流。
+IterWave is a content operations workspace for creators publishing image-and-text content across multiple platforms. It connects topic discovery, content planning, platform-specific production, quality checks, human-approved publishing, and performance review into a traceable workflow.
 
----
+## Core principles
 
-## 核心能力
+- **Visual-content first:** Focuses on topics, copy, image cards, quality checks, and operational review.
+- **Plan-driven production:** Master plans, platform sub-plans, stage dependencies, and execution states drive production—not merely plan-management screens.
+- **Human-controlled publishing:** Automation can prepare and save drafts, but never clicks a platform's Publish button.
+- **Traceability:** Plan and content versions, task states, execution outcomes, and review evidence are recorded.
+- **Local-first control:** Operators retain control of credentials, configuration, databases, and content assets.
 
-- **发现与策划** — 结合账号定位、选题库与相关热点，形成可编辑的内容计划
-- **多平台图文生产** — 为各平台生成适配的文案和图片卡片，并执行质量检查
-- **可编辑的 Agent 编排** — 调整工作流步骤、前置依赖和人工审核节点
-- **人工把关** — 内容自动整理至草稿，发布与关键决策保留人工控制
-- **数据驱动迭代** — 记录逐篇指标、明确数据缺失状态，利用复盘结果指导下一轮内容策略
-- **本地优先** — 以用户可控的知识库、账号画像和内容资产为基础，逐步构建可配置、可审计的运营闭环
+## Workflow
 
-## 产品定位
-
-IterWave 聚焦于**图文运营**场景，与通用 AI Agent 内容生成工具的核心差异：
-
-1. **专注图文** — 不把视频、配音、音乐生成当作产品主线，深耕选题、平台化文案、图片卡片、质量检查与运营复盘
-2. **可调整的工作流** — 用户可以修改编排、平台分项计划、依赖关系和人工审核节点，而不只是调用预设技能
-3. **人工把关的闭环** — 自动发现、计划、创作、存草稿；发布由用户确认，再回收数据、分析原因、生成下一轮策略。强调过程透明、状态可追溯
-4. **本地优先与可解释复盘** — 用户掌握自己的选题库、账号画像、内容版本和运营数据；每个策略结论能查看依据、样本量、置信度和人工修改记录
-
-## 工作模式
-
-```
-选题库 + 账号定位 + 热点发现
-           ↓
-    内容计划（可编辑的 Agent 编排）
-           ↓
-    四平台文案生成 + 图片卡片制作
-           ↓
-    终极目标检查 + 质量门 → 存草稿
-           ↓
-    ✅ 用户手动发布（永不自动点发布）
-           ↓
-    数据采集 → 复盘 → 螺旋引擎 → 下一轮策略调整
+```text
+Topic library / Account positioning / Trend discovery
+                         ↓
+                  Master and sub-plans
+                         ↓
+              Staged orchestration and execution
+                         ↓
+             Platform-specific copy and image cards
+                         ↓
+                    Quality checks and draft saving
+                         ↓
+                    Human-approved publishing
+                         ↓
+             Data collection → Review → Iteration
 ```
 
-**红线**：Playwright 只存草稿，永不自动点击"发布"按钮。发布确认通过 UI 手动操作或定时只读轮询。
+## Supported platforms
 
-## 技术栈
+Xiaohongshu, Douyin, Kuaishou, and WeChat Channels (image-and-text workflows). Actual capabilities depend on platform interfaces, account permissions, and UI changes; live account workflows must be validated in the target environment.
 
-| 层 | 选型 |
+## Technology stack
+
+| Layer | Technology |
 |---|---|
-| 语言 | Python 3.11+ / TypeScript |
-| 后端 | FastAPI + SQLAlchemy + Pydantic v2 |
-| 调度 | APScheduler（SQLiteJobStore 持久化） |
-| 浏览器 | Playwright（仅存草稿 + 只读数据采集） |
-| 图片 | Pillow + OpenCV + NumPy |
-| 前端 | React 18 + Vite |
-| 数据库 | SQLite |
+| Backend | Python 3.11+, FastAPI, Pydantic v2 |
+| Storage | SQLite, versioned schema migrations |
+| Scheduling and execution | APScheduler, global task queue, isolated workers |
+| Browser automation | Playwright (draft saving and read-only collection) |
+| Frontend | React 18, TypeScript, Vite |
+| Image processing | Pillow, OpenCV, NumPy |
 
-## 支持平台
+## Quick start
 
-小红书 · 抖音 · 快手 · 视频号（仅图文）
-
-## 快速开始
-
-### 后端
+### Backend
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
+python -m venv .venv
+source .venv/bin/activate
 pip install -e ".[dev]"
-# 复制 config/config.yaml 中的配置，填入 API Key（存 config/.env，已 gitignore）
 uvicorn src.api.main:app --reload
 ```
 
-### 首次访问与公网部署
+Prepare configuration based on `config/config.yaml`. Keep API keys, cookies, and tokens in local environment configuration; never commit them.
 
-- 首次启动后先完成访问口令设置；未设置口令时，业务 API 默认不应对未认证访问开放。
-- 本机开发如需免引导口令完成首次设置，必须显式设置 `ITERWAVE_ALLOW_LOCAL_BOOTSTRAP=1`，且使用本机直连地址。默认情况下，本机也需引导口令。公网或反向代理部署前，先在服务端环境变量中设置强随机的 `ITERWAVE_BOOTSTRAP_TOKEN`，再通过首次设置页面提交该引导口令并设置正式访问口令。
-- 公网部署不要启用 `ITERWAVE_ALLOW_LOCAL_BOOTSTRAP=1`。不要把引导口令写进仓库、前端配置或日志；完成初始化后应从部署环境中移除引导口令。
-- 配置文件与数据库目录应限制为运行服务的操作系统用户可读写，并通过 HTTPS 访问管理界面。
-- 当前版本每个 Uvicorn 进程的应用生命周期都会启动账号组 APScheduler。部署仍应使用单个 Uvicorn worker；跨进程 APScheduler 选主尚未实现，不要配置 `--workers` 大于 1。全局任务队列可通过 `ITERWAVE_TASK_WORKERS` 配置 1–8 个进程内消费者，跨账号组并行、同账号组串行。
-- 多账号组即时热切换默认开启。部署环境如需关闭，设置 `ITERWAVE_ENABLE_TENANT_HOT_SWITCH=0` 后重启服务；关闭时，账号组选择只保存选择结果，需重启后才切换运行时。全局队列的跨账号组热切换验收必须在启用该能力并重启后进行，不能在任务执行期间通过重启来模拟切换，否则运行中任务会进入 `interrupted`，需要先核实业务结果。
-
-### 前端
+### Frontend
 
 ```bash
 cd web
 npm install
 npm run dev
+npm test
+npm run build
 ```
 
-## 项目结构
+## Deployment and security
 
+- Before first deployment, configure a strong random `ITERWAVE_BOOTSTRAP_TOKEN` and use the initialization flow to set the permanent access password. Remove the bootstrap token after initialization.
+- Use HTTPS for public deployments. Do not enable `ITERWAVE_ALLOW_LOCAL_BOOTSTRAP=1` in public environments.
+- Restrict configuration, database, and session directories to the service operating-system user. Apply least-privilege permissions to sensitive files.
+- APScheduler does not yet provide cross-process leader election. Run a single Uvicorn worker; do not configure multiple `--workers`.
+- The global queue defaults to one worker and FIFO serial execution. Enable cross-account-group parallelism only after assessing its process-level hard-timeout impact.
+- Tasks interrupted by a hard timeout or worker exit are not replayed automatically. Verify the platform-side outcome before deciding how to recover.
+- Automated comments, replies, and follows are disabled by default. Confirm platform rules and account authorization before enabling them.
+- The Playwright publishing boundary is draft saving. A person must confirm the actual publishing action.
+
+## Repository layout
+
+```text
+src/
+  core/       State machines, plan versions, task queue, scheduling, recovery, analytics
+  adapters/   Platform adapters
+  api/        FastAPI routes and application lifecycle
+  vendor/     Third-party code retained under its upstream license
+web/          React frontend
+migrations/   Database schema migrations
+tests/        Backend tests
+config/       Configuration templates (no real secrets)
 ```
-iterwave-content-ops/
-├── src/
-│   ├── core/          # 共享内核：状态机、评分、螺旋引擎、熔断、调度...
-│   ├── adapters/      # 四平台适配器（基于 Playwright 的存草稿器 + 数据读回）
-│   ├── vendor/easel/  # 从 Easel（Apache 2.0）复制的登录态、数据采集代码
-│   └── api/           # FastAPI 路由
-├── web/               # React 前端
-├── migrations/        # DB schema 迁移
-├── tests/             # pytest
-└── config/            # 主配置 + .env（密钥已 gitignore）
-```
 
-## 与 Easel 的关系
+## Development and validation status
 
-IterWave 的部分平台适配器代码基于 [Easel](https://github.com/kaichen/Easel)（Apache License 2.0）复制改写：
+The project remains under active development. Passing repository tests does not imply end-to-end validation against real platforms. The following require a target environment with the relevant accounts, network access, and model credentials:
 
-- 登录态管理、二维码 DOM 渲染签名、创作者中心数据采集路径 → 复制进 `src/vendor/easel/`
-- 四平台发布器 → 按需复制后改造成存草稿模式（移除自动发布按钮）
-- **核心模块独立实现**：选题评估引擎、螺旋引擎、缺口分析、熔断机制、节奏控制器、两层状态机
+- Real login, draft saving, and data-reading workflows for all four platforms;
+- The complete model workflow: copy generation, image-card production, and quality checks;
+- The end-to-end loop from post-publication data collection through review to next-round strategy execution.
 
-详见 `src/vendor/easel/LICENSE` 和 `src/vendor/easel/NOTICE`。
+Contributions should include relevant tests. Do not put credentials, user data, or real account state in logs or the repository.
 
-## 安全边界
+## Third-party code and license
 
-- API Key、Cookie、Token 只存本地 `.env` / 登录态文件，已 `chmod 600`
-- 日志中的敏感信息脱敏（保留前 4 位 + `***`）
-- Playwright 永不点击"发布"按钮；默认仅存草稿与只读采集
-- 自动评论（含被动回复）、主动评论和关注默认关闭；只有部署者显式设置 `ITERWAVE_ENABLE_AUTOMATED_ENGAGEMENT=1` 才启用，启用前必须确认平台规则与账号授权；不设置时这些动作只记为 skipped
-- 反向代理限速按真实客户端 IP 统计；仅信任 `ITERWAVE_TRUSTED_PROXY_IPS` 指定的代理网段，默认仅信任 `127.0.0.1,::1`，禁止配置为无边界信任任意转发头
-- 熔断机制：检测到平台异常自动停止所有运营，3 步验证后方可恢复
+Some platform adapter code is derived from and modified based on [Easel](https://github.com/kaichen/Easel) (Apache License 2.0). See `src/vendor/easel/LICENSE` and `src/vendor/easel/NOTICE` for attribution and license details.
 
-## 代码现状（Early Preview）
-
-> 代码规模随功能迭代持续变化，不再以固定行数作为完成度指标；以仓库目录、测试结果和本文件中的模块说明为准。
->
-> 主要业务模块已有实质实现。真实平台连接（Playwright）、模型调用链路和端到端集成仍需在目标环境验证。
-
-### 后端核心（src/core/）
-
-| 模块 | 文件 | 行数 |
-|---|---|---|
-| 配置加载 + Pydantic v2 模型 | config.py | 351 |
-| SQLite + schema 迁移 | db.py | 241 |
-| 两层状态机（轮次 9 态 + 单篇 8 态） | state_machine/__init__.py | 279 |
-| 选题评估引擎（冷启动/样本积累/稳定运行三模式） | scoring/topic_eval.py | 333 |
-| 终极目标检查器（方向性约束） | guard/ultimate_goal_checker.py | 176 |
-| 螺旋引擎 + 缺口分析 | spiral/__init__.py | 285 |
-| 运营引擎（评论/关注） + 熔断 + 节奏控制器 | ops/engine.py + circuit_breaker.py + rhythm.py | 590 |
-| APScheduler 调度器（6 类任务） | scheduler/__init__.py | 1,072 |
-| 内容管线 + 轮次执行器 | content_pipeline.py + round_executor.py | 1,065 |
-| 热点发现（60s.viki.moe 公益 API） | hot_topics.py | 362 |
-| 平台内归一化 + 纵深洞察 | metrics/__init__.py + insights.py | Winsorized 基准、样本标准差、95% t 置信区间、按平台独立分析 |
-| 计划版本签名（§19 内容一致性） | plan_version.py | 227 |
-| 断点恢复（幂等 + pending_verify） | recovery.py | 151 |
-| 目标进度 + 终极目标口径 | goal_progress.py | 118 |
-
-### 平台适配器（src/adapters/）
-
-| 适配器 | 行数 | 说明 |
-|---|---|---|
-| 小红书 | 321 | 存草稿 + 数据读回 |
-| 抖音 | 277 | 存草稿 + 数据读回 |
-| 快手 | 278 | 存草稿 + 数据读回 |
-| 视频号 | 77 | 存草稿（简化版）|
-| 平台读回（创作者中心数据采集） | 278 | 四平台统一接口 |
-| 存草稿器（红线：永不点发布） | — | draft_saver.py |
-
-### API 层
-
-`src/api/main.py` — FastAPI 路由入口，覆盖状态机、选题、评分、运营、熔断、配置、通知、账号组与任务队列等端点；同步写请求提供请求级事务边界，异步写路径单独定义事务范围。
-
-### React 前端（web/）
-
-19 个文件 5,758 行，含 11 个页面：Dashboard · Production · HotTopics · Gaps · Goals · Calendar · Assets · Agent · Analytics · Operations · Settings，以及 Sidebar、AppContext、api 封装、DemoBadge（原型边界标注）等组件。
-
-### 测试
-
-`tests/` 按模块覆盖状态机、三模式评分、NULL vs 0 红线、事务锁与回滚、租户隔离、任务队列、调度器、API 端点、热点去重、分析统计和适配器安全。测试总量以当前仓库为准。
-
-### 尚未验证
-
-- Playwright 真实四平台存草稿链路（端到端）
-- 模型调用链路（文案生成 + 终极目标检查 + 图片卡片制作）
-- 四平台数据采集 API 真实连通性
-- 完整螺旋闭环（发布 → 数据 → 复盘 → 策略 → 下一轮）
-
-## License
-
-本项目基于 Apache License 2.0 开源，继承 Easel 上游许可证。
+This project is licensed under Apache License 2.0. See [LICENSE](LICENSE).

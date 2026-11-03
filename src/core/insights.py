@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
 
-from .timezone import business_now
+from .timezone import business_now, storage_now, storage_window_cutoffs, timestamp_since_sql
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +91,16 @@ class PlatformInsightsEngine:
     ) -> list[PlatformInsight]:
         """重新分析并落库，返回结果。"""
         days = self.cfg.insights.window_days if days is None else days
-        targets = platforms or list(PLATFORMS)
+        if isinstance(days, bool) or not isinstance(days, int) or days < 1 or days > 3650:
+            raise ValueError("days must be an integer between 1 and 3650")
+        targets = list(platforms) if platforms is not None else list(PLATFORMS)
+        if not targets:
+            raise ValueError("platforms must not be empty")
+        unknown = sorted(set(targets) - set(PLATFORMS))
+        if unknown:
+            raise ValueError(f"unsupported platform(s): {', '.join(unknown)}")
+        if len(set(targets)) != len(targets):
+            raise ValueError("platforms must not contain duplicates")
         results: list[PlatformInsight] = []
         for p in targets:
             insight = self._analyze_one(p, round_id, days)
@@ -121,14 +130,37 @@ class PlatformInsightsEngine:
         days = self.cfg.insights.window_days if days is None else days
         max_age_minutes = (self.cfg.insights.cache_max_age_minutes
                            if max_age_minutes is None else max_age_minutes)
-        rows = self.db.execute(
-            "SELECT MAX(analyzed_at) FROM platform_insights"
-        ).fetchone()
-        last = self._parse_dt(rows[0]) if rows and rows[0] else None
-        if last is not None and business_now(self.cfg) - last <= timedelta(minutes=max_age_minutes):
-            cached = self.latest()
-            if cached:
-                return cached
+        if isinstance(max_age_minutes, bool) or not isinstance(max_age_minutes, int) or max_age_minutes < 0:
+            raise ValueError("max_age_minutes must be a non-negative integer")
+        cached_rows = self.db.execute(
+            "SELECT * FROM platform_insights "
+            "WHERE round_id IS ? AND days_analyzed = ? "
+            "AND id IN (SELECT MAX(id) FROM platform_insights "
+            "           WHERE round_id IS ? AND days_analyzed = ? GROUP BY platform) "
+            "ORDER BY CASE platform WHEN 'xhs' THEN 1 WHEN 'douyin' THEN 2 "
+            "WHEN 'kuaishou' THEN 3 WHEN 'wechat_channels' THEN 4 ELSE 9 END",
+            (round_id, days, round_id, days),
+        ).fetchall()
+        cached = [self._row_to_dict(row) for row in cached_rows]
+        cached_platforms = {row.get("platform") for row in cached}
+        now = business_now(self.cfg)
+        fresh = len(cached) > 0 and cached_platforms == set(PLATFORMS)
+        if fresh:
+            for row in cached:
+                analyzed_at = self._parse_dt(row.get("analyzed_at"))
+                if analyzed_at is None:
+                    fresh = False
+                    break
+                comparable_now = now
+                if analyzed_at.tzinfo is None and comparable_now.tzinfo is not None:
+                    analyzed_at = analyzed_at.replace(tzinfo=comparable_now.tzinfo)
+                elif analyzed_at.tzinfo is not None and comparable_now.tzinfo is None:
+                    comparable_now = comparable_now.replace(tzinfo=analyzed_at.tzinfo)
+                if comparable_now - analyzed_at > timedelta(minutes=max_age_minutes):
+                    fresh = False
+                    break
+        if fresh:
+            return cached
         return [i.to_dict() for i in self.analyze(round_id=round_id, days=days)]
 
     # ------------------------------------------------------------------
@@ -136,7 +168,9 @@ class PlatformInsightsEngine:
     # ------------------------------------------------------------------
 
     def _analyze_one(self, platform: str, round_id: Optional[int], days: int) -> PlatformInsight:
-        since = (business_now(self.cfg) - timedelta(days=days)).isoformat(timespec="seconds")
+        since_utc, since_legacy = storage_window_cutoffs(
+            storage_now() - timedelta(days=days), self.cfg,
+        )
         rows = self.db.execute(
             "SELECT m.interaction_rate, m.like_rate, m.collect_rate, "
             "       c.title, c.word_count, c.card_style, t.dimension, "
@@ -144,17 +178,26 @@ class PlatformInsightsEngine:
             "FROM metrics m "
             "JOIN contents c ON m.content_id = c.id "
             "LEFT JOIN topic_index t ON c.topic_id = t.id "
-            "LEFT JOIN drafts d ON d.content_id = c.id AND d.platform = m.platform "
+            "LEFT JOIN drafts d ON d.id = ("
+            "  SELECT d2.id FROM drafts d2 "
+            "  WHERE d2.content_id = c.id AND d2.platform = m.platform "
+            "    AND d2.user_confirmed_at IS NOT NULL "
+            "  ORDER BY d2.user_confirmed_at DESC, d2.id DESC LIMIT 1"
+            ") "
             "WHERE m.platform = ? AND m.fetch_status IN ('success','partial') "
-            "  AND m.fetched_at >= ?",
-            (platform, since),
+            "  AND " + timestamp_since_sql("m.fetched_at") + " "
+            "  AND m.id = (SELECT MAX(m2.id) FROM metrics m2 "
+            "             WHERE m2.content_id = m.content_id AND m2.platform = m.platform "
+            "               AND m2.fetch_status IN ('success','partial')) "
+            "  AND (? IS NULL OR c.round_id = ?)",
+            (platform, since_utc, since_legacy, round_id, round_id),
         ).fetchall()
 
         samples = [
             {
-                "interaction_rate": r[0],
-                "like_rate": r[1],
-                "collect_rate": r[2],
+                "interaction_rate": self._finite_float(r[0]),
+                "like_rate": self._finite_float(r[1]),
+                "collect_rate": self._finite_float(r[2]),
                 "title": r[3],
                 "word_count": r[4],
                 "card_style": r[5],
@@ -168,10 +211,15 @@ class PlatformInsightsEngine:
             platform=platform,
             round_id=round_id,
             days_analyzed=days,
-            sample_count=len(samples),
+            sample_count=0,
         )
 
-        irs = sorted(s["interaction_rate"] for s in samples if s["interaction_rate"] is not None)
+        irs = sorted(
+            float(s["interaction_rate"]) for s in samples
+            if s["interaction_rate"] is not None
+            and math.isfinite(float(s["interaction_rate"]))
+        )
+        insight.sample_count = len(irs)
         if irs:
             insight.avg_interaction_rate = round(sum(irs) / len(irs), 6)
             insight.p25_interaction_rate = round(self._percentile(irs, 0.25), 6)
@@ -206,14 +254,14 @@ class PlatformInsightsEngine:
             valid = [v for v in values if v is not None]
             out.append({
                 "dimension": dim,
-                "sample_count": len(values),
+                "sample_count": len(valid),
                 "avg_interaction_rate": round(sum(valid) / len(valid), 6) if valid else None,
             })
         # 表现优先、样本量其次；无数据（NULL）排最后
         out.sort(
             key=lambda d: (
                 d["avg_interaction_rate"] is None,
-                -(d["avg_interaction_rate"] or 0),
+                -(d["avg_interaction_rate"] if d["avg_interaction_rate"] is not None else 0),
                 -d["sample_count"],
             )
         )
@@ -232,10 +280,14 @@ class PlatformInsightsEngine:
             valid = [v for v in values if v is not None]
             out.append({
                 "hour": hour,
-                "sample_count": len(values),
+                "sample_count": len(valid),
                 "avg_interaction_rate": round(sum(valid) / len(valid), 6) if valid else None,
             })
-        out.sort(key=lambda d: (-(d["avg_interaction_rate"] or 0), -d["sample_count"]))
+        out.sort(key=lambda d: (
+            d["avg_interaction_rate"] is None,
+            -(d["avg_interaction_rate"] if d["avg_interaction_rate"] is not None else 0),
+            -d["sample_count"],
+        ))
         return out[:self.cfg.insights.top_hours_limit]
 
     def _title_style(self, samples: list[dict]) -> dict:
@@ -257,16 +309,24 @@ class PlatformInsightsEngine:
             valid = [v for v in values if v is not None]
             rows.append({
                 "title_len": label,
-                "sample_count": len(values),
+                "sample_count": len(valid),
                 "avg_interaction_rate": round(sum(valid) / len(valid), 6) if valid else None,
             })
-        rows.sort(key=lambda d: (-(d["avg_interaction_rate"] or 0), -d["sample_count"]))
+        rows.sort(key=lambda d: (
+            d["avg_interaction_rate"] is None,
+            -(d["avg_interaction_rate"] if d["avg_interaction_rate"] is not None else 0),
+            -d["sample_count"],
+        ))
         valid_lens = [s for s in samples if s["title"]]
         avg_len = (
             round(sum(len(s["title"].strip()) for s in valid_lens) / len(valid_lens), 1)
             if valid_lens else None
         )
-        return {"avg_title_len": avg_len, "best_bucket": rows[0]["title_len"], "buckets": rows}
+        best_bucket = next(
+            (row["title_len"] for row in rows if row["avg_interaction_rate"] is not None),
+            None,
+        )
+        return {"avg_title_len": avg_len, "best_bucket": best_bucket, "buckets": rows}
 
     def _best_group(self, samples: list[dict], key: str, label_field: str) -> Optional[dict]:
         buckets: dict[str, list[Optional[float]]] = {}
@@ -282,16 +342,20 @@ class PlatformInsightsEngine:
             valid = [v for v in values if v is not None]
             scored.append({
                 label_field: label,
-                "sample_count": len(values),
+                "sample_count": len(valid),
                 "avg_interaction_rate": round(sum(valid) / len(valid), 6) if valid else None,
             })
-        scored.sort(key=lambda d: (-(d["avg_interaction_rate"] or 0), -d["sample_count"]))
+        scored.sort(key=lambda d: (
+            d["avg_interaction_rate"] is None,
+            -(d["avg_interaction_rate"] if d["avg_interaction_rate"] is not None else 0),
+            -d["sample_count"],
+        ))
         return scored[0]
 
     def _conclude(self, insight: PlatformInsight) -> str:
         """生成一句人话结论。样本为 0 时不编数字（R3）。"""
         if insight.sample_count == 0:
-            return "该平台暂无有效采集样本，暂不做纵深结论（不是 0 互动，是没有数据）。"
+            return "该平台暂无可用互动率样本，暂不做纵深结论（缺失数据不代表 0 互动）。"
 
         parts: list[str] = []
         if insight.avg_interaction_rate is not None:
@@ -381,10 +445,41 @@ class PlatformInsightsEngine:
             2.093, 2.086, 2.080, 2.074, 2.069, 2.064, 2.060, 2.056, 2.052,
             2.048, 2.045,
         )
-        critical = critical_values[df - 1] if df <= len(critical_values) else 1.96
+        critical = (
+            critical_values[df - 1]
+            if df <= len(critical_values)
+            else PlatformInsightsEngine._student_t_critical_975(df)
+        )
         mean = statistics.mean(values)
         margin = critical * statistics.stdev(values) / math.sqrt(len(values))
         return mean - margin, mean + margin
+
+    @staticmethod
+    def _finite_float(value) -> Optional[float]:
+        """Convert persisted numeric data safely; malformed/non-finite values are missing, not zero."""
+        if value is None:
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return parsed if math.isfinite(parsed) else None
+
+    @staticmethod
+    def _student_t_critical_975(df: int) -> float:
+        """Student-t 双侧 95% 临界值；使用 Cornish-Fisher 展开覆盖 df > 29。"""
+        if isinstance(df, bool) or not isinstance(df, int) or df < 1:
+            raise ValueError("degrees of freedom must be a positive integer")
+        z = 1.959963984540054
+        v = float(df)
+        term1 = (z ** 3 + z) / (4 * v)
+        term2 = (5 * z ** 5 + 16 * z ** 3 + 3 * z) / (96 * v ** 2)
+        term3 = (3 * z ** 7 + 19 * z ** 5 + 17 * z ** 3 - 15 * z) / (384 * v ** 3)
+        term4 = (
+            79 * z ** 9 + 776 * z ** 7 + 1482 * z ** 5
+            - 1920 * z ** 3 - 945 * z
+        ) / (92160 * v ** 4)
+        return z + term1 + term2 + term3 + term4
 
     @staticmethod
     def _percentile(sorted_values: list[float], q: float) -> float:

@@ -20,12 +20,16 @@ DraftSaver — 通用 Playwright 存草稿工具（四平台共用）。
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import mimetypes
 import os
+import re
+import weakref
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import parse_qs, urlsplit
 
 from playwright.async_api import Page, BrowserContext, async_playwright
 
@@ -37,6 +41,109 @@ from .base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Page.route is the final in-process boundary: a UI regression or a platform button
+# label change must not be able to submit a publish-like network operation.
+_PUBLISH_GUARD_CONTEXTS = weakref.WeakSet()
+_PUBLISH_PATH_RE = re.compile(
+    r"(?:^|/)(?:publish|submit|send|release|post-publish|publish-post)(?:/|$|[._?-])",
+    re.IGNORECASE,
+)
+_PUBLISH_ACTION_KEYS = {
+    "action", "operation", "op", "command", "intent", "publishaction",
+    "submitaction", "publishtype", "submittype", "contentaction",
+}
+_PUBLISH_ACTION_VALUES = {
+    "publish", "published", "publishnow", "publishimmediately",
+    "submit", "submitnow", "send", "sendnow", "release", "post",
+}
+
+
+def _normalize_action_token(value: object) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+
+def _contains_publish_action(value) -> bool:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            normalized_key = _normalize_action_token(key)
+            if normalized_key in _PUBLISH_ACTION_KEYS:
+                action_values = child if isinstance(child, list) else [child]
+                if any(
+                    isinstance(item, str) and _normalize_action_token(item) in _PUBLISH_ACTION_VALUES
+                    for item in action_values
+                ):
+                    return True
+                if any(
+                    item is True for item in action_values
+                ) and normalized_key in {"publishaction", "submitaction"}:
+                    return True
+            if _contains_publish_action(child):
+                return True
+    elif isinstance(value, list):
+        return any(_contains_publish_action(item) for item in value)
+    return False
+
+
+def _is_publish_network_request(method: str, url: str, post_data: str | None = None) -> bool:
+    """识别写请求中的发布动作；草稿保存路径不属于发布动作。"""
+    if str(method or "").upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return False
+    parsed_url = urlsplit(str(url or ""))
+    path = parsed_url.path.lower()
+    # Some platform APIs put the operation in the URL query rather than the body.
+    query_payload = {
+        key: values for key, values in parse_qs(parsed_url.query).items() if values
+    }
+    payload = None
+    if post_data:
+        try:
+            payload = json.loads(post_data)
+        except (TypeError, ValueError):
+            # Some platform endpoints submit form-urlencoded action fields.
+            try:
+                payload = {key: values for key, values in parse_qs(post_data).items() if values}
+            except (TypeError, ValueError):
+                payload = None
+    # An explicit publish action always wins, even if the URL contains "draft".
+    if _contains_publish_action(query_payload) or _contains_publish_action(payload):
+        return True
+    # Only explicit draft-save routes are exempt; a generic /draft/* path is not.
+    if re.search(r"/(?:draft|drafts)/(?:save|create)(?:/|$)", path) or re.search(
+        r"/save[-_]draft(?:/|$)", path,
+    ):
+        return False
+    return bool(_PUBLISH_PATH_RE.search(path))
+
+
+async def _install_publish_network_guard(target: Page | BrowserContext) -> None:
+    """在整个 BrowserContext 安装请求级发布拦截，覆盖其全部页面和弹窗。"""
+    try:
+        # Prefer context-wide routing. Page-only fakes remain supported by unit tests.
+        context = target if hasattr(target, "pages") else getattr(target, "context", target)
+        if context in _PUBLISH_GUARD_CONTEXTS:
+            return
+
+        async def guard(route):
+            request = route.request
+            if _is_publish_network_request(
+                request.method, request.url, getattr(request, "post_data", None),
+            ):
+                parsed = urlsplit(request.url)
+                logger.critical(
+                    "平台发布网络请求已拦截 method=%s host=%s path=%s",
+                    request.method, parsed.netloc, parsed.path[:160],
+                )
+                await route.abort(error_code="blockedbyclient")
+                return
+            await route.continue_()
+
+        await context.route("**/*", guard)
+        _PUBLISH_GUARD_CONTEXTS.add(context)
+    except Exception as exc:
+        logger.exception("无法安装发布网络拦截，拒绝继续草稿保存")
+        raise RuntimeError("发布网络安全拦截未能启用，已停止平台操作") from exc
 
 
 # =====================================================================
@@ -320,7 +427,11 @@ class DraftSaver:
           ⚠️ 按钮点了但无成功证据 → needs_human_verify=True（R17）
           ❌ 明确失败（登录态 / 熔断 / 图片数量不符 / 按钮未找到）→ success=False
         """
+        save_attempt_started = False
+        draft_id = None
         try:
+            # UI 白名单之外再加一层请求级防线（BrowserContext 级）；安装失败时 fail closed。
+            await _install_publish_network_guard(page)
             # 0. 视频号图文走独立链路（入口在「内容管理→图文」列表页，创作器在嵌套 iframe 里）
             if content.image_paths and self.selectors.get("image_flow") == "wechat_finder":
                 return await self._save_wechat_image_draft(page, content)
@@ -416,6 +527,9 @@ class DraftSaver:
             initial_draft_count = await self._draft_count(page)
 
             # 7. ⚠️ 存草稿（只点 save_draft_button，严禁点 _publish_button_audit_only！）
+            # 从第一次尝试触发保存按钮开始，后续未分类异常都可能发生在平台已接收操作之后。
+            # 保守记为不确定状态，避免把可能已保存的草稿标为 failed 并自动重复提交。
+            save_attempt_started = True
             save_ok = await self._click_save_draft_button(page, self.selectors["save_draft_button"])
             if not save_ok:
                 logger.warning("存草稿按钮未找到，尝试兜底 ...")
@@ -473,8 +587,23 @@ class DraftSaver:
             )
 
         except Exception as exc:
-            logger.exception("❌ 平台 %s 存草稿失败: %s", self.platform, exc)
-            return DraftResult(success=False, error_msg=safe_error_summary(exc, "平台存草稿失败，请检查登录状态后重试"))
+            logger.exception("❌ 平台 %s 存草稿流程异常: %s", self.platform, exc)
+            safe_error = safe_error_summary(exc, "平台存草稿操作异常")
+            if save_attempt_started:
+                return DraftResult(
+                    success=False,
+                    needs_human_verify=True,
+                    platform_draft_id=draft_id,
+                    platform_draft_id_missing=(draft_id is None),
+                    error_msg=(
+                        "存草稿操作已开始但流程异常，平台是否已保存无法确认；"
+                        "已暂停自动重试，请人工核实平台草稿箱。"
+                    ),
+                )
+            return DraftResult(
+                success=False,
+                error_msg=safe_error_summary(exc, "平台存草稿失败，请检查登录状态后重试"),
+            )
 
     # ------------------------------------------------------------------
     # 内部辅助
@@ -859,15 +988,38 @@ class DraftSaver:
             frame = await self._wechat_composer_frame(page, timeout_s=8)
             if frame is None:
                 continue
-            if await self._wechat_click_save(frame):
+            try:
+                clicked = await self._wechat_click_save(frame)
+            except Exception as exc:
+                # 发生在保存按钮调用期间的异常无法证明平台没有收到点击。
+                logger.exception("视频号保存草稿点击异常，转人工核实")
+                return DraftResult(
+                    success=False,
+                    needs_human_verify=True,
+                    platform_draft_id_missing=True,
+                    uploaded_image_count=len(content.image_paths),
+                    error_msg="视频号保存草稿操作发生异常，平台是否已保存无法确认；请人工核实。",
+                )
+            if clicked:
                 save_clicked = True
                 break
             await page.wait_for_timeout(1500)
         if not save_clicked:
             return DraftResult(success=False, error_msg="未找到「保存草稿」按钮")
 
-        await page.wait_for_timeout(3000)
-        evidence = await self._verify_wechat_draft(page, content.title)
+        try:
+            await page.wait_for_timeout(3000)
+            evidence = await self._verify_wechat_draft(page, content.title)
+        except Exception:
+            # 保存动作已确认触发，后续等待/核验异常一律不得降级成可自动重试的失败。
+            logger.exception("视频号保存后核验异常，转人工核实")
+            return DraftResult(
+                success=False,
+                needs_human_verify=True,
+                platform_draft_id_missing=True,
+                uploaded_image_count=len(content.image_paths),
+                error_msg="视频号已触发保存，但核验流程异常；平台是否已保存无法确认，请人工核实。",
+            )
         if evidence:
             return DraftResult(
                 success=True,

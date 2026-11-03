@@ -115,6 +115,10 @@ class GlobalTaskQueue:
                 );
                 CREATE INDEX IF NOT EXISTS idx_global_task_queue_tenant
                     ON global_task_queue(tenant_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_global_task_queue_created_at
+                    ON global_task_queue(created_at);
+                CREATE INDEX IF NOT EXISTS idx_global_task_queue_tenant_type_created
+                    ON global_task_queue(tenant_id, task_type, created_at);
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_global_task_active_aggregate
                     ON global_task_queue(tenant_id, task_type, aggregate_id)
                     WHERE aggregate_id IS NOT NULL AND status IN ('queued','running');
@@ -134,6 +138,16 @@ class GlobalTaskQueue:
                     note TEXT NOT NULL,
                     acted_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS global_task_admin_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL REFERENCES global_task_queue(task_id) ON DELETE CASCADE,
+                    action TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    acted_at TEXT NOT NULL,
+                    details_json TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE INDEX IF NOT EXISTS idx_global_task_admin_audit_task_time
+                    ON global_task_admin_audit(task_id, acted_at DESC, id DESC);
                 """
             )
             # 跨进程串行执行旧表迁移，避免多 Uvicorn worker 同时 ALTER 同一列。
@@ -393,16 +407,17 @@ class GlobalTaskQueue:
 
     def fail(
         self, task_id: str, owner: str, *, error_code: str,
-        error_message: str,
+        error_message: str, result: dict[str, Any] | None = None,
     ) -> bool:
+        result_json = json.dumps(result, ensure_ascii=False, sort_keys=True) if result is not None else None
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute(
                 "UPDATE global_task_queue SET status='failed',finished_at=?,error_code=?,"
-                "error_message=?,lease_owner=NULL,lease_expires_at=NULL "
+                "error_message=?,result_json=COALESCE(?,result_json),lease_owner=NULL,lease_expires_at=NULL "
                 "WHERE task_id=? AND status='running' AND lease_owner=?",
-                (_stamp(), error_code[:80], error_message[:500], task_id, owner),
+                (_stamp(), error_code[:80], error_message[:500], result_json, task_id, owner),
             )
             conn.commit()
             return cursor.rowcount == 1
@@ -482,15 +497,62 @@ class GlobalTaskQueue:
         finally:
             conn.close()
 
-    def cancel(self, task_id: str) -> bool:
+    def cancel(self, task_id: str, *, actor: str = "system") -> bool:
+        """Cancel a queued task and append its audit event in the same transaction."""
+        actor = str(actor or "").strip()
+        if not actor or len(actor) > 100:
+            raise ValueError("actor 无效")
         conn = self._connect()
         try:
+            conn.execute("BEGIN IMMEDIATE")
+            acted_at = _stamp()
             cursor = conn.execute(
                 "UPDATE global_task_queue SET status='cancelled',finished_at=? "
                 "WHERE task_id=? AND status='queued'",
-                (_stamp(), task_id),
+                (acted_at, task_id),
             )
+            if cursor.rowcount == 1:
+                conn.execute(
+                    "INSERT INTO global_task_admin_audit(task_id,action,actor,acted_at,details_json) "
+                    "VALUES(?,?,?,?,?)",
+                    (task_id, "cancel", actor, acted_at, "{}"),
+                )
+            conn.commit()
             return cursor.rowcount == 1
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def interrupt_running_after_worker_exit(self, *, reason: str) -> dict[str, Any]:
+        """Mark all running tasks interrupted after the owning worker process is confirmed dead.
+
+        A worker process hosts multiple tenant consumers. Killing its process group can
+        interrupt several tenants, so all running rows and all owner leases are reconciled
+        in one transaction. Uncertain platform effects are never replayed automatically.
+        """
+        message = (reason or "后台 Worker 进程已退出，任务结果需人工核实")[:500]
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT task_id FROM global_task_queue WHERE status='running' ORDER BY queue_order"
+            ).fetchall()
+            cursor = conn.execute(
+                "UPDATE global_task_queue SET status='interrupted', finished_at=?, "
+                "error_code='worker_process_lost', error_message=?, "
+                "lease_owner=NULL, lease_expires_at=NULL WHERE status='running'",
+                (_stamp(), message),
+            )
+            # Clear both the legacy singleton and the current per-consumer lease table.
+            conn.execute("DELETE FROM global_task_worker_lease WHERE singleton_id=1")
+            conn.execute("DELETE FROM global_task_worker_leases")
+            conn.commit()
+            return {"interrupted": cursor.rowcount, "task_ids": [row["task_id"] for row in rows]}
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -546,6 +608,30 @@ class GlobalTaskQueue:
         finally:
             conn.close()
 
+    def list_admin_audit(self, task_id: str) -> list[dict[str, Any]]:
+        """Return append-only operator actions for a task, newest first."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT id, task_id, action, actor, acted_at, details_json "
+                "FROM global_task_admin_audit WHERE task_id=? ORDER BY acted_at DESC, id DESC",
+                (task_id,),
+            ).fetchall()
+            result = []
+            for row in rows:
+                try:
+                    details = json.loads(row["details_json"] or "{}")
+                except (TypeError, ValueError):
+                    details = {}
+                result.append({
+                    "id": int(row["id"]), "task_id": row["task_id"],
+                    "action": row["action"], "actor": row["actor"],
+                    "acted_at": row["acted_at"], "details": details,
+                })
+            return result
+        finally:
+            conn.close()
+
     def resolve_failed_task(
         self, task_id: str, *, action: str, actor: str, note: str,
     ) -> tuple[dict[str, str], bool]:
@@ -581,6 +667,12 @@ class GlobalTaskQueue:
             conn.execute(
                 "INSERT INTO global_task_actions(task_id,action,actor,note,acted_at) VALUES(?,?,?,?,?)",
                 (task_id, action, actor, note, acted_at),
+            )
+            conn.execute(
+                "INSERT INTO global_task_admin_audit(task_id,action,actor,acted_at,details_json) "
+                "VALUES(?,?,?,?,?)",
+                (task_id, f"resolve_{action}", actor, acted_at,
+                 json.dumps({"note": note}, ensure_ascii=False)),
             )
             conn.commit()
             return {"action": action, "actor": actor, "note": note, "acted_at": acted_at}, True
@@ -660,6 +752,13 @@ class GlobalTaskQueue:
             row = conn.execute(
                 "SELECT * FROM global_task_queue WHERE task_id=?", (retry_id,)
             ).fetchone()
+            conn.execute(
+                "INSERT INTO global_task_admin_audit(task_id,action,actor,acted_at,details_json) "
+                "VALUES(?,?,?,?,?)",
+                (task_id, "retry", actor, now,
+                 json.dumps({"retry_task_id": retry_id, "confirmed_not_executed": True,
+                             "confirmation_note": note}, ensure_ascii=False)),
+            )
             conn.commit()
             task = self._decode(row)
             assert task is not None
@@ -683,26 +782,47 @@ class GlobalTaskQueue:
         finally:
             conn.close()
 
+    def list_running_tasks(self) -> list[QueuedTask]:
+        """Return every running task in one SQLite read snapshot for watchdog enforcement."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT q.*, a.action AS resolution_action, a.actor AS resolution_actor, "
+                "a.note AS resolution_note, a.acted_at AS resolution_at "
+                "FROM global_task_queue q LEFT JOIN global_task_actions a ON a.task_id=q.task_id "
+                "WHERE q.status='running' ORDER BY q.queue_order"
+            ).fetchall()
+            return [self._decode(row) for row in rows]
+        finally:
+            conn.close()
+
     def list_page(
         self, *, page: int = 1, page_size: int = 20,
         scope: str = "history", tenant_id: str | None = None,
         task_type: str | None = None, error_keyword: str | None = None,
         date_from: str | None = None, date_to: str | None = None,
-        unresolved_only: bool = False,
+        unresolved_only: bool = False, status: str | None = None,
     ) -> tuple[list[QueuedTask], int]:
         """Return a stable, database-paginated slice of active or historical tasks."""
         page = max(1, int(page))
         page_size = max(1, min(int(page_size), 500))
-        if scope not in {"active", "history", "failed"}:
-            raise ValueError("scope must be active or history")
+        if scope not in {"active", "history", "failed", "filtered"}:
+            raise ValueError("scope must be active, history, failed, or filtered")
         statuses = (
             ("queued", "running") if scope == "active"
             else ("failed", "interrupted") if scope == "failed"
+            else ("queued", "running", "succeeded", "failed", "cancelled", "interrupted")
+            if scope == "filtered"
             else ("succeeded", "failed", "cancelled", "interrupted")
         )
         placeholders = ",".join("?" for _ in statuses)
         where = f"q.status IN ({placeholders})"
         params: list[object] = list(statuses)
+        if status is not None:
+            if status not in {"queued", "running", "succeeded", "failed", "cancelled", "interrupted"}:
+                raise ValueError("status is invalid")
+            where += " AND q.status=?"
+            params.append(status)
         if unresolved_only:
             if scope != "failed":
                 raise ValueError("unresolved_only 仅适用于 failed scope")
@@ -728,6 +848,16 @@ class GlobalTaskQueue:
         if date_to is not None:
             where += " AND substr(q.created_at, 1, 10) <= ?"
             params.append(date_to)
+        # Validate calendar dates, not merely their lexical ordering. Invalid values
+        # otherwise produce silently empty result sets through SQLite substr().
+        for field_name, date_value in (("date_from", date_from), ("date_to", date_to)):
+            if date_value is not None:
+                try:
+                    parsed_date = datetime.strptime(date_value, "%Y-%m-%d")
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"{field_name} must be a valid YYYY-MM-DD date") from exc
+                if parsed_date.strftime("%Y-%m-%d") != date_value:
+                    raise ValueError(f"{field_name} must be a valid YYYY-MM-DD date")
         if date_from and date_to and date_from > date_to:
             raise ValueError("date_from cannot be later than date_to")
         offset = (page - 1) * page_size
@@ -748,11 +878,12 @@ class GlobalTaskQueue:
                 try:
                     task = self._decode(row)
                 except TaskQueueError as exc:
-                    logger.error(
-                        "跳过无法解码的队列记录 task_id=%s error=%s",
-                        row["task_id"], str(exc),
-                    )
-                    continue
+                    # Never silently omit corrupt history rows: doing so makes the
+                    # returned page disagree with COUNT(*) and hides persistent damage.
+                    logger.exception("队列历史记录损坏 task_id=%s", row["task_id"])
+                    raise TaskQueueError(
+                        f"队列任务 {row['task_id']} 数据损坏，分页结果不完整"
+                    ) from exc
                 if task is not None:
                     tasks.append(task)
             return tasks, int(total_row["n"] if total_row else 0)
@@ -789,6 +920,87 @@ class GlobalTaskQueue:
                 "total": sum(by_status.values()),
                 "by_status": by_status,
                 "by_tenant": by_tenant,
+            }
+        finally:
+            conn.close()
+
+    def dispatch_summary(
+        self, *, date_from: str | None = None, date_to: str | None = None,
+        tenant_id: str | None = None, task_type: str | None = None,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        """Return bounded aggregate metrics and daily trends without loading task payloads."""
+        from datetime import date, timedelta
+        if date_from and date_to and date_from > date_to:
+            raise ValueError("date_from cannot be later than date_to")
+        where = ["1=1"]
+        params: list[object] = []
+        if date_from is not None:
+            try:
+                date.fromisoformat(date_from)
+            except ValueError as exc:
+                raise ValueError("date_from must be YYYY-MM-DD") from exc
+            where.append("created_at >= ?")
+            params.append(date_from)
+        if date_to is not None:
+            try:
+                date_to_value = date.fromisoformat(date_to)
+            except ValueError as exc:
+                raise ValueError("date_to must be YYYY-MM-DD") from exc
+            where.append("created_at < ?")
+            params.append((date_to_value + timedelta(days=1)).isoformat())
+        if tenant_id is not None:
+            where.append("tenant_id = ?")
+            params.append(tenant_id)
+        if task_type is not None:
+            if not task_type or len(task_type) > 80:
+                raise ValueError("task_type is invalid")
+            where.append("task_type = ?")
+            params.append(task_type)
+        allowed_statuses = {"queued", "running", "succeeded", "failed", "cancelled", "interrupted"}
+        if status is not None:
+            if status not in allowed_statuses:
+                raise ValueError("status is invalid")
+            where.append("status = ?")
+            params.append(status)
+        clause = " AND ".join(where)
+        conn = self._connect()
+        try:
+            status_rows = conn.execute(
+                f"SELECT status, COUNT(*) AS n FROM global_task_queue WHERE {clause} GROUP BY status",
+                params,
+            ).fetchall()
+            statuses = {key: 0 for key in ("queued", "running", "succeeded", "failed", "cancelled", "interrupted")}
+            for row in status_rows:
+                statuses[str(row["status"])] = int(row["n"])
+            daily_rows = conn.execute(
+                f"SELECT substr(created_at,1,10) AS day, "
+                "SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END) AS succeeded, "
+                "SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed, "
+                "COUNT(*) AS total "
+                f"FROM global_task_queue WHERE {clause} GROUP BY substr(created_at,1,10) ORDER BY day",
+                params,
+            ).fetchall()
+            duration = conn.execute(
+                f"SELECT AVG((julianday(finished_at)-julianday(started_at))*86400.0) AS avg_seconds "
+                f"FROM global_task_queue WHERE {clause} AND started_at IS NOT NULL "
+                "AND finished_at IS NOT NULL AND status IN ('succeeded','failed','interrupted')",
+                params,
+            ).fetchone()
+            return {
+                "total": sum(statuses.values()),
+                "by_status": statuses,
+                "daily": [
+                    {"date": str(row["day"]), "total": int(row["total"]),
+                     "succeeded": int(row["succeeded"] or 0), "failed": int(row["failed"] or 0)}
+                    for row in daily_rows
+                ],
+                "average_duration_seconds": (
+                    round(float(duration["avg_seconds"]), 2)
+                    if duration and duration["avg_seconds"] is not None else None
+                ),
+                "filters": {"date_from": date_from, "date_to": date_to,
+                            "tenant_id": tenant_id, "task_type": task_type, "status": status},
             }
         finally:
             conn.close()

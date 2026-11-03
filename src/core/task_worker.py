@@ -52,7 +52,8 @@ class GlobalTaskWorker:
                 shutdown_grace_seconds = float(os.getenv("ITERWAVE_TASK_SHUTDOWN_GRACE_SECONDS", "30"))
             except (TypeError, ValueError):
                 shutdown_grace_seconds = 30.0
-        self.shutdown_grace_seconds = max(0.0, min(float(shutdown_grace_seconds), 300.0))
+        # 与独立 Watchdog 的等待上限（90s + 5s）保持一致，避免 Worker 尚在宽限期内即被 SIGKILL。
+        self.shutdown_grace_seconds = max(0.0, min(float(shutdown_grace_seconds), 90.0))
         self.reconcile_terminal_rounds = bool(reconcile_terminal_rounds)
         self.owner = uuid.uuid4().hex
         self._reconciled_interrupted_task_ids: set[str] = set()
@@ -256,9 +257,9 @@ class GlobalTaskWorker:
         if conn is None or not callable(getattr(conn, "execute", None)):
             return None
         import json
-        from src.core.timezone import business_now
+        from src.core.timezone import storage_now
         try:
-            now = business_now(cfg).isoformat(timespec="seconds")
+            now = storage_now().isoformat(timespec="seconds")
             identity = json.dumps(args, ensure_ascii=False, default=str)[:300]
             with conn:
                 cur = conn.execute(
@@ -275,12 +276,12 @@ class GlobalTaskWorker:
     def _finish_scheduler_task_run(conn, cfg, task_run_id: int | None, status: str, error_msg: str | None) -> None:
         if conn is None or task_run_id is None:
             return
-        from src.core.timezone import business_now
+        from src.core.timezone import storage_now
         try:
             with conn:
                 conn.execute(
                     "UPDATE task_runs SET status=?, finished_at=?, error_msg=? WHERE id=? AND status='running'",
-                    (status, business_now(cfg).isoformat(timespec="seconds"), error_msg, task_run_id),
+                    (status, storage_now().isoformat(timespec="seconds"), error_msg, task_run_id),
                 )
         except Exception:
             logger.exception("结束定时任务审计记录失败 task_run_id=%s", task_run_id)
@@ -350,8 +351,8 @@ class GlobalTaskWorker:
         """原子标记关联计划失败；拒绝覆盖已取消、已完成等终态计划。"""
         if conn is None or not callable(getattr(conn, "execute", None)):
             return
-        from src.core.timezone import business_now
-        now = business_now(cfg).isoformat(timespec="seconds")
+        from src.core.timezone import storage_now
+        now = storage_now().isoformat(timespec="seconds")
         transaction = conn if callable(getattr(conn, "__enter__", None)) else nullcontext()
         with transaction:
             conn.execute("BEGIN IMMEDIATE")
@@ -374,8 +375,8 @@ class GlobalTaskWorker:
         """原子关联轮次草稿并推进计划；迟到结果不得覆盖已终止计划。"""
         if conn is None or not callable(getattr(conn, "execute", None)):
             return
-        from src.core.timezone import business_now
-        now = business_now(cfg).isoformat(timespec="seconds")
+        from src.core.timezone import storage_now
+        now = storage_now().isoformat(timespec="seconds")
         transaction = conn if callable(getattr(conn, "__enter__", None)) else nullcontext()
         with transaction:
             conn.execute("BEGIN IMMEDIATE")
@@ -417,6 +418,7 @@ class GlobalTaskWorker:
         ))
         execution = asyncio.create_task(self._run_task(task))
         stop_waiter = asyncio.create_task(stop_event.wait()) if stop_event is not None else None
+        report: dict[str, Any] | None = None
         try:
             wait_for = {execution, heartbeat}
             if stop_waiter is not None:
@@ -450,7 +452,9 @@ class GlobalTaskWorker:
                 except asyncio.CancelledError:
                     pass
                 raise WorkerLeaseLost("任务租约丢失，已请求停止当前任务")
-            report = await execution
+            execution_result = await execution
+            if isinstance(execution_result, dict):
+                report = execution_result
             if lease_lost.is_set():
                 raise WorkerLeaseLost("任务租约丢失，拒绝提交完成状态")
             if isinstance(report, dict) and report.get("final_status") == "failed":
@@ -484,6 +488,7 @@ class GlobalTaskWorker:
                 failed = self.queue.fail(
                     task.task_id, self.owner,
                     error_code=error_code, error_message=safe_message,
+                    result=report,
                 )
             except Exception:
                 logger.exception("写入任务失败状态异常 task_id=%s", task.task_id)
