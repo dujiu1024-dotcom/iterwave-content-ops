@@ -322,11 +322,12 @@ export default function Production() {
   };
 
   const confirmPublish = async (draftId: string) => {
-    // 发布确认与链接回填合并为一个动作；允许留空，稍后在数据复盘页补填。
+    // 实际发布时间与点击确认时间分开记录；不清楚时留空，后端明确标记为确认时间。
     const noteUrl = window.prompt("粘贴已发布内容的链接（可留空，之后可补填）", "") ?? "";
+    const publishedAt = window.prompt("实际发布时间（ISO 日期时间，例如 2026-11-03T18:30:00；不清楚可留空）", "") ?? "";
     try {
-      await api.confirmPublish(draftId, noteUrl.trim() || undefined);
-      showToast(noteUrl.trim() ? "✓ 已确认发布并保存链接" : "✓ 已确认发布，可稍后补填链接");
+      await api.confirmPublish(draftId, noteUrl.trim() || undefined, undefined, undefined, publishedAt.trim() || undefined);
+      showToast(noteUrl.trim() ? "✓ 已确认发布并保存链接" : "✓ 已确认发布；发布时间已记录或标记为确认时间");
       await refresh();
       if (currentRoundId) await loadRoundData(currentRoundId);
     } catch (e: any) { showToast(`确认失败: ${e.message}`, "error"); }

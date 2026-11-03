@@ -7,7 +7,11 @@ const PAGE_SIZE = 30;
 function actionLabel(action: string): string {
   if (action === "review_approve") return "审核通过";
   if (action === "review_reject") return "审核驳回";
-  if (action === "review_resubmit") return "重新提交";
+  if (action === "review_resubmit" || action === "resubmitted") return "重新提交";
+  if (action === "review_edit") return "内容编辑";
+  if (action === "approved") return "审核通过";
+  if (action === "rejected") return "审核驳回";
+  if (action === "edited") return "内容编辑";
   return action;
 }
 
@@ -34,6 +38,16 @@ export default function Review() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [editTitle, setEditTitle] = useState("");
+  const [editBody, setEditBody] = useState("");
+  const [editTags, setEditTags] = useState("");
+  const [effectFeedback, setEffectFeedback] = useState<Awaited<ReturnType<typeof api.stageEffectFeedback>> | null>(null);
+  const [effectAssessment, setEffectAssessment] = useState<"effective" | "mixed" | "ineffective" | "insufficient_data">("insufficient_data");
+  const [effectRecommendation, setEffectRecommendation] = useState("");
+  const [effectEvidence, setEffectEvidence] = useState("");
+  const [effectConfidence, setEffectConfidence] = useState<"low" | "medium" | "high">("low");
+  const [publishFailureReason, setPublishFailureReason] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -58,6 +72,17 @@ export default function Review() {
   useEffect(() => { void load(); }, [load]);
 
   const selected = items.find((item) => item.id === selectedId) ?? null;
+  useEffect(() => {
+    const stageId = selected?.sub_plan_stage_id;
+    if (!stageId) { setEffectFeedback(null); return; }
+    let cancelled = false;
+    void api.stageEffectFeedback(stageId).then((result) => {
+      if (!cancelled) setEffectFeedback(result);
+    }).catch((err) => {
+      if (!cancelled) setError(err instanceof Error ? err.message : "策略效果数据加载失败");
+    });
+    return () => { cancelled = true; };
+  }, [selected?.sub_plan_stage_id]);
   const filteredItems = useMemo(() => {
     const query = search.trim().toLowerCase();
     if (!query) return items;
@@ -102,6 +127,50 @@ export default function Review() {
     } finally {
       setBusyId(null);
     }
+  };
+
+  const saveEdit = async () => {
+    if (!selected || busyId) return;
+    setBusyId(selected.id); setError(""); setNotice("");
+    try {
+      await api.updateContent(selected.id, {
+        title: editTitle.trim(), body: editBody.trim(),
+        tags: editTags.split(/[，,]/).map((tag) => tag.trim().replace(/^#/, "")).filter(Boolean),
+        reason: "集中审核页面人工编辑",
+      });
+      await api.recheckContent(selected.id);
+      setEditing(false);
+      setNotice("内容已保存，并已重新执行 G2 检查；需要重新审核。");
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "内容编辑失败");
+    } finally { setBusyId(null); }
+  };
+
+  const recordPublishFailure = async () => {
+    if (!selected || !publishFailureReason.trim() || busyId) return;
+    setBusyId(selected.id); setError(""); setNotice("");
+    try {
+      await api.recordPublishFailure(selected.draft_id, publishFailureReason.trim());
+      setPublishFailureReason("");
+      setNotice("发布失败结果已记录；草稿仍保留，可在处理后重新发布。");
+      await load();
+    } catch (err) { setError(err instanceof Error ? err.message : "发布结果记录失败"); }
+    finally { setBusyId(null); }
+  };
+
+  const saveEffectReview = async () => {
+    if (!selected?.sub_plan_stage_id || !effectRecommendation.trim()) return;
+    try {
+      await api.saveStageEffectFeedback(selected.sub_plan_stage_id, {
+        assessment: effectAssessment, recommendation: effectRecommendation.trim(),
+        evidence_note: effectEvidence.trim(), confidence: effectConfidence,
+      });
+      setEffectRecommendation(""); setEffectEvidence("");
+      const result = await api.stageEffectFeedback(selected.sub_plan_stage_id);
+      setEffectFeedback(result);
+      setNotice("策略效果评估已保存，历史记录不会被覆盖。");
+    } catch (err) { setError(err instanceof Error ? err.message : "策略评估保存失败"); }
   };
 
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -192,11 +261,21 @@ export default function Review() {
                 <span>草稿状态：{selected.draft_status}</span>
                 <span>G2：{selected.guard_outcome ?? "未检查"}</span>
                 <span>审核：{statusLabel(selected.review_status)}</span>
+                <span>发布：{selected.publish_status === "published" ? "已发布" : selected.publish_status === "failed" ? "发布失败" : "未发布"}</span>
+                {selected.published_at && <span>发布时间：{selected.published_at}（{selected.publish_time_source === "user_supplied" ? "人工填写" : "确认时间"}）</span>}
               </div>
+              {selected.publish_result_note && <p className="notice error">发布失败原因：{selected.publish_result_note}</p>}
               <section className="review-content-preview" aria-label="待审核正文">
                 <h3>内容正文</h3>
-                <div className="review-body">{selected.body || "（正文为空）"}</div>
-                {selected.tags.length > 0 && <div className="review-tags">{selected.tags.map((tag) => <span key={tag}>#{tag}</span>)}</div>}
+                {editing ? <div className="review-edit-form">
+                  <label>标题<input value={editTitle} onChange={(e) => setEditTitle(e.target.value)} maxLength={200} /></label>
+                  <label>正文<textarea value={editBody} onChange={(e) => setEditBody(e.target.value)} rows={12} maxLength={20000} /></label>
+                  <label>标签（逗号分隔）<input value={editTags} onChange={(e) => setEditTags(e.target.value)} /></label>
+                  <div className="review-edit-actions"><button className="btn primary" type="button" disabled={busyId !== null || !editTitle.trim() || !editBody.trim()} onClick={() => void saveEdit()}>保存并重新检查</button><button className="btn" type="button" onClick={() => setEditing(false)}>取消</button></div>
+                </div> : <>
+                  <div className="review-body">{selected.body || "（正文为空）"}</div>
+                  {selected.tags.length > 0 && <div className="review-tags">{selected.tags.map((tag) => <span key={tag}>#{tag}</span>)}</div>}
+                </>}
                 {selected.image_count > 0 && <div className="review-image-grid">
                   {Array.from({ length: Math.min(selected.image_count, 4) }, (_, index) => (
                     <a key={index} href={api.contentImageUrl(selected.id, index)} target="_blank" rel="noreferrer">
@@ -206,10 +285,38 @@ export default function Review() {
                   {selected.image_count > 4 && <span className="muted">另有 {selected.image_count - 4} 张图片</span>}
                 </div>}
               </section>
+              <div className="review-provenance">
+                <h3>生产来源</h3>
+                <p>母计划：{selected.master_plan_title || "未关联"} {selected.master_plan_version_no ? `（版本 ${selected.master_plan_version_no}）` : ""}</p>
+                <p>平台子计划：{selected.subplan_title || "未关联"} {selected.subplan_version_no ? `（版本 ${selected.subplan_version_no}）` : ""}</p>
+                <p>策略步骤：{selected.strategy_step_title || "未关联"} {selected.stage_order ? `（第 ${selected.stage_order} 步）` : ""}</p>
+                {selected.strategy_step_direction && <p>策略方向：{selected.strategy_step_direction}</p>}
+                {selected.strategy_step_completion_condition && <p>完成条件：{selected.strategy_step_completion_condition}</p>}
+                {selected.plan_attribution_status === "manual_review" && <p className="notice error">该轮次的母计划来源需要人工核对。</p>}
+              </div>
+              {selected.sub_plan_stage_id && <section className="review-effect">
+                <h3>策略效果反馈</h3>
+                {effectFeedback ? <>
+                  <p>关联内容：{effectFeedback.content_count} 篇；已确认发布：{effectFeedback.published_count} 篇</p>
+                  <p>自动采集样本：{effectFeedback.automatic_metrics.samples ?? 0}；阅读 {effectFeedback.automatic_metrics.views ?? "暂无"}；点赞 {effectFeedback.automatic_metrics.likes ?? "暂无"}；收藏 {effectFeedback.automatic_metrics.collects ?? "暂无"}；评论 {effectFeedback.automatic_metrics.comments ?? "暂无"}；分享 {effectFeedback.automatic_metrics.shares ?? "暂无"}；涨粉 {effectFeedback.automatic_metrics.new_followers ?? "暂无"}</p>
+                  <p>手动录入样本：{effectFeedback.manual_metrics.samples ?? 0}；阅读 {effectFeedback.manual_metrics.views ?? "暂无"}；点赞 {effectFeedback.manual_metrics.likes ?? "暂无"}；收藏 {effectFeedback.manual_metrics.collects ?? "暂无"}；评论 {effectFeedback.manual_metrics.comments ?? "暂无"}；分享 {effectFeedback.manual_metrics.shares ?? "暂无"}</p>
+                  <label>效果评估<select value={effectAssessment} onChange={(e) => setEffectAssessment(e.target.value as typeof effectAssessment)}><option value="effective">有效</option><option value="mixed">部分有效</option><option value="ineffective">无效</option><option value="insufficient_data">数据不足</option></select></label>
+                  <label>置信度<select value={effectConfidence} onChange={(e) => setEffectConfidence(e.target.value as typeof effectConfidence)}><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
+                  <label>下一步调整建议<textarea value={effectRecommendation} onChange={(e) => setEffectRecommendation(e.target.value)} rows={3} maxLength={2000} placeholder="说明保留、调整或停止哪些策略动作" /></label>
+                  <label>评估依据<textarea value={effectEvidence} onChange={(e) => setEffectEvidence(e.target.value)} rows={2} maxLength={2000} placeholder="补充样本范围、异常情况和判断理由" /></label>
+                  <button className="btn primary" type="button" disabled={!effectRecommendation.trim()} onClick={() => void saveEffectReview()}>保存策略评估</button>
+                  {effectFeedback.reviews.length > 0 && <ol className="review-effect-history">{effectFeedback.reviews.map((entry) => <li key={entry.id}><strong>{entry.assessment}</strong> · {entry.recommendation}<small>{entry.created_at} · 置信度 {entry.confidence}</small></li>)}</ol>}
+                </> : <p className="muted">正在加载策略效果数据…</p>}
+              </section>}
               {selected.guard_reason && <p className="muted">质量检查说明：{selected.guard_reason}</p>}
               {selected.review_rejection_reason && <p className="notice error">驳回原因：{selected.review_rejection_reason}</p>}
               {selected.draft_error && <p className="muted">草稿说明：{selected.draft_error}</p>}
+              {selected.publish_status !== "published" && <div className="review-publish-failure">
+                <label>如果已尝试发布但失败，记录失败原因<textarea value={publishFailureReason} onChange={(e) => setPublishFailureReason(e.target.value)} rows={2} maxLength={1000} placeholder="例如：平台审核未通过、发布接口失败或账号异常" /></label>
+                <button className="btn danger" type="button" disabled={!publishFailureReason.trim() || busyId !== null} onClick={() => void recordPublishFailure()}>记录发布失败</button>
+              </div>}
               <div className="review-actions">
+                {!editing && selected.publish_status !== "published" && <button className="btn" type="button" disabled={busyId !== null} onClick={() => { setEditTitle(selected.title); setEditBody(selected.body); setEditTags(selected.tags.join(", ")); setEditing(true); }}>编辑内容</button>}
                 {selected.review_status === "rejected" ? <>
                   <p className="muted">该内容已驳回。必须先通过 G2 质量检查，再明确重新提交审核；不能直接改为通过。</p>
                   <div className="review-reject-form">
@@ -295,6 +402,19 @@ export default function Review() {
         .review-history ol { padding-left: 20px; display: grid; gap: 12px; }
         .review-history li { display: grid; gap: 4px; }
         .review-history small { color: var(--muted); }
+        .review-provenance, .review-effect { margin: 14px 16px; padding: 14px; border: 1px solid var(--line); border-radius: 9px; }
+        .review-provenance p { margin: 5px 0; font-size: 12px; }
+        .review-effect { display: grid; gap: 9px; }
+        .review-effect label, .review-edit-form label { display: grid; gap: 5px; font-size: 12px; color: var(--muted); }
+        .review-effect textarea, .review-effect select, .review-edit-form input, .review-edit-form textarea { width: 100%; }
+        .review-effect-history { display: grid; gap: 8px; padding-left: 20px; }
+        .review-effect-history li { display: grid; gap: 4px; font-size: 12px; }
+        .review-effect-history small { color: var(--muted); }
+        .review-edit-form { display: grid; gap: 10px; }
+        .review-edit-actions { display: flex; gap: 8px; }
+        .review-publish-failure { margin: 0 16px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; display: grid; gap: 8px; }
+        .review-publish-failure label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
+        .review-publish-failure textarea { width: 100%; }
       `}</style>
     </div>
   );
