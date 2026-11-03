@@ -138,8 +138,8 @@ def business_date_predicate(column: str, day: str, cfg=None) -> tuple[str, tuple
     the persisted timestamp formats used by this application.
     """
     if not re.fullmatch(
-        r"(?:[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)?|"
-        r"COALESCE\\([A-Za-z_][A-Za-z0-9_]*,\\s*[A-Za-z_][A-Za-z0-9_]*\\))",
+        r"(?:[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?|"
+        r"COALESCE\([A-Za-z_][A-Za-z0-9_]*,\s*[A-Za-z_][A-Za-z0-9_]*\))",
         column,
     ):
         raise ValueError("invalid timestamp column")
