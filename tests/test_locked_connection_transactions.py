@@ -416,3 +416,41 @@ def test_sync_get_endpoint_finalizer_rolls_back_implicit_write(tmp_path):
     finally:
         api_main._g_ctx.clear()
         api_main._g_ctx.update(saved)
+
+
+
+def test_slow_managed_endpoint_does_not_block_unrelated_read(tmp_path):
+    import threading
+    import time
+
+    conn = _locked(sqlite3.connect(tmp_path / "slow-managed.db", check_same_thread=False))
+    conn.execute("CREATE TABLE t (v INTEGER)")
+    conn.commit()
+    saved = dict(api_main._g_ctx)
+    api_main._g_ctx.clear()
+    api_main._g_ctx["conn"] = conn
+    started = threading.Event()
+    read_done = threading.Event()
+
+    def slow_external_endpoint():
+        started.set()
+        time.sleep(0.3)  # Represents remote HTTP/model work before any SQL transaction.
+        return {"ok": True}
+
+    managed = api_main.manages_own_transaction(slow_external_endpoint)
+    route = api_main.TransactionalAPIRoute("/slow-managed", managed, methods=["POST"])
+    worker = threading.Thread(target=route.endpoint)
+    try:
+        worker.start()
+        assert started.wait(timeout=1)
+        reader = threading.Thread(
+            target=lambda: (conn.execute("SELECT COUNT(*) FROM t").fetchone(), read_done.set())
+        )
+        reader.start()
+        reader.join(timeout=0.15)
+        assert read_done.is_set(), "slow non-database work blocked an unrelated tenant read"
+        worker.join(timeout=1)
+        assert not worker.is_alive()
+    finally:
+        api_main._g_ctx.clear()
+        api_main._g_ctx.update(saved)
