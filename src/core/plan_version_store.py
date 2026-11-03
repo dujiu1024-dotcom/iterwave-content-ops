@@ -101,6 +101,16 @@ class PlanVersionStore:
                 raise PlanVersionError("主计划版本不存在")
             if row["status"] != "draft":
                 raise PlanVersionError("只有草稿版本可以审核生效")
+            if row["deleted_at"] is not None:
+                raise PlanVersionError("已删除的主计划不能审核生效")
+            latest = self.conn.execute(
+                """SELECT id FROM master_plan_versions
+                   WHERE deleted_at IS NULL
+                     AND (status IN ('draft','effective') OR effective_at IS NOT NULL)
+                   ORDER BY version_no DESC LIMIT 1"""
+            ).fetchone()
+            if latest is None or int(latest["id"]) != int(version_id):
+                raise PlanVersionError("只有最新的未删除主计划可以审核生效")
             snapshot = json.loads(row["plan_snapshot"])
             signature = self._signer.compute_signature(snapshot)
             if signature != row["plan_signature"]:
@@ -112,9 +122,11 @@ class PlanVersionStore:
                 # A new mother plan pauses child plans still based on the superseded
                 # version. Existing rounds and child snapshots remain untouched.
                 self.conn.execute(
-                    """UPDATE sub_plans SET status='paused',updated_at=?
+                    """UPDATE sub_plans
+                       SET status='paused',pause_reason='master_plan_switch',
+                           paused_by_master_version_id=?,updated_at=?
                        WHERE master_plan_version_id=? AND status='active'""",
-                    (now, previous_effective["id"]),
+                    (version_id, now, previous_effective["id"]),
                 )
             self.conn.execute(
                 """UPDATE master_plan_versions
@@ -148,6 +160,101 @@ class PlanVersionStore:
             return dict(self.conn.execute(
                 "SELECT * FROM master_plan_versions WHERE id=?", (version_id,)
             ).fetchone())
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def delete_master_version(self, version_id: int, *, actor: str = "user") -> dict[str, Any]:
+        """Soft-delete the latest effective master and atomically restore its predecessor."""
+        now = _now()
+        self._begin()
+        try:
+            current = self.conn.execute(
+                "SELECT * FROM master_plan_versions WHERE id=?", (version_id,)
+            ).fetchone()
+            if current is None:
+                raise PlanVersionError("主计划版本不存在")
+            if current["deleted_at"] is not None:
+                raise PlanVersionError("主计划已经删除")
+            if current["status"] != "effective":
+                raise PlanVersionError("只能删除当前生效的最新主计划")
+            latest = self.conn.execute(
+                """SELECT id FROM master_plan_versions
+                   WHERE deleted_at IS NULL
+                     AND (status IN ('draft','effective') OR effective_at IS NOT NULL)
+                   ORDER BY version_no DESC LIMIT 1"""
+            ).fetchone()
+            if latest is None or int(latest["id"]) != int(version_id):
+                raise PlanVersionError("只能删除最新的未删除主计划")
+            predecessor = self.conn.execute(
+                """SELECT * FROM master_plan_versions
+                   WHERE deleted_at IS NULL AND id<>? AND version_no<?
+                     AND status='archived' AND effective_at IS NOT NULL
+                   ORDER BY version_no DESC LIMIT 1""",
+                (version_id, current["version_no"]),
+            ).fetchone()
+            if predecessor is None:
+                raise PlanVersionError("没有可恢复的上一份未删除主计划，拒绝删除以避免系统无生效母计划")
+
+            # The deleted master's currently active children must stop producing.
+            self.conn.execute(
+                """UPDATE sub_plans
+                   SET status='paused',pause_reason='master_plan_deleted',
+                       paused_by_master_version_id=?,updated_at=?
+                   WHERE master_plan_version_id=? AND status='active'""",
+                (version_id, now, version_id),
+            )
+            self.conn.execute(
+                """UPDATE master_plan_versions
+                   SET status='archived',deleted_at=?,deleted_by=?,superseded_at=COALESCE(superseded_at,?)
+                   WHERE id=? AND status='effective' AND deleted_at IS NULL""",
+                (now, actor, now, version_id),
+            )
+            if self.conn.execute("SELECT changes()").fetchone()[0] != 1:
+                raise PlanVersionError("主计划状态已变化，请刷新后重试")
+
+            self.conn.execute(
+                """UPDATE master_plan_versions
+                   SET status='effective',reviewed_at=COALESCE(reviewed_at,?),
+                       reviewed_by=COALESCE(reviewed_by,?),effective_at=COALESCE(effective_at,?)
+                   WHERE id=? AND status='archived' AND deleted_at IS NULL""",
+                (now, actor, now, predecessor["id"]),
+            )
+            if self.conn.execute("SELECT changes()").fetchone()[0] != 1:
+                raise PlanVersionError("上一份主计划无法恢复")
+            # Restore only children paused by this exact master-plan switch.
+            self.conn.execute(
+                """UPDATE sub_plans
+                   SET status='active',pause_reason=NULL,paused_by_master_version_id=NULL,updated_at=?
+                   WHERE master_plan_version_id=? AND status='paused'
+                     AND pause_reason='master_plan_switch'
+                     AND paused_by_master_version_id=?""",
+                (now, predecessor["id"], version_id),
+            )
+            self.conn.execute(
+                """UPDATE plan_settings
+                   SET plan_snapshot=?,plan_signature=?,updated_at=?,updated_by=?,active_version_id=?
+                   WHERE id=1""",
+                (predecessor["plan_snapshot"], predecessor["plan_signature"],
+                 now, actor, predecessor["id"]),
+            )
+            if self.conn.execute("SELECT changes()").fetchone()[0] != 1:
+                raise PlanVersionError("母计划设置记录缺失，无法安全恢复")
+            self.conn.execute(
+                """INSERT INTO signature_history(
+                       plan_signature,plan_snapshot,round_id,created_at,author
+                   ) VALUES(?,?,NULL,?,?)""",
+                (predecessor["plan_signature"], predecessor["plan_snapshot"], now, actor),
+            )
+            self.conn.commit()
+            return {
+                "deleted_version": dict(self.conn.execute(
+                    "SELECT * FROM master_plan_versions WHERE id=?", (version_id,)
+                ).fetchone()),
+                "restored_version": dict(self.conn.execute(
+                    "SELECT * FROM master_plan_versions WHERE id=?", (predecessor["id"],)
+                ).fetchone()),
+            }
         except Exception:
             self.conn.rollback()
             raise

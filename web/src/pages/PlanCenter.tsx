@@ -134,6 +134,21 @@ export default function PlanCenter() {
       await load();
     } catch (e) { showToast("母计划审核失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
   };
+  const deleteMasterPlan = async () => {
+    if (!masterVersionId) return;
+    const confirmed = window.confirm(
+      "确认删除当前生效母计划？系统会保留历史生产记录，并自动恢复上一份曾经生效且未删除的母计划。只有因本次切换暂停的子计划会恢复；人工暂停、已完成和已取消的子计划不会恢复。没有可恢复版本时，删除会被拒绝。"
+    );
+    if (!confirmed) return;
+    try {
+      const result = await api.deleteMasterPlan(masterVersionId);
+      setMasterDraftVersionId(null);
+      showToast(`当前母计划已软删除，已恢复母计划 v${result.restored_version.version_no}`, "success");
+      await load();
+    } catch (e) {
+      showToast("删除母计划失败：" + (e instanceof Error ? e.message : String(e)), "error");
+    }
+  };
   const resetDraft = () => { if (data) { setDraft(structuredClone(data.plan)); setDirty(false); setSaved(false); } };
   const adoptGap = async (dimension: string) => {
     try {
@@ -264,7 +279,7 @@ export default function PlanCenter() {
         </div>
         <div className="panel-head" style={{ marginTop: 16 }}><div><div className="panel-title">主计划草稿编辑</div><div className="panel-sub">保存会创建服务端不可变草稿版本；只有审核通过后才切换生效计划。</div></div><span className={"tag " + (dirty ? "orange" : saved ? "green" : "gray")}>{dirty ? "有未保存修改" : saved ? "草稿已暂存" : "与当前版本一致"}</span></div>
         <div className="grid two"><div><label className="form-label">每个平台默认选题数</label><input className="field" type="number" min={1} max={50} value={draft.topic_count_per_platform} onChange={(e) => changeDraft({ ...draft, topic_count_per_platform: Math.max(1, Number(e.target.value) || 1) })}/><label className="form-label" style={{ marginTop: 12 }}>关联目标</label><select className="field" value={draft.cadence?.goal_id ?? ""} onChange={(e) => changeDraft({ ...draft, cadence: { ...draft.cadence, goal_id: e.target.value || undefined } })}><option value="">暂不关联</option>{goals.map((g) => <option key={g.id} value={g.id}>{g.goal_text}</option>)}</select><label className="form-label" style={{ marginTop: 12 }}>内容形式</label><select className="field" value={draft.content_format} onChange={(e) => changeDraft({ ...draft, content_format: e.target.value })}><option value="image_text">图文</option><option value="video">视频</option><option value="mixed">混合</option></select></div><div><label className="form-label">启用平台</label><div className="plan-platform-toggles">{ALL_PLATFORMS.map((p) => <label className="plan-platform-toggle" key={p}><input type="checkbox" checked={draft.enabled_platforms.includes(p)} onChange={(e) => changeDraft({ ...draft, enabled_platforms: e.target.checked ? [...draft.enabled_platforms, p] : draft.enabled_platforms.filter((v) => v !== p) })}/><span>{platformMeta(p).label}</span></label>)}</div><label className="form-label" style={{ marginTop: 12 }}>选题方向配额</label>{Object.entries(draft.dimension_allocation).map(([name, count]) => <div className="plan-dimension-row" key={name}><span>{name}</span><input className="field" type="number" min={0} value={count} onChange={(e) => changeDraft({ ...draft, dimension_allocation: { ...draft.dimension_allocation, [name]: Math.max(0, Number(e.target.value) || 0) } })}/><button className="btn sm" onClick={() => { const next = { ...draft.dimension_allocation }; delete next[name]; changeDraft({ ...draft, dimension_allocation: next }); }}>移除</button></div>)}<button className="btn sm" style={{ marginTop: 8 }} onClick={() => { const name = window.prompt("输入选题方向名称"); if (name?.trim()) changeDraft({ ...draft, dimension_allocation: { ...draft.dimension_allocation, [name.trim()]: 1 } }); }}>＋ 添加方向</button></div></div>
-        <div className="plan-form-actions"><button className="btn" onClick={resetDraft} disabled={!dirty && !saved}>放弃修改</button><button className="btn primary" onClick={saveDraft} disabled={!dirty}>保存草稿</button><button className="btn" onClick={() => void submitMasterReview()} disabled={!masterDraftVersionId}>审核并生效</button></div>
+        <div className="plan-form-actions"><button className="btn" onClick={resetDraft} disabled={!dirty && !saved}>放弃修改</button><button className="btn primary" onClick={saveDraft} disabled={!dirty}>保存草稿</button><button className="btn" onClick={() => void submitMasterReview()} disabled={!masterDraftVersionId}>审核并生效</button><button className="btn danger" onClick={() => void deleteMasterPlan()} disabled={!masterVersionId || dirty || saved}>删除当前母计划并恢复上一版本</button></div>
         {data.stale_rounds.length > 0 && <div className="note" style={{ marginTop: 12, color: "var(--orange)" }}>{data.stale_rounds.length} 个活跃轮次仍基于旧计划，可到内容生产 → 轮次状态查看。</div>}
       </div>
       <div className="panel"><div className="panel-head"><div><div className="panel-title">版本历史</div><div className="panel-sub">来自服务端 signature_history；可查看历史计划快照。</div></div><span className="tag gray">{data.history.length} 条记录</span></div>{data.history.length === 0 ? <EmptyHint next="保存母计划后，系统会记录计划签名">暂无版本历史</EmptyHint> : <div className="table-wrap"><table><thead><tr><th>版本</th><th>关联范围</th><th>来源</th><th>记录时间</th><th>操作</th></tr></thead><tbody>{data.history.map((h, i) => <tr key={h.plan_signature + i}><td><code>{h.plan_signature.slice(0, 14)}…</code></td><td>{h.round_number != null ? "第 " + h.round_number + " 轮" : h.round_id != null ? "历史轮次" : "主计划"}</td><td>{h.author ?? "系统"}</td><td>{h.created_at}</td><td><button className="btn sm" onClick={() => setVersion(h)}>查看快照</button></td></tr>)}</tbody></table></div>}{version && <div className="plan-version-detail"><div className="panel-head"><b>版本快照 · {version.plan_signature.slice(0, 14)}…</b><button className="btn sm" onClick={() => setVersion(null)}>关闭</button></div>{snapshot(version) ? <div className="plan-version-grid"><span>默认篇数：{snapshot(version)?.topic_count_per_platform}</span><span>启用平台：{snapshot(version)?.enabled_platforms.map((p) => platformMeta(p as Platform).label).join("、")}</span><span>内容形式：{snapshot(version)?.content_format}</span><span>方向配额：{Object.entries(snapshot(version)?.dimension_allocation ?? {}).map(([k,v]) => k + " " + v).join("、") || "未设置"}</span></div> : <div className="note">历史快照无法解析。</div>}</div>}</div>

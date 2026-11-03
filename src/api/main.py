@@ -5824,6 +5824,17 @@ def _register_routes(app: FastAPI) -> None:
         except PlanVersionError as exc:
             raise HTTPException(409, str(exc)) from exc
 
+    @app.delete("/api/plans/{version_id}")
+    def delete_master_plan(version_id: int):
+        """软删除最新生效母计划，并在同一事务中恢复上一份未删除版本。"""
+        from src.core.plan_version_store import PlanVersionStore, PlanVersionError
+        try:
+            return PlanVersionStore(_g()["conn"]).delete_master_version(
+                version_id, actor="user",
+            )
+        except PlanVersionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     @app.post("/api/plan_adjustments/adopt")
     def adopt_plan_adjustments(req: dict):
         """复盘采纳只为已存在的平台子计划创建新草稿版本，不写入生效母计划。"""
