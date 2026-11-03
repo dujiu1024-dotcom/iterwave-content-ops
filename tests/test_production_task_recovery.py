@@ -118,6 +118,27 @@ def test_global_expired_recovery_includes_historical_rounds_and_requires_review(
 
 
 
+def test_global_expired_sweeper_holds_write_transaction_during_reconciliation(store):
+    statements = []
+    store.conn.set_trace_callback(statements.append)
+    task = make_task(store, "serialized-expired")
+    store.claim_task(task["id"], worker_id="old-worker")
+    store.conn.execute(
+        "UPDATE production_tasks SET lease_expires_at='2000-01-01T00:00:00+00:00' WHERE id=?",
+        (task["id"],),
+    )
+    statements.clear()
+
+    reconcile_expired_production_tasks(store.conn)
+
+    normalized = [statement.strip().upper() for statement in statements]
+    begin_index = normalized.index("BEGIN IMMEDIATE")
+    select_index = next(i for i, statement in enumerate(normalized) if "SELECT ID,ROUND_ID FROM PRODUCTION_TASKS" in statement)
+    update_index = next(i for i, statement in enumerate(normalized) if "UPDATE PRODUCTION_TASKS SET STATUS=" in statement)
+    commit_index = normalized.index("COMMIT")
+    assert begin_index < select_index < update_index < commit_index
+
+
 def test_store_expired_lease_does_not_blindly_requeue_without_artifact(store):
     task = make_task(store, "store-expired")
     store.claim_task(task["id"], worker_id="old-worker")
