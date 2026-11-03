@@ -6,7 +6,6 @@ CREATE TABLE IF NOT EXISTS tenant_skill_executions (
   status TEXT NOT NULL CHECK(status IN ('rejected','queued','running','succeeded','failed','timed_out','cancelled')),
   reason_code TEXT NOT NULL,
   input_bytes INTEGER NOT NULL DEFAULT 0,
-  input_sha256 TEXT NOT NULL DEFAULT '',
   requested_at TEXT NOT NULL,
   finished_at TEXT,
   diagnostic_id TEXT NOT NULL

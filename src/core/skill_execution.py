@@ -6,7 +6,6 @@ sandbox service. This module intentionally has no host-process fallback.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 import uuid
@@ -40,10 +39,9 @@ def request_execution(conn: sqlite3.Connection, skill: dict, payload: Any) -> di
         reason = "input_too_large" if len(encoded) > MAX_INPUT_BYTES else BLOCK_REASON
     conn.execute(
         """INSERT INTO tenant_skill_executions
-        (execution_id,skill_id,skill_version,status,reason_code,input_bytes,input_sha256,requested_at,diagnostic_id)
-        VALUES(?,?,?,'rejected',?,?,?,?,?)""",
-        (execution_id, skill["skill_id"], skill["version"], reason, len(encoded),
-         hashlib.sha256(encoded).hexdigest() if encoded else "", _now(), diagnostic_id),
+        (execution_id,skill_id,skill_version,status,reason_code,input_bytes,requested_at,diagnostic_id)
+        VALUES(?,?,?,'rejected',?,?,?,?)""",
+        (execution_id, skill["skill_id"], skill["version"], reason, len(encoded), _now(), diagnostic_id),
     )
     conn.execute(
         """INSERT INTO tenant_skill_audit(skill_id,action,actor,details_json,created_at)

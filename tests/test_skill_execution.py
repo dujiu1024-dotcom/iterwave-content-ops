@@ -11,11 +11,11 @@ def test_execution_is_fail_closed_and_auditable(conn):
     assert result["status"] == "rejected"
     assert result["reason_code"] == "sandbox_unavailable"
     assert result["execution_enabled"] is False
-    row = conn.execute("SELECT status,reason_code,input_sha256 FROM tenant_skill_executions WHERE execution_id=?",
+    row = conn.execute("SELECT status,reason_code,input_bytes FROM tenant_skill_executions WHERE execution_id=?",
                        (result["execution_id"],)).fetchone()
     assert row["status"] == "rejected"
     assert row["reason_code"] == "sandbox_unavailable"
-    assert len(row["input_sha256"]) == 64
+    assert row["input_bytes"] > 0
     audit = tenant_skills.list_audit(conn, "deny_skill")
     assert any(item["action"] == "execution_rejected" for item in audit)
 
