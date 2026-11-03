@@ -781,3 +781,43 @@ def test_reentrant_claim_does_not_drop_current_worker_lease(tmp_path):
     assert queue.claim_next("worker-a", lease_seconds=120) is None
     assert queue.renew(task.task_id, "worker-a", lease_seconds=120) is True
     assert queue.finish(task.task_id, "worker-a", result={"ok": True})
+
+
+def test_dispatch_summary_aggregates_all_statuses_and_daily_trends(tmp_path):
+    queue = make_queue(tmp_path)
+    tasks = []
+    for tenant, task_type in (("tenant-a", "round_run"), ("tenant-a", "scheduler_job"), ("tenant-b", "round_run")):
+        task, _ = queue.enqueue(task_type=task_type, tenant_id=tenant, payload={})
+        tasks.append(task)
+
+    conn = queue._connect()
+    try:
+        conn.execute("UPDATE global_task_queue SET status='succeeded', started_at=created_at, finished_at=created_at WHERE task_id=?", (tasks[0].task_id,))
+        conn.execute("UPDATE global_task_queue SET status='failed', started_at=created_at, finished_at=created_at WHERE task_id=?", (tasks[1].task_id,))
+        conn.execute("UPDATE global_task_queue SET status='cancelled' WHERE task_id=?", (tasks[2].task_id,))
+    finally:
+        conn.close()
+
+    summary = queue.dispatch_summary()
+    assert summary["total"] == 3
+    assert summary["by_status"] == {
+        "queued": 0, "running": 0, "succeeded": 1,
+        "failed": 1, "cancelled": 1, "interrupted": 0,
+    }
+    assert len(summary["daily"]) == 1
+    assert summary["daily"][0]["total"] == 3
+    assert summary["daily"][0]["succeeded"] == 1
+    assert summary["daily"][0]["failed"] == 1
+    assert summary["average_duration_seconds"] is not None
+
+    scoped = queue.dispatch_summary(tenant_id="tenant-a", task_type="round_run")
+    assert scoped["total"] == 1
+    assert scoped["by_status"]["succeeded"] == 1
+    assert scoped["filters"]["tenant_id"] == "tenant-a"
+
+
+def test_dispatch_summary_rejects_reversed_date_range(tmp_path):
+    queue = make_queue(tmp_path)
+    import pytest
+    with pytest.raises(ValueError, match="date_from"):
+        queue.dispatch_summary(date_from="2026-11-03", date_to="2026-11-02")

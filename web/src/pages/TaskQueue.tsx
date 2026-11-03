@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, GlobalTaskQueueItem } from "../api";
 import { useApp } from "../AppContext";
 import { roundTaskLabel } from "../roundLabel";
+import TaskDispatchMetrics from "../components/TaskDispatchMetrics";
 
 const STATUS_LABEL: Record<GlobalTaskQueueItem["status"], string> = {
   queued: "等待执行",
@@ -290,6 +291,8 @@ export default function TaskQueue() {
         </div>
         <button className="btn sm soft" type="button" onClick={() => void refresh()}>立即刷新</button>
       </div>
+
+      <TaskDispatchMetrics />
 
       <div className="queue-summary-grid" style={{ marginBottom: 18 }}>
         <div className="panel stat-card"><div className="muted">排队与执行</div><div className="stat-value">{activeCounts.queued + activeCounts.running}</div></div>

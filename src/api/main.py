@@ -4416,6 +4416,24 @@ def _register_routes(app: FastAPI) -> None:
                 response["tenant_status_counts"] = _task_queue.status_counts(scope="failed")["by_tenant"]
         return response
 
+    @app.get("/api/task-queue/summary")
+    def global_task_queue_summary(
+        date_from: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        date_to: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        tenant_id: str | None = Query(None, min_length=1, max_length=100),
+        task_type: str | None = Query(None, min_length=1, max_length=80),
+    ):
+        """Aggregate global queue metrics using indexed SQL; task payloads are never loaded."""
+        if _task_queue is None:
+            raise HTTPException(503, "全局任务队列尚未初始化")
+        try:
+            return _task_queue.dispatch_summary(
+                date_from=date_from, date_to=date_to,
+                tenant_id=tenant_id, task_type=task_type,
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     @app.get("/api/task-queue/{task_id}")
     def get_global_task(task_id: str):
         if _task_queue is None:
