@@ -669,7 +669,8 @@ class LockedConnection:
         if self._context_owner == owner and self._context_depth > 0:
             object.__setattr__(self, "_rollback_only", True)
             return
-        self._lock.acquire()
+        self._acquire_lock()
+        self._recover_abandoned_state()
         release_retained = False
         try:
             self._conn.rollback()
