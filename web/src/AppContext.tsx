@@ -3,6 +3,24 @@ import { api, AuthStatus, SystemStatus, Platform } from "./api";
 
 interface Toast { id: number; text: string; type?: "info" | "success" | "error"; }
 
+// 长耗时操作的中文名：超过 4 秒仍未完成时，右下角会显示“正在做什么 + 已用时长”，
+// 避免用户面对一个无响应的按钮干等。未登记的 key 统一显示“正在处理”。
+const PENDING_LABELS: Record<string, string> = {
+  "regen-cards": "AI 重新生成卡片",
+  "media:generate-for-content": "AI 生成内容卡片",
+  "media:upload": "上传素材",
+  "tenant:backup": "备份租户数据",
+  "tenant:restore": "恢复租户备份",
+  "autogrow:run": "执行自增长策略",
+  "diag": "运行系统诊断",
+  "plan-suggest": "生成母计划建议",
+  "cfg:kb": "同步选题库",
+  "delete-content": "删除内容",
+  "delete-round": "删除轮次",
+};
+
+const SLOW_THRESHOLD_SECONDS = 4;
+
 interface AppContextType {
   status: SystemStatus | null;
   refreshStatus: () => Promise<void>;
@@ -33,6 +51,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [auth, setAuth] = useState<AuthStatus | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [pending, setPending] = useState<Record<string, boolean>>({});
+  /** 超过阈值仍未完成的操作用绝对计时展示，而不是一直转圈 */
+  const [slowPending, setSlowPending] = useState<{ key: string; label: string; seconds: number } | null>(null);
+  const pendingSince = useRef<Record<string, number>>({});
 
   const refreshAuth = useCallback(async () => {
     try {
@@ -69,17 +90,37 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const withPending = useCallback(async <T,>(key: string, fn: () => Promise<T>): Promise<T | undefined> => {
     if (inflight.current.has(key)) return undefined;
     inflight.current.add(key);
+    pendingSince.current[key] = Date.now();
     setPending((prev) => ({ ...prev, [key]: true }));
     try {
       return await fn();
     } finally {
       inflight.current.delete(key);
+      delete pendingSince.current[key];
       setPending((prev) => {
         const next = { ...prev };
         delete next[key];
         return next;
       });
+      setSlowPending((prev) => (prev?.key === key ? null : prev));
     }
+  }, []);
+
+  // 每 1s 采样：只展示最久的一个长任务，少于 4s 的快操作不会打扰用户
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      let longest: { key: string; label: string; seconds: number } | null = null;
+      for (const [key, startedAt] of Object.entries(pendingSince.current)) {
+        const seconds = Math.max(0, Math.round((now - startedAt) / 1000));
+        if (seconds < SLOW_THRESHOLD_SECONDS) continue;
+        if (!longest || seconds > longest.seconds) {
+          longest = { key, label: PENDING_LABELS[key] ?? "正在处理", seconds };
+        }
+      }
+      setSlowPending(longest);
+    }, 1000);
+    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -97,6 +138,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     <AppContext.Provider value={{ status, refreshStatus, auth, refreshAuth, toasts, showToast, dismissToast, pending, withPending, isPending }}>
       {children}
       <div className="toast-area" role="status" aria-live="polite">
+        {slowPending && (
+          <div className="toast info">
+            ◷ {slowPending.label} · 已用 {slowPending.seconds >= 60
+              ? `${Math.floor(slowPending.seconds / 60)} 分 ${slowPending.seconds % 60} 秒`
+              : `${slowPending.seconds} 秒`}
+          </div>
+        )}
         {toasts.map((t) => (
           <div key={t.id} className={`toast ${t.type || "info"}`}>
             <b>{t.type === "error" ? "需要处理" : t.type === "success" ? "已完成" : "提示"}</b>

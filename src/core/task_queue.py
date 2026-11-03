@@ -52,6 +52,7 @@ class QueuedTask:
     resolution_actor: str | None = None
     resolution_note: str | None = None
     resolution_at: str | None = None
+    progress: dict[str, Any] | None = None
 
 
 class TaskQueueError(RuntimeError):
@@ -111,7 +112,8 @@ class GlobalTaskQueue:
                     error_message TEXT,
                     retry_of_task_id TEXT,
                     retry_confirmed_by TEXT,
-                    retry_confirmation_note TEXT
+                    retry_confirmation_note TEXT,
+                    progress_json TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_global_task_queue_tenant
                     ON global_task_queue(tenant_id, created_at DESC);
@@ -170,6 +172,8 @@ class GlobalTaskQueue:
                     conn.execute("ALTER TABLE global_task_queue ADD COLUMN retry_confirmed_by TEXT")
                 if "retry_confirmation_note" not in columns:
                     conn.execute("ALTER TABLE global_task_queue ADD COLUMN retry_confirmation_note TEXT")
+                if "progress_json" not in columns:
+                    conn.execute("ALTER TABLE global_task_queue ADD COLUMN progress_json TEXT")
                 conn.execute(
                     "CREATE UNIQUE INDEX IF NOT EXISTS uq_global_task_retry_parent "
                     "ON global_task_queue(retry_of_task_id) WHERE retry_of_task_id IS NOT NULL"
@@ -224,6 +228,11 @@ class GlobalTaskQueue:
             resolution_actor=row["resolution_actor"] if "resolution_actor" in row.keys() else None,
             resolution_note=row["resolution_note"] if "resolution_note" in row.keys() else None,
             resolution_at=row["resolution_at"] if "resolution_at" in row.keys() else None,
+            progress=(
+                json.loads(row["progress_json"])
+                if "progress_json" in row.keys() and row["progress_json"]
+                else None
+            ),
         )
 
     def enqueue(
@@ -381,6 +390,31 @@ class GlobalTaskQueue:
         except Exception:
             conn.rollback()
             raise
+        finally:
+            conn.close()
+
+    def update_progress(self, task_id: str, progress: dict[str, Any]) -> bool:
+        """写入任务实时进度快照；仅对排队中/运行中的任务生效。
+
+        进度只用于界面展示，任何写入失败都不应影响任务执行，调用方负责兜底。
+        """
+        if not isinstance(progress, dict):
+            raise ValueError("progress 必须是对象")
+        progress_json = json.dumps(progress, ensure_ascii=False, sort_keys=True, default=str)
+        conn = self._connect()
+        try:
+            statement = (
+                "UPDATE global_task_queue SET progress_json=? "
+                "WHERE task_id=? AND status IN ('queued','running')"
+            )
+            try:
+                cursor = conn.execute(statement, (progress_json, task_id))
+            except sqlite3.OperationalError:
+                # 旧库可能尚未跑到建表迁移：就地补列后重试一次，避免进度整段丢失。
+                conn.execute("ALTER TABLE global_task_queue ADD COLUMN progress_json TEXT")
+                cursor = conn.execute(statement, (progress_json, task_id))
+            conn.commit()
+            return cursor.rowcount == 1
         finally:
             conn.close()
 

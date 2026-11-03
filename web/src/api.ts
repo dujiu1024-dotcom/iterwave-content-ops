@@ -14,6 +14,22 @@ export interface RecoveryInfo {
   pending_verify: number;
 }
 
+export interface TaskProgressStep {
+  id: string;
+  label: string;
+  status: "pending" | "running" | "done" | "failed" | "skipped";
+  detail: string;
+}
+
+export interface TaskProgress {
+  steps: TaskProgressStep[];
+  current_step: string | null;
+  current_label: string;
+  detail: string;
+  percent: number;
+  updated_at?: string;
+}
+
 export interface GlobalTaskQueueItem {
   queue_order: number;
   task_id: string;
@@ -71,6 +87,8 @@ export interface GlobalTaskQueueDetail {
   resolution_actor: string | null;
   resolution_note: string | null;
   resolution_at: string | null;
+  progress: TaskProgress | null;
+  elapsed_seconds: number | null;
   execution_log: Array<{ step: string; status: string; detail: string }>;
 }
 
@@ -1764,7 +1782,7 @@ export const api = {
       method: "POST", body: JSON.stringify(data),
     }),
   roundRunStatus: (id: number) =>
-    fetchJson<{ round_id: number; task_id?: string; status?: GlobalTaskQueueItem["status"]; queued?: boolean; running: boolean; report: RunRoundReport | null; error: string | null; error_code?: string | null }>(
+    fetchJson<{ round_id: number; task_id?: string; status?: GlobalTaskQueueItem["status"]; queued?: boolean; running: boolean; report: RunRoundReport | null; error: string | null; error_code?: string | null; progress?: TaskProgress | null; started_at?: string | null; elapsed_seconds?: number | null }>(
       `/api/rounds/${id}/run_status`,
     ),
   /** 恢复已生成、尚未存平台草稿的内容；不会重新生成或发布。 */
@@ -2348,9 +2366,15 @@ export const api = {
     if (platform) p.set("platform", platform);
     return fetchJson<{ round_id: number; items: ContentItem[] }>(`/api/contents?${p}`);
   },
-  /** G-36：卡片图地址；默认 inline 可直接预览，download=true 才触发下载 */
-  contentImageUrl: (id: string, index: number, download = false) =>
-    `${API}/api/contents/${id}/images/${index}${download ? "?download=1" : ""}`,
+  /** G-36：卡片图地址；默认 inline 可直接预览，download=true 才触发下载。
+   *  version 传图片文件名做缓存击穿：重新生成后文件名变化，避免浏览器命中旧图缓存。 */
+  contentImageUrl: (id: string, index: number, download = false, version?: string | null) => {
+    const params = new URLSearchParams();
+    if (download) params.set("download", "1");
+    if (version) params.set("v", version);
+    const query = params.toString();
+    return `${API}/api/contents/${id}/images/${index}${query ? `?${query}` : ""}`;
+  },
   updateContent: (id: string, data: { title?: string; body?: string; tags?: string[]; reason?: string }) =>
     fetchJson<{ id: string; changed: boolean; title: string; body: string; tags: string[] }>(
       `/api/contents/${id}`, { method: "PATCH", body: JSON.stringify(data) },

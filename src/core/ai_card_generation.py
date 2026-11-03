@@ -5,11 +5,15 @@ including Chinese typography, illustration, layout and decoration. OCR is a hard
 """
 from __future__ import annotations
 
+import json
+import logging
 import re
 import uuid
 from pathlib import Path
 
 from .media_generation import generate_image_bytes
+
+logger = logging.getLogger(__name__)
 
 
 def _paginate_body(body: str, *, max_chars: int = 90, segments_per_page: int = 5) -> list[list[str]]:
@@ -67,8 +71,14 @@ def generate_ai_card_set(
     *, title: str, subtitle: str, body: str, output_dir: Path, platform,
     cfg, settings: dict, allow_fallback: bool | None = None,
     brand_profile: dict | None = None,
+    allow_ocr_failure: bool = False,
 ) -> tuple[list[Path], list[str]]:
-    """Generate cover + all body pages as complete AI images, then require OCR pass."""
+    """Generate cover + all body pages as complete AI images, then require OCR pass.
+
+    With ``allow_ocr_failure=True`` an OCR failure no longer discards the set: the last
+    generated image per page is kept and the persisted OCR report stays ``not_passed``,
+    so callers must surface a "审查不通过，需人工复核" marker instead of hiding the page.
+    """
     from .visual_ocr import validate_rendered_pages
 
     body_pages = _paginate_body(body, max_chars=60, segments_per_page=3)
@@ -111,6 +121,7 @@ def generate_ai_card_set(
     paths: list[Path] = []
     for index, prompt in enumerate(prompts):
         accepted_path = None
+        fallback_path = None
         last_error = "OCR 未通过"
         for attempt in range(3):
             retry_prompt = prompt if attempt == 0 else (
@@ -132,24 +143,45 @@ def generate_ai_card_set(
                 result = validate_rendered_pages([path], [expected[index]], page_report)
             except ValueError as exc:
                 last_error = str(exc)
-                path.unlink(missing_ok=True)
-                continue
-            if result.get("status") == "passed" and result.get("gate") == "passed":
+                result = None
+            if result and result.get("status") == "passed" and result.get("gate") == "passed":
                 accepted_path = path
                 break
-            last_error = str(result.get("reason") or result.get("status") or "OCR 未通过")
-            path.unlink(missing_ok=True)
+            if result is not None:
+                last_error = str(result.get("reason") or result.get("status") or "OCR 未通过")
+            if fallback_path is not None:
+                fallback_path.unlink(missing_ok=True)
+            fallback_path = path
         if accepted_path is None:
-            raise ValueError(
-                f"第 {index + 1} 张 AI 完整卡片连续 3 次未通过 OCR，拒绝模板降级：{last_error}"
+            if not allow_ocr_failure:
+                if fallback_path is not None:
+                    fallback_path.unlink(missing_ok=True)
+                raise ValueError(
+                    f"第 {index + 1} 张 AI 完整卡片连续 3 次未通过 OCR，拒绝模板降级：{last_error}"
+                )
+            logger.warning(
+                "第 %d 张 AI 完整卡片 OCR 未通过，按人工复核口径保留成品：%s",
+                index + 1, last_error,
             )
+            accepted_path = fallback_path
         paths.append(accepted_path)
 
     report_path = output_dir / f"visual_ocr_{paths[0].stem}.json"
-    report = validate_rendered_pages(paths, expected, report_path)
+    try:
+        report = validate_rendered_pages(paths, expected, report_path)
+    except ValueError:
+        if not allow_ocr_failure:
+            raise
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            report = {"status": "unavailable", "reason": "ocr_report_missing", "gate": "not_passed"}
     if report.get("status") != "passed" or report.get("gate") != "passed":
-        raise ValueError(
-            f"AI 完整卡片 OCR 硬门未通过（{report.get('status')}）；"
-            "图片已生成但不得作为合格成品交付"
-        )
+        if not allow_ocr_failure:
+            raise ValueError(
+                f"AI 完整卡片 OCR 硬门未通过（{report.get('status')}）；"
+                "图片已生成但不得作为合格成品交付"
+            )
+        logger.warning("AI 完整卡片整组 OCR 硬门未通过（%s），保留成品并标记需人工复核",
+                       report.get("status"))
     return paths, page_texts

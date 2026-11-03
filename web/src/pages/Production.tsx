@@ -4,9 +4,11 @@ import { navigate, useUrlTab } from "../nav";
 import {
   api, RunRoundReport, SpiralRound, Draft, Platform, AssetItem,
   PlanResponse, ContentItem, PipelineResponse, RecheckResult, Goal, AutogrowStatus,
+  TaskProgress,
 } from "../api";
 import DemoBadge from "../components/DemoBadge";
 import EmptyHint from "../components/EmptyHint";
+import TaskProgressPanel from "../components/TaskProgressPanel";
 
 const ROUND_STATUSES = ["created", "producing", "awaiting_publish", "collecting_metrics", "analyzing", "completed", "partial_completed", "failed", "cancelled"];
 const ROUND_TARGETABLE: Record<string, string[]> = {
@@ -124,6 +126,11 @@ export default function Production() {
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
   const [saveDrafts, setSaveDrafts] = useState(true);
   const [running, setRunning] = useState(false);
+  const [runProgress, setRunProgress] = useState<TaskProgress | null>(null);
+  const [runStartedAt, setRunStartedAt] = useState<string | null>(null);
+  const [runQueued, setRunQueued] = useState(false);
+  // 仅用于每秒触发一次重渲染，让「已用时长」走秒
+  const [, setRunTick] = useState(0);
   const [report, setReport] = useState<RunRoundReport | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
   const [noLogin, setNoLogin] = useState<Platform[]>([]);
@@ -254,6 +261,41 @@ export default function Production() {
     return () => window.removeEventListener("keydown", onKey);
   }, [previewCard]);
 
+  // 运行中每秒刷新已用时长（步骤进度跟随 2s 轮询更新）
+  useEffect(() => {
+    if (!running && !(roundDetail?.status === "producing" && runStartedAt)) return;
+    const timer = window.setInterval(() => setRunTick((tick) => tick + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [running, roundDetail?.status, runStartedAt]);
+
+  const runElapsedSeconds = runStartedAt
+    ? Math.max(0, Math.round((Date.now() - new Date(runStartedAt).getTime()) / 1000))
+    : null;
+  const showRunProgress = running || (roundDetail?.status === "producing" && runStartedAt !== null);
+
+  // 刷新页面/切换轮次时，如果该轮仍在生产，接续展示任务进度，避免页面看起来“没反应”
+  useEffect(() => {
+    if (!currentRoundId || running || roundDetail?.status !== "producing") return;
+    let active = true;
+    const hydrate = async () => {
+      try {
+        const status = await api.roundRunStatus(currentRoundId);
+        if (!active || !status.running) return;
+        setRunProgress(status.progress ?? null);
+        setRunQueued(Boolean(status.queued));
+        if (status.started_at) setRunStartedAt(status.started_at);
+      } catch {
+        // 状态查询失败时保持轮次自带的“生产中”展示，不额外报错
+      }
+    };
+    hydrate();
+    const timer = window.setInterval(hydrate, 3000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [currentRoundId, running, roundDetail?.status]);
+
   // ---------------------------------------------------------------- 操作
   const handleCreateRound = async () => {
     try {
@@ -271,6 +313,9 @@ export default function Production() {
     setRunning(true);
     setRunError(null);
     setReport(null);
+    setRunProgress(null);
+    setRunQueued(false);
+    setRunStartedAt(new Date().toISOString());
     try {
       const started = await api.runRound(
         currentRoundId,
@@ -285,6 +330,9 @@ export default function Production() {
         await new Promise((resolve) => window.setTimeout(resolve, 2000));
         const status = await api.roundRunStatus(currentRoundId);
         if (status.error) throw new Error(status.error);
+        setRunProgress(status.progress ?? null);
+        setRunQueued(Boolean(status.queued));
+        if (status.started_at) setRunStartedAt(status.started_at);
         if (status.report) {
           res = status.report;
           break;
@@ -308,6 +356,7 @@ export default function Production() {
       showToast(`运行失败: ${e.message}`, "error");
     } finally {
       setRunning(false);
+      setRunQueued(false);
     }
   };
 
@@ -956,6 +1005,13 @@ export default function Production() {
                     {running ? "◷ 运行中…" : roundDetail?.status === "failed" ? "↻ 重试本轮" : "▶ 运行本轮"}
                   </button>
                 </div>
+                {showRunProgress && (
+                  <TaskProgressPanel
+                    progress={runProgress}
+                    elapsedSeconds={runElapsedSeconds}
+                    queued={runQueued}
+                  />
+                )}
 
                 {roundDetail.status === "failed" && (
                   <div className="note" style={{ marginTop: 8 }}>
@@ -1292,7 +1348,7 @@ export default function Production() {
               <>
                 <div className="card-grid">
                   {Array.from({ length: selectedContent.image_count }, (_, i) => {
-                    const url = api.contentImageUrl(selectedContent.id, i);
+                    const url = api.contentImageUrl(selectedContent.id, i, false, selectedContent.image_paths?.[i]);
                     return (
                       <div className="card-item" key={i}>
                         {brokenCards[i] ? (
@@ -1317,7 +1373,7 @@ export default function Production() {
                           <span>第 {i + 1} 张</span>
                           <a
                             className="btn sm"
-                            href={api.contentImageUrl(selectedContent.id, i, true)}
+                            href={api.contentImageUrl(selectedContent.id, i, true, selectedContent.image_paths?.[i])}
                             download
                             style={{ textDecoration: "none" }}
                           >⬇ 下载</a>
@@ -1356,7 +1412,7 @@ export default function Production() {
                     )}
                     <a
                       className="btn sm"
-                      href={api.contentImageUrl(selectedContent.id, previewCard, true)}
+                      href={api.contentImageUrl(selectedContent.id, previewCard, true, selectedContent.image_paths?.[previewCard])}
                       download
                       style={{ textDecoration: "none" }}
                     >⬇ 下载这张</a>
@@ -1364,7 +1420,7 @@ export default function Production() {
                   </div>
                 </div>
                 <img
-                  src={api.contentImageUrl(selectedContent.id, previewCard)}
+                  src={api.contentImageUrl(selectedContent.id, previewCard, false, selectedContent.image_paths?.[previewCard])}
                   alt={`卡片 ${previewCard + 1}`}
                 />
               </div>

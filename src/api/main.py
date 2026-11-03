@@ -1720,6 +1720,18 @@ def _register_routes(app: FastAPI) -> None:
         """Canonical aware UTC clock for persistence and API event timestamps."""
         return storage_now()
 
+    def _elapsed_seconds(value):
+        """从持久化时间戳算出已运行秒数；无法解析时返回 None，不伪造 0。"""
+        if not value:
+            return None
+        try:
+            started = parse_persisted_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        if started is None:
+            return None
+        return max(0, int((_storage_now() - started).total_seconds()))
+
     def _api_business_datetime(value):
         """Serialize legacy tenant-local naive timestamps with their original zone."""
         return _api_datetime(value, naive_timezone=business_zone(_g().get("cfg")))
@@ -4497,6 +4509,8 @@ def _register_routes(app: FastAPI) -> None:
                 "resolution_actor": task.resolution_actor,
                 "resolution_note": task.resolution_note,
                 "resolution_at": task.resolution_at,
+                "progress": task.progress,
+                "elapsed_seconds": _elapsed_seconds(task.started_at or task.created_at),
             })
         response = {"items": items}
         if scope != "all":
@@ -5019,6 +5033,10 @@ def _register_routes(app: FastAPI) -> None:
                     "status": task.status,
                     "running": task.status in ("queued", "running"),
                     "queued": task.status == "queued",
+                    "progress": task.progress,
+                    "started_at": task.started_at,
+                    "queued_at": task.created_at,
+                    "elapsed_seconds": _elapsed_seconds(task.started_at or task.created_at),
                     "report": task.result,
                     "error": task.error_message,
                     "error_code": task.error_code,
@@ -6223,8 +6241,10 @@ def _register_routes(app: FastAPI) -> None:
         if root not in path.parents or not path.is_file():
             raise HTTPException(404, "图片文件不存在（可能已被清理）")
         if download:
-            return FileResponse(str(path), filename=path.name, media_type="image/png")
-        return FileResponse(str(path), media_type="image/png")
+            return FileResponse(str(path), filename=path.name, media_type="image/png",
+                                headers={"Cache-Control": "no-cache, max-age=0, must-revalidate"})
+        return FileResponse(str(path), media_type="image/png",
+                            headers={"Cache-Control": "no-cache, max-age=0, must-revalidate"})
 
     @app.get("/api/contents/{content_id}/visual-versions")
     def list_content_visual_versions(content_id: str):
@@ -6679,7 +6699,7 @@ def _register_routes(app: FastAPI) -> None:
                 title=title, subtitle=subtitle, body=body, output_dir=output_dir,
                 platform=platform, cfg=cfg, settings=settings,
                 allow_fallback=settings.get("fallback_enabled"),
-                brand_profile=profile,
+                brand_profile=profile, allow_ocr_failure=True,
             )
         except (ValueError, RuntimeError) as exc:
             raise HTTPException(422, f"AI 完整卡片生成或 OCR 硬门失败：{exc}") from exc

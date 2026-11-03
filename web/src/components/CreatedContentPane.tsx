@@ -124,6 +124,10 @@ export default function CreatedContentPane() {
                         : d.visual_status === "generated"
                           ? <span className="tag blue">AI 配图</span>
                           : <span className="tag orange" title={d.visual_reason || "尚未选用正式视觉素材"}>模板降级</span>}
+                      {d.visual_status === "generated" && d.visual_reason?.includes("OCR 硬门未通过") && (
+                        <span className="tag orange" style={{ marginLeft: 4 }}
+                          title={d.visual_reason}>审查不通过·需人工复核</span>
+                      )}
                     </td>
                     <td style={{ fontSize: 11, color: "var(--muted)" }}>{d.scheduled_publish_at ?? d.saved_at ?? "—"}</td>
                     <td>
