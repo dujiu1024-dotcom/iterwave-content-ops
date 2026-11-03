@@ -129,3 +129,34 @@ def test_business_date_predicate_rejects_untrusted_column(cfg):
 
     with pytest.raises(ValueError, match="invalid timestamp column"):
         business_date_predicate("fetched_at); DROP TABLE metrics; --", "2026-11-03", cfg)
+
+
+
+def test_legacy_saved_at_uses_historical_host_local_timezone():
+    import os
+    import time
+    from datetime import timezone
+    from src.core.timezone import parse_server_local_legacy_datetime
+
+    previous = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "America/Los_Angeles"
+        if hasattr(time, "tzset"):
+            time.tzset()
+        parsed = parse_server_local_legacy_datetime("2026-11-02 10:00:00")
+        assert parsed == datetime(2026, 11, 2, 18, 0, tzinfo=timezone.utc)
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        if hasattr(time, "tzset"):
+            time.tzset()
+
+
+def test_legacy_saved_at_preserves_explicit_timezone_offset():
+    from datetime import timezone
+    from src.core.timezone import parse_server_local_legacy_datetime
+
+    parsed = parse_server_local_legacy_datetime("2026-11-02T10:00:00+08:00")
+    assert parsed == datetime(2026, 11, 2, 2, 0, tzinfo=timezone.utc)
