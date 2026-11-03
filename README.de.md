@@ -1,8 +1,8 @@
 # IterWave — KI-gestützter Arbeitsbereich für visuelle Inhalte
 
-[简体中文](README.md) · [English](README.en.md) · [Русский](README.ru.md) · [日本語](README.ja.md) · [Français](README.fr.md) · [Deutsch](README.de.md)
+[English](README.md) · [Vereinfachtes Chinesisch](README.zh-CN.md) · [Russisch](README.ru.md) · [Japanisch](README.ja.md) · [Französisch](README.fr.md) · [Deutsch](README.de.md)
 
-> **Early Preview** — Ein Open-Source-Projekt in aktiver Entwicklung. Der tatsächliche Funktionsstand ergibt sich aus Code, Tests und Prüfungen in der Zielumgebung.
+> **Frühe Vorschauversion** — Ein Open-Source-Projekt in aktiver Entwicklung. Der tatsächliche Funktionsstand ergibt sich aus Code, Tests und Prüfungen in der Zielumgebung.
 
 IterWave ist ein Arbeitsbereich für Creator, die bild- und textbasierte Inhalte auf mehreren Plattformen veröffentlichen. Themenfindung, Inhaltsplanung, plattformspezifische Produktion, Qualitätskontrolle, menschliche Veröffentlichungsfreigabe und Leistungsanalyse werden zu einem nachvollziehbaren Workflow verbunden.
 
