@@ -120,8 +120,10 @@ def update_skill(conn: sqlite3.Connection, skill_id: str, manifest: dict, actor:
     current = get_skill(conn, skill_id)
     if current is None:
         return None
-    if current["version"] == manifest["version"]:
-        raise ValueError({"valid": False, "errors": [{"field":"version","code":"immutable","message":"更新内容必须提升版本号"}]})
+    current_core = tuple(int(part) for part in current["version"].split("-", 1)[0].split("."))
+    next_core = tuple(int(part) for part in manifest["version"].split("-", 1)[0].split("."))
+    if next_core <= current_core:
+        raise ValueError({"valid": False, "errors": [{"field":"version","code":"not_increased","message":"更新必须使用更高的主/次/修订版本号"}]})
     now, payload = _now(), _json(manifest)
     try:
         conn.execute("""UPDATE tenant_skill_registry SET name=?,version=?,description=?,inputs_json=?,outputs_json=?,
