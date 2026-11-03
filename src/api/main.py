@@ -74,6 +74,7 @@ from src.api.response_utils import (
 from src.api.notify_rules import NotifyRuleRequest, build_notify_rules_router  # noqa: F401
 from src.api.audit_queries import build_audit_query_router
 from src.api.platform_progress import build_platform_progress_router
+from src.api.tenant_settings import build_tenant_settings_router
 from src.api.action_items import build_action_items_router
 from src.api.platform_styles import build_platform_styles_router
 from src.core.tenant_registry import TenantRegistry, TenantError
@@ -8691,96 +8692,9 @@ def _register_routes(app: FastAPI) -> None:
     def kb_inspect():
         return kb_sources.legacy_inspect(_g()["cfg"])
 
-    # --- 主动运营目标（账号组业务数据，SQLite 持久化）---
-    @app.get("/api/ops-targets")
-    def get_ops_targets():
-        from src.core.ops_targets_repository import read_targets
-        return {"items": read_targets(_g()["conn"])}
-
-    @app.put("/api/ops-targets")
-    def put_ops_targets(req: dict):
-        from src.core.ops_targets_repository import load_ops_targets, replace_targets
-        conn = _g()["conn"]
-        try:
-            items = replace_targets(conn, req, cfg=_g()["cfg"])
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
-        _g()["cfg"].ops_targets = load_ops_targets(conn)
-        return {"items": items, "message": "主动运营目标已保存；后续调度将读取新目标"}
-
-    # --- 行业模板（一键填画像 / 维度建议 / 合规红线），由账号组 SQLite 提供 ---
-    @app.get("/api/presets")
-    def list_presets():
-        from src.core.industry_presets_repository import list_presets as _list_presets
-        return {"items": _list_presets(_g()["conn"])}
-
-    @app.put("/api/presets/{key}")
-    def save_custom_preset(key: str, req: dict):
-        from src.core.industry_presets_repository import upsert_custom_preset
-        try:
-            return upsert_custom_preset(_g()["conn"], {**req, "key": key}, cfg=_g()["cfg"])
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
-
-    @app.delete("/api/presets/{key}")
-    def delete_custom_preset(key: str):
-        from src.core.industry_presets_repository import delete_custom_preset
-        try:
-            deleted = delete_custom_preset(_g()["conn"], key, cfg=_g()["cfg"])
-        except ValueError as exc:
-            raise HTTPException(409, str(exc)) from exc
-        if not deleted:
-            raise HTTPException(404, "自定义行业模板不存在")
-        return {"key": key, "deleted": True}
-
-    @app.post("/api/presets/{key}/restore")
-    def restore_custom_preset(key: str):
-        from src.core.industry_presets_repository import restore_custom_preset as _restore
-        try:
-            item = _restore(_g()["conn"], key, cfg=_g()["cfg"])
-        except ValueError as exc:
-            raise HTTPException(409, str(exc)) from exc
-        if item is None:
-            raise HTTPException(404, "行业模板不存在")
-        return item
-
-    @app.get("/api/presets/{key}/versions")
-    def get_preset_versions(key: str):
-        from src.core.industry_presets_repository import get_preset, list_preset_versions
-        if get_preset(_g()["conn"], key) is None:
-            raise HTTPException(404, "行业模板不存在")
-        return {"items": list_preset_versions(_g()["conn"], key)}
-
-    @app.post("/api/presets/{key}/apply")
-    def apply_preset(key: str):
-        from src.core.industry_presets_repository import get_preset
-        preset = get_preset(_g()["conn"], key)
-        if preset is None:
-            raise HTTPException(404, "行业模板不存在")
-        if not preset.get("is_active", True):
-            raise HTTPException(409, "该行业模板已归档，请先恢复后再应用")
-        cfg = _g()["cfg"]
-        updates = {
-            "ultimate_goal.positioning": preset["positioning"],
-            "ultimate_goal.persona_keywords": list(preset["persona_keywords"]),
-            "ultimate_goal.forbidden_directions": list(preset["forbidden_directions"]),
-            "ultimate_goal.redline_keywords": sorted(
-                set(cfg.ultimate_goal.redline_keywords) | set(preset["extra_redlines"])
-            ),
-        }
-        try:
-            patch_config(cfg, _g()["conn"], updates)
-        except (ConfigNotAllowedError, ConfigPatchError) as e:
-            raise HTTPException(422, str(e)) from e
-        return {
-            "key": key, "name": preset["name"],
-            "positioning": preset["positioning"],
-            "persona_keywords": preset["persona_keywords"],
-            "dimensions": preset["dimensions"],
-            "platform_notes": preset["platform_notes"],
-            "extra_redlines": preset["extra_redlines"],
-            "message": "画像与红线已更新；建议维度可在「内容生产」里填入母计划",
-        }
+    app.include_router(build_tenant_settings_router(
+        _g, patch_config, ConfigNotAllowedError, ConfigPatchError,
+    ))
 
     # --- 热点源（综合热榜可关，可加 RSS / JSON 行业源）---
     def _public_hot_sources(items: list[dict]) -> list[dict]:
