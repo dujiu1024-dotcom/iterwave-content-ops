@@ -165,3 +165,44 @@ def test_cross_platform_dedup_updates_are_transactional():
         "SELECT duplicate_of FROM hot_topics WHERE id='second'"
     ).fetchone()[0] is None
     conn.close()
+
+
+
+def test_cross_platform_window_uses_utc_for_aware_and_legacy_naive_rows(monkeypatch):
+    from datetime import timezone as dt_timezone
+    from src.core.hot_topic_dedup import mark_cross_platform
+
+    conn = _dedup_connection()
+    cfg = SimpleNamespace(business_timezone="Asia/Shanghai")
+    monkeypatch.setattr(
+        timezone, "storage_now",
+        lambda: datetime(2026, 11, 3, 12, 0, 0, tzinfo=dt_timezone.utc),
+    )
+    conn.executemany(
+        "INSERT INTO hot_topics(id,platform,title_norm,evidence_status,discovered_at,last_seen_at) "
+        "VALUES(?,?,?,?,?,?)",
+        [
+            ("old-aware", "xhs", "outsidewindow", "collected",
+             "2026-11-01T11:59:59+00:00", "2026-11-01T11:59:59+00:00"),
+            ("old-naive", "douyin", "outsidewindow", "collected",
+             "2026-11-01 11:59:59", "2026-11-01 11:59:59"),
+            ("recent-aware", "xhs", "sameevent", "collected",
+             "2026-11-01T12:00:00+00:00", "2026-11-01T12:00:00+00:00"),
+            ("recent-naive", "douyin", "sameevent", "collected",
+             "2026-11-01 12:00:00", "2026-11-01 12:00:00"),
+        ],
+    )
+    conn.commit()
+
+    merged = mark_cross_platform(
+        conn, threshold=0.9, window_hours=48,
+        length_prefilter_ratio=0.5, cfg=cfg,
+    )
+
+    assert merged == 1
+    assert conn.execute(
+        "SELECT duplicate_of FROM hot_topics WHERE id='recent-naive'"
+    ).fetchone()[0] == "recent-aware"
+    assert conn.execute(
+        "SELECT duplicate_of FROM hot_topics WHERE id='old-naive'"
+    ).fetchone()[0] is None
