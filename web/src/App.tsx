@@ -9,6 +9,7 @@ import GlobalOperations from "./pages/GlobalOperations";
 import HotTopics from "./pages/HotTopics";
 import Goals from "./pages/Goals";
 import Production from "./pages/Production";
+import Review from "./pages/Review";
 import PlanCenter from "./pages/PlanCenter";
 import Operations from "./pages/Operations";
 import Calendar from "./pages/Calendar";
@@ -71,6 +72,7 @@ function Router() {
       case "hot": return <HotTopics />;
       case "goals": return <Goals />;
       case "production": return <Production />;
+      case "review": return <Review />;
       case "plan-center": return <PlanCenter />;
       case "operations": return <Operations />;
       case "calendar": return <Calendar />;

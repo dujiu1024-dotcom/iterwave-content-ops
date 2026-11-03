@@ -418,6 +418,7 @@ class GlobalTaskWorker:
         ))
         execution = asyncio.create_task(self._run_task(task))
         stop_waiter = asyncio.create_task(stop_event.wait()) if stop_event is not None else None
+        report: dict[str, Any] | None = None
         try:
             wait_for = {execution, heartbeat}
             if stop_waiter is not None:
@@ -451,7 +452,9 @@ class GlobalTaskWorker:
                 except asyncio.CancelledError:
                     pass
                 raise WorkerLeaseLost("任务租约丢失，已请求停止当前任务")
-            report = await execution
+            execution_result = await execution
+            if isinstance(execution_result, dict):
+                report = execution_result
             if lease_lost.is_set():
                 raise WorkerLeaseLost("任务租约丢失，拒绝提交完成状态")
             if isinstance(report, dict) and report.get("final_status") == "failed":
@@ -485,6 +488,7 @@ class GlobalTaskWorker:
                 failed = self.queue.fail(
                     task.task_id, self.owner,
                     error_code=error_code, error_message=safe_message,
+                    result=report,
                 )
             except Exception:
                 logger.exception("写入任务失败状态异常 task_id=%s", task.task_id)

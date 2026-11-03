@@ -19,6 +19,7 @@ export const NAV_ITEMS: NavItem[] = [
   { page: "goals",      label: "目标与策略", icon: "◎", section: "指挥与发现" },
 
   { page: "production", label: "内容生产",   icon: "▤", section: "内容作战" },
+  { page: "review",     label: "集中审核",   icon: "✓", section: "内容作战" },
   { page: "plan-center", label: "计划管理", icon: "▧", section: "内容作战" },
   { page: "calendar",   label: "内容日历",   icon: "▦", section: "内容作战" },
   { page: "assets",     label: "内容资产",   icon: "▣", section: "内容作战" },

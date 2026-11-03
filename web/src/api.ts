@@ -40,6 +40,48 @@ export interface GlobalTaskQueueItem {
   resolution_at?: string | null;
 }
 
+export interface GlobalTaskQueueAuditItem {
+  id: number;
+  task_id: string;
+  action: string;
+  actor: string;
+  acted_at: string;
+  details: Record<string, unknown>;
+}
+
+export interface GlobalTaskQueueDetail {
+  task_id: string;
+  queue_order: number;
+  task_type: string;
+  tenant_id: string;
+  aggregate_id: string | null;
+  round_number: number | null;
+  status: GlobalTaskQueueItem["status"];
+  created_at: string;
+  available_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  attempts: number;
+  error_code: string | null;
+  error_message: string | null;
+  retry_of_task_id: string | null;
+  retry_confirmed_by: string | null;
+  retry_confirmation_note: string | null;
+  resolution_action: "handled" | "ignored" | null;
+  resolution_actor: string | null;
+  resolution_note: string | null;
+  resolution_at: string | null;
+  execution_log: Array<{ step: string; status: string; detail: string }>;
+}
+
+export interface GlobalTaskQueueSummary {
+  total: number;
+  by_status: { queued: number; running: number; succeeded: number; failed: number; cancelled: number; interrupted: number };
+  daily: Array<{ date: string; total: number; succeeded: number; failed: number }>;
+  average_duration_seconds: number | null;
+  filters: { date_from: string | null; date_to: string | null; tenant_id: string | null; task_type: string | null; status: string | null };
+}
+
 export interface GlobalTaskQueueResponse {
   items: GlobalTaskQueueItem[];
   total?: number;
@@ -1175,6 +1217,17 @@ export interface ContentItem {
   review_rejection_reason: string | null;
 }
 
+export interface ReviewQueueItem {
+  id: string; round_id: number | null; round_number: number | null; round_status: string | null;
+  topic_id: string | null; platform: Platform; title: string; body: string; tags: string[]; image_count: number; guard_outcome: string | null;
+  guard_reason: string | null; review_rejected: boolean; review_rejection_reason: string | null;
+  created_at: string; draft_id: string; draft_status: string; draft_error: string | null;
+  saved_at: string | null; scheduled_publish_at: string | null;
+  review_status: "pending" | "approved" | "rejected";
+  review_history: { override_field: string; reason: string; overridden_by: string; overridden_at: string; override_value: string }[];
+}
+export interface ReviewQueuePage { items: ReviewQueueItem[]; total: number; page: number; page_size: number; pages: number; }
+
 export interface RecheckResult {
   id: string;
   result: "pass" | "warn" | "fail" | "error";
@@ -1638,9 +1691,24 @@ export const api = {
     fetchJson<{ updated: Record<string, number | null>; goals: Goal[]; summary: GoalSummary }>(
       "/api/goals/progress/refresh", { method: "POST" },
     ),
-  taskQueue: (params: { scope?: "all" | "active" | "history" | "failed"; page?: number; pageSize?: number; taskType?: string; tenantId?: string; errorKeyword?: string; dateFrom?: string; dateTo?: string } = {}) => {
+  taskQueueDetail: (taskId: string) =>
+    fetchJson<GlobalTaskQueueDetail>(`/api/task-queue/${encodeURIComponent(taskId)}`),
+  taskQueueAudit: (taskId: string) =>
+    fetchJson<{ items: GlobalTaskQueueAuditItem[] }>(`/api/task-queue/${encodeURIComponent(taskId)}/audit`),
+  taskQueueSummary: (params: { dateFrom?: string; dateTo?: string; tenantId?: string; taskType?: string; status?: string } = {}) => {
+    const query = new URLSearchParams();
+    if (params.dateFrom) query.set("date_from", params.dateFrom);
+    if (params.dateTo) query.set("date_to", params.dateTo);
+    if (params.tenantId) query.set("tenant_id", params.tenantId);
+    if (params.taskType) query.set("task_type", params.taskType);
+    if (params.status) query.set("status", params.status);
+    const suffix = query.toString();
+    return fetchJson<GlobalTaskQueueSummary>(`/api/task-queue/summary${suffix ? `?${suffix}` : ""}`);
+  },
+  taskQueue: (params: { scope?: "all" | "active" | "history" | "failed" | "filtered"; status?: GlobalTaskQueueItem["status"]; page?: number; pageSize?: number; taskType?: string; tenantId?: string; errorKeyword?: string; dateFrom?: string; dateTo?: string } = {}) => {
     const query = new URLSearchParams();
     if (params.scope) query.set("scope", params.scope);
+    if (params.status) query.set("status", params.status);
     if (params.page != null) query.set("page", String(params.page));
     if (params.pageSize != null) query.set("page_size", String(params.pageSize));
     if (params.taskType) query.set("task_type", params.taskType);
@@ -2289,6 +2357,19 @@ export const api = {
   regenerateContentCards: (id: string) =>
     fetchJson<{ id: string; image_count: number; image_paths: string[] }>(
       `/api/contents/${id}/cards`, { method: "POST" },
+    ),
+  reviewQueue: (filters: { status?: string; platform?: Platform | "all"; taskType?: string; from?: string; to?: string; page?: number; pageSize?: number } = {}) => {
+    const p = new URLSearchParams({ page: String(filters.page ?? 1), page_size: String(filters.pageSize ?? 30) });
+    if (filters.status) p.set("status", filters.status);
+    if (filters.platform && filters.platform !== "all") p.set("platform", filters.platform);
+    if (filters.taskType) p.set("task_type", filters.taskType);
+    if (filters.from) p.set("from", filters.from);
+    if (filters.to) p.set("to", filters.to);
+    return fetchJson<ReviewQueuePage>(`/api/review-queue?${p.toString()}`);
+  },
+  approveContent: (id: string, reason = "人工审核通过") =>
+    fetchJson<{ id: string; review_status: "approved"; deduped: boolean }>(
+      `/api/contents/${id}/approve`, { method: "POST", body: JSON.stringify({ reason }) },
     ),
   rejectContent: (id: string, reason: string) =>
     fetchJson<{
