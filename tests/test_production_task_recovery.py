@@ -115,3 +115,36 @@ def test_global_expired_recovery_includes_historical_rounds_and_requires_review(
     recovered = store.get_task(task["id"])
     assert recovered["status"] == "failed"
     assert recovered["error_code"] == "lease_expired_requires_review"
+
+
+
+def test_store_expired_lease_does_not_blindly_requeue_without_artifact(store):
+    task = make_task(store, "store-expired")
+    store.claim_task(task["id"], worker_id="old-worker")
+    store.conn.execute(
+        "UPDATE production_tasks SET lease_expires_at='2000-01-01T00:00:00+00:00' WHERE id=?",
+        (task["id"],),
+    )
+    recovered = store.recover_expired_tasks(now="2020-01-01T00:00:00+00:00", round_id=7)
+    assert recovered == [task["id"]]
+    result = store.get_task(task["id"])
+    assert result["status"] == "failed"
+    assert result["error_code"] == "lease_expired_requires_review"
+
+
+def test_store_expired_lease_adopts_existing_content(store):
+    task = make_task(store, "store-artifact-expired")
+    store.claim_task(task["id"], worker_id="old-worker")
+    store.conn.execute(
+        "INSERT INTO contents(id,production_task_id,round_id,platform) VALUES('store-content',?,7,'xhs')",
+        (task["id"],),
+    )
+    store.conn.execute(
+        "UPDATE production_tasks SET lease_expires_at='2000-01-01T00:00:00+00:00' WHERE id=?",
+        (task["id"],),
+    )
+    recovered = store.recover_expired_tasks(now="2020-01-01T00:00:00+00:00", round_id=7)
+    assert recovered == [task["id"]]
+    result = store.get_task(task["id"])
+    assert result["status"] == "succeeded"
+    assert result["content_id"] == "store-content"
