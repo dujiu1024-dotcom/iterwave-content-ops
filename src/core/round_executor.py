@@ -35,6 +35,7 @@ from .config import PROJECT_ROOT
 
 from .timezone import business_now, storage_now
 from .task_context import bind_task_context
+from .task_progress import start_progress, update_step, update_detail, fail_current
 from .production_task_store import ProductionTaskStore
 from .kb_reader import KbReader  # noqa: F401 — 兼容旧引用
 from .topic_pool import load_pool
@@ -48,22 +49,6 @@ from ..adapters.base import Platform, ContentToPublish
 from ..adapters.base import DraftStatus, CircuitBreakerReason
 
 logger = logging.getLogger(__name__)
-
-
-def start_progress(steps: list[dict], *, detail: str = "") -> None:
-    """Record the initial orchestration progress without requiring a UI websocket."""
-    logger.info("轮次进度初始化 steps=%s detail=%s", [s.get("id") for s in steps], detail)
-
-
-def update_step(step_id: str, *, status: str, detail: str = "") -> None:
-    """Record an orchestration step transition; durable status lives in run_report."""
-    logger.info("轮次步骤进度 step=%s status=%s detail=%s", step_id, status, detail)
-
-
-def update_detail(detail: str) -> None:
-    """Record the current executor detail for deployments without a live progress sink."""
-    logger.info("轮次执行进度 detail=%s", detail)
-
 
 class RoundPreconditionError(ValueError):
     """执行前置条件不满足；错误文案经过业务层整理，可安全展示给用户。"""
@@ -368,6 +353,9 @@ class RoundExecutor:
                 subplan = self._subplan_context["subplan"]
                 context_lines = [
                     "已审核平台子计划执行约束：内容必须符合当前子计划和策略步骤。",
+                    "必须先分析所有前置步骤的实际结果与效果评价，再决定当前步骤的执行方式。",
+                    "若前置效果未达预期、存在风险或评价指出问题，不得机械照搬原策略；必须在本轮执行中调整选题角度、内容重点或执行方式，并在结果报告中说明调整依据。",
+                    "不得擅自改写已审核的持久化策略；需要改变后续步骤目标、依赖或进入条件时，应提出明确的策略修订建议，交由人工审核后形成新版本。",
                     f"子计划：{subplan.get('title') or ''}",
                     f"阶段：{stage.get('title') or ''}",
                     f"阶段方向：{stage.get('direction') or ''}",
@@ -463,6 +451,7 @@ class RoundExecutor:
             report["failure_message"] = str(exc)
             report["errors"].append(str(exc))
             report["final_status"] = "failed"
+            fail_current(f"文案生成失败：{exc.code}")
             try:
                 transitioned = self.sm_round.transition(
                     round_id, "failed", f"文案生成失败：{exc.code}",
@@ -477,6 +466,7 @@ class RoundExecutor:
             report["errors"].append("执行异常，请检查运行日志")
             report["failure_code"] = "generation_pipeline_failed"
             report["final_status"] = "failed"
+            fail_current("执行异常，请检查运行日志")
             # 状态迁移本身也可能因数据库/状态机异常失败；不能让它覆盖原始异常，
             # 否则下方 task_runs 收尾和 run_report 持久化都不会执行。
             try:

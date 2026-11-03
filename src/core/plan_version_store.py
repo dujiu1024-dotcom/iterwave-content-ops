@@ -712,14 +712,19 @@ class PlanVersionStore:
                 raise PlanVersionError(
                     f"前置阶段 {dependency_key} 尚未完成或缺少实际效果记录"
                 )
+            if not str(outcome["evaluation"] or "").strip():
+                raise PlanVersionError(f"前置阶段 {dependency_key} 缺少效果评价，不能进入后续步骤")
             try:
+                actual_result = json.loads(outcome["result_json"])
+                if not isinstance(actual_result, dict) or not actual_result:
+                    raise ValueError("empty or invalid result")
                 dependency_outcomes[dependency_key] = {
-                    "result": json.loads(outcome["result_json"]),
-                    "evaluation": outcome["evaluation"],
+                    "result": actual_result,
+                    "evaluation": str(outcome["evaluation"]).strip(),
                     "recorded_at": outcome["recorded_at"],
                 }
             except (TypeError, ValueError) as exc:
-                raise PlanVersionError(f"前置阶段 {dependency_key} 的实际结果损坏") from exc
+                raise PlanVersionError(f"前置阶段 {dependency_key} 的实际结果损坏或为空") from exc
         ready = dict(stage)
         ready["dependency_outcomes"] = dependency_outcomes
         return ready

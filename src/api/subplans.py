@@ -789,6 +789,27 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
                              (sub_plan_id,))
             conn.commit()
             raise HTTPException(409, "子计划没有待执行阶段，所有阶段已完成或取消")
+        # Fail closed before acquiring an idempotency lease: the selected stage must
+        # satisfy its entry condition and every predecessor must have a completed,
+        # evaluated outcome. create_round_once rechecks this atomically before insert.
+        try:
+            ready_stage = lifecycle.assert_stage_ready(
+                int(stage["id"]), int(identity["current_version_id"])
+            )
+        except PlanVersionError as exc:
+            try:
+                dependencies = json.loads(stage["dependencies_json"] or "[]")
+            except (TypeError, ValueError):
+                dependencies = []
+            raise HTTPException(409, detail={
+                "code": "strategy_step_blocked",
+                "message": str(exc),
+                "sub_plan_id": sub_plan_id,
+                "stage_id": int(stage["id"]),
+                "stage_key": stage["stage_key"],
+                "dependencies": dependencies,
+            }) from exc
+
         remaining = max(0, int(stage["target_count"]) - int(stage["confirmed_published_count"] or 0))
         if remaining <= 0:
             raise HTTPException(409, "当前阶段用户确认发布目标已达成")
@@ -866,7 +887,8 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
             return {"round_id": round_id, "round_number": number, "deduped": created["deduped"],
                     "topic_count": topic_count, "platforms": [identity["platform"]],
                     "bound_subplan_version_id": identity["current_version_id"],
-                    "bound_stage_id": stage["id"]}
+                    "bound_stage_id": stage["id"],
+                    "dependency_outcomes": ready_stage.get("dependency_outcomes", {})}
         except HTTPException:
             raise
         except (PlanVersionError, TypeError, ValueError, sqlite3.Error) as exc:
@@ -1351,7 +1373,7 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
                 "confirmed_published_count": sum(x["confirmed_published_count"] for x in items),
                 "stages": items}
 
-    @app.get("/api/production-tasks")
+@app.get("/api/production-tasks")
     def list_production_tasks(
         round_id: int | None = None,
         strategy_step_id: str | None = None,
