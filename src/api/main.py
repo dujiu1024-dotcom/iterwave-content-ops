@@ -72,6 +72,7 @@ from src.api.response_utils import (
 )
 # Keep NotifyRuleRequest in this module namespace: FastAPI resolves the wrapped route signature here.
 from src.api.notify_rules import NotifyRuleRequest, build_notify_rules_router  # noqa: F401
+from src.api.hot_sources import build_hot_sources_router
 from src.api.audit_queries import build_audit_query_router
 from src.api.platform_progress import build_platform_progress_router
 from src.api.tenant_settings import build_tenant_settings_router
@@ -8696,164 +8697,12 @@ def _register_routes(app: FastAPI) -> None:
         _g, patch_config, ConfigNotAllowedError, ConfigPatchError,
     ))
 
-    # --- 热点源（综合热榜可关，可加 RSS / JSON 行业源）---
-    def _public_hot_sources(items: list[dict]) -> list[dict]:
-        # URL 可能带签名/访问令牌；前端只需显示主机与脱敏占位符。
-        public = []
-        for item in items or []:
-            row = dict(item)
-            raw_url = str(row.get("url") or "")
-            row["url"] = kb_sources._redact_remote_url(raw_url) if raw_url else ""
-            raw_name = str(row.get("name") or "")
-            row["name"] = redact(raw_name) if raw_name else raw_name
-            public.append(row)
-        return public
-
-    def _restore_masked_hot_source_urls(items: list[dict], current: list[dict]) -> list[dict]:
-        # 列表操作会把脱敏后 URL 一起提交；按来源标识恢复服务器保存的原始 URL。
-        # 新增项的 URL 不匹配已有项的脱敏值，因此仍会正常保存。
-        restored = []
-        for incoming in items or []:
-            row = dict(incoming)
-            for old in current or []:
-                old_name = str(old.get("name") or "")
-                incoming_name = str(row.get("name") or "")
-                same_name = old_name == incoming_name or redact(old_name) == incoming_name
-                same_key = (
-                    same_name
-                    and str(old.get("type") or "aggregate") == str(row.get("type") or "aggregate")
-                    and str(old.get("platform") or "") == str(row.get("platform") or "")
-                    and tuple(old.get("platforms") or []) == tuple(row.get("platforms") or [])
-                )
-                if same_key and str(row.get("url") or "") == kb_sources._redact_remote_url(str(old.get("url") or "")):
-                    row["url"] = old.get("url") or ""
-                    break
-            restored.append(row)
-        return restored
-
-    def _hot_source_history_key(source: dict) -> str:
-        # 只持久化不可逆指纹；来源 URL 可能含 token，不得写入历史表。
-        identity = {
-            "name": str(source.get("name") or ""),
-            "type": str(source.get("type") or "aggregate"),
-            "platform": str(source.get("platform") or ""),
-            "platforms": sorted(str(v) for v in (source.get("platforms") or [])),
-            "url": str(source.get("url") or ""),
-        }
-        return hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
-
-    def _latest_hot_source_test(source: dict):
-        row = _g()["conn"].execute(
-            "SELECT status, item_count, sample_titles_json, message, tested_at "
-            "FROM hot_source_test_history WHERE source_key=? ORDER BY id DESC LIMIT 1",
-            (_hot_source_history_key(source),),
-        ).fetchone()
-        if row is None:
-            return None
-        try:
-            samples = json.loads(row["sample_titles_json"] or "[]")
-        except (TypeError, ValueError):
-            samples = []
-        return {
-            "status": row["status"], "item_count": int(row["item_count"] or 0),
-            "sample_titles": samples if isinstance(samples, list) else [],
-            "message": row["message"], "tested_at": row["tested_at"],
-        }
-
-    @app.get("/api/hot_topics/sources")
-    def hot_sources_list():
-        cfg_sources = _g()["cfg"].hot_topics.sources or []
-        public_items = _public_hot_sources(cfg_sources)
-        for index, item in enumerate(public_items):
-            item["last_test"] = _latest_hot_source_test(cfg_sources[index])
-        return {"items": public_items}
-
-    @app.get("/api/hot_topics/sources/history")
-    def hot_sources_test_history(limit: int = Query(100, ge=1, le=500)):
-        rows = _g()["conn"].execute(
-            "SELECT id, source_key, source_label, source_type, status, item_count, "
-            "sample_titles_json, message, tested_at FROM hot_source_test_history "
-            "ORDER BY id DESC LIMIT ?", (limit,),
-        ).fetchall()
-        items = []
-        for row in rows:
-            item = dict(row)
-            try:
-                item["sample_titles"] = json.loads(item.pop("sample_titles_json") or "[]")
-            except (TypeError, ValueError):
-                item["sample_titles"] = []
-                item.pop("sample_titles_json", None)
-            items.append(item)
-        return {"items": items, "total": len(items)}
-
-    @app.put("/api/hot_topics/sources")
-    def hot_sources_update(req: dict):
-        cfg = _g()["cfg"]
-        items = (req or {}).get("items")
-        if not isinstance(items, list):
-            raise HTTPException(422, "热点源必须是数组")
-        items = _restore_masked_hot_source_urls(items, cfg.hot_topics.sources)
-        try:
-            patch_config(cfg, _g()["conn"], {"hot_topics.sources": items})
-        except (ConfigNotAllowedError, ConfigPatchError) as e:
-            raise HTTPException(422, str(e)) from e
-        return {"items": _public_hot_sources(cfg.hot_topics.sources)}
-
-    @app.post("/api/hot_topics/sources/{source_index}/test")
-    def test_hot_source(source_index: int):
-        """只试抓取指定 RSS/JSON 来源，不写入热点库、不触发全量采集。"""
-        cfg = _g()["cfg"]
-        sources = cfg.hot_topics.sources or []
-        if source_index < 0 or source_index >= len(sources):
-            raise HTTPException(404, "热点来源不存在")
-        source = sources[source_index]
-        source_type = str(source.get("type") or "aggregate")
-        if source_type not in ("rss", "json"):
-            raise HTTPException(400, "单来源试抓取仅支持 RSS / JSON 来源")
-        label = str(source.get("platform") or source.get("name") or "行业源")
-        collector = HotTopicCollector(cfg, _g()["conn"])
-        try:
-            rows = collector._fetch_custom(source, label)
-        except Exception as exc:  # noqa: BLE001 — 试抓取仅返回脱敏诊断，不影响其他来源
-            safe_error = redact(str(exc))
-            logger.warning("热点来源试抓取失败 %s: %s", redact(label), safe_error)
-            rows = None
-            fetch_error = safe_error
-        else:
-            fetch_error = None
-        if fetch_error:
-            result = {
-                "ok": False, "status": "failed", "source": redact(label),
-                "item_count": 0, "sample_titles": [], "message": fetch_error,
-            }
-        elif not rows:
-            result = {
-                "ok": False, "status": "empty", "source": redact(label),
-                "item_count": 0, "sample_titles": [], "message": "来源可访问，但未解析到有效标题",
-            }
-        else:
-            result = {
-                "ok": True, "status": "success", "source": redact(label),
-                "item_count": len(rows),
-                "sample_titles": [redact(str(row.get("title") or ""))[:300] for row in rows[:3]],
-                "message": "试抓取成功，未写入热点库",
-            }
-        # 保存诊断历史，但绝不写入 hot_topics；只存 URL 的 SHA-256 指纹。
-        conn = _g()["conn"]
-        conn.execute(
-            "INSERT INTO hot_source_test_history "
-            "(source_key, source_label, source_type, status, item_count, sample_titles_json, message, tested_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                _hot_source_history_key(source), redact(label)[:160], source_type,
-                result["status"], result["item_count"],
-                json.dumps(result["sample_titles"], ensure_ascii=False),
-                redact(result["message"])[:1000],
-                storage_now().isoformat(timespec="seconds"),
-            ),
-        )
-        conn.commit()
-        return result
+    app.include_router(build_hot_sources_router(
+        _g, patch_config, ConfigNotAllowedError, ConfigPatchError,
+        HotTopicCollector, redact, kb_sources._redact_remote_url, storage_now,
+        manages_own_transaction=manages_own_transaction,
+        route_class=TransactionalAPIRoute,
+    ))
 
     # ============================================================
     # Dashboard 补齐（对比报告 3.1 🔴 后端真缺失）
