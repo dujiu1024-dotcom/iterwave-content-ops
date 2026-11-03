@@ -1729,30 +1729,33 @@ def _register_routes(app: FastAPI) -> None:
             now_dt - timedelta(minutes=_g()["cfg"].activation.stale_task_timeout_minutes),
             _g()["cfg"],
         )
-        stale_runs = conn.execute(
-            "SELECT id FROM sample_runs WHERE tenant_id=? "
-            "AND status IN ('created','generating','quality_check') AND "
-            + timestamp_before_sql("created_at"),
-            (tenant_id, stale_utc, stale_legacy),
-        ).fetchall()
-        if stale_runs:
-            conn.execute(
-                "UPDATE sample_runs SET status='failed', error_code='task_interrupted', "
-                "error_message_safe='体验任务中断，请重新生成', completed_at=? "
-                "WHERE tenant_id=? AND status IN ('created','generating','quality_check') AND "
+        # This GET endpoint performs stale-run recovery writes and is therefore not
+        # covered by TransactionalAPIRoute's write-method wrapper. Serialize the
+        # select-and-transition pair explicitly to prevent duplicate recovery races.
+        with connection_transaction(conn, immediate=True):
+            stale_runs = conn.execute(
+                "SELECT id FROM sample_runs WHERE tenant_id=? "
+                "AND status IN ('created','generating','quality_check') AND "
                 + timestamp_before_sql("created_at"),
-                (now, tenant_id, stale_utc, stale_legacy),
-            )
-            conn.commit()
-            for stale in stale_runs:
-                try:
-                    _record_content_event(
-                        "sample_generation_failed", sample_run_id=stale["id"],
-                        metadata={"error_code": "task_interrupted"},
-                        idempotency_key=f"sample-failed:{stale['id']}",
-                    )
-                except Exception:
-                    logger.exception("中断体验任务事件写入失败 run=%s", stale["id"])
+                (tenant_id, stale_utc, stale_legacy),
+            ).fetchall()
+            if stale_runs:
+                conn.execute(
+                    "UPDATE sample_runs SET status='failed', error_code='task_interrupted', "
+                    "error_message_safe='体验任务中断，请重新生成', completed_at=? "
+                    "WHERE tenant_id=? AND status IN ('created','generating','quality_check') AND "
+                    + timestamp_before_sql("created_at"),
+                    (now, tenant_id, stale_utc, stale_legacy),
+                )
+        for stale in stale_runs:
+            try:
+                _record_content_event(
+                    "sample_generation_failed", sample_run_id=stale["id"],
+                    metadata={"error_code": "task_interrupted"},
+                    idempotency_key=f"sample-failed:{stale['id']}",
+                )
+            except Exception:
+                logger.exception("中断体验任务事件写入失败 run=%s", stale["id"])
         cohort = conn.execute(
             "SELECT first_seen_at FROM activation_cohort WHERE tenant_id=?", (tenant_id,)
         ).fetchone()
@@ -4693,25 +4696,30 @@ def _register_routes(app: FastAPI) -> None:
         round_id = int(round_result["id"])
         now = _storage_now().isoformat(timespec="seconds")
         try:
-            conn.execute("BEGIN IMMEDIATE")
-            cursor = conn.execute(
-                "UPDATE content_plans SET status='generating',platforms_json=?,version=version+1,updated_at=? "
-                "WHERE id=? AND version=? AND status IN ('planned','failed')",
-                (json.dumps(platforms, ensure_ascii=False), now, plan_id, int(plan["version"])),
-            )
-            if cursor.rowcount != 1:
-                raise HTTPException(409, "计划已在其他窗口启动，请刷新后重试")
-            conn.execute(
-                "INSERT INTO content_plan_rounds(plan_id,round_id,created_at) VALUES(?,?,?)",
-                (plan_id, round_id, now),
-            )
-            conn.commit()
+            # Async routes are not wrapped by TransactionalAPIRoute. Use the connection-level
+            # transaction guard explicitly so BEGIN/UPDATE/INSERT/COMMIT cannot interleave
+            # with another request using this tenant's shared LockedConnection.
+            with connection_transaction(conn, immediate=True):
+                cursor = conn.execute(
+                    "UPDATE content_plans SET status='generating',platforms_json=?,version=version+1,updated_at=? "
+                    "WHERE id=? AND version=? AND status IN ('planned','failed')",
+                    (json.dumps(platforms, ensure_ascii=False), now, plan_id, int(plan["version"])),
+                )
+                if cursor.rowcount != 1:
+                    raise HTTPException(409, "计划已在其他窗口启动，请刷新后重试")
+                conn.execute(
+                    "INSERT INTO content_plan_rounds(plan_id,round_id,created_at) VALUES(?,?,?)",
+                    (plan_id, round_id, now),
+                )
         except Exception:
-            conn.rollback()
-            # create_round 的短时去重可能把并发请求指向同一轮；只有本请求新建的轮次才允许回滚取消。
+            # connection_transaction has already rolled back the failed plan update/link.
+            # create_round's short dedupe may return a shared round; only cancel a newly-created one.
             if not round_result.get("deduped"):
-                conn.execute("UPDATE spiral_rounds SET status='cancelled' WHERE id=? AND status='created'", (round_id,))
-                conn.commit()
+                with connection_transaction(conn, immediate=True):
+                    conn.execute(
+                        "UPDATE spiral_rounds SET status='cancelled' WHERE id=? AND status='created'",
+                        (round_id,),
+                    )
             raise
         try:
             queued = await run_round(round_id, RunRoundRequest(
@@ -4720,13 +4728,11 @@ def _register_routes(app: FastAPI) -> None:
         except Exception as exc:
             # 入队失败时 Worker 尚未开始执行；计划和未启动轮次必须一起补偿。
             try:
-                from src.core.timezone import business_now
-                with conn:
-                    conn.execute("BEGIN IMMEDIATE")
+                with connection_transaction(conn, immediate=True):
                     conn.execute(
                         "UPDATE content_plans SET status='failed',version=version+1,updated_at=? "
                         "WHERE id=? AND status='generating'",
-                        (storage_now().isoformat(timespec="seconds"), plan_id),
+                        (_storage_now().isoformat(timespec="seconds"), plan_id),
                     )
                     conn.execute(
                         "UPDATE spiral_rounds SET status='cancelled' "

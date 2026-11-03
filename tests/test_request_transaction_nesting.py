@@ -115,3 +115,50 @@ def test_goal_patch_with_locked_connection(locked_client):
     edited = tc.patch(f"/api/goals/{child.json()['id']}", json={"goal_text": "c2"})
     assert edited.status_code == 200, edited.text
     assert edited.json()["goal_text"] == "c2"
+
+def test_connection_transaction_serializes_multi_statement_write_against_other_thread(tmp_path):
+    import threading
+
+    conn = _locked(sqlite3.connect(tmp_path / "serialized.db", check_same_thread=False))
+    conn.execute("CREATE TABLE events (value TEXT NOT NULL)")
+    conn.commit()
+    first_statement_done = threading.Event()
+    allow_first_to_finish = threading.Event()
+    second_statement_done = threading.Event()
+    errors = []
+
+    def first_writer():
+        try:
+            with connection_transaction(conn, immediate=True):
+                conn.execute("INSERT INTO events VALUES ('first-a')")
+                first_statement_done.set()
+                assert allow_first_to_finish.wait(2)
+                conn.execute("INSERT INTO events VALUES ('first-b')")
+        except BaseException as exc:
+            errors.append(exc)
+
+    def second_writer():
+        try:
+            assert first_statement_done.wait(2)
+            conn.execute("INSERT INTO events VALUES ('second')")
+            conn.commit()
+            second_statement_done.set()
+        except BaseException as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=first_writer)
+    second = threading.Thread(target=second_writer)
+    first.start()
+    second.start()
+    assert first_statement_done.wait(2)
+    # The second thread must not be able to execute between the two statements
+    # protected by the first writer's transaction-level lock.
+    assert not second_statement_done.wait(0.05)
+    allow_first_to_finish.set()
+    first.join(2)
+    second.join(2)
+    assert not first.is_alive() and not second.is_alive()
+    assert not errors
+    assert [row[0] for row in conn.execute("SELECT value FROM events ORDER BY rowid")] == [
+        "first-a", "first-b", "second",
+    ]
