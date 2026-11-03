@@ -26,7 +26,7 @@ const META: Record<Platform, PlatformMeta> = {
 };
 
 export function platformMeta(p: string | Platform): PlatformMeta {
-  return (META[p as Platform] ?? { label: p, color: "#666", icon: "●" }) as PlatformMeta;
+  return (META[p as Platform] ?? { label: "未知平台", color: "#666", icon: "●" }) as PlatformMeta;
 }
 
 /** 旧 Sidebar 导出兼容（避免大规模改 import） */
@@ -38,5 +38,5 @@ const SOURCE_LABELS: Record<string, string> = {
   xhs: "小红书", kuaishou: "快手", wechat_channels: "视频号",
 };
 export function platformLabel(p: string): string {
-  return SOURCE_LABELS[p] ?? META[p as Platform]?.label ?? p;
+  return SOURCE_LABELS[p] ?? META[p as Platform]?.label ?? "未知来源";
 }

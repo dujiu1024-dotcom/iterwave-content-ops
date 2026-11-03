@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, ProductionLineDefinition, ProductionLineRecord, ProductionLineVersion } from "../api";
 import { Platform, platformMeta } from "../platforms";
 import { useApp } from "../AppContext";
+import { displayStatusLabel } from "../displayLabels";
 
 interface Props {
   subPlanId: string;
@@ -152,7 +153,7 @@ export default function ProductionLinePanel({ subPlanId, platform, subplanTitle 
         {line?.status === "active" && <button className="btn" onClick={() => void run(() => api.setProductionLineStatus(subPlanId, "paused", "人工暂停"), "生产线已暂停")} disabled={busy}>暂停生产线</button>}
         {line?.status === "paused" && <button className="btn" onClick={() => void run(() => api.setProductionLineStatus(subPlanId, "active"), "生产线已恢复")} disabled={busy}>恢复生产线</button>}
       </div>
-      {line?.versions && line.versions.length > 1 && <div className="tiny" style={{ marginTop: 12 }}>历史版本：{line.versions.map((v) => `v${v.version_no} · ${v.status}`).join("；")}</div>}
+      {line?.versions && line.versions.length > 1 && <div className="tiny" style={{ marginTop: 12 }}>历史版本：{line.versions.map((v) => `v${v.version_no} · ${displayStatusLabel(v.status)}`).join("；")}</div>}
     </>}
   </section>;
 }

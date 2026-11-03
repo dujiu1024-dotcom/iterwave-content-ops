@@ -10,6 +10,7 @@ import VisualBrandPane from "../components/VisualBrandPane";
 import { useApp } from "../AppContext";
 import { PersonaEditor } from "../components/ConfigEditors";
 import { navigate, useUrlTab } from "../nav";
+import { displaySourceLabel, displayStatusLabel } from "../displayLabels";
 import {
   api, AssetItem, AssetType, Draft, HotTopicItem, KbInspect, ScoredTopic, SystemConfigView,
 } from "../api";
@@ -342,12 +343,12 @@ export default function Assets() {
                     {hot.slice(0, 10).map((h) => (
                       <tr key={h.id}>
                         <td>{h.title}</td>
-                        <td><span className="tag gray">{h.source}</span></td>
+                        <td><span className="tag gray">{displaySourceLabel(h.source)}</span></td>
                         <td>{h.discovered_at ?? <span style={{ color: "var(--subtle)" }}>—</span>}</td>
                         <td>{h.heat == null ? <span style={{ color: "var(--subtle)" }}>—</span> : h.heat.toLocaleString()}</td>
                         <td>
                           <span className={`tag ${h.evidence_status === "collected" ? "green" : h.evidence_status === "demo" ? "orange" : "red"}`}>
-                            {h.evidence_status}
+                            {displayStatusLabel(h.evidence_status)}
                           </span>
                         </td>
                       </tr>

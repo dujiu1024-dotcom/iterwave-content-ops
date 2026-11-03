@@ -11,6 +11,7 @@ import {
   OpsKpiResponse, OpsLogItem, TaskRunItem, NotificationItem,
   SchedulerJob, RhythmConfig, NotifyRule, SystemConfigView, OpsTargetsView,
 } from "../api";
+import { displayCodeLabel, displayStatusLabel, displayTaskTypeLabel, displayPlatformLabel, displayLevelLabel } from "../displayLabels";
 
 const PLATFORM_NAME: Record<Platform, string> = {
   xhs: "小红书", douyin: "抖音",
@@ -484,7 +485,7 @@ function LogsPane({ logs, total, page, pages, onPageChange, onResolved, targetId
                 <td style={{ maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12 }}>
                   {l.content ?? l.target_author ?? "-"}
                 </td>
-                <td><span className={`demo-status ${STATUS_CLS[l.status] ?? ""}`}>{STATUS_LABEL[l.status] ?? l.status}</span></td>
+                <td><span className={`demo-status ${STATUS_CLS[l.status] ?? ""}`}>{STATUS_LABEL[l.status] ?? displayStatusLabel(l.status)}</span></td>
                 <td>{l.status === "pending_verify" ? <div style={{ display: "flex", gap: 6 }}>
                   <button className="btn sm" disabled={busyId === l.id} onClick={() => void resolve(l.id, "sent")}>已发出</button>
                   <button className="btn sm ghost" disabled={busyId === l.id} onClick={() => void resolve(l.id, "not_sent")}>未发出</button>
@@ -623,7 +624,7 @@ function PublishPane() {
               <div className="task-main">
                 <div className="task-title">{PLATFORM_NAME[d.platform as Platform]} · {d.title ?? d.id}</div>
                 <div className="task-desc">
-                  状态：<strong>{d.status}</strong>
+                  状态：<strong>{displayStatusLabel(d.status)}</strong>
                   {d.status === "draft_pending"
                     ? " · 仅保存在 IterWave，本内容尚未存入平台"
                     : d.saved_at ? ` · 存草稿 ${new Date(d.saved_at).toLocaleString("zh-CN")}` : ""}
@@ -823,7 +824,7 @@ function BreakerPane({
               {cb?.events.map((e) => (
                 <tr key={e.id}>
                   <td style={{ fontSize: 12, color: "var(--muted)" }}>{new Date(e.detected_at).toLocaleString("zh-CN")}</td>
-                  <td>{e.platform}</td>
+                  <td>{displayPlatformLabel(e.platform)}</td>
                   <td><span className="tag orange">{e.reason_label ?? e.reason}</span></td>
                   <td>{e.resolved_at ? <span className="tag green">已恢复</span> : <span className="tag red">熔断中</span>}</td>
                 </tr>
@@ -899,9 +900,9 @@ function TasksPane({ tasks, total, page, pages, onPageChange, onResolved, target
             {tasks.map((t) => (
               <tr key={t.id} style={(targetType === "round" ? t.task_type === "round_pipeline" && t.biz_id === String(targetId) : targetId === t.id) ? { background: "var(--surface-2)", outline: "2px solid var(--primary)" } : undefined}>
                 <td style={{ fontSize: 12, fontFamily: "monospace" }}>#{t.id}</td>
-                <td>{TYPE_LABEL[t.task_type] ?? t.task_type}</td>
+                <td>{TYPE_LABEL[t.task_type] ?? displayTaskTypeLabel(t.task_type)}</td>
                 <td>{t.platform ? PLATFORM_NAME[t.platform] : "-"}</td>
-                <td><span className={`demo-status ${STATUS_CLS[t.status] ?? ""}`}>{STATUS_LABEL[t.status] ?? t.status}</span></td>
+                <td><span className={`demo-status ${STATUS_CLS[t.status] ?? ""}`}>{STATUS_LABEL[t.status] ?? displayStatusLabel(t.status)}</span></td>
                 <td>{t.attempt}/{t.max_attempts}</td>
                 <td style={{ fontSize: 11, color: "var(--muted)" }}>{t.started_at ? new Date(t.started_at).toLocaleString("zh-CN") : "-"}</td>
                 <td style={{ fontSize: 11, color: "var(--muted)" }}>{t.finished_at ? new Date(t.finished_at).toLocaleString("zh-CN") : "-"}</td>
@@ -1334,7 +1335,7 @@ function NotificationsPane({ items, rules, total, page, pages, onPageChange, onC
           <div>
             <label className="form-label">级别</label>
             <select className="field" value={level} onChange={(e) => setLevel(e.target.value)}>
-              {LEVELS.map((l) => <option key={l} value={l}>{l}</option>)}
+              {LEVELS.map((l) => <option key={l} value={l}>{displayLevelLabel(l)}</option>)}
             </select>
           </div>
           <button className="btn primary sm" onClick={addRule} disabled={busy}>＋ 新增规则</button>
@@ -1351,7 +1352,7 @@ function NotificationsPane({ items, rules, total, page, pages, onPageChange, onC
               {rules.map((r) => (
                 <tr key={r.id}>
                   <td>{TYPE_LABEL[r.scenario] ?? r.scenario}</td>
-                  <td style={{ fontFamily: "monospace", fontSize: 11 }}>{r.channel}</td>
+                  <td style={{ fontFamily: "monospace", fontSize: 11 }}>{displayCodeLabel(r.channel)}</td>
                   <td>
                     <select className="field" style={{ width: 110 }} value={r.level}
                       onChange={(e) => changeLevel(r, e.target.value)}>
@@ -1386,9 +1387,9 @@ function NotificationsPane({ items, rules, total, page, pages, onPageChange, onC
               {items.map((n) => (
                 <tr key={n.id}>
                   <td style={{ fontSize: 11, color: "var(--muted)", whiteSpace: "nowrap" }}>{new Date(n.sent_at).toLocaleString("zh-CN")}</td>
-                  <td><span className={`tag ${LEVEL_CLS[n.level] ?? ""}`}>{n.level.toUpperCase()}</span></td>
-                  <td>{TYPE_LABEL[n.type] ?? n.type}</td>
-                  <td>{n.platform ? PLATFORM_NAME[n.platform] : "-"}</td>
+                  <td><span className={`tag ${LEVEL_CLS[n.level] ?? ""}`}>{displayLevelLabel(n.level)}</span></td>
+                  <td>{TYPE_LABEL[n.type] ?? displayCodeLabel(n.type)}</td>
+                  <td>{n.platform ? PLATFORM_NAME[n.platform] ?? displayPlatformLabel(n.platform) : "-"}</td>
                   <td style={{ fontSize: 12, maxWidth: 280 }}>{n.title}</td>
                   <td style={{ fontSize: 11 }}>{n.channel ?? "-"}</td>
                 </tr>

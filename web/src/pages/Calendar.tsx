@@ -4,6 +4,7 @@ import EmptyHint from "../components/EmptyHint";
 import { api, ContentPlan, Platform, ScheduleEvent, UnscheduledDraft } from "../api";
 import { ALL_PLATFORMS, platformMeta } from "../platforms";
 import { formatCalendarDate as _fmt, shiftCalendarDate } from "../calendarDate.mjs";
+import { displayStatusLabel } from "../displayLabels";
 
 const PLAN_STATUS_LABEL: Record<ContentPlan["status"], string> = {
   planned: "待执行",
@@ -387,7 +388,7 @@ export default function Calendar() {
                       return (
                         <button type="button" key={e.id} className="calendar-event" draggable={editable}
                           onDragStart={(event) => { event.dataTransfer.setData("text/plain", e.id); event.dataTransfer.effectAllowed = "move"; }}
-                          title={editable ? `${e.title} · 点击改排期` : `${e.title} · ${statusLabel[e.status] ?? e.status}（不可改排期）`}
+                          title={editable ? `${e.title} · 点击改排期` : `${e.title} · ${statusLabel[e.status] ?? displayStatusLabel(e.status)}（不可改排期）`}
                           disabled={!editable}
                           onClick={() => { setSelected({ id: e.id, title: e.title }); setDraftTime(_toLocalInput(e.scheduled || e.saved_at)); }}
                           style={{ borderLeft: `3px solid ${platformColors[e.platform] || "#666"}`, outline: selected?.id === e.id || targetDraftId === e.id ? "2px solid var(--blue)" : "none" }}>
@@ -438,7 +439,7 @@ export default function Calendar() {
                       onClick={() => { setSelected({ id: e.id, title: e.title }); setDraftTime(_toLocalInput(e.scheduled || e.saved_at)); }}>
                       <span className="calendar-agenda-time">{e.scheduled ? e.scheduled.slice(11, 16) : "—"}</span>
                       <span className="calendar-agenda-color" style={{ background: platformColors[e.platform] || "#666" }} />
-                      <span className="calendar-agenda-copy"><strong>{e.title}</strong><small>{platformMeta(e.platform).label} · {statusLabel[e.status] ?? e.status}{e.stage_title ? ` · ${e.stage_title}` : ""}</small></span>
+                      <span className="calendar-agenda-copy"><strong>{e.title}</strong><small>{platformMeta(e.platform).label} · {statusLabel[e.status] ?? displayStatusLabel(e.status)}{e.stage_title ? ` · ${e.stage_title}` : ""}</small></span>
                       <span className="calendar-agenda-action">{editable ? "编辑排期" : "不可编辑"}</span>
                     </button>
                   );
@@ -588,7 +589,7 @@ export default function Calendar() {
                         {platformMeta(d.platform).label}
                       </span>
                     </td>
-                    <td>{statusLabel[d.status] ?? d.status}</td>
+                    <td>{statusLabel[d.status] ?? displayStatusLabel(d.status)}</td>
                     <td>
                       <input
                         className="field"

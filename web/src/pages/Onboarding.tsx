@@ -3,6 +3,7 @@ import { api, Platform, SystemConfigView, SystemStatus, Goal, DiagnoseResult } f
 import { navigate } from "../nav";
 import { PersonaEditor, KbEditor, LlmEditor, PlatformToggles } from "../components/ConfigEditors";
 import { useApp } from "../AppContext";
+import { displayStatusLabel, displayCodeLabel, displayMetricLabel } from "../displayLabels";
 
 const STEPS = [
   { key: "persona",  label: "① 账号画像",     hint: "终极目标 / 红线 / 定位关键词" },
@@ -400,12 +401,12 @@ export default function Onboarding() {
                       <tr key={g.id}>
                         <td style={{ maxWidth: 220 }}>{g.goal_text}</td>
                         <td>{g.target_platform ? PLATFORM_NAMES[g.target_platform] : "全局"}</td>
-                        <td style={{ fontFamily: "monospace", fontSize: 11 }}>{g.target_metric}</td>
+                        <td style={{ fontFamily: "monospace", fontSize: 11 }}>{displayCodeLabel(g.target_metric)}</td>
                         <td>{g.target_value}</td>
                         <td>{g.current_value !== null ? g.current_value : <span style={{ color: "var(--subtle)" }}>—</span>}</td>
-                        <td style={{ fontSize: 11 }}>{g.metric_scope}</td>
+                        <td style={{ fontSize: 11 }}>{displayCodeLabel(g.metric_scope)}</td>
                         <td>{g.achievement_rate !== null ? `${g.achievement_rate.toFixed(1)}%` : <span style={{ color: "var(--subtle)" }}>数据待采集</span>}</td>
-                        <td><span className={`tag ${g.status === "active" ? "green" : "gray"}`}>{g.status}</span></td>
+                        <td><span className={`tag ${g.status === "active" ? "green" : "gray"}`}>{displayStatusLabel(g.status)}</span></td>
                       </tr>
                     ))}
                   </tbody>

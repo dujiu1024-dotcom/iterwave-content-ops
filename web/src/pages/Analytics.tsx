@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import EmptyHint from "../components/EmptyHint";
 import { api, MetricsResponse, MetricRow, Platform, SpiralAnalysis, Draft, WeeklyReport, ActivationStatus, GoalSummary, BusinessAnalyticsSummary } from "../api";
+import { displayMetricLabel, displaySourceLabel, displayPlatformLabel } from "../displayLabels";
 
 const PLATFORM_NAME: Record<Platform, string> = {
   xhs: "小红书", douyin: "抖音",
@@ -338,7 +339,7 @@ export default function Analytics() {
                 {historyOpen === draft.id && <div style={{ marginTop: 10, borderTop: "1px solid var(--line)", paddingTop: 10 }}>
                   {(snapshotHistory[draft.id] || []).length === 0 ? <div className="panel-sub">暂无历史指标快照</div> :
                     (snapshotHistory[draft.id] || []).map((item) => <div className="panel-sub" key={item.id} style={{ padding: "6px 0" }}>
-                      {item.measured_at} · {item.source === "manual" ? "人工填写" : item.source === "platform_readback" ? "平台读回" : item.source}
+                      {item.measured_at} · {displaySourceLabel(item.source)}
                       · {(activationStatus?.platform_metric_fields?.[draft.platform] || []).map((field) => `${({views:"曝光",likes:"点赞",collects:"收藏",comments:"评论",shares:"分享"} as Record<string,string>)[field] || field} ${item[field as keyof typeof item] ?? "—"}`).join(" · ")}
                       {item.correction_of ? " · 修正记录" : ""}
                       {item.source === "manual" && <button type="button" className="btn sm" style={{ marginLeft: 8 }} onClick={() => setBackfillValues((prev) => ({
@@ -369,7 +370,7 @@ export default function Analytics() {
           <div style={{ padding: "0 16px 16px" }}>
             <div className="panel-sub">{weeklyReport.period.start} 至 {weeklyReport.period.end} · 有效样本 {weeklyReport.sample_size} 篇 · 可复盘 {weeklyReport.effective_review_count ?? 0} 篇 · 来源：{weeklyReport.data_sources.join("、") || "暂无"}</div>
             <h3 style={{ marginTop: 14 }}>表现最好</h3>
-            {weeklyReport.best_content.length ? weeklyReport.best_content.map((item) => <div className="task-row" key={`${item.content_id}-${item.metric}`}><div className="task-main"><div className="task-title">{item.title}</div><div className="task-desc">{PLATFORM_NAME[item.platform]} · {item.metric}：{item.value} · {item.source} · 统计时间 {item.measured_at}{item.conflict ? " · 来源冲突，按规则选择" : ""}</div></div></div>) : <div className="panel-sub">暂无有效指标，暂不排名。</div>}
+            {weeklyReport.best_content.length ? weeklyReport.best_content.map((item) => <div className="task-row" key={`${item.content_id}-${item.metric}`}><div className="task-main"><div className="task-title">{item.title}</div><div className="task-desc">{PLATFORM_NAME[item.platform]} · {displayMetricLabel(item.metric)}：{item.value} · {displaySourceLabel(item.source)} · 统计时间 {item.measured_at}{item.conflict ? " · 来源冲突，按规则选择" : ""}</div></div></div>) : <div className="panel-sub">暂无有效指标，暂不排名。</div>}
             {!!weeklyReport.data_conflicts?.length && <div className="note" style={{ marginTop: 12 }}>
               <strong>数据来源冲突（保留原始记录）</strong>
               {weeklyReport.data_conflicts.map((conflict) => <div className="panel-sub" key={conflict.content_id}>
@@ -468,7 +469,7 @@ export default function Analytics() {
               <tbody>
                 {rows.map((m, i) => (
                   <tr key={m.id ?? i}>
-                    <td>{PLATFORM_NAME[m.platform] ?? m.platform}</td>
+                    <td>{PLATFORM_NAME[m.platform] ?? displayPlatformLabel(m.platform)}</td>
                     <td style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {m.content_title || <span style={{ color: "var(--subtle)" }}>—</span>}
                     </td>
@@ -546,8 +547,8 @@ export default function Analytics() {
                 <tbody>
                   {zStats.map((s, i) => (
                     <tr key={i}>
-                      <td>{PLATFORM_NAME[s.platform as Platform] ?? s.platform}</td>
-                      <td>{METRIC_NAME[s.metric] ?? s.metric}</td>
+                      <td>{PLATFORM_NAME[s.platform as Platform] ?? displayPlatformLabel(s.platform)}</td>
+                      <td>{METRIC_NAME[s.metric] ?? displayMetricLabel(s.metric)}</td>
                       <td>{s.mean}</td>
                       <td>{s.std}</td>
                       <td>{s.sample_count}</td>

@@ -4,6 +4,7 @@ import { useApp } from "../AppContext";
 import { roundTaskLabel } from "../roundLabel";
 import TaskDispatchMetrics from "../components/TaskDispatchMetrics";
 import TaskProgressPanel from "../components/TaskProgressPanel";
+import { displayCodeLabel, displayStatusLabel, displayStepLabel, displayTaskTypeLabel, displayErrorLabel } from "../displayLabels";
 
 const STATUS_LABEL: Record<GlobalTaskQueueItem["status"], string> = {
   queued: "等待执行",
@@ -77,7 +78,7 @@ function TaskRow({
   return (
     <div className="panel-row" style={{ display: "grid", gridTemplateColumns: "minmax(180px, 1.5fr) minmax(100px, .8fr) minmax(100px, .8fr) minmax(150px, 1fr) auto", gap: 14, alignItems: "center", padding: "14px 16px" }}>
       <div style={{ minWidth: 0 }}>
-        <div style={{ fontWeight: 650 }}>{TASK_LABEL[task.task_type] || task.task_type}</div>
+        <div style={{ fontWeight: 650 }}>{TASK_LABEL[task.task_type] || displayTaskTypeLabel(task.task_type)}</div>
         <div className="muted" style={{ fontSize: 12, marginTop: 4, overflowWrap: "anywhere" }}>
           {task.tenant_name} · {aggregateLabel(task)}
         </div>
@@ -466,7 +467,7 @@ export default function TaskQueue() {
                   <div><div className="muted">任务 ID</div><code>{detailTask.task_id}</code></div>
                   <div><div className="muted">队列序号</div><strong>#{detailTask.queue_order}</strong></div>
                   <div><div className="muted">所属账号组</div><strong>{detailTask.tenant_id}</strong></div>
-                  <div><div className="muted">任务类型 / 状态</div><strong>{detailTask.task_type} · {STATUS_LABEL[detailTask.status]}</strong></div>
+                  <div><div className="muted">任务类型 / 状态</div><strong>{displayTaskTypeLabel(detailTask.task_type)} · {STATUS_LABEL[detailTask.status] ?? displayStatusLabel(detailTask.status)}</strong></div>
                   <div><div className="muted">创建时间</div>{timeLabel(detailTask.created_at)}</div>
                   <div><div className="muted">开始时间</div>{timeLabel(detailTask.started_at)}</div>
                   <div><div className="muted">结束时间</div>{timeLabel(detailTask.finished_at)}</div>
@@ -479,7 +480,7 @@ export default function TaskQueue() {
                     queued={detailTask.status === "queued"}
                   />
                 )}
-                {detailTask.error_code && <div className="notice danger" style={{ marginTop: 14 }}>错误代码：{detailTask.error_code}</div>}
+                {detailTask.error_code && <div className="notice danger" style={{ marginTop: 14 }}>错误说明：{displayErrorLabel(detailTask.error_code)} <code style={{ marginLeft: 6 }}>{detailTask.error_code}</code></div>}
                 {detailTask.error_message && <div style={{ marginTop: 10, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{detailTask.error_message}</div>}
                 {detailTask.retry_of_task_id && <div className="muted" style={{ marginTop: 12 }}>恢复自任务：{detailTask.retry_of_task_id}</div>}
                 {detailTask.retry_confirmation_note && <div className="muted" style={{ marginTop: 6 }}>恢复核验：{detailTask.retry_confirmation_note}</div>}
@@ -492,8 +493,8 @@ export default function TaskQueue() {
                   {detailTask.execution_log?.length ? <div className="list">
                     {detailTask.execution_log.map((entry, index) => <div className="task-row" key={index}>
                       <div className="task-main">
-                        <strong>{entry.step}</strong>
-                        <div className="tiny">{entry.status}</div>
+                        <strong>{displayStepLabel(entry.step)}</strong>
+                        <div className="tiny">{displayStatusLabel(entry.status)}</div>
                         {entry.detail && <div className="tiny" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{entry.detail}</div>}
                       </div>
                     </div>)}

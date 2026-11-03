@@ -3,6 +3,7 @@ import { api, GlobalMonitorResponse, GlobalTaskQueueItem, GlobalTodoItem, Notifi
 import { navigate } from "../nav";
 import { roundTaskLabel } from "../roundLabel";
 import ProductionPlanMonitor from "../components/ProductionPlanMonitor";
+import { displayStatusLabel } from "../displayLabels";
 
 const STATUS: Record<string, string> = {
   queued: "排队中", running: "运行中", succeeded: "已完成",
@@ -182,7 +183,7 @@ export default function GlobalOperations() {
                     <div className="global-scheduler-cell">
                       <strong>{RUN_TYPE[tenant.recent_execution.task_type] ?? "其他后台任务"}</strong>
                       <span className={`tag ${tenant.recent_execution.status === "success" || tenant.recent_execution.status === "succeeded" ? "green" : tenant.recent_execution.status === "failed" || tenant.recent_execution.status === "interrupted" ? "red" : "gray"}`}>
-                        {RUN_STATUS[tenant.recent_execution.status] ?? tenant.recent_execution.status}
+                        {RUN_STATUS[tenant.recent_execution.status] ?? displayStatusLabel(tenant.recent_execution.status)}
                       </span>
                       {tenant.recent_execution.has_error_detail && <span className="tiny">诊断详情已记录</span>}
                       <span className="tiny">{tenant.recent_execution.finished_at || tenant.recent_execution.started_at || tenant.recent_execution.created_at

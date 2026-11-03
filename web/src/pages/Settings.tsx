@@ -6,6 +6,7 @@ import TenantManagerPane from "../components/TenantManagerPane";
 import RuntimePolicyEditor from "../components/RuntimePolicyEditor";
 import { AdvancedEditor, ImageModelEditor, KbEditor, LlmEditor, PlatformStyleEditor, PlatformToggles, TimeoutEditor } from "../components/ConfigEditors";
 import { api, type SystemStatus, type SystemConfigView } from "../api";
+import { displayPlatformLabel } from "../displayLabels";
 
 const PLATFORM_LABELS: Record<string, string> = {
   xhs: "小红书",
@@ -162,7 +163,7 @@ export default function Settings() {
   };
 
   const enabledNames = status?.enabled_platforms
-    .map((p) => PLATFORM_LABELS[p] ?? p)
+    .map((p) => PLATFORM_LABELS[p] ?? displayPlatformLabel(p))
     .join(" · ") ?? "加载中…";
 
   const brokenNames = status?.circuit_broken_platforms

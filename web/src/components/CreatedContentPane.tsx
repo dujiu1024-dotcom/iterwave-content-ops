@@ -6,6 +6,7 @@ import { useApp } from "../AppContext";
 import EmptyHint from "./EmptyHint";
 import { navigate } from "../nav";
 import { api, Draft, platformMeta } from "../api";
+import { displayStatusLabel } from "../displayLabels";
 
 const STATUS_LABEL: Record<string, { text: string; cls: string }> = {
   draft_pending: { text: "待存草稿", cls: "gray" },
@@ -105,7 +106,7 @@ export default function CreatedContentPane() {
             </tr></thead>
             <tbody>
               {drafts.map((d) => {
-                const st = STATUS_LABEL[d.status] ?? { text: d.status, cls: "gray" };
+                const st = STATUS_LABEL[d.status] ?? { text: displayStatusLabel(d.status), cls: "gray" };
                 const locked = LOCKED.has(d.status);
                 return (
                   <tr key={d.id}>

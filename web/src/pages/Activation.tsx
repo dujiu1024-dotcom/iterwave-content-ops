@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, ActivationSampleRun, ActivationSavedSample, ActivationStatus, Platform } from "../api";
 import { navigate } from "../nav";
+import { displayPlatformLabel, displayStatusLabel } from "../displayLabels";
 
 const PLATFORMS: { value: Platform; label: string }[] = [
   { value: "xhs", label: "小红书" },
@@ -307,7 +308,7 @@ export default function Activation() {
           <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 12, padding: 12 }}>
             {savedSamples.map((item) => (
               <article className="task-row" key={item.id} style={{ display: "block", padding: 14 }}>
-                <div className="panel-sub">{PLATFORMS.find((p) => p.value === item.platform)?.label || item.platform} · {item.angle} · 已保存于 {item.adopted_at}</div>
+                <div className="panel-sub">{PLATFORMS.find((p) => p.value === item.platform)?.label || displayPlatformLabel(item.platform)} · {item.angle} · 已保存于 {item.adopted_at}</div>
                 <h3 style={{ margin: "8px 0" }}>{item.title}</h3>
                 <div className="panel-sub" style={{ whiteSpace: "pre-wrap", maxHeight: 150, overflow: "auto" }}>{item.body}</div>
                 <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
