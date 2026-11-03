@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import uuid
 from .timezone import storage_now
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,7 @@ def research_status() -> dict:
 def run_once(
     cfg, conn=None, *, trigger: str = "manual",
     tenant_id: str | None = None, _reserved: bool = False,
+    collection_id: str | None = None,
 ) -> dict:
     """同步执行一次采集 + 匹配；可由后台线程以预占状态启动。"""
     if not _reserved:
@@ -88,7 +90,9 @@ def run_once(
         # 原始采集数据发布到共享快照；标签匹配和结果仍写入当前账号组数据库。
         publish_from_tenant(conn)
         if cfg.hot_topics.enabled is not False:
-            report = HotTopicCollector(cfg, conn).refresh(on_progress=on_progress)
+            report = HotTopicCollector(cfg, conn).refresh(
+                on_progress=on_progress, collection_id=collection_id or uuid.uuid4().hex,
+            )
         on_progress({
             "stage": "matching", "label": "标签匹配 / 研判", "percent": 92,
             "message": "按账号画像匹配定位关联",

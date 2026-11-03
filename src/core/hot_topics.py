@@ -25,6 +25,7 @@ import json
 import statistics
 import logging
 import re
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
@@ -563,15 +564,20 @@ class HotTopicCollector:
         urgent_total = self.conn.execute(base + " SELECT COUNT(*) FROM visible WHERE time_sensitive = 1", gate_params).fetchone()[0]
         return items, list(sources.values()) + list(failed.values()), total, match_summary, urgent_total, source_options
 
-    def refresh(self, on_progress: Optional[Callable[[dict], None]] = None) -> dict:
-        """并发抓取综合热榜平台 + 自定义 RSS/JSON 行业源 → 落库。返回各来源采集结果。
+    def refresh(
+        self,
+        on_progress: Optional[Callable[[dict], None]] = None,
+        *,
+        collection_id: Optional[str] = None,
+    ) -> dict:
+        """并发抓取来源；SQLite 租约和 fencing token 保护每个来源的快照提交。"""
+        from .hot_topic_collection_store import (
+            claim_source, commit_snapshot, fail_source,
+        )
 
-        on_progress：进度回调（stage / label / percent / sources / message）。
-        采集全程在后台线程执行，进度只写入状态，与前端页面是否停留在本页无关。
-        """
+        collection_id = str(collection_id or uuid.uuid4().hex)
         report: dict[str, str] = {}
-        # 综合热榜：顺序抓 5 个平台 × 15s 超时会把接口拖到 1 分钟以上，改并发
-        jobs: list[tuple[str, str, object]] = []   # (报告键, 展示来源, 可调用)
+        jobs: list[tuple[str, str, object]] = []
         for agg in self.aggregate_sources:
             base = (agg.get("url") or "https://60s.viki.moe").rstrip("/")
             name = agg.get("name") or "60s.viki.moe"
@@ -580,7 +586,7 @@ class HotTopicCollector:
                              lambda p=platform, b=base, n=name: self._fetch_platform(p, b, n)))
         for src in self.custom_sources:
             label = src.get("platform") or src.get("name") or "行业源"
-            jobs.append((label, label, lambda s=src, l=label: self._fetch_custom(s, l)))
+            jobs.append((label, label, lambda source=src, name=label: self._fetch_custom(source, name)))
 
         total = len(jobs)
         src_state: list[dict] = [
@@ -589,48 +595,90 @@ class HotTopicCollector:
         ]
 
         def emit(stage: str, label: str, percent: int, *, message: Optional[str] = None) -> None:
-            if on_progress is None:
-                return
-            on_progress({"stage": stage, "label": label, "percent": percent,
-                         "sources": [dict(s) for s in src_state], "message": message})
+            if on_progress is not None:
+                on_progress({"stage": stage, "label": label, "percent": percent,
+                             "sources": [dict(item) for item in src_state], "message": message})
 
-        emit("fetching", "抓取平台热榜", 5, message=f"共 {total} 个数据源")
+        emit("fetching", "领取数据源采集权", 5, message=f"共 {total} 个数据源")
+        # 先在数据库中领取来源租约，再启动网络抓取。租约在各 Worker 之间共享。
+        claimed: list[tuple[str, str, object, object]] = []
+        for key, label, fetch_fn in jobs:
+            owner = uuid.uuid4().hex
+            try:
+                state, claim = claim_source(
+                    self.conn, key, collection_id, owner,
+                    lease_seconds=max(120, int(self.hcfg.fetch_timeout_seconds) * 4 + 60),
+                )
+            except Exception as exc:
+                logger.exception("热点来源租约领取失败 source=%s", redact(key))
+                report[key] = "failed"
+                next(item for item in src_state if item["key"] == key)["status"] = "failed"
+                continue
+            if state == "duplicate":
+                report[key] = "duplicate"
+                next(item for item in src_state if item["key"] == key)["status"] = "duplicate"
+            elif state == "busy":
+                report[key] = "skipped"
+                next(item for item in src_state if item["key"] == key)["status"] = "skipped"
+            else:
+                claimed.append((key, label, fetch_fn, claim))
 
-        # 每个来源完成后立即落库，避免慢来源阻塞时已完成来源的数据一直留在内存。
-        saved = 0
-        with ThreadPoolExecutor(max_workers=min(self.hcfg.max_concurrent_fetches, max(1, total))) as pool:
-            futures = {pool.submit(fn): (key, label) for key, label, fn in jobs}
-            done = 0
-            for fut in as_completed(futures):
-                key, label = futures[fut]
+        done = 0
+        with ThreadPoolExecutor(max_workers=min(self.hcfg.max_concurrent_fetches, max(1, len(claimed)))) as pool:
+            futures = {pool.submit(fetch_fn): (key, label, claim)
+                       for key, label, fetch_fn, claim in claimed}
+            for future in as_completed(futures):
+                key, label, claim = futures[future]
+                state = next(item for item in src_state if item["key"] == key)
                 try:
-                    result = fut.result()
+                    result = future.result()
+                    if not result:
+                        raise RuntimeError("接口返回空列表")
+                    # 旧数据归一化是独立维护事务；实际快照变更在 fencing 事务中完成。
+                    from .hot_topic_dedup import backfill
+                    backfill(self.conn)
+                    committed = commit_snapshot(
+                        self.conn, claim, len(result),
+                        lambda k=key, name=label, rows=result: self._upsert(
+                            k, name, rows, _commit=False, _backfill=False,
+                        ),
+                    )
+                    if not committed:
+                        report[key] = "skipped"
+                        state["status"] = "skipped"
+                    else:
+                        report[key] = "collected"
+                        state["status"] = "collected"
+                        state["items"] = len(result)
+                        logger.info("🔥 热点采集成功 %s：%d 条", redact(key), len(result))
                 except Exception as exc:  # noqa: BLE001 — 单来源失败不影响其他来源
-                    result = exc
+                    from .hot_topic_collection_store import release_source
+                    try:
+                        if isinstance(exc, RuntimeError) and "租约已失效" in str(exc):
+                            raise
+                        failed = fail_source(
+                            self.conn, claim,
+                            lambda k=key, name=label, reason=str(exc): self._record_failure(
+                                k, name, redact(reason), _commit=False,
+                            ),
+                        )
+                        report[key] = "failed" if failed else "skipped"
+                        state["status"] = report[key]
+                    except Exception:
+                        # 过期 Worker 不得写失败占位覆盖新 Worker 的成功快照。
+                        try:
+                            release_source(self.conn, claim)
+                        except Exception:
+                            pass
+                        report[key] = "skipped"
+                        state["status"] = "skipped"
+                    logger.warning("热点采集失败或租约失效 source=%s", redact(key), exc_info=True)
                 done += 1
-                state = next(s for s in src_state if s["key"] == key)
-                if isinstance(result, Exception):
-                    safe_key = redact(str(key))
-                    safe_error = redact(str(result))
-                    logger.warning("热点采集失败 %s: %s", safe_key, safe_error)
-                    self._record_failure(key, label, safe_error)
-                    report[key] = "failed"
-                    state["status"] = "failed"
-                elif not result:
-                    self._record_failure(key, label, "接口返回空列表")
-                    report[key] = "failed"
-                    state["status"] = "failed"
-                else:
-                    self._upsert(key, label, result)
-                    report[key] = "collected"
-                    state["status"] = "collected"
-                    state["items"] = len(result)
-                    logger.info("🔥 热点采集成功 %s：%d 条", key, len(result))
-                saved += 1
-                emit("fetching", "抓取并保存平台热榜", 5 + int(80 * done / max(1, total)),
-                     message=f"已完成并保存 {done}/{total} 个数据源")
+                emit("fetching", "抓取并保存平台热榜", 5 + int(80 * done / max(1, len(claimed))),
+                     message=f"已完成并保存 {done}/{len(claimed)} 个已领取来源")
 
-        self.apply_dedup_and_retention(report)
+        if any(value == "collected" for value in report.values()):
+            self.apply_dedup_and_retention(report)
         emit("dedup", "去重与旧热点清理", 90, message="跨平台合并 + 旧热点滚动清理完成")
         return report
 
@@ -751,7 +799,7 @@ class HotTopicCollector:
     # 落库
     # ------------------------------------------------------------------
 
-    def _upsert(self, source_key: str, source_label_or_rows, rows: Optional[list[dict]] = None) -> None:
+    def _upsert(self, source_key: str, source_label_or_rows, rows: Optional[list[dict]] = None, *, _commit: bool = True, _backfill: bool = True) -> None:
         """去重规则 1：同一 id 只更新（热度 / 链接 / last_seen_at / seen_count），discovered_at 保持首次发现时间。
 
         兼容旧签名 ``_upsert(platform, rows)``。
@@ -763,7 +811,8 @@ class HotTopicCollector:
             source_key = f"{self.source_name}/{source_key}"
         else:
             source_label = str(source_label_or_rows)
-        backfill(self.conn)   # 旧数据先补归一化字段并合并，保证新 id 不与旧行重复
+        if _backfill:
+            backfill(self.conn)   # 旧数据先补归一化字段并合并，保证新 id 不与旧行重复
         now = _utc_now().isoformat(timespec="seconds")
         platform = source_key.rsplit("/", 1)[-1]
         source = source_key
@@ -809,9 +858,10 @@ class HotTopicCollector:
             "UPDATE hot_topics SET duplicate_of = NULL WHERE duplicate_of IS NOT NULL "
             "AND duplicate_of NOT IN (SELECT id FROM hot_topics)"
         )
-        self.conn.commit()
+        if _commit:
+            self.conn.commit()
 
-    def _record_failure(self, source_key: str, source_label: str, reason: str) -> None:
+    def _record_failure(self, source_key: str, source_label: str, reason: str, *, _commit: bool = True) -> None:
         """采集失败：落一行 failed 占位（heat_score = NULL，不显示数字）。"""
         source = source_key
         platform = source_label
@@ -830,7 +880,8 @@ class HotTopicCollector:
                     f"{platform} 热点采集失败：{reason[:100]}",
                 ),
             )
-            self.conn.commit()
+            if _commit:
+                self.conn.commit()
         except Exception:  # noqa: BLE001 — 失败留痕本身不能再抛
             logger.exception("热点失败占位落库失败 platform=%s", platform)
 
