@@ -49,7 +49,7 @@ IterWave 聚焦于**图文运营**场景，与通用 AI Agent 内容生成工具
 | 层 | 选型 |
 |---|---|
 | 语言 | Python 3.11+ / TypeScript |
-| 后端 | FastAPI + SQLAlchemy + Pydantic v2 |
+| 后端 | FastAPI + Python `sqlite3` + Pydantic v2 |
 | 调度 | APScheduler（SQLiteJobStore 持久化） |
 | 浏览器 | Playwright（仅存草稿 + 只读数据采集） |
 | 图片 | Pillow + OpenCV + NumPy |
@@ -140,20 +140,20 @@ IterWave 的部分平台适配器代码基于 [Easel](https://github.com/kaichen
 
 | 模块 | 文件 | 行数 |
 |---|---|---|
-| 配置加载 + Pydantic v2 模型 | config.py | 351 |
-| SQLite + schema 迁移 | db.py | 241 |
-| 两层状态机（轮次 9 态 + 单篇 8 态） | state_machine/__init__.py | 279 |
-| 选题评估引擎（冷启动/样本积累/稳定运行三模式） | scoring/topic_eval.py | 333 |
-| 终极目标检查器（方向性约束） | guard/ultimate_goal_checker.py | 176 |
-| 螺旋引擎 + 缺口分析 | spiral/__init__.py | 285 |
-| 运营引擎（评论/关注） + 熔断 + 节奏控制器 | ops/engine.py + circuit_breaker.py + rhythm.py | 590 |
-| APScheduler 调度器（6 类任务） | scheduler/__init__.py | 1,072 |
-| 内容管线 + 轮次执行器 | content_pipeline.py + round_executor.py | 1,065 |
-| 热点发现（60s.viki.moe 公益 API） | hot_topics.py | 362 |
-| 平台内归一化 + 纵深洞察 | metrics/__init__.py + insights.py | Winsorized 基准、样本标准差、95% t 置信区间、按平台独立分析 |
-| 计划版本签名（§19 内容一致性） | plan_version.py | 227 |
-| 断点恢复（幂等 + pending_verify） | recovery.py | 151 |
-| 目标进度 + 终极目标口径 | goal_progress.py | 118 |
+| 配置加载 + Pydantic v2 模型 | config.py | 配置模型与校验 |
+| SQLite + schema 迁移 | db.py | 迁移、连接包装与事务锁 |
+| 两层状态机（轮次 9 态 + 单篇 8 态） | state_machine/__init__.py | CAS 状态迁移 |
+| 选题评估引擎 | scoring/topic_eval.py | 冷启动/样本积累/稳定运行三模式 |
+| 终极目标检查器 | guard/ultimate_goal_checker.py | 方向性约束 |
+| 螺旋引擎 + 缺口分析 | spiral/ | 策略迭代与缺口分析 |
+| 运营引擎 + 熔断 + 节奏控制器 | ops/ | 运营动作、熔断与节奏控制 |
+| 调度与任务执行 | scheduler/、task_queue.py、task_worker.py | 调度、全局队列与隔离 Worker |
+| 内容管线 + 轮次执行器 | content_pipeline.py、round_executor.py | 生产与恢复 |
+| 热点发现 | hot_topics.py | 热点采集与处理 |
+| 平台内归一化 + 纵深洞察 | metrics/、insights.py | Winsorized 基准、样本标准差、95% t 置信区间、按平台独立分析 |
+| 计划版本签名 | plan_version.py | 内容一致性 |
+| 断点恢复 | recovery.py | 幂等恢复与 `pending_verify` 人工核实 |
+| 目标进度 | goal_progress.py | 目标进度与口径计算 |
 
 ### 平台适配器（src/adapters/）
 
@@ -176,7 +176,7 @@ IterWave 的部分平台适配器代码基于 [Easel](https://github.com/kaichen
 
 ### 测试
 
-`tests/` 按模块覆盖状态机、三模式评分、NULL vs 0 红线、事务锁与回滚、租户隔离、任务队列、调度器、API 端点、热点去重、分析统计和适配器安全。测试总量以当前仓库为准。
+`tests/` 按模块覆盖状态机、三模式评分、NULL vs 0 红线、事务锁与回滚、租户隔离、任务队列、调度器、API 端点、热点去重、分析统计和适配器安全。前端目前仅有 `web/tests/api-error.test.mjs` 一组 Node 内置测试，尚未形成页面/组件级测试覆盖。
 
 ### 尚未验证
 
