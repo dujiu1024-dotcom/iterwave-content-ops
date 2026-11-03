@@ -312,6 +312,20 @@ def test_strategy_steps_persist_dependencies_and_require_real_predecessor_outcom
 
     store.update_stage_status(rows[0]["id"], "in_progress")
     store.update_stage_status(rows[0]["id"], "completed")
+    store.record_stage_outcome(
+        rows[0]["id"], version["id"], {"published_count": 1, "feedback": "用户明确提出需求"},
+        evaluation="",
+    )
+    with pytest.raises(PlanVersionError, match="缺少效果评价"):
+        store.assert_stage_ready(rows[1]["id"], version["id"])
+
+    store.record_stage_outcome(
+        rows[0]["id"], version["id"], {},
+        evaluation="有效反馈率达到目标",
+    )
+    with pytest.raises(PlanVersionError, match="实际结果损坏或为空"):
+        store.assert_stage_ready(rows[1]["id"], version["id"])
+
     outcome = store.record_stage_outcome(
         rows[0]["id"], version["id"], {"published_count": 1, "feedback": "用户明确提出需求"},
         evaluation="有效反馈率达到目标",

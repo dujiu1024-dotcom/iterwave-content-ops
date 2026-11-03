@@ -79,6 +79,26 @@ def test_ai_card_generation_fails_closed_when_ocr_does_not_pass(monkeypatch, tmp
         )
 
 
+def test_ai_card_generation_fails_closed_when_ocr_becomes_unavailable(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(cards, "generate_image_bytes", lambda prompt, **kwargs: (
+        calls.append(prompt) or (b"image", "image/png", ".png", 1024, 1536)
+    ))
+    monkeypatch.setattr(
+        "src.core.visual_ocr.validate_rendered_pages",
+        lambda images, expected, report, **kwargs: {
+            "status": "unavailable", "gate": "not_passed", "reason": "ocr_unavailable",
+        },
+    )
+    with pytest.raises(RuntimeError, match="OCR 执行过程中不可用"):
+        cards.generate_ai_card_set(
+            title="标题", subtitle="栏目", body="正文内容。",
+            output_dir=tmp_path, platform=type("P", (), {"value": "xhs"})(),
+            cfg=_Cfg(tmp_path), settings={"model": "image-model", "size": "1024x1536"},
+        )
+    assert len(calls) == 1
+
+
 def test_pagination_does_not_drop_long_sentence_content():
     source = "这是一个很长的句子，" * 40 + "最后一句。"
     pages = cards._paginate_body(source, max_chars=40, segments_per_page=3, max_pages=50)
