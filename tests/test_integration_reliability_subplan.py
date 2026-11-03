@@ -25,6 +25,7 @@ from src.core.metrics import Normalizer
 from src.core.notify import Notifier
 from src.core.plan_version import PlanVersionManager
 from src.core.plan_version_store import PlanVersionError, PlanVersionStore
+from src.core.production_line_store import ProductionLineStore
 from src.core.state_machine import DraftStateMachine, RoundStateMachine
 from src.core.task_queue import GlobalTaskQueue
 from src.core.task_worker import GlobalTaskWorker
@@ -78,7 +79,39 @@ def _approved_subplan(conn, sub_id: str = "integration-sub"):
         "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=?",
         (int(version["id"]),),
     ).fetchone()
+    line_store = ProductionLineStore(conn)
+    line_draft = line_store.create_draft(
+        sub_id, int(version["id"]),
+        {
+            "title": "联调生产线",
+            "stages": [{
+                "stage_key": str(stage["stage_key"]),
+                "batch_size": int(stage["target_count"]),
+                "production_goal": str(stage["title"]),
+                "instructions": "遵循已审核策略步骤执行",
+            }],
+        },
+        generation_source="manual", author="test",
+    )
+    line_store.activate(int(line_draft["id"]), reviewer="test")
     return store, master, version, stage
+
+
+def _activate_test_production_line(conn, sub_plan_id: str, sub_plan_version_id: int):
+    stages = conn.execute(
+        "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order",
+        (sub_plan_version_id,),
+    ).fetchall()
+    draft = ProductionLineStore(conn).create_draft(
+        sub_plan_id, sub_plan_version_id,
+        {"title": "依赖门禁测试生产线", "stages": [{
+            "stage_key": str(stage["stage_key"]),
+            "batch_size": int(stage["target_count"]),
+            "production_goal": str(stage["title"]),
+        } for stage in stages]},
+        generation_source="manual", author="test",
+    )
+    ProductionLineStore(conn).activate(int(draft["id"]), reviewer="test")
 
 
 # ---------------------------------------------------------------- 1. 事务边界
@@ -153,7 +186,8 @@ def test_round_is_pinned_to_effective_version_and_survives_new_draft(client):
 
     binding_sql = (
         "SELECT master_plan_version_id,sub_plan_id,sub_plan_version_id,sub_plan_stage_id,"
-        "sub_plan_snapshot,plan_attribution_status FROM spiral_rounds WHERE id=?"
+        "sub_plan_snapshot,plan_attribution_status,production_line_version_id "
+        "FROM spiral_rounds WHERE id=?"
     )
     bound = conn.execute(binding_sql, (round_id,)).fetchone()
     assert int(bound["master_plan_version_id"]) == int(master["id"])
@@ -161,6 +195,7 @@ def test_round_is_pinned_to_effective_version_and_survives_new_draft(client):
     assert int(bound["sub_plan_version_id"]) == int(version["id"])
     assert int(bound["sub_plan_stage_id"]) == int(stage["id"])
     assert bound["plan_attribution_status"] == "resolved"
+    assert bound["production_line_version_id"] is not None
     assert json.loads(bound["sub_plan_snapshot"])["title"] == "联调子计划"
 
     # 修改子计划只产生新的草稿版本，审核生效前不得改写既有轮次。
@@ -216,8 +251,19 @@ def test_completed_stage_with_later_failed_effect_review_blocks_production(clien
     )
     store.activate_subplan_version(int(version["id"]), reviewer="test")
     stage = conn.execute(
-        "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=?", (int(version["id"]),)
+        "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=?", (int(version["id"]),)
     ).fetchone()
+    from src.core.production_line_store import ProductionLineStore
+    line_store = ProductionLineStore(conn)
+    line_draft = line_store.create_draft(
+        "completed-review-sub", int(version["id"]),
+        {"title": "复核门禁测试生产线", "stages": [{
+            "stage_key": str(stage["stage_key"]), "batch_size": 1,
+            "production_goal": str(stage["title"]),
+        }]},
+        generation_source="manual", author="test",
+    )
+    line_store.activate(int(line_draft["id"]), reviewer="test")
     conn.execute(
         "UPDATE sub_plan_stages SET status='completed',effect_status='failed' WHERE id=?",
         (int(stage["id"]),),
@@ -297,6 +343,7 @@ def test_manual_round_open_blocks_missing_predecessor_outcome_with_reason(client
         ],
     )
     store.activate_subplan_version(int(version["id"]), reviewer="test")
+    _activate_test_production_line(conn, "dependency-sub", int(version["id"]))
     stages = conn.execute(
         "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order",
         (int(version["id"]),),
@@ -346,6 +393,7 @@ def test_manual_round_open_blocks_unmet_entry_condition(client):
                  "entry_condition_met": False}],
     )
     store.activate_subplan_version(int(version["id"]), reviewer="test")
+    _activate_test_production_line(conn, "entry-sub", int(version["id"]))
 
     before = int(conn.execute("SELECT COUNT(*) FROM spiral_rounds").fetchone()[0])
     response = tc.post("/api/subplans/entry-sub/rounds", json={"topic_count": 2})

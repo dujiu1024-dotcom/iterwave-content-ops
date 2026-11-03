@@ -138,7 +138,7 @@ class RoundExecutor:
         round_row = self.conn.execute(
             """SELECT status,goal_id,round_number,plan_signature,master_plan_version_id,
                       sub_plan_id,sub_plan_version_id,sub_plan_stage_id,
-                      sub_plan_snapshot,sub_plan_stage_snapshot
+                      sub_plan_snapshot,sub_plan_stage_snapshot,production_line_version_id
                FROM spiral_rounds WHERE id = ?""",
             (round_id,),
         ).fetchone()
@@ -147,6 +147,11 @@ class RoundExecutor:
         from .subplan_production import production_paused
         if production_paused(self.conn):
             raise RoundPreconditionError("内容生产已暂停，拒绝执行轮次")
+        # Historical rounds remain readable, but a subplan round without an
+        # approved production-line version must never enter the producer. This
+        # prevents pre-migration rounds from bypassing the human approval gate.
+        if round_row["sub_plan_id"] and round_row["production_line_version_id"] is None:
+            raise RoundPreconditionError("子计划生产轮次缺少已确认的生产线版本，拒绝执行")
         current_status = round_row["status"]
         if current_status == "failed":
             existing_contents = int(self.conn.execute(
@@ -250,6 +255,29 @@ class RoundExecutor:
                 raise RoundPreconditionError("轮次绑定的计划快照损坏")
             if not isinstance(self._plan, dict) or not isinstance(sub_snapshot, dict) or not isinstance(stage_snapshot, dict):
                 raise RoundPreconditionError("轮次绑定的计划快照格式无效")
+            production_line_stage = None
+            line_version_id = round_row["production_line_version_id"]
+            if line_version_id is not None:
+                line_binding = self.conn.execute(
+                    """SELECT l.status AS line_status,v.status AS version_status,
+                              v.sub_plan_version_id,v.definition_json
+                       FROM production_lines l
+                       JOIN production_line_versions v ON v.production_line_id=l.id
+                       WHERE l.sub_plan_id=? AND v.id=?""",
+                    (round_row["sub_plan_id"], line_version_id),
+                ).fetchone()
+                if (line_binding is None or line_binding["line_status"] != "active"
+                        or line_binding["version_status"] not in {"effective", "archived"}
+                        or line_binding["sub_plan_version_id"] != round_row["sub_plan_version_id"]):
+                    raise RoundPreconditionError("轮次绑定的生产线已暂停、终止或版本无效")
+                try:
+                    line_definition = json.loads(line_binding["definition_json"])
+                    production_line_stage = next(
+                        item for item in line_definition.get("stages", [])
+                        if item.get("stage_key") == stage_row["stage_key"]
+                    )
+                except (TypeError, ValueError, StopIteration):
+                    raise RoundPreconditionError("轮次绑定生产线缺少当前策略步骤的执行配置")
             remaining = max(0, int(stage_row["target_count"]) - int(stage_row["published_count"] or 0))
             if remaining <= 0:
                 raise RoundPreconditionError("阶段用户确认发布目标已达成，拒绝继续生产")
@@ -267,10 +295,12 @@ class RoundExecutor:
                 "master_plan_version_id": round_row["master_plan_version_id"],
                 "sub_plan_id": round_row["sub_plan_id"],
                 "sub_plan_version_id": round_row["sub_plan_version_id"],
+                "production_line_version_id": round_row["production_line_version_id"],
                 "stage_id": round_row["sub_plan_stage_id"],
                 "platform": identity["platform"],
                 "subplan": sub_snapshot,
                 "stage": stage_snapshot,
+                "production_line_stage": production_line_stage,
                 "remaining_count": remaining,
             }
         else:
@@ -378,6 +408,14 @@ class RoundExecutor:
                     f"效果评估方法：{stage.get('effect_evaluation') or ''}",
                     f"进入条件：{stage.get('entry_condition') or ''}",
                 ]
+                line_stage = self._subplan_context.get("production_line_stage")
+                if line_stage:
+                    context_lines.extend([
+                        "已确认生产线的执行配置必须遵循：",
+                        f"生产目标：{line_stage.get('production_goal') or ''}",
+                        f"生产线执行指令：{line_stage.get('instructions') or ''}",
+                        f"生产线节奏：{line_stage.get('cadence') or ''}",
+                    ])
                 for dependency_key, outcome in (stage.get("dependency_outcomes") or {}).items():
                     context_lines.append(
                         f"前置步骤 {dependency_key} 实际结果："
@@ -1050,6 +1088,7 @@ class RoundExecutor:
                         master_plan_version_id=int(self._subplan_context["master_plan_version_id"]),
                         sub_plan_id=str(self._subplan_context["sub_plan_id"]),
                         sub_plan_version_id=int(self._subplan_context["sub_plan_version_id"]),
+                        production_line_version_id=self._subplan_context.get("production_line_version_id"),
                         strategy_step_id=strategy_step_id,
                         platform=platform.value,
                         task_ordinal=rank + 1,

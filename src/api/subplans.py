@@ -473,6 +473,17 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         enabled_master_platforms = set(master_snapshot.get("enabled_platforms") or [])
         if not set(platforms).issubset(enabled_master_platforms):
             raise HTTPException(422, "AI 拆解平台必须属于生效主计划启用的平台")
+        existing_platforms = {
+            str(row["platform"]) for row in conn.execute(
+                f"SELECT DISTINCT platform FROM sub_plans WHERE master_plan_version_id=? "
+                f"AND platform IN ({','.join('?' for _ in platforms)})",
+                [int(master["id"]), *platforms],
+            ).fetchall()
+        }
+        platforms = [platform for platform in platforms if platform not in existing_platforms]
+        if not platforms:
+            return {"items": [], "effective": False, "requires_human_review": True,
+                    "already_exists": True, "manual_creation_available": True}
         outcome_context = {}
         conn = get_runtime()["conn"]
         for platform in platforms:
@@ -874,13 +885,25 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         if production_paused(conn):
             raise HTTPException(409, "内容生产已暂停")
         identity = conn.execute(
-            """SELECT p.*,v.status AS version_status,m.status AS master_status
+            """SELECT p.*,v.status AS version_status,m.status AS master_status,
+                      pl.status AS production_line_status,
+                      pl.current_version_id AS production_line_version_id,
+                      plv.status AS production_line_version_status,
+                      plv.sub_plan_version_id AS production_line_subplan_version_id,
+                      plv.definition_json AS production_line_definition_json
                FROM sub_plans p JOIN sub_plan_versions v ON v.id=p.current_version_id
                JOIN master_plan_versions m ON m.id=p.master_plan_version_id
+               LEFT JOIN production_lines pl ON pl.sub_plan_id=p.id
+               LEFT JOIN production_line_versions plv ON plv.id=pl.current_version_id
                WHERE p.id=?""", (sub_plan_id,),
         ).fetchone()
         if identity is None or identity["status"] != "active" or identity["version_status"] != "effective" or identity["master_status"] != "effective":
             raise HTTPException(409, "子计划未审核生效或授权已暂停")
+        if (identity["production_line_status"] != "active"
+                or identity["production_line_version_id"] is None
+                or identity["production_line_version_status"] != "effective"
+                or identity["production_line_subplan_version_id"] != identity["current_version_id"]):
+            raise HTTPException(409, "生产线尚未确认生效，或其绑定的子计划版本已过期")
         stages = conn.execute(
             """SELECT s.*,COALESCE(stats.confirmed_published_count,0) AS confirmed_published_count
                FROM sub_plan_stages s LEFT JOIN sub_plan_stage_publish_stats stats ON stats.stage_id=s.id
@@ -918,8 +941,12 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
             if total and completed == total:
                 conn.execute("UPDATE sub_plans SET status='completed',updated_at=CURRENT_TIMESTAMP WHERE id=?",
                              (sub_plan_id,))
+                conn.execute("UPDATE production_lines SET status='completed',updated_at=CURRENT_TIMESTAMP WHERE sub_plan_id=? AND status='active'",
+                             (sub_plan_id,))
             elif total and completed + cancelled == total:
                 conn.execute("UPDATE sub_plans SET status='cancelled',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                             (sub_plan_id,))
+                conn.execute("UPDATE production_lines SET status='cancelled',updated_at=CURRENT_TIMESTAMP WHERE sub_plan_id=? AND status IN ('active','paused')",
                              (sub_plan_id,))
             conn.commit()
             raise HTTPException(409, "子计划没有待执行阶段，所有阶段已完成或取消")
@@ -976,12 +1003,25 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
                 raise HTTPException(422, "topic_count 必须是 1-50 的整数")
         if requested_count < 1 or requested_count > 50:
             raise HTTPException(422, "topic_count 必须在 1-50 之间")
-        topic_count = min(requested_count, remaining, 50)
+        try:
+            line_definition = json.loads(identity["production_line_definition_json"] or "{}")
+            line_stage = next(
+                item for item in line_definition.get("stages", [])
+                if item.get("stage_key") == stage["stage_key"]
+            )
+            line_batch_size = int(line_stage["batch_size"])
+        except (TypeError, ValueError, KeyError, StopIteration):
+            raise HTTPException(409, "生产线未配置当前策略步骤的有效生产批量")
+        if line_batch_size < 1:
+            raise HTTPException(409, "生产线当前策略步骤的生产批量无效")
+        topic_count = min(requested_count, remaining, line_batch_size, 50)
         now_slot = business_now(runtime["cfg"]).replace(minute=0, second=0, microsecond=0).isoformat()
-        key = f"round-open:{now_slot}"
+        line_version_id = int(identity["production_line_version_id"])
+        key = f"round-open:{now_slot}:{line_version_id}"
         request_hash = __import__("hashlib").sha256(json.dumps(
             {"sub_plan_id": sub_plan_id,
              "sub_plan_version_id": identity["current_version_id"],
+             "production_line_version_id": line_version_id,
              "stage_id": stage["id"], "slot": now_slot,
              "topic_count": topic_count, "platforms": [identity["platform"]]},
             sort_keys=True, ensure_ascii=False,
@@ -1011,6 +1051,7 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
                 key, goal_id=goal[0] if goal else None,
                 content_variants=[{"platform": identity["platform"]}],
                 trigger_source="manual",
+                production_line_version_id=line_version_id,
             )
             if stage["status"] == "pending":
                 s.update_stage_status(int(stage["id"]), "in_progress")
@@ -1019,6 +1060,7 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
             return {"round_id": round_id, "round_number": number, "deduped": created["deduped"],
                     "topic_count": topic_count, "platforms": [identity["platform"]],
                     "bound_subplan_version_id": identity["current_version_id"],
+                    "bound_production_line_version_id": line_version_id,
                     "bound_stage_id": stage["id"],
                     "dependency_outcomes": ready_stage.get("dependency_outcomes", {})}
         except HTTPException:

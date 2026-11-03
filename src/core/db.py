@@ -548,6 +548,7 @@ class Database:
                 "tenant_skill_versions", "tenant_skill_audit",
                 "tenant_skill_references", "tenant_skill_executions",
                 "draft_save_verifications",
+                "production_lines", "production_line_versions",
                 # Tables introduced by earlier incremental migrations.
                 "app_settings", "autogrow_runs", "orchestration_settings",
                 "notify_rules", "platform_styles", "account_snapshots",
@@ -641,6 +642,11 @@ class Database:
                 "idx_production_tasks_round_status", "idx_production_tasks_step_status",
                 "idx_production_tasks_recovery", "idx_production_task_attempts_task",
                 "idx_contents_production_task", "idx_production_tasks_content",
+                # Production-line lifecycle and immutable version indexes (139).
+                "idx_production_lines_status", "idx_production_line_versions_subplan",
+                "idx_production_line_versions_line", "idx_spiral_rounds_production_line",
+                "idx_production_tasks_line_version", "idx_production_lines_current_version",
+                "idx_production_line_versions_based_on",
                 # Foreign-key child indexes added in migration 128.
                 "idx_ops_logs_round_id", "idx_contents_topic_id",
                 "idx_user_override_round_id",
@@ -703,6 +709,13 @@ class Database:
                 ("sub_plan_versions", "master_plan_version_id", "master_plan_versions", "id", "NO ACTION"),
                 ("sub_plan_versions", "based_on_version_id", "sub_plan_versions", "id", "NO ACTION"),
                 ("sub_plan_stages", "sub_plan_version_id", "sub_plan_versions", "id", "RESTRICT"),
+                ("production_lines", "sub_plan_id", "sub_plans", "id", "RESTRICT"),
+                ("production_lines", "current_version_id", "production_line_versions", "id", "RESTRICT"),
+                ("production_line_versions", "production_line_id", "production_lines", "id", "RESTRICT"),
+                ("production_line_versions", "sub_plan_version_id", "sub_plan_versions", "id", "RESTRICT"),
+                ("production_line_versions", "based_on_version_id", "production_line_versions", "id", "RESTRICT"),
+                ("spiral_rounds", "production_line_version_id", "production_line_versions", "id", "RESTRICT"),
+                ("production_tasks", "production_line_version_id", "production_line_versions", "id", "RESTRICT"),
                 ("round_open_idempotency", "master_plan_version_id", "master_plan_versions", "id", "NO ACTION"),
                 ("round_open_idempotency", "sub_plan_id", "sub_plans", "id", "NO ACTION"),
                 ("round_open_idempotency", "sub_plan_version_id", "sub_plan_versions", "id", "NO ACTION"),
@@ -765,6 +778,8 @@ class Database:
                 ("schema_migration_checksums", ("version",)),
                 ("production_tasks", ("idempotency_key",)),
                 ("production_task_attempts", ("task_id", "attempt_no")),
+                ("production_lines", ("sub_plan_id",)),
+                ("production_line_versions", ("production_line_id", "version_no")),
             }
             actual_unique_constraints = set()
             for table_name in existing:
@@ -830,10 +845,26 @@ class Database:
                     "result_json": "TEXT", "evaluation": "TEXT",
                     "recorded_at": "TEXT", "recorded_by": "TEXT",
                 },
+                "spiral_rounds": {"production_line_version_id": "INTEGER"},
+                "production_lines": {
+                    "id": "TEXT", "sub_plan_id": "TEXT", "status": "TEXT",
+                    "current_version_id": "INTEGER", "created_at": "TEXT",
+                    "updated_at": "TEXT", "created_by": "TEXT",
+                    "activated_at": "TEXT", "activated_by": "TEXT", "pause_reason": "TEXT",
+                },
+                "production_line_versions": {
+                    "id": "INTEGER", "production_line_id": "TEXT",
+                    "sub_plan_version_id": "INTEGER", "version_no": "INTEGER",
+                    "status": "TEXT", "definition_json": "TEXT",
+                    "generation_source": "TEXT", "based_on_version_id": "INTEGER",
+                    "created_at": "TEXT", "created_by": "TEXT",
+                    "reviewed_at": "TEXT", "reviewed_by": "TEXT", "change_note": "TEXT",
+                },
                 "production_tasks": {
                     "id": "TEXT", "idempotency_key": "TEXT", "round_id": "INTEGER",
                     "master_plan_version_id": "INTEGER", "sub_plan_id": "TEXT",
                     "sub_plan_version_id": "INTEGER", "strategy_step_id": "TEXT",
+                    "production_line_version_id": "INTEGER",
                     "platform": "TEXT", "task_ordinal": "INTEGER", "status": "TEXT",
                     "attempt_count": "INTEGER", "max_attempts": "INTEGER",
                     "content_id": "TEXT", "input_snapshot_json": "TEXT",
@@ -888,11 +919,16 @@ class Database:
                     "sub_plan_id", "stage_key", "source_version_id", "stage_id",
                     "result_json", "evaluation", "recorded_at", "recorded_by",
                 },
+                "production_lines": {"sub_plan_id", "status", "created_at", "updated_at", "created_by"},
+                "production_line_versions": {
+                    "production_line_id", "sub_plan_version_id", "version_no",
+                    "status", "definition_json", "generation_source", "created_at", "created_by",
+                },
                 "production_tasks": {
                     "id", "idempotency_key", "round_id", "master_plan_version_id",
                     "sub_plan_id", "sub_plan_version_id", "strategy_step_id",
-                    "platform", "task_ordinal", "status", "attempt_count",
-                    "max_attempts", "input_snapshot_json", "created_at", "updated_at",
+                    "production_line_version_id", "platform", "task_ordinal", "status",
+                    "attempt_count", "max_attempts", "input_snapshot_json", "created_at", "updated_at",
                 },
                 "production_task_attempts": {
                     "task_id", "attempt_no", "status", "started_at",
@@ -934,6 +970,10 @@ class Database:
                 "sub_plan_stage_outcomes": {
                     "evaluation": "''", "recorded_by": "'user'",
                 },
+                "production_lines": {"status": "'draft'", "created_by": "'system'"},
+                "production_line_versions": {
+                    "status": "'draft'", "generation_source": "'manual'", "created_by": "'user'",
+                },
                 "production_tasks": {
                     "task_ordinal": "1", "status": "'pending'",
                     "attempt_count": "0", "max_attempts": "3",
@@ -971,6 +1011,14 @@ class Database:
                 "production_task_attempts": (
                     "attempt_no > 0",
                     "status IN ('running','succeeded','failed','cancelled','abandoned')",
+                ),
+                "production_lines": (
+                    "status IN ('draft','active','paused','completed','cancelled','archived')",
+                ),
+                "production_line_versions": (
+                    "version_no > 0",
+                    "status IN ('draft','effective','rejected','archived')",
+                    "generation_source IN ('ai','manual','system')",
                 ),
                 "content_review_events": (
                     "event_type IN ('edited','approved','rejected','resubmitted')",

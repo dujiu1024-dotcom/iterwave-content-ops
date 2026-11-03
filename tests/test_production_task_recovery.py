@@ -18,10 +18,11 @@ def store():
         CREATE TABLE spiral_rounds(
             id INTEGER PRIMARY KEY, master_plan_version_id INTEGER, sub_plan_id TEXT,
             sub_plan_version_id INTEGER, sub_plan_stage_id INTEGER,
-            sub_plan_snapshot TEXT, sub_plan_stage_snapshot TEXT
+            sub_plan_snapshot TEXT, sub_plan_stage_snapshot TEXT,
+            production_line_version_id INTEGER
         );
         INSERT INTO spiral_rounds VALUES(
-            7,11,'sub-a',13,17,'{}','{}'
+            7,11,'sub-a',13,17,'{}','{}',NULL
         );
         CREATE TABLE sub_plans(id TEXT PRIMARY KEY, platform TEXT);
         INSERT INTO sub_plans VALUES('sub-a','xhs');
@@ -41,7 +42,8 @@ def store():
             attempt_count INTEGER, max_attempts INTEGER, content_id TEXT,
             input_snapshot_json TEXT, error_code TEXT, error_message TEXT,
             available_at TEXT, started_at TEXT, finished_at TEXT,
-            lease_expires_at TEXT, created_at TEXT, updated_at TEXT
+            lease_expires_at TEXT, created_at TEXT, updated_at TEXT,
+            production_line_version_id INTEGER
         );
         CREATE TABLE production_task_attempts(
             id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, attempt_no INTEGER,

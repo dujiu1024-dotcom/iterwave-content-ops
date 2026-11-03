@@ -3099,6 +3099,44 @@ def test_subplan_create_cleans_identity_when_initial_version_fails(client, monke
     assert conn.execute("SELECT 1 FROM sub_plans WHERE id=?", (created_ids[0],)).fetchone() is None
 
 
+def test_master_plan_approval_triggers_draft_only_ai_subplan_orchestration(client, monkeypatch):
+    from src.core.plan_version_store import PlanVersionStore
+
+    tc, conn, _ = client
+    store = PlanVersionStore(conn)
+    active = conn.execute(
+        "SELECT id,plan_snapshot FROM master_plan_versions WHERE status='effective' ORDER BY version_no DESC LIMIT 1"
+    ).fetchone()
+    if active is None:
+        base = {"topic_count_per_platform": 4, "enabled_platforms": ["xhs"],
+                "dimension_allocation": {"AI教育": 4}, "content_format": "image_text"}
+        draft = store.create_master_draft(base, author="test")
+    else:
+        draft = store.create_master_draft(
+            json.loads(active["plan_snapshot"]),
+            based_on_version_id=int(active["id"]), author="test",
+        )
+    calls = []
+
+    async def fake_generate(conn_arg, cfg_arg, master_version_id):
+        status = conn_arg.execute(
+            "SELECT status FROM master_plan_versions WHERE id=?", (master_version_id,)
+        ).fetchone()[0]
+        calls.append((master_version_id, status))
+        return {"status": "drafts_created", "items": [
+            {"subplan_id": "ai-draft-xhs", "version_id": 123, "platform": "xhs"}
+        ], "requires_human_review": True, "effective": False}
+
+    monkeypatch.setattr(
+        "src.core.master_plan_orchestrator.generate_subplan_drafts", fake_generate,
+    )
+    response = tc.post(f"/api/plans/{draft['id']}/review", json={"action": "approve"})
+    assert response.status_code == 200, response.text
+    assert calls == [(int(draft["id"]), "effective")]
+    assert response.json()["effective"] is True
+    assert response.json()["subplan_generation"]["status"] == "drafts_created"
+
+
 def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client):
     from src.core.plan_version_store import PlanVersionStore
 
@@ -3162,6 +3200,23 @@ def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client
     })
     assert reviewed.status_code == 200, reviewed.text
     assert reviewed.json()["authorization"] == "active"
+    stage = conn.execute(
+        "SELECT stage_key,target_count FROM sub_plan_stages WHERE sub_plan_version_id=?",
+        (version_id,),
+    ).fetchone()
+    line_draft = tc.post(f"/api/subplans/{sub_id}/production-line/draft", json={
+        "definition": {"title": "API 测试生产线", "stages": [{
+            "stage_key": stage["stage_key"], "batch_size": int(stage["target_count"]),
+            "production_goal": "按策略步骤执行",
+        }]},
+    })
+    assert line_draft.status_code == 201, line_draft.text
+    line_version = line_draft.json()["draft"]
+    line_review = tc.post(
+        f"/api/production-lines/{line_version['production_line_id']}/versions/{line_version['id']}/review",
+        json={"action": "approve"},
+    )
+    assert line_review.status_code == 200, line_review.text
     invalid_reorder = tc.post(f"/api/subplans/{sub_id}/stages/reorder", json={
         "based_on_version_id": version_id, "expected_version_no": 1, "stage_ids": [True],
     })
