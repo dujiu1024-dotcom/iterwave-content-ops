@@ -148,17 +148,33 @@ class RoundExecutor:
             raise RoundPreconditionError("内容生产已暂停，拒绝执行轮次")
         current_status = round_row["status"]
         if current_status == "failed":
-            # 只允许没有产生任何内容/草稿的失败轮次重试，避免重复生成或覆盖已有交付物。
-            existing_contents = self.conn.execute(
+            existing_contents = int(self.conn.execute(
                 "SELECT COUNT(*) FROM contents WHERE round_id = ?", (round_id,)
-            ).fetchone()[0]
-            existing_drafts = self.conn.execute(
+            ).fetchone()[0] or 0)
+            existing_drafts = int(self.conn.execute(
                 "SELECT COUNT(*) FROM drafts d JOIN contents c ON c.id = d.content_id WHERE c.round_id = ?",
                 (round_id,),
-            ).fetchone()[0]
-            if existing_contents or existing_drafts:
-                raise RoundPreconditionError("本轮失败前已产生内容或草稿，为避免重复交付，请修复问题后新建一轮")
-            if not self.sm_round.transition(round_id, "created", "用户发起安全重试（无已生成内容）"):
+            ).fetchone()[0] or 0)
+            pending_tasks = 0
+            if round_row["sub_plan_id"]:
+                pending_tasks = int(self.conn.execute(
+                    "SELECT COUNT(*) FROM production_tasks WHERE round_id=? AND status='pending'",
+                    (round_id,),
+                ).fetchone()[0] or 0)
+            # Existing artifacts are reusable only when an explicit task-level recovery
+            # has queued pending work. The producer adopts succeeded artifacts and runs
+            # only pending tasks; an ordinary whole-round replay remains forbidden.
+            if (existing_contents or existing_drafts) and pending_tasks <= 0:
+                raise RoundPreconditionError(
+                    "本轮失败前已产生内容或草稿，且没有已显式恢复的待执行生产任务；"
+                    "为避免重复生成或交付，拒绝整轮重跑"
+                )
+            reason = (
+                "用户发起生产任务级恢复；保留并复用已落库成品"
+                if existing_contents or existing_drafts
+                else "用户发起安全重试（无已生成内容）"
+            )
+            if not self.sm_round.transition(round_id, "created", reason):
                 raise RoundPreconditionError("失败轮次无法重置，请新建一轮")
         elif current_status != "created":
             raise RoundPreconditionError(
