@@ -168,12 +168,18 @@ export default function TaskQueue() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
   const [detailAudit, setDetailAudit] = useState<import("../api").GlobalTaskQueueAuditItem[]>([]);
+  const [drilldown, setDrilldown] = useState<{ status?: GlobalTaskQueueItem["status"]; dateFrom?: string; dateTo?: string; tenantId?: string; taskType?: string } | null>(null);
 
   const refresh = useCallback(async () => {
     try {
       const [activeResponse, historyResponse] = await Promise.all([
         api.taskQueue({ scope: "active", page: activePage, pageSize: activePageSize }),
-        api.taskQueue({
+        api.taskQueue(drilldown ? {
+          scope: "filtered", status: drilldown.status,
+          page: historyPage, pageSize: historyPageSize,
+          taskType: drilldown.taskType, tenantId: drilldown.tenantId,
+          dateFrom: drilldown.dateFrom, dateTo: drilldown.dateTo,
+        } : {
           scope: historyStatus === "failed" ? "failed" : "history",
           page: historyPage, pageSize: historyPageSize,
           taskType: historyType === "all" ? undefined : historyType,
@@ -203,7 +209,7 @@ export default function TaskQueue() {
     } finally {
       setLoading(false);
     }
-  }, [activePage, historyPage, historyType, historyStatus, historyTenantId, historyErrorKeyword, historyDateFrom, historyDateTo]);
+  }, [activePage, historyPage, historyType, historyStatus, historyTenantId, historyErrorKeyword, historyDateFrom, historyDateTo, drilldown]);
 
   useEffect(() => {
     void refresh();
@@ -320,7 +326,7 @@ export default function TaskQueue() {
         <button className="btn sm soft" type="button" onClick={() => void refresh()}>立即刷新</button>
       </div>
 
-      <TaskDispatchMetrics />
+      <TaskDispatchMetrics onDrilldown={(filters) => { setDrilldown(filters); setHistoryPage(1); }} />
 
       <div className="queue-summary-grid" style={{ marginBottom: 18 }}>
         <div className="panel stat-card"><div className="muted">排队与执行</div><div className="stat-value">{activeCounts.queued + activeCounts.running}</div></div>
@@ -462,6 +468,18 @@ export default function TaskQueue() {
                   {detailTask.resolution_note && <div>{detailTask.resolution_note}</div>}
                 </div>}
                 <section style={{ marginTop: 16 }}>
+                  <h3>执行步骤日志</h3>
+                  {detailTask.execution_log?.length ? <div className="list">
+                    {detailTask.execution_log.map((entry, index) => <div className="task-row" key={index}>
+                      <div className="task-main">
+                        <strong>{entry.step}</strong>
+                        <div className="tiny">{entry.status}</div>
+                        {entry.detail && <div className="tiny" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{entry.detail}</div>}
+                      </div>
+                    </div>)}
+                  </div> : <div className="empty-state">该任务没有持久化步骤明细；运行中任务的实时步骤流尚不可用。</div>}
+                </section>
+                <section style={{ marginTop: 16 }}>
                   <h3>操作审计</h3>
                   {detailAudit.length ? <div className="list">
                     {detailAudit.map((entry) => <div className="task-row" key={entry.id}>
@@ -475,7 +493,7 @@ export default function TaskQueue() {
                     </div>)}
                   </div> : <div className="empty-state">暂无管理操作审计记录。</div>}
                 </section>
-                <div className="tiny" style={{ marginTop: 16 }}>仅展示队列持久化的状态与诊断字段；系统未记录的步骤级执行进度不会在此处推断。</div>
+                <div className="tiny" style={{ marginTop: 16 }}>步骤明细来自任务执行报告中持久化的 steps 字段；不伪造实时进度。未产出步骤报告的失败任务仅展示已持久化错误。</div>
               </>
             )}
           </section>
