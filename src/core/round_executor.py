@@ -463,7 +463,6 @@ class RoundExecutor:
             report["failure_message"] = str(exc)
             report["errors"].append(str(exc))
             report["final_status"] = "failed"
-            fail_current(f"文案生成失败：{exc.code}")
             try:
                 transitioned = self.sm_round.transition(
                     round_id, "failed", f"文案生成失败：{exc.code}",
@@ -478,7 +477,6 @@ class RoundExecutor:
             report["errors"].append("执行异常，请检查运行日志")
             report["failure_code"] = "generation_pipeline_failed"
             report["final_status"] = "failed"
-            fail_current("执行异常，请检查运行日志")
             # 状态迁移本身也可能因数据库/状态机异常失败；不能让它覆盖原始异常，
             # 否则下方 task_runs 收尾和 run_report 持久化都不会执行。
             try:
