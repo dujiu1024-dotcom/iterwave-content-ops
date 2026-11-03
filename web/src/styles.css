@@ -948,3 +948,35 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
   .plan-stage-metrics { grid-template-columns:repeat(3,minmax(0,1fr)); }
   .plan-center-page .page-head { gap:10px; }
 }
+
+/* ===== 滚动条：细、半透明、跟随底色 =====
+   macOS「始终显示滚动条」会把原生滚动条画成白色宽轨，压在深色侧栏上非常突兀。
+   统一改成 8px 细条 + 透明轨道；侧栏内用浅色滑块，页面内用深色滑块。 */
+* { scrollbar-width: thin; scrollbar-color: rgba(23, 36, 58, .24) transparent; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(23, 36, 58, .24);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(23, 36, 58, .42); background-clip: content-box; }
+::-webkit-scrollbar-corner { background: transparent; }
+
+.sidebar, .sidebar-nav, .side-bottom { scrollbar-color: rgba(255, 255, 255, .32) transparent; }
+.sidebar::-webkit-scrollbar, .sidebar-nav::-webkit-scrollbar, .side-bottom::-webkit-scrollbar { width: 6px; }
+.sidebar::-webkit-scrollbar-track, .sidebar-nav::-webkit-scrollbar-track,
+.side-bottom::-webkit-scrollbar-track { background: transparent; }
+.sidebar::-webkit-scrollbar-thumb, .sidebar-nav::-webkit-scrollbar-thumb,
+.side-bottom::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, .30);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: content-box;
+}
+.sidebar::-webkit-scrollbar-thumb:hover, .sidebar-nav::-webkit-scrollbar-thumb:hover,
+.side-bottom::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, .52);
+  background-clip: content-box;
+}
