@@ -113,34 +113,47 @@ logger = logging.getLogger(__name__)
 # =====================================================================
 
 class TransactionalAPIRoute(APIRoute):
-    """为同步写 API 提供请求级事务边界，异常时自动回滚并释放连接锁。
-
-    认证端点不依赖租户数据库，异步端点因可能跨线程 await 而单独审查，
-    不在此处自动包裹。
-    """
+    """Bound sync/async endpoint transactions and clean up implicit writes on exit."""
 
     def __init__(self, path: str, endpoint, **kwargs):
         methods = {str(method).upper() for method in (kwargs.get("methods") or [])}
-        if (
-            methods.intersection({"POST", "PUT", "PATCH", "DELETE"})
-            and not path.startswith("/api/auth/")
-            and not inspect.iscoroutinefunction(endpoint)
-            and not getattr(endpoint, "_manages_own_transaction", False)
-        ):
+        if not path.startswith("/api/auth/"):
             original = endpoint
-
-            def transactional_endpoint(*args, **call_kwargs):
-                conn = _g_ctx.get("conn")
-                if conn is None:
-                    return original(*args, **call_kwargs)
-                with conn:
-                    return original(*args, **call_kwargs)
-
-            transactional_endpoint.__name__ = getattr(original, "__name__", "transactional_endpoint")
-            transactional_endpoint.__doc__ = getattr(original, "__doc__", None)
-            transactional_endpoint.__annotations__ = getattr(original, "__annotations__", {})
-            transactional_endpoint.__signature__ = inspect.signature(original)
-            endpoint = transactional_endpoint
+            use_request_transaction = (
+                methods.intersection({"POST", "PUT", "PATCH", "DELETE"})
+                and not inspect.iscoroutinefunction(original)
+                and not getattr(original, "_manages_own_transaction", False)
+            )
+            if inspect.iscoroutinefunction(original):
+                async def safe_async_endpoint(*args, **call_kwargs):
+                    conn = _g_ctx.get("conn")
+                    try:
+                        return await original(*args, **call_kwargs)
+                    finally:
+                        if conn is not None and hasattr(conn, "rollback_if_open"):
+                            conn.rollback_if_open(timeout=2.0)
+                wrapped = safe_async_endpoint
+            else:
+                def safe_sync_endpoint(*args, **call_kwargs):
+                    conn = _g_ctx.get("conn")
+                    try:
+                        if conn is None:
+                            return original(*args, **call_kwargs)
+                        if use_request_transaction:
+                            with conn:
+                                return original(*args, **call_kwargs)
+                        return original(*args, **call_kwargs)
+                    finally:
+                        if conn is not None and hasattr(conn, "rollback_if_open"):
+                            conn.rollback_if_open(timeout=2.0)
+                wrapped = safe_sync_endpoint
+            wrapped.__name__ = getattr(original, "__name__", "transactional_endpoint")
+            wrapped.__doc__ = getattr(original, "__doc__", None)
+            wrapped.__annotations__ = getattr(original, "__annotations__", {})
+            wrapped.__signature__ = inspect.signature(original)
+            if getattr(original, "_manages_own_transaction", False):
+                wrapped._manages_own_transaction = True
+            endpoint = wrapped
         super().__init__(path, endpoint, **kwargs)
 
 
@@ -1047,6 +1060,15 @@ def _build_app() -> FastAPI:
                     tracked_request = False
             return response
         finally:
+            conn = _g_ctx.get("conn")
+            if conn is not None and hasattr(conn, "rollback_if_open"):
+                try:
+                    if conn.rollback_if_open(timeout=2.0):
+                        logger.error("请求结束时发现未关闭的 SQLite 事务，已执行回滚 path=%s", path)
+                except TimeoutError:
+                    logger.error("请求结束时 SQLite 事务锁仍被占用，回滚兜底超时 path=%s", path)
+                except Exception:
+                    logger.exception("请求结束时 SQLite 事务回滚兜底失败 path=%s", path)
             if tracked_request:
                 _tenant_switch_gate.leave_request()
 
@@ -2857,10 +2879,12 @@ def _register_routes(app: FastAPI) -> None:
         return get_media_generation_settings()
 
     @app.post("/api/media/generate", status_code=201)
+    @manages_own_transaction
     def generate_media_asset(req: MediaGenerationRequest):
         return _generate_media_asset(req)
 
     @app.post("/api/media/generate-for-content/{content_id}", status_code=201)
+    @manages_own_transaction
     def generate_media_for_content(content_id: str, usage_role: str = Query("cover", pattern="^(cover|illustration|background)$")):
         """根据现有内容生成候选配图；生成结果进入待审核状态，不自动分配。"""
         row = _g()["conn"].execute("SELECT id, title, body, platform FROM contents WHERE id = ?", (content_id,)).fetchone()
@@ -2881,6 +2905,7 @@ def _register_routes(app: FastAPI) -> None:
         ))
 
     @app.post("/api/media/{asset_id}/edit", status_code=201)
+    @manages_own_transaction
     def edit_media_asset(asset_id: int, req: MediaGenerationRequest):
         return _generate_media_asset(req, source_asset_id=asset_id)
 
@@ -8567,6 +8592,7 @@ def _register_routes(app: FastAPI) -> None:
         return {"total": total, "inserted": total - before}
 
     @app.post("/api/kb/sources/{source_id}/sync")
+    @manages_own_transaction
     def kb_source_sync(source_id: str):
         cfg = _g()["cfg"]
         source = next((s for s in kb_sources.load_registry(cfg) if s["id"] == source_id), None)
