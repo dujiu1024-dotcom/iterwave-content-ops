@@ -1373,7 +1373,7 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
                 "confirmed_published_count": sum(x["confirmed_published_count"] for x in items),
                 "stages": items}
 
-@app.get("/api/production-tasks")
+    @app.get("/api/production-tasks")
     def list_production_tasks(
         round_id: int | None = None,
         strategy_step_id: str | None = None,
