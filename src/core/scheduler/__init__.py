@@ -633,10 +633,20 @@ class SchedulerEngine:
         with self.conn:
             self.conn.execute("BEGIN IMMEDIATE")
             today = business_now(self.cfg).strftime("%Y-%m-%d")
+            utc_start, legacy_start = business_date_cutoffs(today, self.cfg)
+            utc_end, legacy_end = business_date_cutoffs(today, self.cfg, end=True)
+            fetched_at_aware = (
+                "(instr(substr(COALESCE(fetched_at, ''), 20), '+') > 0 "
+                "OR instr(substr(COALESCE(fetched_at, ''), 20), '-') > 0 "
+                "OR substr(COALESCE(fetched_at, ''), -1) = 'Z')"
+            )
             prev = self.conn.execute(
                 "SELECT id, attempt FROM metrics WHERE draft_id = ? AND platform = ? "
-                "AND substr(COALESCE(fetched_at, ''), 1, 10) = ?",
-                (draft_id, platform.value, today),
+                f"AND (({fetched_at_aware} AND datetime(fetched_at) "
+                "BETWEEN datetime(?) AND datetime(?)) "
+                f"OR (NOT {fetched_at_aware} AND datetime(fetched_at) "
+                "BETWEEN datetime(?) AND datetime(?)))",
+                (draft_id, platform.value, utc_start, utc_end, legacy_start, legacy_end),
             ).fetchone()
             if prev:
                 # 注意：这里的 metrics_attempt 是「当天第几次采集」，与作业重试 attempt 无关
