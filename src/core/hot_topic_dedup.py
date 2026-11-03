@@ -130,7 +130,7 @@ def mark_cross_platform(
 
 
 def prune(conn, *, retention_days: int, max_rows: int, cfg=None) -> int:
-    """规则 3：按账号组业务时区、保留天数与总量上限原子清理。"""
+    """规则 3：按 UTC 时间点、保留天数与总量上限原子清理；兼容历史 naive-UTC 行。"""
     from .timezone import storage_now, timestamp_before_sql
 
     cutoff = storage_now() - timedelta(days=retention_days)
