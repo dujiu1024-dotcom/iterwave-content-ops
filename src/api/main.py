@@ -219,7 +219,7 @@ def _resolve_task_round_numbers(registry, tasks) -> dict:
         try:
             try:
                 name = str(registry.get(tenant_id).get("name") or tenant_id)
-            except Exception:  # noqa: BLE001 — 注册表无该账号组时按 id 推导路径
+            except TenantError:  # 注册表缺少该账号组时按 id 推导路径
                 name = tenant_id
             db_file = registry.paths(tenant_id, name=name).db_file
             if not db_file.exists():
@@ -232,7 +232,9 @@ def _resolve_task_round_numbers(registry, tasks) -> dict:
             ).fetchall():
                 if number is not None:
                     resolved[(tenant_id, int(rid))] = int(number)
-        except Exception:  # noqa: BLE001 — 单个账号组不可读不影响队列列表
+        except (TenantError, sqlite3.Error, OSError):
+            # 单个账号组不可读不影响队列列表，但必须留下诊断信息，不能静默吞掉故障。
+            logger.warning("读取账号组轮次编号失败 tenant=%s", tenant_id, exc_info=True)
             continue
         finally:
             if conn is not None:
