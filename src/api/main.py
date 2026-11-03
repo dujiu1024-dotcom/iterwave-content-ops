@@ -4452,8 +4452,17 @@ def _register_routes(app: FastAPI) -> None:
                 if not isinstance(item, dict):
                     continue
                 step_name = item.get("step") or item.get("name") or item.get("stage") or f"步骤 {index}"
-                step_status = item.get("status") or item.get("state") or "completed"
-                detail = item.get("message") or item.get("detail") or item.get("error") or ""
+                safe_fields = (
+                    "status", "count", "scheduled", "saved", "failed", "pending",
+                    "attempted", "selected", "mode", "source", "shortfall",
+                    "allocation", "dimension_allocation", "skipped", "copy_hint_count",
+                    "dropped_hints", "file_type", "kb_count", "extra_count", "excluded_count",
+                )
+                safe_detail = {key: item[key] for key in safe_fields if key in item}
+                step_status = item.get("status") or ("partial" if item.get("failed") else "completed")
+                detail = item.get("message") or item.get("detail") or item.get("error") or (
+                    json.dumps(safe_detail, ensure_ascii=False, default=str) if safe_detail else ""
+                )
                 execution_log.append({
                     "step": str(step_name)[:120],
                     "status": str(step_status)[:40],
