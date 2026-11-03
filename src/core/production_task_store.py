@@ -436,43 +436,48 @@ class ProductionTaskStore:
     def recover_expired_tasks(
         self, *, now: str | None = None, round_id: int | None = None,
     ) -> list[str]:
-        """Requeue expired leases; attempt history remains marked abandoned."""
+        """Reconcile expired leases without blindly replaying uncertain side effects.
+
+        Existing content is adopted as success. A task with no persisted artifact is
+        failed into manual review; an operator must confirm side-effect safety before
+        explicitly retrying it.
+        """
         current = now or _stamp()
         owns_transaction = not self.conn.in_transaction
         if owns_transaction:
             self.conn.execute("BEGIN IMMEDIATE")
         try:
-            query = """SELECT id,attempt_count,max_attempts FROM production_tasks
+            query = """SELECT id FROM production_tasks
                        WHERE status='running' AND lease_expires_at IS NOT NULL
                          AND lease_expires_at<=?"""
             args: list[Any] = [current]
             if round_id is not None:
                 query += " AND round_id=?"
                 args.append(int(round_id))
+            query += " ORDER BY lease_expires_at,id"
             rows = self.conn.execute(query, args).fetchall()
             recovered: list[str] = []
             for row in rows:
-                exhausted = int(row["attempt_count"]) >= int(row["max_attempts"])
-                status = "failed" if exhausted else "pending"
-                self.conn.execute(
-                    """UPDATE production_tasks SET status=?,error_code='worker_lease_expired',
-                       error_message='执行器租约过期，任务已恢复',finished_at=?,
-                       lease_expires_at=NULL,updated_at=? WHERE id=?""",
-                    (status, current if exhausted else None, current, row["id"]),
-                )
-                self.conn.execute(
-                    """UPDATE production_task_attempts SET status='abandoned',finished_at=?,
-                       error_code='worker_lease_expired',
-                       error_message='执行器租约过期，任务已恢复'
-                       WHERE task_id=? AND attempt_no=? AND status='running'""",
-                    (current, row["id"], int(row["attempt_count"])),
-                )
-                recovered.append(row["id"])
+                task_id = str(row["id"])
+                artifact = self.get_content_for_task(task_id)
+                if artifact is not None:
+                    self.complete_task(task_id, content_id=str(artifact["id"]))
+                else:
+                    self.fail_task(
+                        task_id,
+                        error_code="lease_expired_requires_review",
+                        error_message=(
+                            "任务租约已过期且没有已落库成品；为避免重复图片/API副作用，"
+                            "任务已转人工核实，不会自动重新生成"
+                        ),
+                        retryable=False,
+                    )
+                recovered.append(task_id)
             if owns_transaction:
                 self.conn.commit()
             return recovered
         except Exception:
-            if owns_transaction:
+            if owns_transaction and self.conn.in_transaction:
                 self.conn.rollback()
             raise
 

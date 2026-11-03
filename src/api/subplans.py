@@ -1372,3 +1372,77 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
                 "status": identity["status"], "current_stage_id": current_stage,
                 "confirmed_published_count": sum(x["confirmed_published_count"] for x in items),
                 "stages": items}
+
+    @app.get("/api/production-tasks")
+    def list_production_tasks(
+        round_id: int | None = None,
+        strategy_step_id: str | None = None,
+        status: str | None = None,
+        page: int = Query(1, ge=1),
+        page_size: int = Query(50, ge=1, le=200),
+    ):
+        from src.core.production_task_store import ProductionTaskStore
+        conn = get_runtime()["conn"]
+        store = ProductionTaskStore(conn)
+        items = store.list_tasks(
+            round_id=round_id, strategy_step_id=strategy_step_id, status=status,
+            limit=page_size, offset=(page - 1) * page_size,
+        )
+        clauses, args = [], []
+        for column, value in (
+            ("round_id", round_id), ("strategy_step_id", strategy_step_id), ("status", status),
+        ):
+            if value is not None:
+                clauses.append(f"{column}=?")
+                args.append(value)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        total = int(conn.execute("SELECT COUNT(*) FROM production_tasks" + where, args).fetchone()[0])
+        return {
+            "items": items, "total": total, "page": page, "page_size": page_size,
+            "pages": max(1, (total + page_size - 1) // page_size),
+            "has_more": page * page_size < total,
+        }
+
+    @app.get("/api/production-tasks/{task_id}")
+    def get_production_task(task_id: str):
+        from src.core.production_task_store import ProductionTaskError, ProductionTaskStore
+        conn = get_runtime()["conn"]
+        store = ProductionTaskStore(conn)
+        try:
+            task = store.get_task(task_id)
+        except ProductionTaskError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        attempts = conn.execute(
+            "SELECT * FROM production_task_attempts WHERE task_id=? ORDER BY attempt_no",
+            (task_id,),
+        ).fetchall()
+        artifact = store.get_content_for_task(task_id)
+        return {
+            "task": task,
+            "attempts": [dict(row) for row in attempts],
+            "content": artifact,
+        }
+
+    @app.post("/api/production-tasks/{task_id}/recover")
+    def recover_production_task_endpoint(
+        task_id: str,
+        confirmed_no_external_side_effect: bool = False,
+    ):
+        from src.core.production_task_store import ProductionTaskError
+        from src.core.production_task_recovery import recover_production_task
+        conn = get_runtime()["conn"]
+        try:
+            return recover_production_task(
+                conn, task_id,
+                confirmed_no_external_side_effect=confirmed_no_external_side_effect,
+            )
+        except ProductionTaskError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/production-tasks/recovery/reconcile-expired")
+    def reconcile_expired_production_tasks_endpoint(limit: int = Query(200, ge=1, le=1000)):
+        from src.core.production_task_recovery import reconcile_expired_production_tasks
+        conn = get_runtime()["conn"]
+        return {
+            "items": reconcile_expired_production_tasks(conn, limit=limit),
+        }

@@ -12,7 +12,7 @@ export interface ProductionMonitorRound {
   trigger_source?: string; plan_attribution_status?: string;
 }
 export interface ProductionMonitorStage {
-  id: number; title: string; status: string; stage_order: number; direction?: string; completion_condition?: string; notes?: string;
+  id: number; title: string; status: string; stage_order: number; stage_key?: string; direction?: string; completion_condition?: string; notes?: string;
   target_count: number; round_count: number; production_task_count: number; production_task_status_counts: Record<string, number>;
   content_count: number; draft_count: number; review_pending_count: number;
   review_approved_count: number; review_rejected_count: number; published_count: number; failed_draft_count: number;
@@ -25,6 +25,22 @@ export interface ProductionMonitorSubplan {
   version_no: number | null; stages: ProductionMonitorStage[];
   stage_count: number; round_count: number;
 }
+export interface ProductionTaskItem {
+  id: string; round_id: number; master_plan_version_id: number; sub_plan_id: string;
+  sub_plan_version_id: number; strategy_step_id: string; platform: Platform;
+  task_ordinal: number; status: string; attempt_count: number; max_attempts: number;
+  content_id: string | null; error_code: string | null; error_message: string | null;
+  created_at: string; started_at: string | null; finished_at: string | null; updated_at: string;
+  input_snapshot?: Record<string, unknown>;
+}
+export interface ProductionTaskDetail {
+  task: ProductionTaskItem;
+  attempts: Array<{ id: number; attempt_no: number; status: string; worker_id: string | null;
+    started_at: string; finished_at: string | null; error_code: string | null;
+    error_message: string | null; output_content_id: string | null }>;
+  content: { id: string; title?: string | null; platform?: Platform; round_id?: number } | null;
+}
+
 export interface ProductionMonitorResponse {
   master_plan: { id: number; version_no: number; status: string; created_at: string; effective_at: string | null } | null;
   platforms: ProductionMonitorSubplan[];
@@ -2114,6 +2130,16 @@ export const api = {
       `/api/content-plans/${id}/start`, { method: "POST" },
     ),
   productionMonitor: () => fetchJson<ProductionMonitorResponse>("/api/production-monitor"),
+  productionTasks: (status = "failed", page = 1, pageSize = 100) =>
+    fetchJson<{ items: ProductionTaskItem[]; total: number; page: number; page_size: number; pages: number }>(
+      `/api/production-tasks?status=${encodeURIComponent(status)}&page=${page}&page_size=${pageSize}`,
+    ),
+  productionTask: (id: string) => fetchJson<ProductionTaskDetail>(`/api/production-tasks/${encodeURIComponent(id)}`),
+  recoverProductionTask: (id: string, confirmedNoExternalSideEffects: boolean) =>
+    fetchJson<{ task: ProductionTaskItem; action: string; content_id?: string }>(
+      `/api/production-tasks/${encodeURIComponent(id)}/recover?confirmed_no_external_side_effect=${confirmedNoExternalSideEffects}`,
+      { method: "POST" },
+    ),
   globalOperationsSummary: (days = 30) => fetchJson<GlobalMonitorResponse>(`/api/global-monitor?days=${days}`),
   todos: (page = 1, pageSize = 20, tenantId?: string, source?: GlobalTodoItem["source"]) => {
     const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
