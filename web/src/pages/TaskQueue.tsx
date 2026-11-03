@@ -207,7 +207,8 @@ export default function TaskQueue() {
 
   useEffect(() => {
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 2500);
+    // 全局队列列表使用低频刷新；统计图表仅在手动刷新或筛选时请求。
+    const timer = window.setInterval(() => void refresh(), 10000);
     return () => window.clearInterval(timer);
   }, [refresh]);
 
