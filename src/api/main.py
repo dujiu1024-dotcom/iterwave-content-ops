@@ -74,6 +74,7 @@ from src.api.response_utils import (
 from src.api.notify_rules import NotifyRuleRequest, build_notify_rules_router  # noqa: F401
 from src.api.audit_queries import build_audit_query_router
 from src.api.platform_progress import build_platform_progress_router
+from src.api.action_items import build_action_items_router
 from src.api.platform_styles import build_platform_styles_router
 from src.core.tenant_registry import TenantRegistry, TenantError
 from src.core.task_queue import GlobalTaskQueue, TaskQueueError
@@ -8948,131 +8949,9 @@ def _register_routes(app: FastAPI) -> None:
         _g, Platform, _platform_status_snapshot,
     ))
 
-    # --- 决策待办聚合（Dashboard #9：需要你决策的事项）---
-    @app.get("/api/action_items")
-    def action_items():
-        """聚合三类需要人工决策的事项：
-
-        1. goals：有 target_platform、但 achievement_rate 为 NULL 且 baseline_at 过期
-        2. rounds：status='awaiting_publish' 超过 72h（R8 publish_confirm_timeout）
-        3. circuit_breaker：cooldown_until 已到期、但 resolved_at 仍 NULL（需要 try_recover）
-
-        返回统一 action_items[] 列表，前端按 type 分组显示。
-        """
-        from datetime import datetime, timedelta as td
-        conn = _g()["conn"]
-        now = _now()
-        items: list[dict] = []
-
-        def _pname(p: Optional[str]) -> str:
-            if not p:
-                return "全平台"
-            try:
-                return Platform(p).display_name
-            except ValueError:
-                return p
-
-        # 1. 目标已过统计周期仍未达成：达成率与 /api/goals 同一口径（GoalProgressUpdater.rate_for），
-        #    metric_period_end 是日期，必须按「日期 < 今天」比较，否则截止当天就会被误判超期
-        goal_rows = conn.execute(
-            """SELECT id, goal_text, target_platform, target_metric, target_value,
-                      metric_scope, baseline_value, baseline_at, current_value, metric_period_end
-               FROM goals
-               WHERE status='active'
-                 AND metric_period_end IS NOT NULL
-                 AND substr(metric_period_end, 1, 10) < ?
-            """,
-            (now.date().isoformat(),),
-        ).fetchall()
-        for r in goal_rows:
-            rate = GoalProgressUpdater.rate_for(r)
-            if rate is not None and rate >= 100:
-                continue
-            pct = f"{rate:.0f}%" if rate is not None else "数据待采集"
-            cur_val = r["current_value"]
-            items.append({
-                "id": f"goal:{r['id']}",
-                "type": "goal_strategy",
-                "title": f"目标「{r['goal_text']}」已过截止日期 {r['metric_period_end'][:10]} 但未达成（{pct}）",
-                "detail": (
-                    f"{_pname(r['target_platform'])} · {r['target_metric']} 目标 {r['target_value']}"
-                    f" · 当前 {cur_val if cur_val is not None else '待采集'}"
-                ),
-                "priority": "high",
-                "source": "goals",
-                "platform": r["target_platform"],
-                "created_at": r["metric_period_end"],
-                "actions": ["go_goal"],
-            })
-
-        # 2. 轮次等待发布超过 72h
-        rounds_rows = conn.execute(
-            """SELECT id, round_number, status, awaiting_publish_ended_at, created_at
-               FROM spiral_rounds
-               WHERE status='awaiting_publish'
-                 AND awaiting_publish_ended_at IS NOT NULL
-                 AND awaiting_publish_ended_at < ?
-            """,
-            (now.isoformat(),),
-        ).fetchall()
-        for r in rounds_rows:
-            items.append({
-                "id": f"round:{r['id']}",
-                "type": "publish_decision",
-                "title": f"Round {r['round_number']} 已超过 {r['awaiting_publish_ended_at'][:10]} 等待发布，需确认或取消",
-                "detail": f"超时 {(now - datetime.fromisoformat(r['awaiting_publish_ended_at'])).days} 天",
-                "priority": "high",
-                "source": "rounds",
-                "created_at": r["created_at"],
-                "actions": ["go_round"],
-            })
-
-        # 3. 熔断冷却到期未恢复（需要 try_recover 3 步验证）
-        cb_rows = conn.execute(
-            """SELECT id, platform, reason, detected_at, cooldown_until, resolved_at
-               FROM circuit_breaker_events
-               WHERE resolved_at IS NULL
-                 AND cooldown_until IS NOT NULL
-                 AND cooldown_until < ?
-            """,
-            (now.isoformat(),),
-        ).fetchall()
-        for r in cb_rows:
-            items.append({
-                "id": f"cb:{r['id']}",
-                "type": "circuit_recover",
-                "title": f"{_pname(r['platform'])} 熔断冷却已到期（原因：{r['reason']}），需执行 3 步恢复验证",
-                "platform": r["platform"],
-                "detail": f"冷却到期于 {r['cooldown_until'][:16]}",
-                "priority": "high",
-                "source": "circuit_breaker",
-                "created_at": r["detected_at"],
-                "actions": ["run_recover"],
-            })
-
-        # 4. circuits 熔断但 cooldown 未到期（低优先级提醒）
-        cb2 = conn.execute(
-            """SELECT id, platform, reason, detected_at, cooldown_until
-               FROM circuit_breaker_events
-               WHERE resolved_at IS NULL
-                 AND (cooldown_until IS NULL OR cooldown_until >= ?)
-               LIMIT 5
-            """,
-            (now.isoformat(),),
-        ).fetchall()
-        for r in cb2:
-            items.append({
-                "id": f"cb2:{r['id']}",
-                "type": "circuit_active",
-                "title": f"{_pname(r['platform'])} 熔断中（原因：{r['reason']}），冷却至 {r['cooldown_until'][:16] if r['cooldown_until'] else '—'}",
-                "platform": r["platform"],
-                "priority": "medium",
-                "source": "circuit_breaker",
-                "created_at": r["detected_at"],
-                "actions": ["go_ops"],
-            })
-
-        return {"items": items, "total": len(items)}
+    app.include_router(build_action_items_router(
+        _g, _now, Platform, GoalProgressUpdater.rate_for,
+    ))
 
     # ============================================================
     # Operations 补齐（对比报告 3.7 🔴 后端真缺失）
