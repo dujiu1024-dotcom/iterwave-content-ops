@@ -88,13 +88,13 @@ class ProductionTaskStore:
                 raise ProductionTaskError(f"任务来源与生产轮次不一致：{field}")
 
         bound_line_version_id = source.get("production_line_version_id")
+        if bound_line_version_id is None:
+            raise ProductionTaskError("生产轮次未绑定生产线版本，拒绝创建不可追溯任务")
         if production_line_version_id is None:
             production_line_version_id = bound_line_version_id
         if (bound_line_version_id is not None
                 and str(bound_line_version_id) != str(production_line_version_id)):
             raise ProductionTaskError("任务生产线版本与生产轮次绑定的版本不一致")
-        if bound_line_version_id is None and production_line_version_id is not None:
-            raise ProductionTaskError("生产轮次未绑定生产线版本")
         # The task must point at the exact strategy step bound to this round's
         # immutable sub-plan version, not merely any step with a matching key.
         bound_stage_id = source.get("sub_plan_stage_id")

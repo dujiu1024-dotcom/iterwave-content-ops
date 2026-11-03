@@ -735,6 +735,49 @@ export interface ContentPlan {
   updated_at: string;
 }
 
+export interface ProductionBatch {
+  round_id: number;
+  round_number: number | null;
+  round_status: string;
+  created_at: string;
+  master_plan_version_id: number | null;
+  sub_plan_id: string | null;
+  sub_plan_title: string | null;
+  platform: Platform | null;
+  sub_plan_version_id: number | null;
+  strategy_step_id: string | null;
+  strategy_step_title: string | null;
+  production_line_version_id: number | null;
+  attribution_status: "attributed" | "manual_review";
+  task_count: number;
+  pending_task_count: number;
+  running_task_count: number;
+  succeeded_task_count: number;
+  failed_task_count: number;
+  cancelled_task_count: number;
+}
+
+export interface ProductionBatchTask {
+  id: string;
+  strategy_step_id: string;
+  platform: Platform;
+  task_ordinal: number;
+  status: "pending" | "running" | "succeeded" | "failed" | "cancelled";
+  attempt_count: number;
+  max_attempts: number;
+  error_code: string | null;
+  error_message: string | null;
+  content_id: string | null;
+  content_title: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProductionBatchDetail {
+  batch: Omit<ProductionBatch, "task_count" | "pending_task_count" | "running_task_count" | "succeeded_task_count" | "failed_task_count" | "cancelled_task_count">;
+  tasks: ProductionBatchTask[];
+}
+
 export interface ScheduleResponse {
   start_date: string;
   end_date: string;
@@ -2164,6 +2207,12 @@ export const api = {
     if (endDate) p.set("end_date", endDate);
     return fetchJson<{ items: ContentPlan[]; total: number }>(`/api/content-plans?${p}`);
   },
+  productionBatches: (startDate: string, endDate: string) => {
+    const p = new URLSearchParams({ start_date: startDate, end_date: endDate });
+    return fetchJson<{ items: ProductionBatch[]; total: number }>(`/api/production-batches?${p}`);
+  },
+  productionBatch: (roundId: number) =>
+    fetchJson<ProductionBatchDetail>(`/api/production-batches/${roundId}`),
   tenantSkills: (enabled?: boolean) => fetchJson<{ items: TenantSkillManifest[]; total: number; builtin_items: BuiltinSkillManifest[]; builtin_total: number; execution_enabled: false; custom_execution_enabled: false }>(`/api/skills${enabled === undefined ? "" : `?enabled=${enabled}`}`),
   registerTenantSkill: (data: Pick<TenantSkillManifest, "skill_id" | "name" | "version" | "description" | "category" | "inputs" | "outputs" | "permissions">) =>
     fetchJson<TenantSkillManifest & { execution_enabled: false }>("/api/skills", { method: "POST", body: JSON.stringify(data) }),
@@ -2177,25 +2226,16 @@ export const api = {
     ),
   deleteTenantSkill: (skill_id: string) =>
     fetchJson<{ skill_id: string; deleted: boolean }>(`/api/skills/${skill_id}`, { method: "DELETE" }),
-  contentPlan: (id: string) => fetchJson<ContentPlan & { drafts: Array<{ draft_id: string; platform: Platform; status: string; title: string; round_id: number | null; round_number: number | null }>; rounds: Array<{ round_id: number; round_number: number | null; task_id: string | null; created_at: string }> }>(`/api/content-plans/${id}`),
-  linkContentPlanDrafts: (id: string, draft_ids: string[]) =>
-    fetchJson<{ plan_id: string; linked_now: string[]; linked_count: number; status: string }>(
-      `/api/content-plans/${id}/drafts`, { method: "POST", body: JSON.stringify({ draft_ids }) },
-    ),
-  createContentPlan: (data: Pick<ContentPlan, "title" | "topic" | "platforms" | "planned_count" | "scheduled_date" | "notes">) =>
-    fetchJson<ContentPlan>("/api/content-plans", { method: "POST", body: JSON.stringify(data) }),
-  updateContentPlan: (id: string, data: Partial<Pick<ContentPlan, "title" | "topic" | "platforms" | "planned_count" | "scheduled_date" | "status" | "notes">> & { version: number }) =>
-    fetchJson<ContentPlan>(`/api/content-plans/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
-  cancelContentPlan: (id: string, version: number) =>
-    fetchJson<{ id: string; status: string }>(`/api/content-plans/${id}?version=${version}`, { method: "DELETE" }),
-  archiveContentPlan: (id: string, version: number) =>
-    fetchJson<{ id: string; status: ContentPlan["status"]; version: number }>(`/api/content-plans/${id}/archive?version=${version}`, { method: "POST" }),
-  restoreContentPlan: (id: string, version: number) =>
-    fetchJson<{ id: string; status: ContentPlan["status"]; version: number }>(`/api/content-plans/${id}/restore?version=${version}`, { method: "POST" }),
-  startContentPlan: (id: string) =>
-    fetchJson<{ plan_id: string; round_id: number; task_id: string; status: string; queued: boolean }>(
-      `/api/content-plans/${id}/start`, { method: "POST" },
-    ),
+  contentPlan: (id: string) => fetchJson<ContentPlan & {
+    drafts: Array<{ draft_id: string; platform: Platform; status: string; title: string; round_id: number | null; round_number: number | null }>;
+    rounds: Array<{
+      round_id: number; round_number: number | null; task_id: string | null; created_at: string;
+      master_plan_version_id: number | null; sub_plan_id: string | null;
+      sub_plan_version_id: number | null; sub_plan_stage_id: number | null;
+      strategy_step_id: string | null; production_line_version_id: number | null;
+      attribution_status: "attributed" | "manual_review" | "legacy_unattributed";
+    }>;
+  }>(`/api/content-plans/${id}`),
   productionMonitor: () => fetchJson<ProductionMonitorResponse>("/api/production-monitor"),
   productionTasks: (status = "failed", page = 1, pageSize = 100) =>
     fetchJson<{ items: ProductionTaskItem[]; total: number; page: number; page_size: number; pages: number }>(

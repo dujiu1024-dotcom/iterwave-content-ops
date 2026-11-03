@@ -21,8 +21,8 @@ def store():
     conn.execute(
         """INSERT INTO spiral_rounds(
             id,master_plan_version_id,sub_plan_id,sub_plan_version_id,sub_plan_stage_id,
-            sub_plan_snapshot,sub_plan_stage_snapshot
-        ) VALUES(7,11,'sub-a',13,17,'{"title":"frozen"}','{"stage":"frozen"}')"""
+            sub_plan_snapshot,sub_plan_stage_snapshot,production_line_version_id
+        ) VALUES(7,11,'sub-a',13,17,'{"title":"frozen"}','{"stage":"frozen"}',77)"""
     )
     conn.executescript("""
         CREATE TABLE sub_plans(id TEXT PRIMARY KEY, platform TEXT);
@@ -101,6 +101,14 @@ def test_task_inherits_and_freezes_the_round_production_line_version(store):
     assert task["input_snapshot"]["round"]["production_line_version_id"] == 77
     with pytest.raises(ProductionTaskError, match="版本与生产轮次绑定"):
         make_task(store, idempotency_key="wrong-line-version", production_line_version_id=78)
+
+
+def test_new_task_rejects_round_without_production_line_version(store):
+    store.conn.execute(
+        "UPDATE spiral_rounds SET production_line_version_id=NULL WHERE id=7"
+    )
+    with pytest.raises(ProductionTaskError, match="未绑定生产线版本"):
+        make_task(store, idempotency_key="missing-line-version")
 
 
 def test_create_requires_round_source_to_match(store):

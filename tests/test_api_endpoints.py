@@ -1249,99 +1249,95 @@ def test_scheduler_run_unknown_job_404(client):
 
 # ---------------------------------------------------------------- Content plans
 
-def test_content_plan_create_list_update_and_cancel_are_tenant_scoped(client):
+def test_content_plan_is_legacy_read_model_and_only_schedule_date_is_editable(client):
     tc, conn, _ = client
-    before_drafts = conn.execute("SELECT COUNT(*) FROM drafts").fetchone()[0]
-    payload = {
-        "title": "本周产品内容计划",
-        "topic": "围绕真实使用场景制作系列内容",
-        "platforms": ["xhs", "douyin"],
-        "planned_count": 3,
-        "scheduled_date": "2026-11-02",
-        "notes": "先做用户问题梳理",
-    }
-    created = tc.post("/api/content-plans", json=payload)
-    assert created.status_code == 200
-    plan = created.json()
-    assert plan["status"] == "planned"
-    assert plan["version"] == 1
-    assert plan["platforms"] == ["douyin", "xhs"]
+    _insert_content_plan(conn, "legacy-calendar-plan", "planned")
 
     listed = tc.get("/api/content-plans?start_date=2026-11-01&end_date=2026-11-03")
     assert listed.status_code == 200
     assert listed.json()["total"] == 1
-    assert listed.json()["items"][0]["id"] == plan["id"]
+    assert listed.json()["items"][0]["id"] == "legacy-calendar-plan"
 
     updated = tc.patch(
-        f"/api/content-plans/{plan['id']}",
-        json={"version": 1, "scheduled_date": "2026-11-03", "topic": "补充主题说明"},
+        "/api/content-plans/legacy-calendar-plan",
+        json={"version": 1, "scheduled_date": "2026-11-03"},
     )
     assert updated.status_code == 200
+    assert updated.json()["scheduled_date"] == "2026-11-03"
     assert updated.json()["version"] == 2
-    assert updated.json()["status"] == "planned"
 
-    stale = tc.patch(
-        f"/api/content-plans/{plan['id']}",
-        json={"version": 1, "title": "过期窗口覆盖"},
+    strategic_edit = tc.patch(
+        "/api/content-plans/legacy-calendar-plan",
+        json={"version": 2, "title": "试图修改战略计划"},
     )
-    assert stale.status_code == 409
+    assert strategic_edit.status_code == 422
 
-    cancelled = tc.delete(f"/api/content-plans/{plan['id']}?version=2")
-    assert cancelled.status_code == 200
-    assert cancelled.json()["status"] == "cancelled"
-    assert conn.execute("SELECT COUNT(*) FROM drafts").fetchone()[0] == before_drafts
+    cancelled = tc.delete("/api/content-plans/legacy-calendar-plan?version=2")
+    assert cancelled.status_code == 409
+    row = conn.execute(
+        "SELECT title,status,version FROM content_plans WHERE id=?",
+        ("legacy-calendar-plan",),
+    ).fetchone()
+    assert tuple(row) == ("P1 lifecycle test", "planned", 2)
 
 
-def test_content_plan_rejects_invalid_payload_and_platform(client):
-    tc, _, _ = client
-    invalid_date = tc.post("/api/content-plans", json={
-        "title": "计划", "scheduled_date": "2026-13-40",
+
+
+def test_content_plan_create_endpoint_rejects_independent_plan_creation(client):
+    tc, conn, _ = client
+    response = tc.post("/api/content-plans", json={
+        "title": "绕过计划管理", "scheduled_date": "2026-11-02",
+        "platforms": ["xhs"], "planned_count": 1,
     })
-    assert invalid_date.status_code == 422
-
-    invalid_count = tc.post("/api/content-plans", json={
-        "title": "计划", "scheduled_date": "2026-11-02", "planned_count": 101,
-    })
-    assert invalid_count.status_code == 422
-
-    invalid_platform = tc.post("/api/content-plans", json={
-        "title": "计划", "scheduled_date": "2026-11-02", "platforms": ["not-a-platform"],
-    })
-    assert invalid_platform.status_code == 422
+    assert response.status_code == 409
+    assert conn.execute("SELECT COUNT(*) FROM content_plans").fetchone()[0] == 0
 
 
 
-def test_content_plan_links_generated_drafts_idempotently_and_rolls_back_invalid_batch(client):
+
+
+def test_content_plan_manual_draft_linking_is_disabled(client):
     tc, conn, seed = client
-    created = tc.post("/api/content-plans", json={
-        "title": "多平台内容计划", "scheduled_date": "2026-11-04",
-        "platforms": ["xhs"], "planned_count": 2,
-    })
-    assert created.status_code == 200
-    plan_id = created.json()["id"]
+    _insert_content_plan(conn, "legacy-plan-link", "planned")
     round_id = seed.round()
     draft_id = seed.draft(round_id, platform="xhs", draft_status="draft_saved")
 
-    missing = tc.post(f"/api/content-plans/{plan_id}/drafts", json={
-        "draft_ids": [draft_id, "missing-draft"],
-    })
-    assert missing.status_code == 404
+    response = tc.post(
+        "/api/content-plans/legacy-plan-link/drafts",
+        json={"draft_ids": [draft_id]},
+    )
+    assert response.status_code == 409
     assert conn.execute(
-        "SELECT COUNT(*) FROM content_plan_drafts WHERE plan_id=?", (plan_id,)
+        "SELECT COUNT(*) FROM content_plan_drafts WHERE plan_id=?",
+        ("legacy-plan-link",),
     ).fetchone()[0] == 0
 
-    linked = tc.post(f"/api/content-plans/{plan_id}/drafts", json={"draft_ids": [draft_id]})
-    assert linked.status_code == 200
-    assert linked.json()["linked_count"] == 1
-    duplicate = tc.post(f"/api/content-plans/{plan_id}/drafts", json={"draft_ids": [draft_id]})
-    assert duplicate.status_code == 200
-    assert duplicate.json()["linked_count"] == 0
 
-    detail = tc.get(f"/api/content-plans/{plan_id}")
+
+
+def test_calendar_production_batches_show_round_and_task_lineage(client):
+    tc, conn, seed = client
+    round_id = seed.round(status="producing")
+    created_at = conn.execute(
+        "SELECT created_at FROM spiral_rounds WHERE id=?", (round_id,)
+    ).fetchone()["created_at"]
+    day = created_at[:10]
+
+    listed = tc.get(
+        f"/api/production-batches?start_date={day}&end_date={day}"
+    )
+    assert listed.status_code == 200
+    batch = next(item for item in listed.json()["items"] if item["round_id"] == round_id)
+    assert batch["task_count"] == 0
+    assert batch["attribution_status"] == "manual_review"
+
+    detail = tc.get(f"/api/production-batches/{round_id}")
     assert detail.status_code == 200
-    assert detail.json()["status"] == "generated"
-    assert detail.json()["drafts"][0]["draft_id"] == draft_id
-    assert detail.json()["drafts"][0]["round_id"] == round_id
+    assert detail.json()["batch"]["round_id"] == round_id
+    assert detail.json()["tasks"] == []
+
+    invalid = tc.get("/api/production-batches?start_date=not-a-date&end_date=2026-11-03")
+    assert invalid.status_code == 422
 
 
 # ---------------------------------------------------------------- Safe tenant Skills registry
@@ -1431,120 +1427,57 @@ def test_skill_registry_rejects_unsafe_permissions_and_invalid_manifest(client):
     assert reserved_id.status_code == 409
 
 
-def test_content_plan_start_enqueues_global_task_and_cancel_only_cancels_queued_task(client, tmp_path, monkeypatch):
+def test_content_plan_start_endpoint_is_blocked_for_legacy_batches(client, tmp_path, monkeypatch):
     tc, conn, _ = client
     queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
     queue.initialize()
     monkeypatch.setattr(api_main, "_task_queue", queue)
-    monkeypatch.setattr(api_main, "_build_task_execution_snapshot", lambda *args, **kwargs: {"test_snapshot": True})
+    _insert_content_plan(conn, "legacy-no-start", "planned")
 
-    created = tc.post("/api/content-plans", json={
-        "title": "排队生产计划", "scheduled_date": "2026-11-06",
-        "platforms": ["xhs"], "planned_count": 2,
-    })
-    assert created.status_code == 200
-    plan_id = created.json()["id"]
-
-    started = tc.post(f"/api/content-plans/{plan_id}/start")
-    assert started.status_code == 202
-    body = started.json()
-    assert body["round_id"] > 0
-    assert body["queued"] is True
-    queued_task = queue.get(body["task_id"])
-    assert queued_task is not None and queued_task.status == "queued"
-
-    detail = tc.get(f"/api/content-plans/{plan_id}")
-    assert detail.status_code == 200
-    assert detail.json()["status"] == "generating"
-    assert detail.json()["rounds"][0]["round_id"] == body["round_id"]
-    assert detail.json()["rounds"][0]["task_id"] == body["task_id"]
-
-    cancelled = tc.delete(f"/api/content-plans/{plan_id}?version=2")
-    assert cancelled.status_code == 200
-    assert queue.get(body["task_id"]).status == "cancelled"
-    assert conn.execute(
-        "SELECT status FROM content_plans WHERE id=?", (plan_id,)
-    ).fetchone()["status"] == "cancelled"
-
-
-def test_content_plan_start_cancels_unqueued_round_when_snapshot_admission_fails(client, tmp_path, monkeypatch):
-    tc, conn, _ = client
-    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
-    queue.initialize()
-    monkeypatch.setattr(api_main, "_task_queue", queue)
-
-    from src.core.task_snapshot import StaleTaskSnapshot
-
-    def reject_snapshot(*args, **kwargs):
-        raise StaleTaskSnapshot("计划执行快照已过期")
-
-    monkeypatch.setattr(api_main, "_build_task_execution_snapshot", reject_snapshot)
-    created = tc.post("/api/content-plans", json={
-        "title": "启动失败补偿计划", "scheduled_date": "2026-11-07",
-        "platforms": ["xhs"], "planned_count": 1,
-    })
-    assert created.status_code == 200
-    plan_id = created.json()["id"]
-
-    started = tc.post(f"/api/content-plans/{plan_id}/start")
+    started = tc.post("/api/content-plans/legacy-no-start/start")
     assert started.status_code == 409
-
-    plan = conn.execute(
-        "SELECT status FROM content_plans WHERE id=?", (plan_id,),
-    ).fetchone()
-    relation = conn.execute(
-        "SELECT round_id,task_id FROM content_plan_rounds WHERE plan_id=?",
-        (plan_id,),
-    ).fetchone()
-    assert plan["status"] == "failed"
-    assert relation is not None and relation["task_id"] is None
     assert conn.execute(
-        "SELECT status FROM spiral_rounds WHERE id=?", (relation["round_id"],),
-    ).fetchone()["status"] == "cancelled"
+        "SELECT status,version FROM content_plans WHERE id='legacy-no-start'"
+    ).fetchone()[:] == ("planned", 1)
+    assert conn.execute("SELECT COUNT(*) FROM content_plan_rounds WHERE plan_id='legacy-no-start'").fetchone()[0] == 0
     assert queue.list_page(scope="history", page=1, page_size=20)[1] == 0
 
-def test_content_plan_start_compensates_unexpected_queue_failure(client, tmp_path, monkeypatch):
+
+
+
+def test_content_plan_start_does_not_create_unattributed_rounds(client):
+    tc, conn, _ = client
+    _insert_content_plan(conn, "legacy-no-round", "planned")
+
+    started = tc.post("/api/content-plans/legacy-no-round/start")
+    assert started.status_code == 409
+    assert conn.execute("SELECT COUNT(*) FROM spiral_rounds").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM content_plan_rounds").fetchone()[0] == 0
+
+
+
+
+def test_content_plan_start_does_not_enqueue_tasks(client, tmp_path, monkeypatch):
     tc, conn, _ = client
     queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
     queue.initialize()
     monkeypatch.setattr(api_main, "_task_queue", queue)
-    monkeypatch.setattr(api_main, "_build_task_execution_snapshot", lambda *args, **kwargs: {"test_snapshot": True})
+    _insert_content_plan(conn, "legacy-no-queue", "failed")
 
-    def fail_enqueue(*args, **kwargs):
-        raise RuntimeError("injected queue adapter failure")
-
-    monkeypatch.setattr(queue, "enqueue", fail_enqueue)
-    created = tc.post("/api/content-plans", json={
-        "title": "意外入队异常补偿", "scheduled_date": "2026-11-10",
-        "platforms": ["xhs"], "planned_count": 1,
-    })
-    assert created.status_code == 200
-    plan_id = created.json()["id"]
-
-    started = tc.post(f"/api/content-plans/{plan_id}/start")
-    assert started.status_code == 503
-
-    plan = conn.execute(
-        "SELECT status FROM content_plans WHERE id=?", (plan_id,),
-    ).fetchone()
-    relation = conn.execute(
-        "SELECT round_id,task_id FROM content_plan_rounds WHERE plan_id=?",
-        (plan_id,),
-    ).fetchone()
-    assert plan["status"] == "failed"
-    assert relation is not None and relation["task_id"] is None
+    started = tc.post("/api/content-plans/legacy-no-queue/start")
+    assert started.status_code == 409
+    assert queue.list_page(scope="history", page=1, page_size=20)[1] == 0
     assert conn.execute(
-        "SELECT status FROM spiral_rounds WHERE id=?", (relation["round_id"],),
-    ).fetchone()["status"] == "cancelled"
+        "SELECT status FROM content_plans WHERE id='legacy-no-queue'"
+    ).fetchone()["status"] == "failed"
+
+
+
 
 def test_worker_result_links_round_drafts_and_updates_plan_status(client):
     tc, conn, seed = client
-    created = tc.post("/api/content-plans", json={
-        "title": "Worker 回写计划", "scheduled_date": "2026-11-08",
-        "platforms": ["xhs"], "planned_count": 1,
-    })
-    assert created.status_code == 200
-    plan_id = created.json()["id"]
+    _insert_content_plan(conn, "legacy-worker-plan", "planned")
+    plan_id = "legacy-worker-plan"
     round_id = seed.round(status="producing")
     draft_id = seed.draft(round_id, platform="xhs", draft_status="draft_saved")
     conn.execute(
@@ -1567,39 +1500,23 @@ def test_worker_result_links_round_drafts_and_updates_plan_status(client):
     ).fetchone()["round_id"] == round_id
 
 
-def test_content_plan_recovers_to_retryable_after_worker_interruption(client, tmp_path, monkeypatch):
-    tc, _, seed = client
-    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
-    queue.initialize()
-    monkeypatch.setattr(api_main, "_task_queue", queue)
-    monkeypatch.setattr(api_main, "_build_task_execution_snapshot", lambda *args, **kwargs: {"test_snapshot": True})
-    created = tc.post("/api/content-plans", json={
-        "title": "中断恢复计划", "scheduled_date": "2026-11-09",
-        "platforms": ["xhs"], "planned_count": 1,
-    })
-    plan_id = created.json()["id"]
-    started = tc.post(f"/api/content-plans/{plan_id}/start")
-    assert started.status_code == 202
-    task_id = started.json()["task_id"]
-    round_id = started.json()["round_id"]
-    draft_id = seed.draft(round_id, platform="xhs", draft_status="draft_saved")
-
-    queue_conn = queue._connect()
-    queue_conn.execute(
-        "UPDATE global_task_queue SET status='interrupted',finished_at='2026-11-09T10:00:00' WHERE task_id=?",
-        (task_id,),
+def test_content_plan_detail_exposes_legacy_round_history_without_starting_production(client):
+    tc, conn, seed = client
+    _insert_content_plan(conn, "legacy-history", "generating")
+    round_id = seed.round(status="producing")
+    conn.execute(
+        "INSERT INTO content_plan_rounds(plan_id,round_id,task_id,created_at) VALUES(?,?,?,?)",
+        ("legacy-history", round_id, "old-queue-task", "2026-11-09T10:00:00"),
     )
-    queue_conn.commit()
-    queue_conn.close()
+    conn.commit()
 
-    listed = tc.get("/api/content-plans?start_date=2026-11-09&end_date=2026-11-09")
-    assert listed.status_code == 200
-    recovered = listed.json()["items"][0]
-    assert recovered["status"] == "failed"
-    assert recovered["version"] == 3
-    detail = tc.get(f"/api/content-plans/{plan_id}")
+    detail = tc.get("/api/content-plans/legacy-history")
     assert detail.status_code == 200
-    assert detail.json()["drafts"][0]["draft_id"] == draft_id
+    assert detail.json()["rounds"][0]["round_id"] == round_id
+    assert detail.json()["rounds"][0]["attribution_status"] == "legacy_unattributed"
+    assert tc.post("/api/content-plans/legacy-history/start").status_code == 409
+
+
 
 
 def test_orchestration_rejects_unregistered_disabled_and_unsupported_custom_skill_refs(client):
@@ -2800,7 +2717,7 @@ def _insert_content_plan(conn, plan_id: str, status: str = "reviewed"):
     conn.commit()
 
 
-def test_content_plan_archive_and_restore_are_versioned_and_keep_history(client):
+def test_content_plan_archive_and_restore_are_not_calendar_operations(client):
     tc, conn, _ = client
     _insert_content_plan(conn, "p1-plan-archive", "reviewed")
     conn.execute(
@@ -2810,17 +2727,13 @@ def test_content_plan_archive_and_restore_are_versioned_and_keep_history(client)
     conn.commit()
 
     archived = tc.post("/api/content-plans/p1-plan-archive/archive?version=1")
-    assert archived.status_code == 200
-    assert archived.json()["status"] == "archived"
-    assert archived.json()["version"] == 2
-
-    stale = tc.post("/api/content-plans/p1-plan-archive/restore?version=1")
-    assert stale.status_code == 409
-
-    restored = tc.post("/api/content-plans/p1-plan-archive/restore?version=2")
-    assert restored.status_code == 200
-    assert restored.json()["status"] == "reviewed"
-    assert restored.json()["version"] == 3
+    restored = tc.post("/api/content-plans/p1-plan-archive/restore?version=1")
+    assert archived.status_code == 409
+    assert restored.status_code == 409
+    row = conn.execute(
+        "SELECT status,version FROM content_plans WHERE id='p1-plan-archive'"
+    ).fetchone()
+    assert tuple(row) == ("reviewed", 1)
     link = conn.execute(
         "SELECT round_id,task_id FROM content_plan_rounds WHERE plan_id=?",
         ("p1-plan-archive",),
@@ -2828,17 +2741,20 @@ def test_content_plan_archive_and_restore_are_versioned_and_keep_history(client)
     assert tuple(link) == (77, "task-77")
 
 
-def test_content_plan_cancelled_can_be_restored_without_deleting_record(client):
+
+
+def test_content_plan_restore_does_not_change_legacy_lifecycle(client):
     tc, conn, _ = client
     _insert_content_plan(conn, "p1-plan-cancelled", "cancelled")
     restored = tc.post("/api/content-plans/p1-plan-cancelled/restore?version=1")
-    assert restored.status_code == 200
-    assert restored.json()["status"] == "planned"
+    assert restored.status_code == 409
     row = conn.execute(
         "SELECT status,version FROM content_plans WHERE id=?",
         ("p1-plan-cancelled",),
     ).fetchone()
-    assert tuple(row) == ("planned", 2)
+    assert tuple(row) == ("cancelled", 1)
+
+
 
 
 def test_archived_industry_preset_cannot_be_applied_until_restored(client, conn):

@@ -22,7 +22,7 @@ def store():
             production_line_version_id INTEGER
         );
         INSERT INTO spiral_rounds VALUES(
-            7,11,'sub-a',13,17,'{}','{}',NULL
+            7,11,'sub-a',13,17,'{}','{}',77
         );
         CREATE TABLE sub_plans(id TEXT PRIMARY KEY, platform TEXT);
         INSERT INTO sub_plans VALUES('sub-a','xhs');

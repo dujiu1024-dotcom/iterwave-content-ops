@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useApp } from "../AppContext";
 import EmptyHint from "../components/EmptyHint";
-import { api, ContentPlan, Platform, ScheduleEvent, UnscheduledDraft } from "../api";
+import { api, ContentPlan, Platform, ScheduleEvent, UnscheduledDraft, ProductionBatch, ProductionBatchDetail } from "../api";
 import { ALL_PLATFORMS, platformMeta } from "../platforms";
 import { formatCalendarDate as _fmt, shiftCalendarDate } from "../calendarDate.mjs";
 import { displayStatusLabel } from "../displayLabels";
@@ -14,6 +14,10 @@ const PLAN_STATUS_LABEL: Record<ContentPlan["status"], string> = {
   archived: "已归档",
   cancelled: "已取消",
   failed: "失败，可重试",
+};
+
+const TASK_STATUS_LABEL: Record<string, string> = {
+  pending: "待执行", running: "执行中", succeeded: "已完成", failed: "失败", cancelled: "已取消",
 };
 
 export default function Calendar() {
@@ -29,18 +33,12 @@ export default function Calendar() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [plans, setPlans] = useState<ContentPlan[]>([]);
-  const [planDetail, setPlanDetail] = useState<(ContentPlan & { drafts: Array<{ draft_id: string; platform: Platform; status: string; title: string; round_id: number | null; round_number: number | null }>; rounds: Array<{ round_id: number; round_number: number | null; task_id: string | null; created_at: string }> }) | null>(null);
+  const [planDetail, setPlanDetail] = useState<(ContentPlan & { drafts: Array<{ draft_id: string; platform: Platform; status: string; title: string; round_id: number | null; round_number: number | null }>; rounds: Array<{ round_id: number; round_number: number | null; task_id: string | null; created_at: string; strategy_step_id?: string | null; production_line_version_id?: number | null; attribution_status?: "attributed" | "manual_review" | "legacy_unattributed" }> }) | null>(null);
   const [planDetailLoading, setPlanDetailLoading] = useState(false);
   const [showArchivedPlans, setShowArchivedPlans] = useState(false);
-  const [planTitle, setPlanTitle] = useState("");
-  const [planTopic, setPlanTopic] = useState("");
-  const [planDate, setPlanDate] = useState(_fmt(today));
-  const [planCount, setPlanCount] = useState("1");
-  const [planPlatforms, setPlanPlatforms] = useState<Platform[]>([]);
-  const [planNotes, setPlanNotes] = useState("");
-  const [planFormOpen, setPlanFormOpen] = useState(false);
-  const [editingPlanId, setEditingPlanId] = useState<string | null>(null);
-  const [editingPlanVersion, setEditingPlanVersion] = useState<number | null>(null);
+  const [batches, setBatches] = useState<ProductionBatch[]>([]);
+  const [batchDetail, setBatchDetail] = useState<ProductionBatchDetail | null>(null);
+
   const [unscheduled, setUnscheduled] = useState<UnscheduledDraft[]>([]);
   const [unscheduledTotal, setUnscheduledTotal] = useState(0);
   const [unscheduledPage, setUnscheduledPage] = useState(1);
@@ -80,7 +78,6 @@ export default function Calendar() {
   }, [targetDraftId]);
   const [pendingDraft, setPendingDraft] = useState<Record<string, string>>({});
   const scheduleDrawerRef = useRef<HTMLElement | null>(null);
-  const planDrawerRef = useRef<HTMLElement | null>(null);
 
   // API 查询范围与当前视图一致：月视图覆盖完整日历网格，周/日视图只请求可见日期。
   const visibleStart = useMemo(() => {
@@ -117,89 +114,54 @@ export default function Calendar() {
   const filteredPlans = useMemo(() => plans.filter((plan) =>
     !searchQuery.trim() || plan.title.toLocaleLowerCase().includes(searchQuery.trim().toLocaleLowerCase())
   ), [plans, searchQuery]);
+  const filteredBatches = useMemo(() => batches.filter((batch) =>
+    (platformFilter === "all" || batch.platform === platformFilter) &&
+    (!searchQuery.trim() || `${batch.sub_plan_title ?? ""} ${batch.strategy_step_title ?? ""}`.toLocaleLowerCase().includes(searchQuery.trim().toLocaleLowerCase()))
+  ), [batches, platformFilter, searchQuery]);
   const filteredUnscheduled = useMemo(() => unscheduled.filter((draft) =>
     (platformFilter === "all" || draft.platform === platformFilter) &&
     (statusFilter === "all" || draft.status === statusFilter) &&
     (!searchQuery.trim() || (draft.title ?? "").toLocaleLowerCase().includes(searchQuery.trim().toLocaleLowerCase()))
   ), [unscheduled, platformFilter, statusFilter, searchQuery]);
   const days = useMemo(() => {
-    const result: { date: Date; key: string; events: ScheduleEvent[]; plans: ContentPlan[]; inMonth: boolean }[] = [];
+    const result: { date: Date; key: string; events: ScheduleEvent[]; plans: ContentPlan[]; batches: ProductionBatch[]; inMonth: boolean }[] = [];
     for (let d = new Date(visibleStart); d < visibleEndExclusive; d.setDate(d.getDate() + 1)) {
       const date = new Date(d);
       const key = _fmt(date);
-      result.push({ date, key, events: filteredEvents.filter((event) => _eventDate(event) === key && (platformFilter === "all" || event.platform === platformFilter)), plans: filteredPlans.filter((plan) => plan.scheduled_date === key && (platformFilter === "all" || plan.platforms.length === 0 || plan.platforms.includes(platformFilter)) && (showArchivedPlans || (plan.status !== "cancelled" && plan.status !== "archived"))), inMonth: date.getMonth() === month });
+      result.push({ date, key, events: filteredEvents.filter((event) => _eventDate(event) === key && (platformFilter === "all" || event.platform === platformFilter)), plans: filteredPlans.filter((plan) => plan.scheduled_date === key && (platformFilter === "all" || plan.platforms.length === 0 || plan.platforms.includes(platformFilter)) && (showArchivedPlans || (plan.status !== "cancelled" && plan.status !== "archived"))), batches: filteredBatches.filter((batch) => batch.created_at.slice(0, 10) === key), inMonth: date.getMonth() === month });
     }
     return result;
-  }, [visibleStart, visibleEndExclusive, filteredEvents, filteredPlans, month, showArchivedPlans, platformFilter]);
+  }, [visibleStart, visibleEndExclusive, filteredEvents, filteredPlans, filteredBatches, month, showArchivedPlans, platformFilter]);
 
   const openPlanDetails = async (planId: string) => {
     setPlanDetailLoading(true);
     try { setPlanDetail(await api.contentPlan(planId)); }
-    catch (e: any) { showToast(`加载计划详情失败：${e?.message ?? e}`, "error"); }
+    catch (e: any) { showToast(`加载历史批次详情失败：${e?.message ?? e}`, "error"); }
     finally { setPlanDetailLoading(false); }
   };
 
-  const beginEditPlan = (plan: ContentPlan) => {
-    setEditingPlanId(plan.id);
-    setEditingPlanVersion(plan.version);
-    setPlanTitle(plan.title);
-    setPlanTopic(plan.topic ?? "");
-    setPlanDate(plan.scheduled_date);
-    setPlanCount(String(plan.planned_count));
-    setPlanPlatforms(plan.platforms ?? []);
-    setPlanNotes(plan.notes ?? "");
-    setPlanDetail(null);
-    setPlanFormOpen(true);
+  const openBatchDetails = async (roundId: number) => {
+    try { setBatchDetail(await api.productionBatch(roundId)); }
+    catch (e: any) { showToast(`加载生产批次失败：${e?.message ?? e}`, "error"); }
   };
 
-  const startPlan = async (plan: ContentPlan) => {
-    try {
-      const result = await withPending(`content-plan:start:${plan.id}`, () => api.startContentPlan(plan.id));
-      if (!result) return;
-      showToast("已加入全局 FIFO 队列", "success");
-      await load();
-    } catch (e: any) { showToast(`启动计划失败：${e?.message ?? e}`, "error"); }
-  };
-
-  const cancelPlan = async (plan: ContentPlan) => {
-    try {
-      await api.cancelContentPlan(plan.id, plan.version);
-      showToast("计划已取消", "success");
-      await load();
-    } catch (e: any) { showToast(`取消失败：${e?.message ?? e}`, "error"); }
-  };
-
-  const archivePlan = async (plan: ContentPlan) => {
-    if (!window.confirm(`归档计划「${plan.title}」？生产轮次和关联草稿都会保留，可随时恢复。`)) return;
-    try {
-      const result = await withPending(`content-plan:archive:${plan.id}`, () => api.archiveContentPlan(plan.id, plan.version));
-      if (!result) return;
-      showToast("计划已归档", "success");
-      setPlanDetail(null);
-      await load();
-    } catch (e: any) { showToast(`归档失败：${e?.message ?? e}`, "error"); }
-  };
-
-  const restorePlan = async (plan: ContentPlan) => {
-    try {
-      const result = await withPending(`content-plan:restore:${plan.id}`, () => api.restoreContentPlan(plan.id, plan.version));
-      if (!result) return;
-      showToast(`计划已恢复为「${PLAN_STATUS_LABEL[result.status]}」`, "success");
-      setPlanDetail(null);
-      await load();
-    } catch (e: any) { showToast(`恢复失败：${e?.message ?? e}`, "error"); }
-  };
 
   const load = async () => {
     setLoading(true);
     setError(null);
     try {
-      const [r, planResult] = await Promise.all([
+      const endDate = _fmt(new Date(visibleEndExclusive.getTime() - 86400000));
+      const [r, planResult, batchResult] = await Promise.all([
         api.schedule(_fmt(visibleStart), _fmt(visibleEndExclusive)),
-        api.contentPlans(_fmt(visibleStart), _fmt(new Date(visibleEndExclusive.getTime() - 86400000))),
+        api.contentPlans(_fmt(visibleStart), endDate),
+        api.productionBatches(_fmt(visibleStart), endDate).catch((batchError) => {
+          showToast(`加载生产批次失败：${batchError instanceof Error ? batchError.message : String(batchError)}`, "error");
+          return { items: [], total: 0 };
+        }),
       ]);
       setEvents(r.items);
       setPlans(planResult.items);
+      setBatches(batchResult.items);
       setUnscheduled(r.unscheduled ?? []);
       setUnscheduledTotal(r.unscheduled_total ?? (r.unscheduled ?? []).length);
       setUnscheduledPage(1);
@@ -228,10 +190,10 @@ export default function Calendar() {
 
   useEffect(() => { void load(); }, [viewMode, year, month, cursorDate]);
   useEffect(() => {
-    if (!plans.some((plan) => plan.status === "generating")) return;
+    if (!plans.some((plan) => plan.status === "generating") && !batches.some((batch) => batch.pending_task_count > 0 || batch.running_task_count > 0)) return;
     const timer = window.setInterval(() => { void load(); }, 10000);
     return () => window.clearInterval(timer);
-  }, [plans, viewMode, year, month, cursorDate]);
+  }, [plans, batches, viewMode, year, month, cursorDate]);
 
 
   const platformColors: Record<string, string> = {
@@ -271,7 +233,7 @@ export default function Calendar() {
   };
 
   useEffect(() => {
-    const drawer = selected ? scheduleDrawerRef.current : planFormOpen ? planDrawerRef.current : null;
+    const drawer = selected ? scheduleDrawerRef.current : null;
     if (!drawer) return;
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const focusable = () => Array.from(drawer.querySelectorAll<HTMLElement>(
@@ -282,7 +244,7 @@ export default function Calendar() {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        if (selected) { setSelected(null); setDraftTime(""); } else { setPlanFormOpen(false); setEditingPlanId(null); setEditingPlanVersion(null); }
+        setSelected(null); setDraftTime("");
         return;
       }
       if (event.key !== "Tab") return;
@@ -294,7 +256,7 @@ export default function Calendar() {
     };
     document.addEventListener("keydown", onKeyDown);
     return () => { document.removeEventListener("keydown", onKeyDown); previousFocus?.focus(); };
-  }, [selected, planFormOpen]);
+  }, [selected]);
 
   return (
     <>
@@ -303,9 +265,9 @@ export default function Calendar() {
           <div className="eyebrow">内容生产 · 排期视图</div>
           <h1 className="page-title">内容排期日历</h1>
           <div className="page-desc">
-            按日期、平台、状态和标题查找内容；系统永不自动触发发布动作。
+            展示生产批次、任务执行状态和内容排期；历史批次只读，战略计划统一在计划管理维护。
             {!loading && <span className="tag teal" style={{ marginLeft: 8 }}>
-              当前视图 {filteredEvents.length} 篇
+              当前视图 {filteredEvents.length} 篇内容 · {filteredBatches.length} 个生产批次
             </span>}
           </div>
         </div>
@@ -321,7 +283,6 @@ export default function Calendar() {
           <button className="btn sm" onClick={() => setCursorDate(new Date(today))}>今天</button>
           <button className="btn sm" onClick={() => setCursorDate((d) => shiftCalendarDate(d, viewMode, 1))}>下一{viewMode === "month" ? "月" : viewMode === "week" ? "周" : "日"}</button>
           <input aria-label="选择日历日期" className="field calendar-date-picker" type="date" value={_fmt(cursorDate)} onChange={(e) => { if (e.target.value) { const [y, m, d] = e.target.value.split("-").map(Number); setCursorDate(new Date(y, m - 1, d)); } }} />
-          <button className="btn sm primary" onClick={() => { setPlanDate(_fmt(cursorDate)); setPlanFormOpen(true); }}>＋ 新建计划</button>
           <input className="field calendar-search" type="search" aria-label="搜索内容标题" placeholder="搜索标题…" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
           <select className="field" aria-label="按状态筛选内容" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
             <option value="all">全部状态</option><option value="draft_pending">待存草稿</option><option value="draft_saved">草稿已存</option><option value="user_published">用户确认</option><option value="published">已发布</option>
@@ -330,7 +291,7 @@ export default function Calendar() {
             <option value="all">全部平台</option>
             {ALL_PLATFORMS.map((p) => <option key={p} value={p}>{platformMeta(p).label}</option>)}
           </select>
-          <label className="calendar-plan-check" title="在日历中同时显示已归档和已取消的计划">
+          <label className="calendar-plan-check" title="在日历中同时显示已归档和已取消的历史批次">
             <input type="checkbox" checked={showArchivedPlans} onChange={(e) => setShowArchivedPlans(e.target.checked)} />显示已归档
           </label>
           <button className="btn sm" onClick={load} disabled={loading}>↻ 刷新</button>
@@ -345,7 +306,7 @@ export default function Calendar() {
       </div>}
 
       <div className="note" style={{ marginBottom: 12, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-        <span>已加载 {filteredEvents.length} 篇内容（共 {events.length} 篇）；内容关联信息以实际生产轮次数据为准。</span>
+        <span>已加载 {filteredEvents.length} 篇内容、{filteredBatches.length} 个生产批次；内容关联信息以实际生产轮次数据为准。</span>
         <button className="btn sm" onClick={() => { window.location.search = "?page=plan-center"; }}>打开计划管理</button>
       </div>
       <div className="panel">
@@ -376,11 +337,15 @@ export default function Calendar() {
                     <button className="calendar-day-number" onClick={() => { setCursorDate(d.date); setViewMode("day"); }} aria-label={`查看 ${d.key} 当天内容`}>
                       {d.date.getDate()}
                     </button>
-                    <button type="button" className="calendar-day-add" aria-label={`在 ${d.key} 新建计划`} onClick={() => { setPlanDate(d.key); setPlanFormOpen(true); }}>＋</button>
                     {loading && <div className="loading" style={{ marginTop: 6, fontSize: 11, color: "var(--muted)" }}><div className="spinner" />加载中...</div>}
+                    {d.batches.slice(0, 2).map((batch) => (
+                      <button type="button" key={batch.round_id} className="calendar-plan-chip" title={`第 ${batch.round_number ?? batch.round_id} 轮 · ${batch.task_count} 个生产任务`} onClick={() => void openBatchDetails(batch.round_id)}>
+                        <strong>生产批次</strong><span>{batch.sub_plan_title ?? "历史轮次"} · {batch.strategy_step_title ?? "策略步骤待核实"}</span>
+                      </button>
+                    ))}
                     {d.plans.slice(0, 2).map((plan) => (
                       <button type="button" key={plan.id} className="calendar-plan-chip" title={`${plan.title} · ${plan.planned_count} 篇/平台`} onClick={() => void openPlanDetails(plan.id)}>
-                        <strong>计划</strong><span>{plan.title}</span>
+                        <strong>历史批次</strong><span>{plan.title}</span>
                       </button>
                     ))}
                     {d.events.slice(0, 2).map((e) => {
@@ -397,9 +362,9 @@ export default function Calendar() {
                         </button>
                       );
                     })}
-                    {(Math.max(0, d.plans.length - 2) + Math.max(0, d.events.length - 2) > 0) && (
+                    {(Math.max(0, d.batches.length - 2) + Math.max(0, d.plans.length - 2) + Math.max(0, d.events.length - 2) > 0) && (
                       <button type="button" className="calendar-more-link" onClick={() => { setCursorDate(d.date); setViewMode("day"); }}>
-                        还有 {Math.max(0, d.plans.length - 2) + Math.max(0, d.events.length - 2)} 项 · 查看当天
+                        还有 {Math.max(0, d.batches.length - 2) + Math.max(0, d.plans.length - 2) + Math.max(0, d.events.length - 2)} 项 · 查看当天
                       </button>
                     )}
                   </div>
@@ -411,25 +376,23 @@ export default function Calendar() {
           <div className={`calendar-agenda ${viewMode === "week" ? "calendar-week-grid" : ""}`}>
             {days.map((d) => (
               <section className="calendar-agenda-day" key={d.key} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); const id = e.dataTransfer.getData("text/plain"); const event = events.find((item) => item.id === id); if (event) { const oldValue = _toLocalInput(event.scheduled || event.saved_at); const time = oldValue.includes("T") ? oldValue.slice(11, 16) : "09:00"; void saveSchedule(id, `${d.key}T${time}`); } }}>
-                <button className="calendar-agenda-date" onClick={() => { if (viewMode === "week") { setCursorDate(d.date); setViewMode("day"); } else { setPlanDate(d.key); setPlanFormOpen(true); } }}>
+                <button className="calendar-agenda-date" onClick={() => { setCursorDate(d.date); setViewMode("day"); }}>
                   <strong>{d.date.toLocaleDateString("zh-CN", { weekday: "long" })}</strong>
                   <span>{d.key}{d.date.toDateString() === today.toDateString() ? " · 今天" : ""}</span>
                 </button>
-                {d.plans.map((plan) => (
-                  <div className="calendar-agenda-plan" key={plan.id}>
-                    <button className="calendar-plan-label" onClick={() => void openPlanDetails(plan.id)}>计划详情</button>
-                    <span className="calendar-agenda-copy"><strong>{plan.title}</strong><small>{plan.planned_count} 篇/平台 · {plan.platforms.length ? plan.platforms.map((p) => platformMeta(p).label).join("、") : "使用启用平台"} · {PLAN_STATUS_LABEL[plan.status]}</small></span>
-                    {(plan.status === "planned" || plan.status === "failed") && (
-                      <button className="btn sm primary" disabled={isPending(`content-plan:start:${plan.id}`)} onClick={() => void startPlan(plan)}>
-                        {isPending(`content-plan:start:${plan.id}`) ? "入队中…" : plan.status === "failed" ? "重试入队" : "加入全局队列"}
-                      </button>
-                    )}
-                    {(plan.status === "planned" || plan.status === "failed" || plan.status === "generating") && (
-                      <button className="btn sm" onClick={() => void cancelPlan(plan)}>取消</button>
-                    )}
+                {d.batches.map((batch) => (
+                  <div className="calendar-agenda-plan" key={batch.round_id}>
+                    <button className="calendar-plan-label" onClick={() => void openBatchDetails(batch.round_id)}>生产任务</button>
+                    <span className="calendar-agenda-copy"><strong>{batch.sub_plan_title ?? `第 ${batch.round_number ?? batch.round_id} 轮`}</strong><small>{batch.platform ? platformMeta(batch.platform).label : "平台待核实"} · {batch.strategy_step_title ?? "策略步骤待核实"} · {batch.task_count} 个任务 · {displayStatusLabel(batch.round_status)}</small></span>
                   </div>
                 ))}
-                {loading ? <div className="loading"><div className="spinner" />加载中...</div> : d.events.length === 0 && d.plans.length === 0 ? (
+                {d.plans.map((plan) => (
+                  <div className="calendar-agenda-plan" key={plan.id}>
+                    <button className="calendar-plan-label" onClick={() => void openPlanDetails(plan.id)}>批次详情</button>
+                    <span className="calendar-agenda-copy"><strong>{plan.title}</strong><small>{plan.planned_count} 篇/平台 · {plan.platforms.length ? plan.platforms.map((p) => platformMeta(p).label).join("、") : "使用启用平台"} · {PLAN_STATUS_LABEL[plan.status]}</small></span>
+                  </div>
+                ))}
+                {loading ? <div className="loading"><div className="spinner" />加载中...</div> : d.events.length === 0 && d.plans.length === 0 && d.batches.length === 0 ? (
                   <div className="calendar-agenda-empty">当天没有排期</div>
                 ) : d.events.map((e) => {
                   const editable = e.status === "draft_pending" || e.status === "draft_saved";
@@ -498,17 +461,6 @@ export default function Calendar() {
             <div className="panel-head">
               <div><div className="panel-title">{planDetail.title}</div><div className="panel-sub">{planDetail.scheduled_date} · {planDetail.planned_count} 篇/平台 · {PLAN_STATUS_LABEL[planDetail.status]}</div></div>
               <div style={{ display: "flex", gap: 8 }}>
-                {(planDetail.status === "planned" || planDetail.status === "failed") && <button className="btn sm primary" onClick={() => beginEditPlan(planDetail)}>编辑计划</button>}
-                {(["generated", "reviewed", "failed", "cancelled"] as ContentPlan["status"][]).includes(planDetail.status) && (
-                  <button className="btn sm" disabled={isPending(`content-plan:archive:${planDetail.id}`)} onClick={() => void archivePlan(planDetail)}>
-                    {isPending(`content-plan:archive:${planDetail.id}`) ? "归档中…" : "归档"}
-                  </button>
-                )}
-                {(planDetail.status === "archived" || planDetail.status === "cancelled") && (
-                  <button className="btn sm" disabled={isPending(`content-plan:restore:${planDetail.id}`)} onClick={() => void restorePlan(planDetail)}>
-                    {isPending(`content-plan:restore:${planDetail.id}`) ? "恢复中…" : "恢复"}
-                  </button>
-                )}
                 <button className="btn sm" onClick={() => setPlanDetail(null)}>关闭</button>
               </div>
             </div>
@@ -516,7 +468,11 @@ export default function Calendar() {
             {planDetail.notes && <div className="note">备注：{planDetail.notes}</div>}
             <div className="calendar-plan-detail-grid">
               <div><strong>生产轮次（{planDetail.rounds.length}）</strong>
-                {planDetail.rounds.length ? planDetail.rounds.map((round) => <div className="calendar-plan-detail-row" key={round.round_id}>{round.round_number != null ? `第 ${round.round_number} 轮` : "轮次信息不可用"} · {round.task_id ? `任务 ${round.task_id.slice(0, 8)}` : "尚未入队"}</div>) : <div className="note">尚未启动生产</div>}
+                {planDetail.rounds.length ? planDetail.rounds.map((round) => <div className="calendar-plan-detail-row" key={round.round_id}>
+                  {round.round_number != null ? `第 ${round.round_number} 轮` : "轮次信息不可用"} · {round.task_id ? `任务 ${round.task_id.slice(0, 8)}` : "尚未入队"}
+                  {round.attribution_status === "attributed" && round.strategy_step_id ? ` · 策略步骤 ${round.strategy_step_id}` : " · 历史归属待核实"}
+                  {round.production_line_version_id ? ` · 生产线版本 v${round.production_line_version_id}` : ""}
+                </div>) : <div className="note">尚未关联生产轮次</div>}
               </div>
               <div><strong>关联草稿（{planDetail.drafts.length}）</strong>
                 {planDetail.drafts.length ? planDetail.drafts.map((draft) => <div className="calendar-plan-detail-row" key={draft.draft_id}>{draft.title || draft.draft_id} · {platformMeta(draft.platform).label} · {draft.status}</div>) : <div className="note">生产完成后自动回写草稿</div>}
@@ -527,42 +483,39 @@ export default function Calendar() {
         </div>
       )}
 
-      {planFormOpen && <div className="calendar-drawer-backdrop" role="presentation" onClick={() => { setPlanFormOpen(false); setEditingPlanId(null); setEditingPlanVersion(null); }}>
-      <section ref={planDrawerRef} tabIndex={-1} className="panel calendar-side-drawer calendar-plan-create" role="dialog" aria-modal="true" aria-label={editingPlanId ? "编辑内容计划" : "新建内容计划"} onClick={(e) => e.stopPropagation()}>
-        <div className="panel-head">
-          <div><div className="panel-title">{editingPlanId ? "编辑内容计划" : "新建内容计划"}</div><div className="panel-sub">{editingPlanId ? "编辑仅影响后续执行，不会回写已经生成的历史草稿。" : "创建计划不会自动开始生产；加入全局队列后才会生成，发布仍需人工确认。"}</div></div>
-          <button className="btn sm" onClick={() => { setPlanFormOpen(false); setEditingPlanId(null); setEditingPlanVersion(null); }}>关闭</button>
-        </div>
-        <div className="calendar-plan-form">
-          <label>计划名称<input className="field" value={planTitle} maxLength={160} onChange={(e) => setPlanTitle(e.target.value)} placeholder="例如：本周产品功能系列" /></label>
-          <label>选题方向备注（非过滤条件）<input className="field" value={planTopic} maxLength={500} onChange={(e) => setPlanTopic(e.target.value)} placeholder="选题方向备注；生产时仍从选题池取题" /></label>
-          <label>计划日期<input className="field" type="date" value={planDate} onChange={(e) => setPlanDate(e.target.value)} /></label>
-          <label>每个平台篇数<input className="field" type="number" min="1" max="50" value={planCount} onChange={(e) => setPlanCount(e.target.value)} /></label>
-          <label className="calendar-plan-platforms">目标平台
-            <span>{(["xhs", "douyin", "wechat_channels", "kuaishou"] as Platform[]).map((platform) => (
-              <label key={platform} className="calendar-plan-check"><input type="checkbox" checked={planPlatforms.includes(platform)} onChange={(e) => setPlanPlatforms((old) => e.target.checked ? [...old, platform] : old.filter((p) => p !== platform))} />{platformMeta(platform).label}</label>
-            ))}</span>
-          </label>
-          <label className="calendar-plan-notes">备注<textarea className="field" rows={2} value={planNotes} maxLength={4000} onChange={(e) => setPlanNotes(e.target.value)} placeholder="可选" /></label>
-          <button className="btn primary" disabled={!planTitle.trim() || !planDate || Number(planCount) < 1 || Number(planCount) > 100 || isPending(editingPlanId ? `content-plan:update:${editingPlanId}` : "content-plan:create")} onClick={async () => {
-            const payload = { title: planTitle.trim(), topic: planTopic.trim(), platforms: planPlatforms, planned_count: Number(planCount), scheduled_date: planDate, notes: planNotes.trim() };
-            try {
-              if (editingPlanId && editingPlanVersion != null) {
-                await withPending(`content-plan:update:${editingPlanId}`, () => api.updateContentPlan(editingPlanId, { ...payload, version: editingPlanVersion }));
-                showToast("内容计划已更新", "success");
-              } else {
-                await withPending("content-plan:create", () => api.createContentPlan(payload));
-                showToast("内容计划已创建", "success");
-              }
-              setPlanTitle(""); setPlanTopic(""); setPlanCount("1"); setPlanPlatforms([]); setPlanNotes("");
-              setPlanFormOpen(false); setEditingPlanId(null); setEditingPlanVersion(null);
-              setCursorDate(new Date(`${planDate}T12:00:00`));
-              await load();
-            } catch (e: any) { showToast(`${editingPlanId ? "更新" : "创建"}计划失败：${e?.message ?? e}`, "error"); }
-          }}>{isPending(editingPlanId ? `content-plan:update:${editingPlanId}` : "content-plan:create") ? "保存中…" : editingPlanId ? "保存修改" : "创建计划"}</button>
-        </div>
-      </section></div>}
 
+
+      {batchDetail && (
+        <div className="calendar-plan-modal" role="dialog" aria-modal="true" aria-label="生产批次详情" onClick={() => setBatchDetail(null)}>
+          <section className="panel" onClick={(e) => e.stopPropagation()}>
+            <div className="panel-head">
+              <div>
+                <div className="panel-title">生产批次 · 第 {batchDetail.batch.round_number ?? batchDetail.batch.round_id} 轮</div>
+                <div className="panel-sub">{batchDetail.batch.sub_plan_title ?? "历史轮次"} · {batchDetail.batch.platform ? platformMeta(batchDetail.batch.platform).label : "平台待核实"} · {displayStatusLabel(batchDetail.batch.round_status)}</div>
+              </div>
+              <button className="btn sm" onClick={() => setBatchDetail(null)}>关闭</button>
+            </div>
+            <div className="note">
+              母计划版本：{batchDetail.batch.master_plan_version_id ?? "待核实"} ·
+              子计划版本：{batchDetail.batch.sub_plan_version_id ?? "待核实"} ·
+              策略步骤：{batchDetail.batch.strategy_step_title ?? batchDetail.batch.strategy_step_id ?? "待核实"} ·
+              生产线版本：{batchDetail.batch.production_line_version_id ?? "待核实"} ·
+              归属：{batchDetail.batch.attribution_status === "attributed" ? "完整" : "待核实"}
+            </div>
+            <div className="calendar-plan-detail-grid">
+              <div><strong>生产任务（{batchDetail.tasks.length}）</strong>
+                {batchDetail.tasks.length ? batchDetail.tasks.map((task) => (
+                  <div className="calendar-plan-detail-row" key={task.id}>
+                    <strong>{task.content_title || task.id}</strong>
+                    <div>{platformMeta(task.platform).label} · {TASK_STATUS_LABEL[task.status] ?? task.status} · 尝试 {task.attempt_count}/{task.max_attempts}</div>
+                    {task.error_message && <div className="note">{task.error_message}</div>}
+                  </div>
+                )) : <div className="note">该批次尚未生成独立生产任务</div>}
+              </div>
+            </div>
+          </section>
+        </div>
+      )}
       {/* 未排期草稿：直接挑选时间写入排期 */}
       <div className="panel">
         <div className="panel-head">
