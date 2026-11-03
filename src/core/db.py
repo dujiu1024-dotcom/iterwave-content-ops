@@ -696,8 +696,7 @@ class LockedConnection:
         if self._context_owner == owner and self._context_depth > 0:
             object.__setattr__(self, "_rollback_only", True)
             return
-        self._acquire_lock()
-        self._recover_abandoned_state()
+        self._acquire_lock_and_recover()
         release_retained = False
         try:
             self._conn.rollback()
@@ -712,8 +711,7 @@ class LockedConnection:
     @contextmanager
     def transaction(self, *, immediate: bool = True):
         """显式事务 API；事务期间独占连接，默认先取得 SQLite 写保留锁。"""
-        self._acquire_lock()
-        self._recover_abandoned_state()
+        self._acquire_lock_and_recover()
         owner = _threading.current_thread()
         if self._conn.in_transaction or self._context_owner is not None:
             self._lock.release()
@@ -754,8 +752,7 @@ class LockedConnection:
             self._lock.release()
 
     def __enter__(self):
-        self._acquire_lock()
-        self._recover_abandoned_state()
+        self._acquire_lock_and_recover()
         owner = _threading.current_thread()
         context_owner = self._context_owner
         if context_owner is None:
