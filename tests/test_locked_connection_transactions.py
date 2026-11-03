@@ -347,3 +347,72 @@ def test_connection_transaction_supports_raw_sqlite_connection():
 
     assert conn.execute("SELECT value FROM events").fetchall() == [("committed",)]
     conn.close()
+
+
+
+def test_abandoned_worker_transaction_is_rolled_back_and_lock_recovered(tmp_path):
+    import threading
+
+    conn = _locked(sqlite3.connect(tmp_path / "abandoned.db", check_same_thread=False))
+    conn.execute("CREATE TABLE t (v INTEGER)")
+    conn.commit()
+    finished = threading.Event()
+
+    def abandon_after_insert():
+        conn.execute("INSERT INTO t VALUES (99)")
+        # Deliberately exit with an implicit SQLite transaction still open.
+        finished.set()
+
+    worker = threading.Thread(target=abandon_after_insert)
+    worker.start()
+    worker.join(timeout=2)
+    assert finished.is_set()
+    assert not worker.is_alive()
+
+    # The next owner detects the dead worker, rolls back its transaction, and proceeds.
+    count = conn.execute("SELECT COUNT(*) FROM t").fetchone()[0]
+    assert count == 0
+
+
+def test_transactional_route_respects_own_transaction_marker():
+    def endpoint():
+        return {"ok": True}
+
+    managed = api_main.manages_own_transaction(endpoint)
+    route = api_main.TransactionalAPIRoute("/managed", managed, methods=["POST"])
+    assert route.endpoint is not managed
+    assert getattr(route.endpoint, "_manages_own_transaction", False)
+
+    plain_route = api_main.TransactionalAPIRoute("/plain", endpoint, methods=["POST"])
+    assert plain_route.endpoint is not endpoint
+
+
+
+def test_sync_get_endpoint_finalizer_rolls_back_implicit_write(tmp_path):
+    raw = sqlite3.connect(tmp_path / "get-write.db", check_same_thread=False)
+    conn = _locked(raw)
+    conn.execute("CREATE TABLE t (v INTEGER)")
+    conn.commit()
+    saved = dict(api_main._g_ctx)
+    api_main._g_ctx.clear()
+    api_main._g_ctx["conn"] = conn
+
+    def legacy_get_route():
+        conn.execute("INSERT INTO t VALUES (7)")
+        return {"ok": True}
+
+    try:
+        route = api_main.TransactionalAPIRoute("/legacy-get", legacy_get_route, methods=["GET"])
+        assert route.endpoint() == {"ok": True}
+        assert conn.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 0
+
+        completed = threading.Event()
+        reader = threading.Thread(
+            target=lambda: (conn.execute("SELECT COUNT(*) FROM t").fetchone(), completed.set())
+        )
+        reader.start()
+        reader.join(timeout=1)
+        assert completed.is_set(), "endpoint finalizer leaked the retained transaction lock"
+    finally:
+        api_main._g_ctx.clear()
+        api_main._g_ctx.update(saved)

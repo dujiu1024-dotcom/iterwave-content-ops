@@ -23,6 +23,7 @@ from contextlib import contextmanager
 import logging
 import shutil
 import sqlite3
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -484,6 +485,44 @@ class _LockedCursor:
         self._res = None
 
 
+class _RecoverableRLock:
+    """Reentrant lock that can recover ownership when a worker thread dies."""
+
+    def __init__(self):
+        self._condition = _threading.Condition(_threading.Lock())
+        self._owner = None
+        self._depth = 0
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        current = _threading.current_thread()
+        deadline = None if timeout is None or timeout < 0 else time.monotonic() + timeout
+        with self._condition:
+            while True:
+                if self._owner is not None and not self._owner.is_alive():
+                    self._owner = None
+                    self._depth = 0
+                    self._condition.notify_all()
+                if self._owner is None or self._owner is current:
+                    self._owner = current
+                    self._depth += 1
+                    return True
+                if not blocking:
+                    return False
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    return False
+                self._condition.wait(remaining)
+
+    def release(self) -> None:
+        with self._condition:
+            if self._owner is not _threading.current_thread():
+                raise RuntimeError("cannot release un-acquired SQLite connection lock")
+            self._depth -= 1
+            if self._depth == 0:
+                self._owner = None
+                self._condition.notify_all()
+
+
 class LockedConnection:
     """线程安全的 sqlite3.Connection 代理，并将隐式事务锁保持到 commit/rollback。
 
@@ -496,7 +535,7 @@ class LockedConnection:
 
     def __init__(self, conn: sqlite3.Connection):
         object.__setattr__(self, "_conn", conn)
-        object.__setattr__(self, "_lock", _threading.RLock())
+        object.__setattr__(self, "_lock", _RecoverableRLock())
         object.__setattr__(self, "_transaction_owner", None)
         object.__setattr__(self, "_context_owner", None)
         object.__setattr__(self, "_context_depth", 0)
@@ -506,9 +545,62 @@ class LockedConnection:
     def raw(self) -> sqlite3.Connection:
         return self._conn
 
+    def _acquire_lock(self, timeout: float = 10.0) -> None:
+        """Bound lock waits so a leaked transaction cannot freeze API workers forever."""
+        if not self._lock.acquire(timeout=timeout):
+            raise TimeoutError(
+                f"SQLite connection lock wait exceeded {timeout:.1f}s"
+            )
+
+    def rollback_if_open(self, timeout: float = 2.0) -> bool:
+        """Best-effort request-finalizer safety net for an abandoned SQLite transaction."""
+        owner = _threading.current_thread()
+        # Never let an unrelated request finalizer roll back another live worker's
+        # transaction or wait behind it. Dead owners are reclaimed below.
+        for active_owner in (self._context_owner, self._transaction_owner):
+            if active_owner is not None and active_owner is not owner and active_owner.is_alive():
+                return False
+        self._acquire_lock(timeout=timeout)
+        release_retained = False
+        rolled_back = False
+        try:
+            self._recover_abandoned_state()
+            if self._conn.in_transaction:
+                self._conn.rollback()
+                rolled_back = True
+            if self._transaction_owner is owner:
+                object.__setattr__(self, "_transaction_owner", None)
+                release_retained = True
+            return rolled_back
+        finally:
+            if release_retained:
+                self._lock.release()
+            self._lock.release()
+
+    def _recover_abandoned_state(self) -> None:
+        """Rollback transactions whose owning worker exited without cleanup."""
+        context_owner = self._context_owner
+        transaction_owner = self._transaction_owner
+        abandoned = (
+            context_owner is not None and not context_owner.is_alive()
+        ) or (
+            transaction_owner is not None and not transaction_owner.is_alive()
+        )
+        if not abandoned:
+            return
+        try:
+            if self._conn.in_transaction:
+                self._conn.rollback()
+        finally:
+            object.__setattr__(self, "_transaction_owner", None)
+            object.__setattr__(self, "_context_owner", None)
+            object.__setattr__(self, "_context_depth", 0)
+            object.__setattr__(self, "_rollback_only", False)
+
     def _run_locked(self, operation):
-        self._lock.acquire()
-        owner = _threading.get_ident()
+        self._acquire_lock()
+        self._recover_abandoned_state()
+        owner = _threading.current_thread()
         retain_current = False
         release_retained = False
         try:
@@ -568,11 +660,12 @@ class LockedConnection:
         return _LockedCursor(self)
 
     def commit(self) -> None:
-        owner = _threading.get_ident()
+        owner = _threading.current_thread()
         if self._context_owner == owner and self._context_depth > 0:
             # 请求/业务事务中的 commit 延迟到最外层 with conn 正常退出。
             return
-        self._lock.acquire()
+        self._acquire_lock()
+        self._recover_abandoned_state()
         release_retained = False
         try:
             self._conn.commit()
@@ -585,11 +678,12 @@ class LockedConnection:
             self._lock.release()
 
     def rollback(self) -> None:
-        owner = _threading.get_ident()
+        owner = _threading.current_thread()
         if self._context_owner == owner and self._context_depth > 0:
             object.__setattr__(self, "_rollback_only", True)
             return
-        self._lock.acquire()
+        self._acquire_lock()
+        self._recover_abandoned_state()
         release_retained = False
         try:
             self._conn.rollback()
@@ -604,8 +698,9 @@ class LockedConnection:
     @contextmanager
     def transaction(self, *, immediate: bool = True):
         """显式事务 API；事务期间独占连接，默认先取得 SQLite 写保留锁。"""
-        self._lock.acquire()
-        owner = _threading.get_ident()
+        self._acquire_lock()
+        self._recover_abandoned_state()
+        owner = _threading.current_thread()
         if self._conn.in_transaction or self._context_owner is not None:
             self._lock.release()
             raise RuntimeError(
@@ -632,8 +727,9 @@ class LockedConnection:
             self.__exit__(None, None, None)
 
     def close(self) -> None:
-        self._lock.acquire()
-        owner = _threading.get_ident()
+        self._acquire_lock()
+        self._recover_abandoned_state()
+        owner = _threading.current_thread()
         release_retained = self._transaction_owner == owner
         try:
             self._conn.close()
@@ -645,8 +741,9 @@ class LockedConnection:
             self._lock.release()
 
     def __enter__(self):
-        self._lock.acquire()
-        owner = _threading.get_ident()
+        self._acquire_lock()
+        self._recover_abandoned_state()
+        owner = _threading.current_thread()
         context_owner = self._context_owner
         if context_owner is None:
             object.__setattr__(self, "_context_owner", owner)
@@ -661,7 +758,7 @@ class LockedConnection:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        owner = _threading.get_ident()
+        owner = _threading.current_thread()
         if self._context_owner != owner or self._context_depth < 1:
             self._lock.release()
             raise RuntimeError("SQLite 事务上下文退出线程不匹配")
@@ -716,7 +813,7 @@ def connection_transaction(conn, *, immediate: bool = True):
     """兼容 LockedConnection 与原生 sqlite3.Connection 的事务上下文。"""
     transaction = getattr(conn, "transaction", None)
     if callable(transaction):
-        if getattr(conn, "_context_owner", None) == _threading.get_ident():
+        if getattr(conn, "_context_owner", None) is _threading.current_thread():
             # 已处于同线程的外层事务上下文（例如同步写 API 的 TransactionalAPIRoute 请求级
             # `with conn`）：加入外层事务，由最外层统一提交/回滚；内层异常会把整体标为回滚。
             # 外层尚未开始写事务时立刻取得写保留锁，保证读-校验-写不被并发写打断。
