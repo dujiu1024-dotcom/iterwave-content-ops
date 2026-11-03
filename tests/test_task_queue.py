@@ -878,3 +878,33 @@ def test_resolve_action_is_recorded_in_admin_audit(tmp_path):
     assert len(audit) == 1
     assert audit[0]["action"] == "resolve_handled"
     assert audit[0]["actor"] == "session:auditor"
+
+
+def test_queue_filtered_scope_supports_chart_drilldown(tmp_path):
+    queue = make_queue(tmp_path)
+    succeeded, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={"n": 1})
+    failed, _ = queue.enqueue(task_type="scheduler_job", tenant_id="tenant-a", payload={"n": 2})
+    other, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-b", payload={"n": 3})
+    conn = queue._connect()
+    try:
+        conn.executemany(
+            "UPDATE global_task_queue SET status=? WHERE task_id=?",
+            [("succeeded", succeeded.task_id), ("failed", failed.task_id)],
+        )
+    finally:
+        conn.close()
+
+    rows, total = queue.list_page(scope="filtered", status="failed", tenant_id="tenant-a")
+    assert total == 1
+    assert [row.task_id for row in rows] == [failed.task_id]
+
+    all_rows, all_total = queue.list_page(scope="filtered", tenant_id="tenant-a")
+    assert all_total == 2
+    assert {row.task_id for row in all_rows} == {succeeded.task_id, failed.task_id}
+
+    try:
+        queue.list_page(scope="filtered", status="unknown")
+    except ValueError as exc:
+        assert "status" in str(exc)
+    else:
+        raise AssertionError("unknown status must be rejected")
