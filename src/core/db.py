@@ -508,7 +508,7 @@ class _RecoverableRLock:
                     return True
                 if not blocking:
                     return False
-                remaining = None if deadline is None else deadline - _threading.monotonic()
+                remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
                     return False
                 self._condition.wait(remaining)
