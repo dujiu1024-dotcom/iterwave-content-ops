@@ -118,7 +118,10 @@ class TransactionalAPIRoute(APIRoute):
     """Bound endpoint transactions and clean up implicit writes on endpoint exit."""
 
     def __init__(self, path: str, endpoint, **kwargs):
-        if not path.startswith("/api/auth/"):
+        if (
+            not path.startswith("/api/auth/")
+            and not getattr(endpoint, "_manages_own_transaction", False)
+        ):
             methods = {str(method).upper() for method in (kwargs.get("methods") or [])}
             original = endpoint
             use_request_transaction = (
