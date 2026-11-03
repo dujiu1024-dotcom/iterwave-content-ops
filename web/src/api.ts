@@ -12,7 +12,7 @@ export interface ProductionMonitorRound {
   trigger_source?: string; plan_attribution_status?: string;
 }
 export interface ProductionMonitorStage {
-  id: number; title: string; status: string; stage_order: number; direction?: string; completion_condition?: string; notes?: string;
+  id: number; title: string; status: string; stage_order: number; stage_key?: string; direction?: string; completion_condition?: string; notes?: string;
   target_count: number; round_count: number; production_task_count: number; production_task_status_counts: Record<string, number>;
   content_count: number; draft_count: number; review_pending_count: number;
   review_approved_count: number; review_rejected_count: number; published_count: number; failed_draft_count: number;
