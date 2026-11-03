@@ -149,17 +149,43 @@ class RoundExecutor:
             raise RoundPreconditionError("内容生产已暂停，拒绝执行轮次")
         current_status = round_row["status"]
         if current_status == "failed":
-            # 只允许没有产生任何内容/草稿的失败轮次重试，避免重复生成或覆盖已有交付物。
-            existing_contents = self.conn.execute(
+            existing_contents = int(self.conn.execute(
                 "SELECT COUNT(*) FROM contents WHERE round_id = ?", (round_id,)
-            ).fetchone()[0]
-            existing_drafts = self.conn.execute(
+            ).fetchone()[0] or 0)
+            existing_drafts = int(self.conn.execute(
                 "SELECT COUNT(*) FROM drafts d JOIN contents c ON c.id = d.content_id WHERE c.round_id = ?",
                 (round_id,),
-            ).fetchone()[0]
-            if existing_contents or existing_drafts:
-                raise RoundPreconditionError("本轮失败前已产生内容或草稿，为避免重复交付，请修复问题后新建一轮")
-            if not self.sm_round.transition(round_id, "created", "用户发起安全重试（无已生成内容）"):
+            ).fetchone()[0] or 0)
+            pending_tasks = 0
+            if round_row["sub_plan_id"]:
+                pending_tasks = int(self.conn.execute(
+                    """SELECT COUNT(*) FROM production_tasks t
+                       WHERE t.round_id=? AND (
+                           t.status='pending' OR (
+                               t.status='succeeded'
+                               AND EXISTS (SELECT 1 FROM contents c
+                                           WHERE c.production_task_id=t.id)
+                               AND NOT EXISTS (SELECT 1 FROM drafts d
+                                               JOIN contents c ON c.id=d.content_id
+                                               WHERE c.production_task_id=t.id)
+                           )
+                       )""",
+                    (round_id,),
+                ).fetchone()[0] or 0)
+            # Existing artifacts are reusable only when an explicit task-level recovery
+            # has queued pending work. The producer adopts succeeded artifacts and runs
+            # only pending tasks; an ordinary whole-round replay remains forbidden.
+            if (existing_contents or existing_drafts) and pending_tasks <= 0:
+                raise RoundPreconditionError(
+                    "本轮失败前已产生内容或草稿，且没有已显式恢复的待执行生产任务；"
+                    "为避免重复生成或交付，拒绝整轮重跑"
+                )
+            reason = (
+                "用户发起生产任务级恢复；保留并复用已落库成品"
+                if existing_contents or existing_drafts
+                else "用户发起安全重试（无已生成内容）"
+            )
+            if not self.sm_round.transition(round_id, "created", reason):
                 raise RoundPreconditionError("失败轮次无法重置，请新建一轮")
         elif current_status != "created":
             raise RoundPreconditionError(
@@ -1037,10 +1063,60 @@ class RoundExecutor:
                             "template": template_data,
                         },
                     )
-                    if task["status"] != "pending":
-                        existing = task_store.get_content_for_task(task["id"])
-                        if existing is not None and task["status"] == "running":
+                    existing = task_store.get_content_for_task(task["id"])
+                    if existing is not None:
+                        if task["status"] == "succeeded":
+                            pass
+                        elif task["status"] == "running":
                             task_store.complete_task(task["id"], content_id=str(existing["id"]))
+                        elif task["status"] in {"pending", "failed"}:
+                            if task["status"] == "failed":
+                                if int(task["attempt_count"]) >= int(task["max_attempts"]):
+                                    task_store.extend_attempts(
+                                        task["id"], max_attempts=int(task["attempt_count"]) + 1,
+                                    )
+                                task_store.retry_task(task["id"], retry_failed=True)
+                            task_store.claim_task(
+                                task["id"], worker_id=f"round-executor-{round_id}-artifact-adoption",
+                                lease_seconds=300,
+                            )
+                            task_store.complete_task(task["id"], content_id=str(existing["id"]))
+                        else:
+                            raise RoundPreconditionError(
+                                f"生产任务 {task['id']} 状态为 {task['status']}，但已有成品；"
+                                "请通过任务恢复入口核对，不允许重新生成"
+                            )
+                        draft = self.conn.execute(
+                            "SELECT id FROM drafts WHERE content_id=? AND platform=? ORDER BY rowid DESC LIMIT 1",
+                            (str(existing["id"]), platform.value),
+                        ).fetchone()
+                        if draft is None:
+                            draft_id = f"draft-{uuid.uuid4().hex[:12]}"
+                            with self.conn:
+                                self.conn.execute(
+                                    "INSERT INTO drafts (id,content_id,platform,status) VALUES (?,?,?,'draft_pending')",
+                                    (draft_id, str(existing["id"]), platform.value),
+                                )
+                        else:
+                            draft_id = str(draft["id"])
+                        try:
+                            saved_tags = json.loads(existing["tags"] or "[]")
+                        except (TypeError, ValueError):
+                            saved_tags = []
+                        try:
+                            saved_images = json.loads(existing["image_paths"] or "[]")
+                        except (TypeError, ValueError):
+                            saved_images = []
+                        rows.append({
+                            "content_id": str(existing["id"]), "draft_id": draft_id,
+                            "platform": platform, "title": existing["title"] or "",
+                            "body": existing["body"] or "", "tags": saved_tags,
+                            "image_paths": saved_images,
+                        })
+                        report["contents_created"] += 1
+                        report["drafts_created"] += 1
+                        continue
+                    if task["status"] != "pending":
                         raise RoundPreconditionError(
                             f"生产任务 {task['id']} 当前状态为 {task['status']}，"
                             "拒绝重复生成；请先恢复或显式重试该任务"
@@ -1779,3 +1855,40 @@ class RoundExecutor:
         # 仍存在不属于生产收尾范围的状态时 fail closed，避免进入无草稿可发的等待态。
         self.sm_round.transition(round_id, "failed", "未发现可发布草稿，且存在未预期的草稿状态组合")
         report["final_status"] = "failed"
+
+# Task-level crash closure. Keep the round executor's business flow unchanged while
+# ensuring every claimed task is finalized even when any downstream stage raises.
+_original_produce_contents = RoundExecutor._produce_contents
+
+
+async def _produce_contents_with_task_recovery(self, round_id, scored, platforms, report, template_data=None):
+    try:
+        return await _original_produce_contents(
+            self, round_id, scored, platforms, report, template_data=template_data,
+        )
+    except Exception as exc:
+        if getattr(self, "_subplan_context", None):
+            try:
+                from .production_task_recovery import reconcile_round_tasks
+                reconciliation = reconcile_round_tasks(
+                    self.conn, round_id=round_id, interrupted=True,
+                    error=exc,
+                )
+                report.setdefault("production_task_recovery", []).extend(reconciliation)
+            except Exception:
+                logger.exception("生产任务异常收尾失败 round=%s", round_id)
+        raise
+    finally:
+        if getattr(self, "_subplan_context", None):
+            try:
+                from .production_task_recovery import reconcile_round_tasks
+                reconciliation = reconcile_round_tasks(
+                    self.conn, round_id=round_id, interrupted=False,
+                )
+                if reconciliation:
+                    report.setdefault("production_task_recovery", []).extend(reconciliation)
+            except Exception:
+                logger.exception("生产任务成品对账失败 round=%s", round_id)
+
+
+RoundExecutor._produce_contents = _produce_contents_with_task_recovery

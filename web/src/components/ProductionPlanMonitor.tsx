@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, ProductionMonitorResponse, ProductionMonitorStage } from "../api";
+import { api, ProductionMonitorResponse, ProductionMonitorStage, ProductionTaskItem, ProductionTaskDetail } from "../api";
 import { navigate } from "../nav";
 
 const PLATFORM_LABEL: Record<string, string> = {
@@ -73,10 +73,19 @@ export default function ProductionPlanMonitor() {
   const [data, setData] = useState<ProductionMonitorResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [failedTasks, setFailedTasks] = useState<ProductionTaskItem[]>([]);
+  const [selectedTask, setSelectedTask] = useState<ProductionTaskDetail | null>(null);
+  const [taskError, setTaskError] = useState("");
+  const [taskBusy, setTaskBusy] = useState(false);
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
-    try { setData(await api.productionMonitor()); }
+    try {
+      const [monitor, tasks] = await Promise.all([api.productionMonitor(), api.productionTasks("failed")]);
+      setData(monitor);
+      setFailedTasks(tasks.items ?? []);
+      setTaskError("");
+    }
     catch (err) { setError(err instanceof Error ? err.message : String(err)); }
     finally { setLoading(false); }
   }, []);
@@ -112,6 +121,24 @@ export default function ProductionPlanMonitor() {
           <Metric label="异常轮次" value={data.totals.abnormal_rounds}/>
           <Metric label="失败轮次 / 草稿" value={(data.totals.failed_rounds ?? 0) + (data.totals.failed_drafts ?? 0)}/>
         </div>
+      </div>
+      <div className="panel" style={{ padding: 12, marginBottom: 12 }}>
+        <div className="panel-head"><div><div className="panel-title">生产任务故障处理 · {failedTasks.length} 项</div><div className="panel-sub">定位失败策略步骤、具体任务、错误原因、尝试历史和内容成品；恢复前必须确认外部副作用。</div></div><button className="btn sm" onClick={() => void load()} disabled={loading}>刷新任务</button></div>
+        {taskError && <div role="alert" className="tiny" style={{ color: "var(--orange)" }}>{taskError}</div>}
+        {failedTasks.length === 0 ? <div className="empty-state">当前没有失败的独立生产任务。</div> : <div className="list">
+          {failedTasks.map((task) => <div className="task-row" key={task.id}>
+            <div className="task-main"><div className="task-title">生产任务 {task.id}</div><div className="task-desc">{PLATFORM_LABEL[task.platform] ?? task.platform} · 轮次 #{task.round_id} · 策略步骤 {data.platforms.flatMap((subplan) => subplan.stages).find((stage) => stage.stage_key === task.strategy_step_id)?.title ?? task.strategy_step_id} · 尝试 {task.attempt_count}/{task.max_attempts}</div><div className="task-desc">{task.error_code || "unknown_error"}：{task.error_message || "未提供错误信息"}</div>{task.content_id && <div className="tiny">成品 ID：{task.content_id}</div>}</div>
+            <button className="btn sm" disabled={taskBusy} onClick={async () => { setTaskBusy(true); try { setSelectedTask(await api.productionTask(task.id)); } catch (err) { setTaskError(err instanceof Error ? err.message : String(err)); } finally { setTaskBusy(false); } }}>查看详情</button>
+          </div>)}
+        </div>}
+        {selectedTask && <div className="panel" style={{ marginTop: 12, padding: 12 }}>
+          <div className="panel-head"><div><strong>任务详情 · {selectedTask.task.id}</strong><div className="tiny">状态 {STATUS_LABEL[selectedTask.task.status] ?? selectedTask.task.status} · {selectedTask.task.attempt_count}/{selectedTask.task.max_attempts} 次尝试</div></div><button className="btn sm" onClick={() => setSelectedTask(null)}>关闭</button></div>
+          <div className="tiny">失败原因：{selectedTask.task.error_code || "—"} · {selectedTask.task.error_message || "—"}</div>
+          {selectedTask.content && <div className="task-row"><div className="task-main"><div className="task-title">{selectedTask.content.title || selectedTask.content.id}</div><div className="task-desc">成品 {selectedTask.content.id}</div></div><button className="btn sm" onClick={() => navigate("production", "pipeline", { type: "content", id: selectedTask.content!.id })}>定位成品</button></div>}
+          <div className="tiny" style={{ fontWeight: 700, marginTop: 10 }}>执行尝试记录</div>
+          {selectedTask.attempts.map((attempt) => <div className="task-row" key={attempt.id}><div className="task-main"><div className="task-title">第 {attempt.attempt_no} 次 · {STATUS_LABEL[attempt.status] ?? attempt.status} · {attempt.worker_id || "执行器未知"}</div><div className="task-desc">{attempt.started_at} → {attempt.finished_at || "未结束"}</div>{attempt.error_message && <div className="task-desc">{attempt.error_code}: {attempt.error_message}</div>}{attempt.output_content_id && <div className="task-desc">输出成品：{attempt.output_content_id}</div>}</div></div>)}
+          {["failed", "pending"].includes(selectedTask.task.status) && <button className="btn sm" disabled={taskBusy} onClick={async () => { const ok = window.confirm("确认已检查相关内容成品及外部平台，确定没有未完成的外部副作用？如果已存在成品，系统会优先关联而不会重新生成。"); if (!ok) return; setTaskBusy(true); try { await api.recoverProductionTask(selectedTask.task.id, true); setSelectedTask(await api.productionTask(selectedTask.task.id)); await load(); } catch (err) { setTaskError(err instanceof Error ? err.message : String(err)); } finally { setTaskBusy(false); } }}>人工核实并恢复任务</button>}
+        </div>}
       </div>
       <div className="panel" style={{ padding: 12, marginBottom: 12 }}>
         <div className="panel-title">内容效果汇总</div>
