@@ -81,46 +81,60 @@ def reconcile_round_tasks(
 
 
 def reconcile_expired_production_tasks(conn, *, limit: int = 200) -> list[dict[str, Any]]:
-    """Global lease sweeper for historical rounds; safe to call from a scheduler."""
+    """Global lease sweeper for historical rounds; safe to call from a scheduler.
+
+    Hold a SQLite write reservation from selection through reconciliation. Otherwise
+    a worker could renew its lease after selection but before fail_task(), and the
+    sweeper would incorrectly fail a live task based on a stale lease snapshot.
+    """
     now = _utc_stamp()
-    rows = conn.execute(
-        """SELECT id,round_id FROM production_tasks
-           WHERE status='running' AND lease_expires_at IS NOT NULL
-             AND lease_expires_at<=?
-           ORDER BY lease_expires_at,id LIMIT ?""",
-        (now, max(1, min(int(limit), 1000))),
-    ).fetchall()
+    owns_transaction = not conn.in_transaction
+    if owns_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     store = ProductionTaskStore(conn)
     outcomes: list[dict[str, Any]] = []
-    for row in rows:
-        task_id = str(row["id"])
-        try:
-            artifact = store.get_content_for_task(task_id)
-            if artifact is not None:
-                store.complete_task(task_id, content_id=str(artifact["id"]))
-                outcomes.append({"task_id": task_id, "round_id": int(row["round_id"]), "action": "adopted_content"})
-            else:
-                store.fail_task(
-                    task_id,
-                    error_code="lease_expired_requires_review",
-                    error_message=(
-                        "生产任务租约已过期且未找到已落库成品；可能存在未确认的图片/API副作用，"
-                        "需人工核实后才能显式重试"
-                    ),
-                    retryable=False,
-                )
-                outcomes.append({
-                    "task_id": task_id,
-                    "round_id": int(row["round_id"]),
-                    "action": "manual_review_required",
-                })
-        except ProductionTaskError:
-            # A concurrent worker may have completed/claimed the task after selection.
-            logger.info("跳过已并发迁移的过期生产任务 task=%s", task_id)
-        except Exception:
-            logger.exception("历史生产任务租约恢复失败 task=%s", task_id)
-            outcomes.append({"task_id": task_id, "round_id": int(row["round_id"]), "action": "reconciliation_failed"})
-    return outcomes
+    try:
+        rows = conn.execute(
+            """SELECT id,round_id FROM production_tasks
+               WHERE status='running' AND lease_expires_at IS NOT NULL
+                 AND lease_expires_at<=?
+               ORDER BY lease_expires_at,id LIMIT ?""",
+            (now, max(1, min(int(limit), 1000))),
+        ).fetchall()
+        for row in rows:
+            task_id = str(row["id"])
+            try:
+                artifact = store.get_content_for_task(task_id)
+                if artifact is not None:
+                    store.complete_task(task_id, content_id=str(artifact["id"]))
+                    outcomes.append({"task_id": task_id, "round_id": int(row["round_id"]), "action": "adopted_content"})
+                else:
+                    store.fail_task(
+                        task_id,
+                        error_code="lease_expired_requires_review",
+                        error_message=(
+                            "生产任务租约已过期且未找到已落库成品；可能存在未确认的图片/API副作用，"
+                            "需人工核实后才能显式重试"
+                        ),
+                        retryable=False,
+                    )
+                    outcomes.append({
+                        "task_id": task_id,
+                        "round_id": int(row["round_id"]),
+                        "action": "manual_review_required",
+                    })
+            except ProductionTaskError:
+                logger.info("跳过已并发迁移的过期生产任务 task=%s", task_id)
+            except Exception:
+                logger.exception("历史生产任务租约恢复失败 task=%s", task_id)
+                outcomes.append({"task_id": task_id, "round_id": int(row["round_id"]), "action": "reconciliation_failed"})
+        if owns_transaction:
+            conn.commit()
+        return outcomes
+    except Exception:
+        if owns_transaction and conn.in_transaction:
+            conn.rollback()
+        raise
 
 
 def recover_production_task(
