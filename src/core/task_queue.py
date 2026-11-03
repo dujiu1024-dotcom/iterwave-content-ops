@@ -115,6 +115,10 @@ class GlobalTaskQueue:
                 );
                 CREATE INDEX IF NOT EXISTS idx_global_task_queue_tenant
                     ON global_task_queue(tenant_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_global_task_queue_created_at
+                    ON global_task_queue(created_at);
+                CREATE INDEX IF NOT EXISTS idx_global_task_queue_tenant_type_created
+                    ON global_task_queue(tenant_id, task_type, created_at);
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_global_task_active_aggregate
                     ON global_task_queue(tenant_id, task_type, aggregate_id)
                     WHERE aggregate_id IS NOT NULL AND status IN ('queued','running');
@@ -841,18 +845,28 @@ class GlobalTaskQueue:
     def dispatch_summary(
         self, *, date_from: str | None = None, date_to: str | None = None,
         tenant_id: str | None = None, task_type: str | None = None,
+        status: str | None = None,
     ) -> dict[str, Any]:
         """Return bounded aggregate metrics and daily trends without loading task payloads."""
+        from datetime import date, timedelta
         if date_from and date_to and date_from > date_to:
             raise ValueError("date_from cannot be later than date_to")
         where = ["1=1"]
         params: list[object] = []
         if date_from is not None:
-            where.append("substr(created_at, 1, 10) >= ?")
+            try:
+                date.fromisoformat(date_from)
+            except ValueError as exc:
+                raise ValueError("date_from must be YYYY-MM-DD") from exc
+            where.append("created_at >= ?")
             params.append(date_from)
         if date_to is not None:
-            where.append("substr(created_at, 1, 10) <= ?")
-            params.append(date_to)
+            try:
+                date_to_value = date.fromisoformat(date_to)
+            except ValueError as exc:
+                raise ValueError("date_to must be YYYY-MM-DD") from exc
+            where.append("created_at < ?")
+            params.append((date_to_value + timedelta(days=1)).isoformat())
         if tenant_id is not None:
             where.append("tenant_id = ?")
             params.append(tenant_id)
@@ -861,6 +875,12 @@ class GlobalTaskQueue:
                 raise ValueError("task_type is invalid")
             where.append("task_type = ?")
             params.append(task_type)
+        allowed_statuses = {"queued", "running", "succeeded", "failed", "cancelled", "interrupted"}
+        if status is not None:
+            if status not in allowed_statuses:
+                raise ValueError("status is invalid")
+            where.append("status = ?")
+            params.append(status)
         clause = " AND ".join(where)
         conn = self._connect()
         try:
@@ -898,7 +918,7 @@ class GlobalTaskQueue:
                     if duration and duration["avg_seconds"] is not None else None
                 ),
                 "filters": {"date_from": date_from, "date_to": date_to,
-                            "tenant_id": tenant_id, "task_type": task_type},
+                            "tenant_id": tenant_id, "task_type": task_type, "status": status},
             }
         finally:
             conn.close()

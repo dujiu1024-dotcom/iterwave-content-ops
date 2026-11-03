@@ -13,6 +13,7 @@ export default function TaskDispatchMetrics() {
   const [dateTo, setDateTo] = useState("");
   const [tenantId, setTenantId] = useState("");
   const [taskType, setTaskType] = useState("");
+  const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -25,6 +26,7 @@ export default function TaskDispatchMetrics() {
         dateTo: dateTo || undefined,
         tenantId: tenantId.trim() || undefined,
         taskType: taskType || undefined,
+        status: status || undefined,
       });
       setSummary(result);
     } catch (err) {
@@ -58,8 +60,14 @@ export default function TaskDispatchMetrics() {
           <option value="round_run">内容生产</option>
           <option value="scheduler_job">账号组后台任务</option>
         </select>
+        <select aria-label="任务状态" value={status} onChange={(event) => setStatus(event.target.value)}>
+          <option value="">全部状态</option>
+          <option value="queued">等待执行</option><option value="running">执行中</option>
+          <option value="succeeded">已完成</option><option value="failed">执行失败</option>
+          <option value="cancelled">已取消</option><option value="interrupted">异常中断</option>
+        </select>
         <button className="btn sm soft" type="button" onClick={() => {
-          setDateFrom(""); setDateTo(""); setTenantId(""); setTaskType("");
+          setDateFrom(""); setDateTo(""); setTenantId(""); setTaskType(""); setStatus("");
           setLoading(true);
           void api.taskQueueSummary().then(setSummary).then(() => setError("")).catch((err) => setError((err as Error).message || "任务统计加载失败")).finally(() => setLoading(false));
         }}>

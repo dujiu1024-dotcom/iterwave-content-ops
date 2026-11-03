@@ -821,3 +821,19 @@ def test_dispatch_summary_rejects_reversed_date_range(tmp_path):
     import pytest
     with pytest.raises(ValueError, match="date_from"):
         queue.dispatch_summary(date_from="2026-11-03", date_to="2026-11-02")
+
+
+def test_dispatch_summary_can_filter_by_status(tmp_path):
+    queue = make_queue(tmp_path)
+    queued, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={})
+    completed, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={})
+    conn = queue._connect()
+    try:
+        conn.execute("UPDATE global_task_queue SET status='succeeded' WHERE task_id=?", (completed.task_id,))
+    finally:
+        conn.close()
+
+    summary = queue.dispatch_summary(status="queued")
+    assert summary["total"] == 1
+    assert summary["by_status"]["queued"] == 1
+    assert summary["filters"]["status"] == "queued"
