@@ -45,7 +45,7 @@ export interface GlobalTaskQueueSummary {
   by_status: { queued: number; running: number; succeeded: number; failed: number; cancelled: number; interrupted: number };
   daily: Array<{ date: string; total: number; succeeded: number; failed: number }>;
   average_duration_seconds: number | null;
-  filters: { date_from: string | null; date_to: string | null; tenant_id: string | null; task_type: string | null };
+  filters: { date_from: string | null; date_to: string | null; tenant_id: string | null; task_type: string | null; status: string | null };
 }
 
 export interface GlobalTaskQueueResponse {
@@ -1646,12 +1646,13 @@ export const api = {
     fetchJson<{ updated: Record<string, number | null>; goals: Goal[]; summary: GoalSummary }>(
       "/api/goals/progress/refresh", { method: "POST" },
     ),
-  taskQueueSummary: (params: { dateFrom?: string; dateTo?: string; tenantId?: string; taskType?: string } = {}) => {
+  taskQueueSummary: (params: { dateFrom?: string; dateTo?: string; tenantId?: string; taskType?: string; status?: string } = {}) => {
     const query = new URLSearchParams();
     if (params.dateFrom) query.set("date_from", params.dateFrom);
     if (params.dateTo) query.set("date_to", params.dateTo);
     if (params.tenantId) query.set("tenant_id", params.tenantId);
     if (params.taskType) query.set("task_type", params.taskType);
+    if (params.status) query.set("status", params.status);
     const suffix = query.toString();
     return fetchJson<GlobalTaskQueueSummary>(`/api/task-queue/summary${suffix ? `?${suffix}` : ""}`);
   },
