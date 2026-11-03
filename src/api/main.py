@@ -6641,7 +6641,7 @@ def _register_routes(app: FastAPI) -> None:
             cover_image = render_ai_background(
                 cover_text, model=settings["model"], size=settings["size"],
                 cfg=cfg, platform=platform, kind="cover",
-                allow_fallback=settings["fallback_enabled"],
+                allow_fallback=settings.get("fallback_enabled", True),
             )
             for lines in pages:
                 prompt = body_page_prompt(title, subtitle, lines)
@@ -6650,7 +6650,7 @@ def _register_routes(app: FastAPI) -> None:
                 body_images.append(render_ai_background(
                     prompt, model=settings["model"], size=settings["size"],
                     cfg=cfg, platform=platform,
-                    allow_fallback=settings["fallback_enabled"],
+                    allow_fallback=settings.get("fallback_enabled", True),
                 ))
         try:
             paths = make_card_set(
