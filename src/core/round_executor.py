@@ -1035,7 +1035,9 @@ class RoundExecutor:
                     )
                     existing = task_store.get_content_for_task(task["id"])
                     if existing is not None:
-                        if task["status"] == "running":
+                        if task["status"] == "succeeded":
+                            pass
+                        elif task["status"] == "running":
                             task_store.complete_task(task["id"], content_id=str(existing["id"]))
                         elif task["status"] in {"pending", "failed"}:
                             if task["status"] == "failed":
