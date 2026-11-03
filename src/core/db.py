@@ -506,8 +506,27 @@ class LockedConnection:
     def raw(self) -> sqlite3.Connection:
         return self._conn
 
+    def _acquire_lock(self, timeout: float = 10.0) -> None:
+        """Bound lock waits so a leaked transaction cannot freeze API workers forever."""
+        if not self._lock.acquire(timeout=timeout):
+            raise TimeoutError(
+                f"SQLite connection lock wait exceeded {timeout:.1f}s"
+            )
+
+    def rollback_if_open(self, timeout: float = 2.0) -> bool:
+        """Best-effort request-finalizer safety net for an abandoned SQLite transaction."""
+        self._acquire_lock(timeout=timeout)
+        try:
+            if not self._conn.in_transaction:
+                return False
+            self._conn.rollback()
+            object.__setattr__(self, "_transaction_owner", None)
+            return True
+        finally:
+            self._lock.release()
+
     def _run_locked(self, operation):
-        self._lock.acquire()
+        self._acquire_lock()
         owner = _threading.get_ident()
         retain_current = False
         release_retained = False
