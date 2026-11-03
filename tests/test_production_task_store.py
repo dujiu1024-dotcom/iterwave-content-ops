@@ -217,7 +217,8 @@ def test_cancel_and_expired_lease_recovery(store):
         now="2999-01-01T00:00:00+00:00", round_id=7
     )
     assert recovered == [task["id"]]
-    assert store.get_task(task["id"])["status"] == "pending"
+    assert store.get_task(task["id"])["status"] == "failed"
+    assert store.get_task(task["id"])["error_code"] == "lease_expired_requires_review"
     store.cancel_task(task["id"], reason="stop")
     assert store.get_task(task["id"])["status"] == "cancelled"
 
