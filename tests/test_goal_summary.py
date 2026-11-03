@@ -187,3 +187,43 @@ def test_rate_metric_current_value_in_percent(client, conn):
     value = GoalProgressUpdater(api_main._g_ctx["cfg"], conn).update_goal(row)
     assert value == pytest.approx(3.8)
     assert GoalProgressUpdater.rate_for(conn.execute("SELECT * FROM goals WHERE id='ir'").fetchone()) == pytest.approx(95.0)
+
+
+
+def test_goal_metric_period_includes_full_business_day_for_utc_and_legacy_rows(cfg, conn):
+    from src.core.goal_progress import GoalProgressUpdater
+
+    cfg.business_timezone = "Asia/Shanghai"
+    _insert_goal(
+        conn, "business-day", metric="likes", target=1000, scope="total",
+        start="2026-11-03", end="2026-11-03",
+    )
+    conn.execute("PRAGMA foreign_keys=OFF")
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(metrics)").fetchall()}
+    required = [
+        row for row in conn.execute("PRAGMA table_info(metrics)").fetchall()
+        if row[3] and row[4] is None and not row[5]
+    ]
+    samples = [
+        ("2026-11-02T15:59:59+00:00", 1),   # before Shanghai business day
+        ("2026-11-02T16:00:00+00:00", 20),  # start, UTC-aware
+        ("2026-11-03T15:59:59+00:00", 30),  # end, UTC-aware
+        ("2026-11-03T16:00:00+00:00", 2),   # next business day
+        ("2026-11-03 00:00:00", 50),        # legacy local start
+        ("2026-11-03 23:59:59", 60),        # legacy local end
+        ("2026-11-04 00:00:00", 3),         # legacy next business day
+    ]
+    for fetched_at, likes in samples:
+        values = {"platform": "xhs", "likes": likes, "fetch_status": "success", "fetched_at": fetched_at}
+        for column in required:
+            values.setdefault(column[1], "x")
+        selected = {key: value for key, value in values.items() if key in cols}
+        conn.execute(
+            f"INSERT INTO metrics ({','.join(selected)}) VALUES ({','.join('?' for _ in selected)})",
+            list(selected.values()),
+        )
+    conn.commit()
+
+    goal = conn.execute("SELECT * FROM goals WHERE id='business-day'").fetchone()
+    value = GoalProgressUpdater(cfg, conn).update_goal(goal)
+    assert value == 160

@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "default_style": "knowledge_infographic",
+  "default_font": "Noto Sans CJK SC",
+  "default_component_style": "card",
+  "styles": [
+    {
+      "key": "knowledge_infographic",
+      "label": "知识信息图",
+      "note": "结构清晰，适合步骤、知识点和数据",
+      "palette": {
+        "bg": "#F3F5F7",
+        "fg": "#17212B",
+        "accent": "#2563EB",
+        "muted": "#526171"
+      },
+      "dark": false
+    },
+    {
+      "key": "editorial_magazine",
+      "label": "杂志编辑",
+      "note": "编辑感排版，适合观点与深度内容",
+      "palette": {
+        "bg": "#F4F0E8",
+        "fg": "#25231F",
+        "accent": "#A34F36",
+        "muted": "#6F685F"
+      },
+      "dark": false
+    },
+    {
+      "key": "business_poster",
+      "label": "商业海报",
+      "note": "强调标题与行动信息",
+      "palette": {
+        "bg": "#101827",
+        "fg": "#FFFFFF",
+        "accent": "#F2B84B",
+        "muted": "#D2D8E2"
+      },
+      "dark": true
+    },
+    {
+      "key": "lifestyle",
+      "label": "生活方式",
+      "note": "轻量、舒展，适合生活方式内容",
+      "palette": {
+        "bg": "#F2EEE8",
+        "fg": "#34332F",
+        "accent": "#66816D",
+        "muted": "#77766E"
+      },
+      "dark": false
+    }
+  ],
+  "fonts": [
+    {
+      "family": "Noto Sans CJK SC",
+      "label": "Noto Sans CJK SC（思源黑体，开源）",
+      "accepted_matches": [
+        "noto sans cjk sc"
+      ]
+    },
+    {
+      "family": "Source Han Sans SC",
+      "label": "Source Han Sans SC（思源黑体，开源）",
+      "accepted_matches": [
+        "source han sans sc",
+        "noto sans cjk sc"
+      ]
+    },
+    {
+      "family": "Microsoft YaHei",
+      "label": "Microsoft YaHei（需宿主机自备授权）",
+      "accepted_matches": [
+        "microsoft yahei"
+      ]
+    }
+  ],
+  "component_styles": [
+    {
+      "key": "card",
+      "label": "卡片式"
+    },
+    {
+      "key": "minimal",
+      "label": "极简式"
+    },
+    {
+      "key": "editorial",
+      "label": "编辑式"
+    }
+  ]
+}

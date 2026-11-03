@@ -2,6 +2,8 @@
 
 // Platform 类型 + 元数据：唯一来源在 platforms.ts
 import type { Platform as _Platform } from "./platforms";
+import { clientErrorMessage } from "./api-error";
+export { clientErrorMessage } from "./api-error";
 export type Platform = _Platform;
 export { platformMeta, PLATFORM_META, ALL_PLATFORMS } from "./platforms";
 
@@ -36,6 +38,48 @@ export interface GlobalTaskQueueItem {
   resolution_actor?: string | null;
   resolution_note?: string | null;
   resolution_at?: string | null;
+}
+
+export interface GlobalTaskQueueAuditItem {
+  id: number;
+  task_id: string;
+  action: string;
+  actor: string;
+  acted_at: string;
+  details: Record<string, unknown>;
+}
+
+export interface GlobalTaskQueueDetail {
+  task_id: string;
+  queue_order: number;
+  task_type: string;
+  tenant_id: string;
+  aggregate_id: string | null;
+  round_number: number | null;
+  status: GlobalTaskQueueItem["status"];
+  created_at: string;
+  available_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  attempts: number;
+  error_code: string | null;
+  error_message: string | null;
+  retry_of_task_id: string | null;
+  retry_confirmed_by: string | null;
+  retry_confirmation_note: string | null;
+  resolution_action: "handled" | "ignored" | null;
+  resolution_actor: string | null;
+  resolution_note: string | null;
+  resolution_at: string | null;
+  execution_log: Array<{ step: string; status: string; detail: string }>;
+}
+
+export interface GlobalTaskQueueSummary {
+  total: number;
+  by_status: { queued: number; running: number; succeeded: number; failed: number; cancelled: number; interrupted: number };
+  daily: Array<{ date: string; total: number; succeeded: number; failed: number }>;
+  average_duration_seconds: number | null;
+  filters: { date_from: string | null; date_to: string | null; tenant_id: string | null; task_type: string | null; status: string | null };
 }
 
 export interface GlobalTaskQueueResponse {
@@ -1096,6 +1140,28 @@ export interface AutogrowStatus {
   recent_runs: { id: number; ran_at: string; action: string; reason: string; round_id: number | null }[];
 }
 
+export interface MasterPlanVersion {
+  id: number; version_no: number; status: string; plan_snapshot: string;
+  plan_signature: string; created_at: string; reviewed_at?: string | null;
+}
+export interface SubPlanStageRecord {
+  id: number; sub_plan_version_id: number; stage_key: string; stage_order: number; title: string;
+  direction: string; target_count: number; start_date: string | null; end_date: string | null;
+  completion_condition: string; status: "pending" | "in_progress" | "completed" | "paused" | "cancelled";
+  notes: string; confirmed_published_count?: number;
+}
+export interface SubPlanVersionRecord {
+  id: number; sub_plan_id: string; version_no: number; master_plan_version_id: number;
+  status: string; snapshot: Record<string, unknown>; stages: SubPlanStageRecord[];
+}
+export interface SubPlanRecord {
+  id: string; master_plan_version_id: number; platform: Platform; title: string;
+  status: string; current_version_id: number | null; current_version_no?: number | null;
+  current_version_status?: string | null; master_version_status?: string | null;
+}
+export interface SubPlanDetail {
+  subplan: SubPlanRecord; versions: SubPlanVersionRecord[];
+}
 export interface PlanSignatureHistory {
   plan_signature: string;
   plan_snapshot: MasterPlan | string;
@@ -1154,6 +1220,17 @@ export interface ContentItem {
   review_rejected: boolean;
   review_rejection_reason: string | null;
 }
+
+export interface ReviewQueueItem {
+  id: string; round_id: number | null; round_number: number | null; round_status: string | null;
+  topic_id: string | null; platform: Platform; title: string; body: string; tags: string[]; image_count: number; guard_outcome: string | null;
+  guard_reason: string | null; review_rejected: boolean; review_rejection_reason: string | null;
+  created_at: string; draft_id: string; draft_status: string; draft_error: string | null;
+  saved_at: string | null; scheduled_publish_at: string | null;
+  review_status: "pending" | "approved" | "rejected";
+  review_history: { override_field: string; reason: string; overridden_by: string; overridden_at: string; override_value: string }[];
+}
+export interface ReviewQueuePage { items: ReviewQueueItem[]; total: number; page: number; page_size: number; pages: number; }
 
 export interface RecheckResult {
   id: string;
@@ -1447,39 +1524,6 @@ async function ensureTenantContext(): Promise<void> {
   await tenantContextInitialization;
 }
 
-/**
- * 错误提示透传规则：后端写好的中文业务提示（包括 5xx，如「图片生成服务暂时不可用…」）原样展示；
- * 仅当 detail 为空，或含堆栈、源码/绝对路径、URL、token/密钥、驱动异常类名等内部特征时，
- * 才替换为通用提示，避免内部诊断信息泄露到浏览器。
- */
-const INTERNAL_DETAIL_PATTERNS: RegExp[] = [
-  /\btraceback\b/i,
-  /File ["'][^"']+["'], line \d+/i,
-  /\.(?:py|pyc|db|sqlite3?|ya?ml|env|log|ini|toml)\b(?::\d+)?/i,
-  /(?:^|[\s"'(=:])\/(?:home|root|tmp|var|usr|opt|etc|srv|app|workspace|Users|private|data)\//,
-  /\b[A-Za-z]:\\[^\s]/,
-  /\b(?:https?|wss?|ftp|file|sqlite|postgres(?:ql)?|mysql|redis):\/\/\S+/i,
-  /\b(?:bearer|authorization)\b\s*[:=]?\s*[A-Za-z0-9._~+/-]{8,}/i,
-  /\b(?:api[_-]?key|access[_-]?token|secret|password|passwd|token)\s*[:=]\s*\S+/i,
-  /\b(?:sk|ak|ghp|gho|xox[abp])-[A-Za-z0-9_-]{8,}/,
-  /\b[A-Za-z0-9_]{40,}\b/,
-  /\b[A-Z][A-Z0-9]*_(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|URL)\b/,
-  /\b(?:sqlite3|sqlalchemy|psycopg2?|pymysql)\.|\b(?:OperationalError|ProgrammingError|IntegrityError|KeyError|TypeError|ValueError|AttributeError|RuntimeError|Exception)\b/,
-  /constraint failed|no such (?:table|column)|database is locked/i,
-  /<\/?(?:html|body|head|title)\b/i,
-];
-
-/** 把后端错误 detail 转成可展示给用户的提示（导出以便单测/复用）。 */
-export function clientErrorMessage(status: number, rawDetail: string | null | undefined): string {
-  const detail = (rawDetail ?? "").trim();
-  const generic = status >= 500
-    ? "服务暂时不可用，请稍后重试"
-    : "操作失败，内部诊断信息已记录，请检查配置或联系管理员";
-  if (!detail) return status >= 500 ? generic : "请求失败，请稍后重试";
-  if (INTERNAL_DETAIL_PATTERNS.some((re) => re.test(detail))) return generic;
-  return detail;
-}
-
 async function fetchJson<T>(path: string, options?: RequestInit): Promise<T> {
   const method = (options?.method || "GET").toUpperCase();
   if (method !== "GET" && !path.startsWith("/api/auth/")) {
@@ -1586,6 +1630,42 @@ export interface WeeklyReport {
   data_conflicts?: { platform: Platform; content_id: string; metrics: string[]; selected_sources: Record<string, string> }[];
 }
 
+export interface VisualBrandProfile {
+  /** 风格键，可选值来自 GET /api/visual/catalog（不在前端写死） */
+  style_key?: string;
+  brand_name?: string;
+  primary_color?: string;
+  secondary_color?: string;
+  background_color?: string;
+  text_color?: string;
+  component_style?: string;
+  font_family?: string;
+  footer?: string;
+  forbidden_styles?: string[];
+}
+export interface VisualCatalog {
+  version: number;
+  default_style: string;
+  default_font: string;
+  default_component_style: string;
+  styles: Array<{ key: string; label: string; note: string; dark: boolean;
+    palette: { bg: string; fg: string; accent: string; muted: string } }>;
+  fonts: Array<{ family: string; label: string; installed: boolean; matched: string }>;
+  component_styles: Array<{ key: string; label: string }>;
+}
+export interface VisualUsageSummary {
+  scanned_rounds: number;
+  totals: { generation_count: number; bytes: number; elapsed_ms: number; items: number };
+  by_platform: Array<{ platform: string; generation_count: number; bytes: number; elapsed_ms: number; items: number }>;
+  recent: Array<{ round_id: number | null; round_number: number | null; topic_id: string; platform: string;
+    generation_count: number; bytes: number; elapsed_ms: number; ocr_status: string;
+    review_status: string; review_score: number | null }>;
+}
+export interface VisualVersionHistory {
+  id: number; version: number; content_hash: string; renderer: string;
+  style_key: string; status: string; created_at: string;
+  design: { pages?: Array<{ page_index: number; image_url: string | null; can_revise?: boolean }> };
+}
 export const api = {
   status: () => fetchJson<SystemStatus>("/api/status"),
   goals: () => fetchJson<Goal[]>("/api/goals"),
@@ -1615,9 +1695,24 @@ export const api = {
     fetchJson<{ updated: Record<string, number | null>; goals: Goal[]; summary: GoalSummary }>(
       "/api/goals/progress/refresh", { method: "POST" },
     ),
-  taskQueue: (params: { scope?: "all" | "active" | "history" | "failed"; page?: number; pageSize?: number; taskType?: string; tenantId?: string; errorKeyword?: string; dateFrom?: string; dateTo?: string } = {}) => {
+  taskQueueDetail: (taskId: string) =>
+    fetchJson<GlobalTaskQueueDetail>(`/api/task-queue/${encodeURIComponent(taskId)}`),
+  taskQueueAudit: (taskId: string) =>
+    fetchJson<{ items: GlobalTaskQueueAuditItem[] }>(`/api/task-queue/${encodeURIComponent(taskId)}/audit`),
+  taskQueueSummary: (params: { dateFrom?: string; dateTo?: string; tenantId?: string; taskType?: string; status?: string } = {}) => {
+    const query = new URLSearchParams();
+    if (params.dateFrom) query.set("date_from", params.dateFrom);
+    if (params.dateTo) query.set("date_to", params.dateTo);
+    if (params.tenantId) query.set("tenant_id", params.tenantId);
+    if (params.taskType) query.set("task_type", params.taskType);
+    if (params.status) query.set("status", params.status);
+    const suffix = query.toString();
+    return fetchJson<GlobalTaskQueueSummary>(`/api/task-queue/summary${suffix ? `?${suffix}` : ""}`);
+  },
+  taskQueue: (params: { scope?: "all" | "active" | "history" | "failed" | "filtered"; status?: GlobalTaskQueueItem["status"]; page?: number; pageSize?: number; taskType?: string; tenantId?: string; errorKeyword?: string; dateFrom?: string; dateTo?: string } = {}) => {
     const query = new URLSearchParams();
     if (params.scope) query.set("scope", params.scope);
+    if (params.status) query.set("status", params.status);
     if (params.page != null) query.set("page", String(params.page));
     if (params.pageSize != null) query.set("page_size", String(params.pageSize));
     if (params.taskType) query.set("task_type", params.taskType);
@@ -1779,12 +1874,71 @@ export const api = {
   /** 待处理/阻塞事项（Dashboard KPI + 待我处理列表用） */
   actionItems: () =>
     fetchJson<{ items: ActionItem[]; total: number }>("/api/action_items"),
+  createPlanDraft: (plan: MasterPlan) =>
+    fetchJson<{ draft: MasterPlanVersion; requires_review: true; effective: false }>("/api/plans", {
+      method: "POST", body: JSON.stringify({
+        topic_count_per_platform: plan.topic_count_per_platform,
+        enabled_platforms: plan.enabled_platforms,
+        dimension_allocation: plan.dimension_allocation,
+        content_format: plan.content_format,
+        per_platform: plan.per_platform ?? {},
+        cadence: plan.cadence ?? {},
+      }),
+    }),
+  reviewMasterPlan: (versionId: number, action: "approve" | "reject", reason?: string) =>
+    fetchJson<{ version?: MasterPlanVersion; version_id?: number; status?: string; effective: boolean }>(
+      `/api/plans/${versionId}/review`, { method: "POST", body: JSON.stringify({ action, reason }) },
+    ),
+  planVersions: (limit = 100) =>
+    fetchJson<{ items: MasterPlanVersion[] }>(`/api/plans/versions?limit=${limit}`),
+  subplans: (params: { masterPlanVersionId?: number; platform?: Platform; status?: string; page?: number; pageSize?: number } = {}) => {
+    const query = new URLSearchParams();
+    if (params.masterPlanVersionId != null) query.set("master_plan_version_id", String(params.masterPlanVersionId));
+    if (params.platform) query.set("platform", params.platform);
+    if (params.status) query.set("status", params.status);
+    if (params.page != null) query.set("page", String(params.page));
+    if (params.pageSize != null) query.set("page_size", String(params.pageSize));
+    return fetchJson<{ items: SubPlanRecord[]; total: number; page: number; page_size: number; pages: number }>(
+      `/api/subplans${query.size ? `?${query.toString()}` : ""}`,
+    );
+  },
+  subplan: (id: string) => fetchJson<SubPlanDetail>(`/api/subplans/${encodeURIComponent(id)}`),
+  createSubplan: (data: { master_plan_version_id: number; platform: Platform; title: string; snapshot: Record<string, unknown>; stages: Array<Partial<SubPlanStageRecord> & { title: string; target_count: number }> }) =>
+    fetchJson<{ subplan: SubPlanRecord; draft: SubPlanVersionRecord }>("/api/subplans", {
+      method: "POST", body: JSON.stringify(data),
+    }),
+  updateSubplan: (id: string, data: { based_on_version_id: number; expected_version_no: number; snapshot: Record<string, unknown>; stages: Array<Partial<SubPlanStageRecord> & { title: string; target_count: number }>; change_note?: string }) =>
+    fetchJson<SubPlanVersionRecord>(`/api/subplans/${encodeURIComponent(id)}`, {
+      method: "PATCH", body: JSON.stringify(data),
+    }),
+  addSubplanStage: (id: string, data: { based_on_version_id: number; expected_version_no: number; stage: { title: string; direction?: string; target_count: number; start_date?: string | null; end_date?: string | null; completion_condition?: string; notes?: string } }) =>
+    fetchJson<SubPlanVersionRecord>(`/api/subplans/${encodeURIComponent(id)}/stages`, {
+      method: "POST", body: JSON.stringify(data),
+    }),
+  editSubplanStage: (id: string, stageId: number, data: { based_on_version_id: number; expected_version_no: number; stage: Partial<SubPlanStageRecord> }) =>
+    fetchJson<SubPlanVersionRecord>(`/api/subplans/${encodeURIComponent(id)}/stages/${stageId}`, {
+      method: "PATCH", body: JSON.stringify(data),
+    }),
+  deleteSubplanStage: (id: string, stageId: number, versionId: number, versionNo: number) =>
+    fetchJson<SubPlanVersionRecord>(`/api/subplans/${encodeURIComponent(id)}/stages/${stageId}?based_on_version_id=${versionId}&expected_version_no=${versionNo}`, {
+      method: "DELETE",
+    }),
+  reviewSubplan: (id: string, versionId: number, action: "approve" | "reject", reason?: string) =>
+    fetchJson<{ version: SubPlanVersionRecord; authorization: string }>(`/api/subplans/${encodeURIComponent(id)}/review`, {
+      method: "POST", body: JSON.stringify({ version_id: versionId, action, reason }),
+    }),
+  aiDraftSubplans: (masterPlanVersionId: number, platforms: Platform[]) =>
+    fetchJson<{ items: Array<{ subplan: SubPlanRecord; draft: SubPlanVersionRecord }>; effective: false; requires_human_review: true }>(
+      "/api/subplans/ai-draft", { method: "POST", body: JSON.stringify({ master_plan_version_id: masterPlanVersionId, platforms }) },
+    ),
   /** 复盘「采纳建议」：把缺口维度写回母计划（后端触发 R18 下游失效） */
   adoptGaps: (dimensions: string[]) =>
-    fetchJson<{ signature: string; adopted_dimensions: string[]; stale_rounds: number[] }>(
-      "/api/plan_adjustments/adopt",
-      { method: "POST", body: JSON.stringify({ dimensions }) },
-    ),
+    fetchJson<{
+      drafts: Array<{ sub_plan_id: string; platform: Platform; draft_version: SubPlanVersionRecord; effective: false }>;
+      effective: false; requires_human_review: true; adopted_dimensions: string[]; message: string;
+    }>("/api/plan_adjustments/adopt", {
+      method: "POST", body: JSON.stringify({ dimensions }),
+    }),
   /** 热点 → 选题库（R22：必须有 source + 原文链接） */
   importHotTopic: (payload: { title: string; source: string; url: string; dimension?: string; confirmed_by?: string }) =>
     fetchJson<{ id: string; imported: boolean; message?: string; manual_confirmation_recorded?: boolean }>("/api/hot_topics/import", {
@@ -2208,6 +2362,19 @@ export const api = {
     fetchJson<{ id: string; image_count: number; image_paths: string[] }>(
       `/api/contents/${id}/cards`, { method: "POST" },
     ),
+  reviewQueue: (filters: { status?: string; platform?: Platform | "all"; taskType?: string; from?: string; to?: string; page?: number; pageSize?: number } = {}) => {
+    const p = new URLSearchParams({ page: String(filters.page ?? 1), page_size: String(filters.pageSize ?? 30) });
+    if (filters.status) p.set("status", filters.status);
+    if (filters.platform && filters.platform !== "all") p.set("platform", filters.platform);
+    if (filters.taskType) p.set("task_type", filters.taskType);
+    if (filters.from) p.set("from", filters.from);
+    if (filters.to) p.set("to", filters.to);
+    return fetchJson<ReviewQueuePage>(`/api/review-queue?${p.toString()}`);
+  },
+  approveContent: (id: string, reason = "人工审核通过") =>
+    fetchJson<{ id: string; review_status: "approved"; deduped: boolean }>(
+      `/api/contents/${id}/approve`, { method: "POST", body: JSON.stringify({ reason }) },
+    ),
   rejectContent: (id: string, reason: string) =>
     fetchJson<{
       id: string; affected_drafts: number; review_rejected: boolean;
@@ -2304,5 +2471,21 @@ export const api = {
     outcome?: "success" | "no_effect" | "unclear"; outcome_note?: string }) =>
     fetchJson<{ suggestion_key: string; decision: string; outcome: string; outcome_note?: string | null }>(
       "/api/reports/weekly/actions", { method: "POST", body: JSON.stringify(data) },
+    ),
+  visualUsage: () => fetchJson<VisualUsageSummary>("/api/visual/usage?limit=500"),
+  visualCatalog: () => fetchJson<VisualCatalog>("/api/visual/catalog"),
+  visualBrandProfile: () => fetchJson<{ tenant_id: string; profile: VisualBrandProfile; updated_at: string | null }>("/api/visual/brand-profile"),
+  saveVisualBrandProfile: (profile: VisualBrandProfile) =>
+    fetchJson<{ tenant_id: string; profile: VisualBrandProfile; updated_at: string }>("/api/visual/brand-profile", {
+      method: "PUT", body: JSON.stringify(profile),
+    }),
+  visualVersions: (contentId: string) =>
+    fetchJson<{ content_id: string; versions: VisualVersionHistory[]; jobs: Array<Record<string, unknown>> }>(
+      `/api/contents/${encodeURIComponent(contentId)}/visual-versions`,
+    ),
+  reviseVisualPage: (contentId: string, versionId: number, pageIndex: number, instruction: string) =>
+    fetchJson<{ content_id: string; job_id: string; version_id: number; page_index: number; image_url: string; status: string }>(
+      `/api/contents/${encodeURIComponent(contentId)}/visual-versions/${versionId}/pages/${pageIndex}/revise`,
+      { method: "POST", body: JSON.stringify({ instruction }) },
     ),
 };

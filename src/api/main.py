@@ -37,6 +37,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import inspect
 import io
 import json
 import os
@@ -52,9 +53,8 @@ from typing import Callable, Literal, Optional
 import httpx
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.routing import APIRoute
-import inspect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -64,13 +64,25 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from src.core.config import load_config, get_config, DEFAULT_ENV_PATH
-from src.core.timezone import business_now
+from src.core.timezone import (business_now, business_zone, storage_now, parse_persisted_datetime, storage_window_cutoffs, timestamp_since_sql, timestamp_before_sql, business_date_cutoffs)
 from src.core.config import PROJECT_ROOT
+from src.api.response_utils import (
+    api_datetime as _api_datetime,
+    friendly_validation_messages as _friendly_validation_messages,
+)
+# Keep NotifyRuleRequest in this module namespace: FastAPI resolves the wrapped route signature here.
+from src.api.notify_rules import NotifyRuleRequest, build_notify_rules_router  # noqa: F401
+from src.api.hot_sources import build_hot_sources_router
+from src.api.audit_queries import build_audit_query_router
+from src.api.tenant_skills import build_tenant_skills_router
+from src.api.platform_progress import build_platform_progress_router
+from src.api.tenant_settings import build_tenant_settings_router
+from src.api.action_items import build_action_items_router
+from src.api.platform_styles import build_platform_styles_router
 from src.core.tenant_registry import TenantRegistry, TenantError
 from src.core.task_queue import GlobalTaskQueue, TaskQueueError
-from src.core.task_worker import GlobalTaskWorker
 from src.core.tenant_switch_gate import TenantSwitchGate, TenantSwitchInProgress
-from src.core.db import Database
+from src.core.db import Database, connection_transaction
 from src.core.state_machine import RoundStateMachine, DraftStateMachine
 from src.core.scoring.topic_eval import ScoringEngine, TopicItem
 from src.core.guard.ultimate_goal_checker import UltimateGoalChecker
@@ -102,39 +114,91 @@ from src.adapters import get_adapters
 logger = logging.getLogger(__name__)
 
 
-class TransactionalAPIRoute(APIRoute):
-    """为同步写 API 提供请求级事务边界，异常时自动回滚并释放连接锁。
-
-    认证端点不依赖租户数据库，异步端点因可能跨线程 await 而单独审查，
-    不在此处自动包裹。
-    """
-
-    def __init__(self, path: str, endpoint, **kwargs):
-        methods = {str(method).upper() for method in (kwargs.get("methods") or [])}
-        if (
-            methods.intersection({"POST", "PUT", "PATCH", "DELETE"})
-            and not path.startswith("/api/auth/")
-            and not inspect.iscoroutinefunction(endpoint)
-        ):
-            original = endpoint
-
-            def transactional_endpoint(*args, **call_kwargs):
-                conn = _g_ctx.get("conn")
-                if conn is None:
-                    return original(*args, **call_kwargs)
-                with conn:
-                    return original(*args, **call_kwargs)
-
-            transactional_endpoint.__name__ = getattr(original, "__name__", "transactional_endpoint")
-            transactional_endpoint.__doc__ = getattr(original, "__doc__", None)
-            transactional_endpoint.__annotations__ = getattr(original, "__annotations__", {})
-            transactional_endpoint.__signature__ = inspect.signature(original)
-            endpoint = transactional_endpoint
-        super().__init__(path, endpoint, **kwargs)
-
 # =====================================================================
 # 全局单例（启动时初始化一次）
 # =====================================================================
+
+class TransactionalAPIRoute(APIRoute):
+    """Bound endpoint transactions and clean up implicit writes on endpoint exit."""
+
+    def __init__(self, path: str, endpoint, **kwargs):
+        if (
+            not path.startswith("/api/auth/")
+            and not getattr(endpoint, "_manages_own_transaction", False)
+        ):
+            methods = {str(method).upper() for method in (kwargs.get("methods") or [])}
+            original = endpoint
+            use_request_transaction = (
+                methods.intersection({"POST", "PUT", "PATCH", "DELETE"})
+                and not inspect.iscoroutinefunction(original)
+                and not getattr(original, "_manages_own_transaction", False)
+            )
+            if inspect.iscoroutinefunction(original):
+                async def safe_async_endpoint(*args, **call_kwargs):
+                    conn = _g_ctx.get("conn")
+                    try:
+                        return await original(*args, **call_kwargs)
+                    finally:
+                        _finalize_endpoint_connection(conn, "异步请求")
+                wrapped = safe_async_endpoint
+            else:
+                def safe_sync_endpoint(*args, **call_kwargs):
+                    conn = _g_ctx.get("conn")
+                    try:
+                        if conn is None:
+                            return original(*args, **call_kwargs)
+                        if use_request_transaction:
+                            with conn:
+                                return original(*args, **call_kwargs)
+                        return original(*args, **call_kwargs)
+                    finally:
+                        _finalize_endpoint_connection(conn, "同步请求")
+                wrapped = safe_sync_endpoint
+            wrapped.__name__ = getattr(original, "__name__", "transactional_endpoint")
+            wrapped.__doc__ = getattr(original, "__doc__", None)
+            wrapped.__annotations__ = getattr(original, "__annotations__", {})
+            wrapped.__signature__ = inspect.signature(original)
+            if getattr(original, "_manages_own_transaction", False):
+                wrapped._manages_own_transaction = True
+            endpoint = wrapped
+        super().__init__(path, endpoint, **kwargs)
+
+
+def _finalize_endpoint_connection(conn, label: str) -> None:
+    if conn is None or not hasattr(conn, "rollback_if_open"):
+        return
+    try:
+        if conn.rollback_if_open(timeout=2.0):
+            logger.error("%s结束时发现未关闭的 SQLite 事务，已执行回滚", label)
+    except TimeoutError:
+        logger.error("%s结束时 SQLite 事务回滚兜底超时", label)
+    except Exception:
+        logger.exception("%s结束时 SQLite 事务回滚兜底失败", label)
+
+
+def manages_own_transaction(func):
+    """Mark a route that performs slow external work outside short DB transactions."""
+    if inspect.iscoroutinefunction(func):
+        async def managed_endpoint(*args, **kwargs):
+            conn = _g_ctx.get("conn")
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                _finalize_endpoint_connection(conn, "自主管理事务的异步路由")
+    else:
+        def managed_endpoint(*args, **kwargs):
+            conn = _g_ctx.get("conn")
+            try:
+                return func(*args, **kwargs)
+            finally:
+                _finalize_endpoint_connection(conn, "自主管理事务的同步路由")
+    managed_endpoint.__name__ = getattr(func, "__name__", "managed_endpoint")
+    managed_endpoint.__doc__ = getattr(func, "__doc__", None)
+    managed_endpoint.__annotations__ = getattr(func, "__annotations__", {})
+    managed_endpoint.__signature__ = inspect.signature(func)
+    managed_endpoint._manages_own_transaction = True
+    return managed_endpoint
+
 
 _g_ctx: dict = {}
 _task_queue: GlobalTaskQueue | None = None
@@ -202,7 +266,7 @@ def _resolve_task_round_numbers(registry, tasks) -> dict:
         try:
             try:
                 name = str(registry.get(tenant_id).get("name") or tenant_id)
-            except Exception:  # noqa: BLE001 — 注册表无该账号组时按 id 推导路径
+            except TenantError:  # 注册表缺少该账号组时按 id 推导路径
                 name = tenant_id
             db_file = registry.paths(tenant_id, name=name).db_file
             if not db_file.exists():
@@ -215,7 +279,9 @@ def _resolve_task_round_numbers(registry, tasks) -> dict:
             ).fetchall():
                 if number is not None:
                     resolved[(tenant_id, int(rid))] = int(number)
-        except Exception:  # noqa: BLE001 — 单个账号组不可读不影响队列列表
+        except (TenantError, sqlite3.Error, OSError):
+            # 单个账号组不可读不影响队列列表，但必须留下诊断信息，不能静默吞掉故障。
+            logger.warning("读取账号组轮次编号失败 tenant=%s", tenant_id, exc_info=True)
             continue
         finally:
             if conn is not None:
@@ -406,6 +472,8 @@ def _build_tenant_runtime_context(
             cfg, conn, scoring, guard, adapters, sm_round, sm_draft,
             circuit_breaker=cb, notifier=notifier,
         )
+        # Pin visual profile lookup to this runtime's immutable account-group identity.
+        executor.tenant_id = tenant_id
         goal_progress = GoalProgressUpdater(cfg, conn)
         insights = PlatformInsightsEngine(cfg, conn)
         scheduler.wire(
@@ -576,55 +644,30 @@ async def _switch_tenant_runtime(tenant_id: str) -> dict:
         ) from exc
 
 
-_VALIDATION_FIELD_LABELS = {
-    "platform": "平台标识", "usage_role": "图片用途", "limit": "数量",
-    "tenant_id": "账号组标识", "name": "名称", "path": "文件位置",
-    "email": "邮箱", "url": "链接", "content_id": "内容标识",
-}
-
-
-def _api_datetime(value, *, naive_timezone=timezone.utc):
-    """API 时间统一携带时区；默认历史数据库时间按 UTC 解释，租户目录时间显式传业务时区。"""
-    if not value or not isinstance(value, str):
-        return value
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return value
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=naive_timezone)
-    return parsed.isoformat()
-
-
-def _friendly_validation_messages(errors: list[dict]) -> list[str]:
-    """将 Pydantic 默认英文校验信息转换为稳定的中文提示，不回显校验器原文。"""
-    messages: list[str] = []
-    for error in errors:
-        loc = error.get("loc") or ()
-        field = str(loc[-1]) if loc else ""
-        label = _VALIDATION_FIELD_LABELS.get(field, "请求参数")
-        kind = str(error.get("type") or "")
-        ctx = error.get("ctx") or {}
-        if kind == "missing":
-            reason = "不能为空"
-        elif kind in ("string_pattern_mismatch", "string_type"):
-            reason = "格式不符合要求"
-        elif kind in ("int_parsing", "int_type", "float_parsing", "float_type"):
-            reason = "类型或格式不正确"
-        elif kind in ("greater_than_equal", "greater_than"):
-            bound = ctx.get("ge", ctx.get("gt", "允许范围"))
-            reason = f"不能小于 {bound}" if "ge" in ctx else f"必须大于 {bound}"
-        elif kind in ("less_than_equal", "less_than"):
-            bound = ctx.get("le", ctx.get("lt", "允许范围"))
-            reason = f"不能大于 {bound}" if "le" in ctx else f"必须小于 {bound}"
-        elif kind == "string_too_short":
-            reason = "长度不足"
-        elif kind == "string_too_long":
-            reason = "长度超出限制"
-        else:
-            reason = "内容不符合要求"
-        messages.append(f"{label}：{reason}")
-    return messages or ["请求参数不符合要求"]
+def _persist_activation_sample_results(
+    conn, run_id: str, tenant_id: str, platform: str, results: list[tuple],
+    completed_at: str,
+) -> int:
+    """原子保存三篇体验样稿并将任务从 quality_check 推进到 ready。"""
+    with conn:
+        for angle, title, body, tags, findings in results:
+            conn.execute(
+                "INSERT INTO sample_contents "
+                "(id, sample_run_id, tenant_id, platform, angle, title, body, hashtags_json, "
+                "quality_status, quality_findings_json, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pass', ?, ?, ?)",
+                (uuid.uuid4().hex, run_id, tenant_id, platform, angle, title, body,
+                 json.dumps(tags, ensure_ascii=False), json.dumps(findings, ensure_ascii=False),
+                 completed_at, completed_at),
+            )
+        cursor = conn.execute(
+            "UPDATE sample_runs SET status='ready', completed_at=? "
+            "WHERE id=? AND tenant_id=? AND status='quality_check'",
+            (completed_at, run_id, tenant_id),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("体验任务状态已变化，拒绝提交迟到的样稿结果")
+    return len(results)
 
 
 def _build_app() -> FastAPI:
@@ -646,8 +689,10 @@ def _build_app() -> FastAPI:
         _task_queue = GlobalTaskQueue(tenant_registry.system_db_file)
         _task_queue.initialize()
         _tenant_runtime_contexts.clear()
-        # 当前部署约束为单 Uvicorn worker；启动时上一进程已退出，可立即回收遗留 running。
-        _task_queue.recover_orphaned_running()
+        # 不得无条件清理 running 租约：独立 Worker 需要先检测旧父进程退出。
+        active_tasks, _active_total = _task_queue.list_page(scope="active", page=1, page_size=500)
+        if any(task.status == "running" for task in active_tasks):
+            await asyncio.sleep(2.0)
         _task_queue.recover_expired()
         active_tenant_id = tenant_registry.active_id()
         active_tenant = tenant_registry.get(active_tenant_id)
@@ -847,30 +892,6 @@ def _build_app() -> FastAPI:
                     except Exception:
                         logger.warning("后台上下文数据库连接清理异常", exc_info=True)
 
-        # 多消费者跨账号组并行；队列确保同一账号组同时最多一个运行任务。
-        try:
-            task_worker_count = int(os.getenv("ITERWAVE_TASK_WORKERS", "4"))
-        except (TypeError, ValueError):
-            task_worker_count = 4
-        task_worker_count = max(1, min(task_worker_count, 8))
-        task_worker_stop = asyncio.Event()
-        task_workers = [
-            GlobalTaskWorker(
-                _task_queue,
-                lambda tenant_id: _build_tenant_runtime_context(tenant_registry, tenant_id),
-                reconcile_terminal_rounds=(index == 0),
-            )
-            for index in range(task_worker_count)
-        ]
-        task_worker_tasks = [
-            asyncio.create_task(
-                worker.run(task_worker_stop),
-                name=f"global-tenant-task-worker-{index + 1}",
-            )
-            for index, worker in enumerate(task_workers)
-        ]
-        logger.info("全局任务消费者已启动 count=%d（同租户串行、跨租户并行）", task_worker_count)
-
         # 热点服务是独立资源池；后台线程持有启动时的账号组配置和独立数据库连接。
         from ..core import hot_topic_service
         if cfg.hot_topics.enabled is not False and hot_topic_service.is_stale(cfg, conn):
@@ -880,17 +901,16 @@ def _build_app() -> FastAPI:
 
         logger.info("✅ FastAPI 应用启动完成，%d 个模块已加载", len(_g_ctx))
 
+        from src.core.task_worker_process_manager import TaskWorkerSupervisorProcess
+        task_worker_supervisor = TaskWorkerSupervisorProcess(project_root=PROJECT_ROOT)
         try:
+            task_worker_supervisor.start()
             yield
         finally:
-            task_worker_stop.set()
-            worker_results = await asyncio.gather(*task_worker_tasks, return_exceptions=True)
-            for index, result in enumerate(worker_results, 1):
-                if isinstance(result, BaseException):
-                    logger.error(
-                        "全局任务消费者关闭异常 worker=%d error=%s",
-                        index, type(result).__name__, exc_info=result,
-                    )
+            try:
+                await asyncio.to_thread(task_worker_supervisor.stop)
+            except Exception:
+                logger.exception("全局任务 Watchdog/Worker 进程关闭异常")
             # 停止所有账号组常驻调度器并释放各自的数据库连接。
             for tenant_id, context in list(_tenant_runtime_contexts.items()):
                 try:
@@ -1073,6 +1093,15 @@ def _build_app() -> FastAPI:
                     tracked_request = False
             return response
         finally:
+            conn = _g_ctx.get("conn")
+            if conn is not None and hasattr(conn, "rollback_if_open"):
+                try:
+                    if conn.rollback_if_open(timeout=2.0):
+                        logger.error("请求结束时发现未关闭的 SQLite 事务，已执行回滚 path=%s", path)
+                except TimeoutError:
+                    logger.error("请求结束时 SQLite 事务锁仍被占用，回滚兜底超时 path=%s", path)
+                except Exception:
+                    logger.exception("请求结束时 SQLite 事务回滚兜底失败 path=%s", path)
             if tracked_request:
                 _tenant_switch_gate.leave_request()
 
@@ -1329,47 +1358,6 @@ class CreateRoundRequest(BaseModel):
     content_plan_id: Optional[str] = None
     content_plan_version: Optional[int] = None
 
-class NotifyRuleRequest(BaseModel):
-    scenario: str
-    channel: str
-    level: str
-    enabled: bool = True
-    condition: Optional[str] = None
-    notes: Optional[str] = None
-    platforms: Optional[list[str]] = None
-
-    @field_validator("scenario")
-    @classmethod
-    def _scenario_ok(cls, v: str) -> str:
-        text = v.strip()
-        if not text or len(text) > 64:
-            raise ValueError("scenario 必须是 1-64 字的场景标识")
-        return text
-
-    @field_validator("channel")
-    @classmethod
-    def _channel_enum(cls, v: str) -> str:
-        if v not in ("macos", "wecom", "feishu", "console"):
-            raise ValueError("channel 只能是 macos / wecom / feishu / console")
-        return v
-
-    @field_validator("level")
-    @classmethod
-    def _level_enum(cls, v: str) -> str:
-        if v not in ("info", "warning", "error", "critical"):
-            raise ValueError("level 只能是 info / warning / error / critical")
-        return v
-
-
-class PlatformStyleUpdate(BaseModel):
-    """平台文案风格（platform_styles 表）：只提交改动字段。"""
-
-    title_style: Optional[str] = Field(None, max_length=200)
-    body_style: Optional[str] = Field(None, max_length=200)
-    tone: Optional[str] = Field(None, max_length=200)
-    hashtags: Optional[list[str]] = Field(None, max_length=10)
-
-
 class PublishConfirmRequest(BaseModel):
     """发布确认补充：笔记链接；质检/人工审核/平台版本异常均需单独说明例外原因。"""
 
@@ -1552,20 +1540,50 @@ def _parse_schedule_time(raw: str) -> str:
 def _write_schedule(conn, draft_id: str, scheduled: Optional[str]) -> dict:
     """写 drafts.scheduled_publish_at。只允许 draft_pending / draft_saved 改排期。"""
     row = conn.execute(
-        "SELECT status FROM drafts WHERE id = ?", (draft_id,)
+        "SELECT status, platform FROM drafts WHERE id = ?", (draft_id,)
     ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail=f"草稿不存在：{draft_id}")
-    status = dict(row)["status"]
+    draft = dict(row)
+    status = draft["status"]
     if status not in ("draft_pending", "draft_saved"):
         raise HTTPException(
             status_code=409,
             detail=f"草稿状态 {status} 不允许改排期（仅 draft_pending / draft_saved）",
         )
     value = _parse_schedule_time(scheduled) if scheduled else None
-    conn.execute(
-        "UPDATE drafts SET scheduled_publish_at = ? WHERE id = ?", (value, draft_id)
-    )
+    if value is not None:
+        # 将冲突判断放进同一条 UPDATE，避免两个并发请求同时通过先查后写检查。
+        # 当前连接已绑定请求租户，因此检查范围天然限定在当前租户内。
+        cursor = conn.execute(
+            "UPDATE drafts SET scheduled_publish_at = ? "
+            "WHERE id = ? AND NOT EXISTS ("
+            "SELECT 1 FROM drafts other WHERE other.id != drafts.id "
+            "AND other.platform = drafts.platform "
+            "AND other.status IN ('draft_pending','draft_saved') "
+            "AND other.scheduled_publish_at IS NOT NULL "
+            "AND datetime(other.scheduled_publish_at) = datetime(?)"
+            ")",
+            (value, draft_id, value),
+        )
+        if cursor.rowcount != 1:
+            conflict = conn.execute(
+                "SELECT id FROM drafts WHERE id != ? AND platform = ? "
+                "AND status IN ('draft_pending','draft_saved') "
+                "AND scheduled_publish_at IS NOT NULL "
+                "AND datetime(scheduled_publish_at) = datetime(?) LIMIT 1",
+                (draft_id, draft["platform"], value),
+            ).fetchone()
+            if conflict is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"该平台在 {value} 已有排期（草稿 {dict(conflict)['id']}），请调整时间",
+                )
+            raise HTTPException(status_code=404, detail=f"草稿不存在：{draft_id}")
+    else:
+        conn.execute(
+            "UPDATE drafts SET scheduled_publish_at = ? WHERE id = ?", (None, draft_id)
+        )
     conn.commit()
     return {"draft_id": draft_id, "scheduled_publish_at": value, "status": status}
 
@@ -1664,7 +1682,16 @@ def _register_routes(app: FastAPI) -> None:
         return _g_ctx
 
     def _now():
+        """Business-local clock for calendar windows; never use for persisted timestamps."""
         return business_now(_g().get("cfg"))
+
+    def _storage_now():
+        """Canonical aware UTC clock for persistence and API event timestamps."""
+        return storage_now()
+
+    def _api_business_datetime(value):
+        """Serialize legacy tenant-local naive timestamps with their original zone."""
+        return _api_datetime(value, naive_timezone=business_zone(_g().get("cfg")))
 
     def _tenant_id() -> str:
         return str(_g().get("runtime_tenant_id") or "default")
@@ -1734,7 +1761,7 @@ def _register_routes(app: FastAPI) -> None:
             "(id, tenant_id, sample_run_id, content_id, sample_content_id, event_type, event_at, source, metadata_json, idempotency_key) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, 'web', ?, ?)",
             (uuid.uuid4().hex, _tenant_id(), sample_run_id, content_id, sample_content_id, event_type,
-             _now().isoformat(sep=" ", timespec="seconds"),
+             _storage_now().isoformat(sep=" ", timespec="seconds"),
              json.dumps(metadata or {}, ensure_ascii=False), idempotency_key),
         )
         conn.commit()
@@ -1764,7 +1791,7 @@ def _register_routes(app: FastAPI) -> None:
     def start_activation():
         conn = _g()["conn"]
         tenant_id = _tenant_id()
-        now = _now().isoformat(sep=" ", timespec="seconds")
+        now = _storage_now().isoformat(sep=" ", timespec="seconds")
         conn.execute(
             "INSERT OR IGNORE INTO activation_cohort (tenant_id, first_seen_at) VALUES (?, ?)",
             (tenant_id, now),
@@ -1781,33 +1808,39 @@ def _register_routes(app: FastAPI) -> None:
     def activation_status():
         conn = _g()["conn"]
         tenant_id = _tenant_id()
-        now_dt = _now()
+        now_dt = _storage_now()
         now = now_dt.isoformat(sep=" ", timespec="seconds")
-        stale_cutoff = (
-            now_dt - timedelta(minutes=_g()["cfg"].activation.stale_task_timeout_minutes)
-        ).isoformat(sep=" ", timespec="seconds")
-        stale_runs = conn.execute(
-            "SELECT id FROM sample_runs WHERE tenant_id=? "
-            "AND status IN ('created','generating','quality_check') AND created_at<?",
-            (tenant_id, stale_cutoff),
-        ).fetchall()
-        if stale_runs:
-            conn.execute(
-                "UPDATE sample_runs SET status='failed', error_code='task_interrupted', "
-                "error_message_safe='体验任务中断，请重新生成', completed_at=? "
-                "WHERE tenant_id=? AND status IN ('created','generating','quality_check') AND created_at<?",
-                (now, tenant_id, stale_cutoff),
-            )
-            conn.commit()
-            for stale in stale_runs:
-                try:
-                    _record_content_event(
-                        "sample_generation_failed", sample_run_id=stale["id"],
-                        metadata={"error_code": "task_interrupted"},
-                        idempotency_key=f"sample-failed:{stale['id']}",
-                    )
-                except Exception:
-                    logger.exception("中断体验任务事件写入失败 run=%s", stale["id"])
+        stale_utc, stale_legacy = storage_window_cutoffs(
+            now_dt - timedelta(minutes=_g()["cfg"].activation.stale_task_timeout_minutes),
+            _g()["cfg"],
+        )
+        # This GET endpoint performs stale-run recovery writes and is therefore not
+        # covered by TransactionalAPIRoute's write-method wrapper. Serialize the
+        # select-and-transition pair explicitly to prevent duplicate recovery races.
+        with connection_transaction(conn, immediate=True):
+            stale_runs = conn.execute(
+                "SELECT id FROM sample_runs WHERE tenant_id=? "
+                "AND status IN ('created','generating','quality_check') AND "
+                + timestamp_before_sql("created_at"),
+                (tenant_id, stale_utc, stale_legacy),
+            ).fetchall()
+            if stale_runs:
+                conn.execute(
+                    "UPDATE sample_runs SET status='failed', error_code='task_interrupted', "
+                    "error_message_safe='体验任务中断，请重新生成', completed_at=? "
+                    "WHERE tenant_id=? AND status IN ('created','generating','quality_check') AND "
+                    + timestamp_before_sql("created_at"),
+                    (now, tenant_id, stale_utc, stale_legacy),
+                )
+        for stale in stale_runs:
+            try:
+                _record_content_event(
+                    "sample_generation_failed", sample_run_id=stale["id"],
+                    metadata={"error_code": "task_interrupted"},
+                    idempotency_key=f"sample-failed:{stale['id']}",
+                )
+            except Exception:
+                logger.exception("中断体验任务事件写入失败 run=%s", stale["id"])
         cohort = conn.execute(
             "SELECT first_seen_at FROM activation_cohort WHERE tenant_id=?", (tenant_id,)
         ).fetchone()
@@ -1819,10 +1852,14 @@ def _register_routes(app: FastAPI) -> None:
             "ORDER BY sr.created_at DESC, sr.id DESC LIMIT 1",
             (tenant_id,),
         ).fetchone()
-        day_start = now_dt.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(sep=" ")
+        local_midnight = now_dt.astimezone(business_zone(cfg)).replace(
+            hour=0, minute=0, second=0, microsecond=0,
+        )
+        day_utc, day_legacy = storage_window_cutoffs(local_midnight.astimezone(timezone.utc), cfg)
         daily_runs_used = conn.execute(
-            "SELECT COUNT(*) FROM sample_runs WHERE tenant_id=? AND created_at>=?",
-            (tenant_id, day_start),
+            "SELECT COUNT(*) FROM sample_runs WHERE tenant_id=? AND "
+            + timestamp_since_sql("created_at"),
+            (tenant_id, day_utc, day_legacy),
         ).fetchone()[0]
         return {
             "tenant_id": tenant_id,
@@ -1871,7 +1908,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(422, "请求标识无效，请刷新后重试")
         conn = _g()["conn"]
         run_id = uuid.uuid4().hex
-        now = _now().isoformat(sep=" ", timespec="seconds")
+        now = _storage_now().isoformat(sep=" ", timespec="seconds")
         from src.core.content_pipeline import _llm_available
         model_ready = _llm_available(_g()["cfg"])
         initial_status = "created" if model_ready else "failed"
@@ -1930,7 +1967,7 @@ def _register_routes(app: FastAPI) -> None:
                     "(id, tenant_id, sample_run_id, event_type, event_at, source, metadata_json, idempotency_key) "
                     "VALUES (?, ?, ?, ?, ?, 'web', ?, ?)",
                     (uuid.uuid4().hex, tenant_id, run_id, event_type,
-                     business_now(cfg_bg).isoformat(sep=" ", timespec="seconds"),
+                     storage_now().isoformat(sep=" ", timespec="seconds"),
                      json.dumps(metadata, ensure_ascii=False), event_key),
                 )
 
@@ -1938,10 +1975,15 @@ def _register_routes(app: FastAPI) -> None:
             from src.core.content_pipeline import ContentGenerationError, generate_copy_content
             from src.adapters.base import Platform as PlatformEnum
             try:
-                started = business_now(cfg_bg).isoformat(sep=" ", timespec="seconds")
+                started = storage_now().isoformat(sep=" ", timespec="seconds")
                 with conn_bg:
-                    conn_bg.execute("UPDATE sample_runs SET status='generating', started_at=? WHERE id=?",
-                                    (started, run_id))
+                    cursor = conn_bg.execute(
+                        "UPDATE sample_runs SET status='generating', started_at=? "
+                        "WHERE id=? AND tenant_id=? AND status='created'",
+                        (started, run_id, tenant_id),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError("体验任务状态已变化，拒绝启动生成")
                 base_cfg = cfg_bg
                 sample_goal = base_cfg.ultimate_goal.model_copy(update={
                     "positioning": description,
@@ -2034,23 +2076,18 @@ def _register_routes(app: FastAPI) -> None:
                             "quality_rejected", "样稿多次未通过质量检查：" + "、".join(findings),
                         )
                     results.append((angle, title, body, tags, findings))
-                now_done = business_now(cfg_bg).isoformat(sep=" ", timespec="seconds")
                 with conn_bg:
-                    conn_bg.execute("UPDATE sample_runs SET status='quality_check' WHERE id=?", (run_id,))
-                    for angle, title, body, tags, findings in results:
-                        conn_bg.execute(
-                            "INSERT INTO sample_contents "
-                            "(id, sample_run_id, tenant_id, platform, angle, title, body, hashtags_json, "
-                            "quality_status, quality_findings_json, created_at, updated_at) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pass', ?, ?, ?)",
-                            (uuid.uuid4().hex, run_id, tenant_id, platform, angle, title, body,
-                             json.dumps(tags, ensure_ascii=False), json.dumps(findings, ensure_ascii=False),
-                             now_done, now_done),
-                        )
-                    conn_bg.execute(
-                        "UPDATE sample_runs SET status='ready', completed_at=? WHERE id=?",
-                        (now_done, run_id),
+                    cursor = conn_bg.execute(
+                        "UPDATE sample_runs SET status='quality_check' "
+                        "WHERE id=? AND tenant_id=? AND status='generating'",
+                        (run_id, tenant_id),
                     )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError("体验任务状态已变化，拒绝进入质量检查")
+                now_done = storage_now().isoformat(sep=" ", timespec="seconds")
+                _persist_activation_sample_results(
+                    conn_bg, run_id, tenant_id, platform, results, now_done,
+                )
                 try:
                     record_sample_event("sample_generation_succeeded", {"sample_count": 3},
                                          f"sample-ready:{run_id}")
@@ -2070,8 +2107,10 @@ def _register_routes(app: FastAPI) -> None:
                 try:
                     with conn_bg:
                         conn_bg.execute(
-                            "UPDATE sample_runs SET status='failed', error_code=?, error_message_safe=?, completed_at=? WHERE id=?",
-                            (code, safe_message[:300], business_now(cfg_bg).isoformat(sep=" ", timespec="seconds"), run_id),
+                            "UPDATE sample_runs SET status='failed', error_code=?, error_message_safe=?, completed_at=? "
+                            "WHERE id=? AND tenant_id=? AND status IN ('created','generating','quality_check')",
+                            (code, safe_message[:300], storage_now().isoformat(sep=" ", timespec="seconds"),
+                             run_id, tenant_id),
                         )
                 except Exception:
                     logger.exception("快速体验失败状态收口失败 run=%s", run_id)
@@ -2085,7 +2124,7 @@ def _register_routes(app: FastAPI) -> None:
     @app.delete("/api/activation/samples/{sample_run_id}")
     def delete_activation_samples(sample_run_id: str):
         conn = _g()["conn"]
-        now = _now().isoformat(sep=" ", timespec="seconds")
+        now = _storage_now().isoformat(sep=" ", timespec="seconds")
         row = conn.execute(
             "SELECT status FROM sample_runs WHERE id=? AND tenant_id=?",
             (sample_run_id, _tenant_id()),
@@ -2173,7 +2212,7 @@ def _register_routes(app: FastAPI) -> None:
         topic_id = f"activation-{sample_content_id}"
         content_id = f"content-{uuid.uuid4().hex[:12]}"
         draft_id = f"draft-{uuid.uuid4().hex[:12]}"
-        now = _now().isoformat(sep=" ", timespec="seconds")
+        now = _storage_now().isoformat(sep=" ", timespec="seconds")
         try:
             conn.execute(
                 "INSERT OR IGNORE INTO topic_index (id, dimension, source, title, date, total_uses) "
@@ -2266,7 +2305,7 @@ def _register_routes(app: FastAPI) -> None:
         ).fetchone()
         if row is None:
             raise HTTPException(404, "体验样稿不存在")
-        now = _now().isoformat(sep=" ", timespec="seconds")
+        now = _storage_now().isoformat(sep=" ", timespec="seconds")
         metadata = {}
         if event_type == "saved":
             conn.execute(
@@ -2342,10 +2381,10 @@ def _register_routes(app: FastAPI) -> None:
             values[field] = raw
         if all(values[field] is None for field in supported_fields):
             raise HTTPException(422, "至少填写一项当前平台支持的指标")
-        measured_at = str((req or {}).get("measured_at") or _now().isoformat(sep=" ", timespec="microseconds"))
+        measured_at = str((req or {}).get("measured_at") or _storage_now().isoformat(sep=" ", timespec="microseconds"))
         if len(measured_at) > 40:
             raise HTTPException(422, "统计时间格式无效")
-        now = _now().isoformat(sep=" ", timespec="seconds")
+        now = _storage_now().isoformat(sep=" ", timespec="seconds")
         correction_of = (req or {}).get("correction_of")
         if correction_of:
             original = conn.execute(
@@ -2354,21 +2393,16 @@ def _register_routes(app: FastAPI) -> None:
             ).fetchone()
             if original is None:
                 raise HTTPException(422, "修正记录必须属于当前账号组和同一篇内容")
-        try:
-            measured_dt = datetime.fromisoformat(measured_at)
-            if measured_dt.tzinfo is not None:
-                measured_dt = measured_dt.astimezone().replace(tzinfo=None)
-            confirmed_dt = datetime.fromisoformat(str(row["user_confirmed_at"]))
-            if confirmed_dt.tzinfo is not None:
-                confirmed_dt = confirmed_dt.astimezone().replace(tzinfo=None)
-        except (TypeError, ValueError):
+        measured_dt = parse_persisted_datetime(measured_at, _g().get("cfg"))
+        confirmed_dt = parse_persisted_datetime(row["user_confirmed_at"], _g().get("cfg"))
+        if measured_dt is None or confirmed_dt is None:
             raise HTTPException(422, "统计时间或发布时间必须是有效的 ISO 日期时间")
-        now_dt = _now()
+        now_dt = storage_now()
         if measured_dt < confirmed_dt:
             raise HTTPException(422, "统计时间不能早于确认发布时间")
         if measured_dt > now_dt + timedelta(minutes=5):
             raise HTTPException(422, "统计时间不能晚于当前时间（允许 5 分钟设备时钟误差）")
-        measured_at = measured_dt.isoformat(sep=" ", timespec="seconds")
+        measured_at = measured_dt.isoformat(timespec="seconds")
         snapshot_id = uuid.uuid4().hex
         conn.execute(
             "INSERT INTO metric_snapshots "
@@ -2641,7 +2675,7 @@ def _register_routes(app: FastAPI) -> None:
                 str(action_item.get("basis") or ""),
             ))
             suggestion_key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
-            now_text = _now().isoformat(sep=" ", timespec="seconds")
+            now_text = _storage_now().isoformat(sep=" ", timespec="seconds")
             conn.execute(
                 "INSERT OR IGNORE INTO weekly_action_feedback "
                 "(tenant_id, suggestion_key, report_start, platform, action, basis, verification, "
@@ -2682,7 +2716,7 @@ def _register_routes(app: FastAPI) -> None:
             "data_conflicts": data_conflicts,
             "data_sources": sorted({str(r.get("source") or "platform_readback") for r in merged}),
             "limitations": ["只比较同平台数据", "单篇表现不代表因果", "人工与平台读回数据保留各自来源", "周内样本的发布后统计时长可能不同，特征差异仅作假设"],
-            "generated_at": _now().isoformat(sep=" ", timespec="seconds"),
+            "generated_at": _storage_now().isoformat(sep=" ", timespec="seconds"),
         }
 
     @app.post("/api/reports/weekly/actions")
@@ -2712,7 +2746,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(404, "建议记录不存在或已过期，请刷新周报")
         if existing["outcome"] != "pending" and decision != "adopted":
             raise HTTPException(409, "已记录验证结果的建议不能再改为忽略")
-        now = _now().isoformat(sep=" ", timespec="seconds")
+        now = _storage_now().isoformat(sep=" ", timespec="seconds")
         if outcome:
             conn.execute(
                 "UPDATE weekly_action_feedback SET decision='adopted', outcome=?, outcome_note=?, "
@@ -2736,7 +2770,7 @@ def _register_routes(app: FastAPI) -> None:
     # --- 健康检查 ---
     @app.get("/health")
     def health():
-        return {"status": "ok", "version": "0.1.0", "timestamp": _now().isoformat()}
+        return {"status": "ok", "version": "0.1.0", "timestamp": _storage_now().isoformat()}
 
     def _generate_media_asset(req: MediaGenerationRequest, source_asset_id: int | None = None):
         registry = _g().get("tenant_registry")
@@ -2783,7 +2817,7 @@ def _register_routes(app: FastAPI) -> None:
         if not _media_generation_lock.acquire(blocking=False):
             raise HTTPException(409, "已有图片生成任务正在执行，请稍后重试")
         try:
-            now = _now().strftime("%Y-%m-%d %H:%M:%S")
+            now = _storage_now().isoformat(timespec="seconds")
             # 个人账号组素材库不设置人为月度次数上限；成功次数仅用于成本与使用分析。
             cur = conn.execute(
                 "INSERT INTO media_generation_jobs (prompt, final_prompt, model, status, created_at) "
@@ -2831,7 +2865,7 @@ def _register_routes(app: FastAPI) -> None:
                 conn.execute(
                     "UPDATE media_generation_jobs SET status = 'succeeded', output_asset_id = ?, "
                     "completed_at = ? WHERE id = ?",
-                    (asset_id, _now().strftime("%Y-%m-%d %H:%M:%S"), job_id),
+                    (asset_id, _storage_now().isoformat(timespec="seconds"), job_id),
                 )
                 conn.commit()
                 return {
@@ -2849,7 +2883,7 @@ def _register_routes(app: FastAPI) -> None:
                     target.unlink(missing_ok=True)
                 conn.execute(
                     "UPDATE media_generation_jobs SET status = 'failed', error_message = ?, completed_at = ? WHERE id = ?",
-                    ("图片生成失败", _now().strftime("%Y-%m-%d %H:%M:%S"), job_id),
+                    ("图片生成失败", _storage_now().isoformat(timespec="seconds"), job_id),
                 )
                 conn.commit()
                 raise
@@ -2858,7 +2892,7 @@ def _register_routes(app: FastAPI) -> None:
                     target.unlink(missing_ok=True)
                 conn.execute(
                     "UPDATE media_generation_jobs SET status = 'failed', error_message = ?, completed_at = ? WHERE id = ?",
-                    ("图片生成失败，详细原因仅记录在服务端日志", _now().strftime("%Y-%m-%d %H:%M:%S"), job_id),
+                    ("图片生成失败，详细原因仅记录在服务端日志", _storage_now().isoformat(timespec="seconds"), job_id),
                 )
                 conn.commit()
                 from src.core.media_generation import ImageGenerationError
@@ -2885,10 +2919,14 @@ def _register_routes(app: FastAPI) -> None:
             "size": "1024x1024", "updated_at": None, "fallback_enabled": 1,
         }
         settings["enabled"] = bool(settings["enabled"])
-        settings["fallback_enabled"] = bool(settings.get("fallback_enabled", 1))
-        month_start = _now().replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+        month_local = _now().replace(day=1, hour=0, minute=0, second=0, microsecond=0).replace(
+            tzinfo=business_zone(_g().get("cfg")),
+        )
+        month_utc, month_legacy = storage_window_cutoffs(month_local.astimezone(timezone.utc), _g().get("cfg"))
         settings["used_this_month"] = int(conn.execute(
-            "SELECT COUNT(*) FROM media_generation_jobs WHERE created_at >= ? AND status = 'succeeded'", (month_start,),
+            "SELECT COUNT(*) FROM media_generation_jobs WHERE "
+            + timestamp_since_sql("created_at") + " AND status = 'succeeded'",
+            (month_utc, month_legacy),
         ).fetchone()[0])
         key_env = os.getenv("ITERWAVE_IMAGE_API_KEY_ENV", "OPENAI_API_KEY").strip()
         settings["provider_configured"] = bool(key_env and os.getenv(key_env))
@@ -2905,23 +2943,22 @@ def _register_routes(app: FastAPI) -> None:
     def put_media_generation_settings(req: MediaGenerationSettingsRequest):
         conn = _g()["conn"]
         conn.execute(
-            "INSERT INTO media_generation_settings "
-            "(id, enabled, monthly_quota, prompt_prefix, model, size, fallback_enabled, updated_at) "
-            "VALUES (1, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+            "INSERT INTO media_generation_settings (id, enabled, monthly_quota, prompt_prefix, model, size, updated_at) "
+            "VALUES (1, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%f+00:00','now')) "
             "ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled, monthly_quota=excluded.monthly_quota, "
-            "prompt_prefix=excluded.prompt_prefix, model=excluded.model, size=excluded.size, "
-            "fallback_enabled=excluded.fallback_enabled, updated_at=CURRENT_TIMESTAMP",
-            (int(req.enabled), req.monthly_quota, req.prompt_prefix.strip(), req.model.strip(), req.size,
-             int(req.fallback_enabled)),
+            "prompt_prefix=excluded.prompt_prefix, model=excluded.model, size=excluded.size, updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now')",
+            (int(req.enabled), req.monthly_quota, req.prompt_prefix.strip(), req.model.strip(), req.size),
         )
         conn.commit()
         return get_media_generation_settings()
 
     @app.post("/api/media/generate", status_code=201)
+    @manages_own_transaction
     def generate_media_asset(req: MediaGenerationRequest):
         return _generate_media_asset(req)
 
     @app.post("/api/media/generate-for-content/{content_id}", status_code=201)
+    @manages_own_transaction
     def generate_media_for_content(content_id: str, usage_role: str = Query("cover", pattern="^(cover|illustration|background)$")):
         """根据现有内容生成候选配图；生成结果进入待审核状态，不自动分配。"""
         row = _g()["conn"].execute("SELECT id, title, body, platform FROM contents WHERE id = ?", (content_id,)).fetchone()
@@ -2942,6 +2979,7 @@ def _register_routes(app: FastAPI) -> None:
         ))
 
     @app.post("/api/media/{asset_id}/edit", status_code=201)
+    @manages_own_transaction
     def edit_media_asset(asset_id: int, req: MediaGenerationRequest):
         return _generate_media_asset(req, source_asset_id=asset_id)
 
@@ -2954,7 +2992,7 @@ def _register_routes(app: FastAPI) -> None:
         if row is None:
             raise HTTPException(404, "图片素材不存在")
         conn.execute(
-            "UPDATE media_assets SET review_status = ?, review_note = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE media_assets SET review_status = ?, review_note = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id = ?",
             (req.decision, req.note.strip(), asset_id),
         )
         conn.commit()
@@ -3043,6 +3081,7 @@ def _register_routes(app: FastAPI) -> None:
         }
 
     @app.post("/api/media", status_code=201)
+    @manages_own_transaction
     def upload_media_asset(req: MediaAssetUploadRequest):
         registry = _g().get("tenant_registry")
         tenant_id = _g().get("runtime_tenant_id", "default")
@@ -3104,23 +3143,42 @@ def _register_routes(app: FastAPI) -> None:
             target.chmod(0o600)
         except OSError:
             pass
+        duplicate_after_processing = None
         try:
-            cur = conn.execute(
-                "INSERT INTO media_assets "
-                "(title, original_filename, stored_filename, mime_type, byte_size, sha256, "
-                "width, height, alt_text, tags, source_type, status, quality_score, quality_details) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'upload', 'active', ?, ?)",
-                (
-                    title, safe_filename, stored_filename, mime_type,
-                    len(raw), digest, width, height, req.alt_text.strip(),
-                    json.dumps(tags, ensure_ascii=False), quality["score"],
-                    json.dumps(quality, ensure_ascii=False),
-                ),
-            )
-            conn.commit()
+            # File decoding, quality scoring and disk I/O above intentionally happen
+            # without a tenant transaction. Recheck the digest under a short write
+            # transaction to preserve concurrent-upload idempotency.
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                duplicate_after_processing = conn.execute(
+                    "SELECT id, title, original_filename, mime_type, byte_size, width, height, "
+                    "alt_text, tags, status, review_status, review_note, created_at "
+                    "FROM media_assets WHERE sha256 = ? AND status = 'active' LIMIT 1",
+                    (digest,),
+                ).fetchone()
+                if duplicate_after_processing is None:
+                    cur = conn.execute(
+                        "INSERT INTO media_assets "
+                        "(title, original_filename, stored_filename, mime_type, byte_size, sha256, "
+                        "width, height, alt_text, tags, source_type, status, quality_score, quality_details) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'upload', 'active', ?, ?)",
+                        (
+                            title, safe_filename, stored_filename, mime_type,
+                            len(raw), digest, width, height, req.alt_text.strip(),
+                            json.dumps(tags, ensure_ascii=False), quality["score"],
+                            json.dumps(quality, ensure_ascii=False),
+                        ),
+                    )
         except Exception:
             target.unlink(missing_ok=True)
             raise
+        if duplicate_after_processing is not None:
+            target.unlink(missing_ok=True)
+            item = dict(duplicate_after_processing)
+            item["tags"] = json.loads(item["tags"] or "[]")
+            item["duplicate"] = True
+            item["file_url"] = f"/api/media/{item['id']}/file"
+            return item
         return {
             "id": cur.lastrowid, "title": title,
             "original_filename": Path(req.filename).name[:255],
@@ -3336,7 +3394,7 @@ def _register_routes(app: FastAPI) -> None:
         if row is None:
             raise HTTPException(404, "图片素材不存在")
         conn.execute(
-            "UPDATE media_assets SET status = 'archived', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE media_assets SET status = 'archived', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id = ?",
             (asset_id,),
         )
         conn.commit()
@@ -3361,7 +3419,7 @@ def _register_routes(app: FastAPI) -> None:
         if not file_path.is_relative_to(paths.media_dir.resolve()) or not file_path.is_file():
             raise HTTPException(409, "素材原始文件不存在，不能恢复为可用状态")
         conn.execute(
-            "UPDATE media_assets SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE media_assets SET status = 'active', updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id = ?",
             (asset_id,),
         )
         conn.commit()
@@ -3374,7 +3432,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(422, "素材名称不能为空且不能超过 120 个字符")
         conn = _g()["conn"]
         cur = conn.execute(
-            "UPDATE media_assets SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE media_assets SET title = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id = ?",
             (title, asset_id),
         )
         if cur.rowcount == 0:
@@ -3579,7 +3637,7 @@ def _register_routes(app: FastAPI) -> None:
         if registry is None:
             raise HTTPException(503, "账号组注册表尚未初始化")
         from datetime import timedelta
-        since = (_now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        since = (_storage_now() - timedelta(days=days)).isoformat(timespec="seconds")
         tenant_rows = []
         totals = {"tenants": 0, "available_tenants": 0, "contents_period": 0, "contents_all": 0, "drafts_all": 0, "drafts_pending": 0, "drafts_saved": 0, "drafts_published": 0, "drafts_failed": 0, "media_active": 0, "media_usage": 0, "registered_accounts": 0, "registered_accounts_active": 0}
         platform_totals = {p: {"contents": 0, "drafts": 0, "registered_accounts": 0} for p in ("xhs", "douyin", "kuaishou", "wechat_channels")}
@@ -4190,7 +4248,7 @@ def _register_routes(app: FastAPI) -> None:
         followers, likes_total = _int("followers"), _int("likes_total")
         if followers is None and likes_total is None:
             raise HTTPException(422, "粉丝数和获赞数至少填一个")
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         conn.execute(
             "INSERT INTO account_snapshots (platform, followers, likes_total, captured_at, source) "
             "VALUES (?, ?, ?, ?, 'manual')",
@@ -4212,7 +4270,7 @@ def _register_routes(app: FastAPI) -> None:
         v = (req or {}).get("current_value")
         if isinstance(v, bool) or not isinstance(v, (int, float)):
             raise HTTPException(422, "current_value 必须是数字")
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         conn.execute("UPDATE goals SET current_value = ?, progress_updated_at = ? WHERE id = ?",
                      (float(v), now, goal_id))
         conn.commit()
@@ -4228,6 +4286,29 @@ def _register_routes(app: FastAPI) -> None:
         from ..core.persona import personas_view
         return personas_view(_g()["cfg"])
 
+    def _validate_goal_hierarchy(conn, goal_id, level, parent_id) -> None:
+        """两级目标约束：总目标(north_star)位于顶层；平台目标只能挂到顶层总目标下。"""
+        level = level or "platform"
+        if parent_id:
+            if level == "north_star":
+                raise HTTPException(422, "总目标不能再挂到其它总目标下")
+            if goal_id is not None and str(parent_id) == str(goal_id):
+                raise HTTPException(422, "目标不能挂到自身下面")
+            parent = conn.execute(
+                "SELECT goal_level, parent_goal_id FROM goals WHERE id = ?", (parent_id,),
+            ).fetchone()
+            if parent is None:
+                raise HTTPException(422, "所属总目标不存在")
+            if (parent["goal_level"] or "platform") != "north_star" or parent["parent_goal_id"]:
+                raise HTTPException(422, "只能挂到顶层总目标下面")
+        if goal_id is not None and (level != "north_star" or parent_id):
+            # 已有子目标的总目标不能降级或挂到别处，否则子目标会变成三级或挂在非总目标下。
+            child = conn.execute(
+                "SELECT 1 FROM goals WHERE parent_goal_id = ? LIMIT 1", (goal_id,),
+            ).fetchone()
+            if child is not None:
+                raise HTTPException(422, "该总目标下仍有子目标，请先移走子目标再修改层级")
+
     @app.post("/api/goals")
     def create_goal(req: CreateGoalRequest):
         """创建阶段目标（R21：6 个口径字段齐备才落库）。
@@ -4237,15 +4318,9 @@ def _register_routes(app: FastAPI) -> None:
         """
         conn = _g()["conn"]
         goal_id = f"goal-{uuid.uuid4().hex[:12]}"
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         if req.parent_goal_id:
-            parent = conn.execute("SELECT goal_level FROM goals WHERE id = ?", (req.parent_goal_id,)).fetchone()
-            if not parent:
-                raise HTTPException(422, "所属总目标不存在")
-            if (parent["goal_level"] or "platform") != "north_star":
-                raise HTTPException(422, "只能挂到总目标下面")
-            if req.goal_level == "north_star":
-                raise HTTPException(422, "总目标不能再挂到其它总目标下")
+            _validate_goal_hierarchy(conn, None, req.goal_level or "platform", req.parent_goal_id)
         conn.execute(
             "INSERT INTO goals (id, goal_type, goal_text, target_metric, target_value,"
             " target_platform, metric_scope, baseline_value, baseline_at,"
@@ -4270,16 +4345,29 @@ def _register_routes(app: FastAPI) -> None:
     def update_goal(goal_id: str, req: "GoalUpdateRequest"):
         """编辑阶段目标口径 / 暂停或完成目标（current_value 只由采集回写）。"""
         conn = _g()["conn"]
-        row = conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone()
-        if not row:
-            raise HTTPException(404, "目标不存在")
         fields = req.model_dump(exclude_unset=True)
         if not fields:
             raise HTTPException(422, "没有需要更新的字段")
-        sets = ", ".join(f"{k} = ?" for k in fields)
-        conn.execute(f"UPDATE goals SET {sets} WHERE id = ?", (*fields.values(), goal_id))
-        conn.commit()
-        item = dict(conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone())
+        # 读取、层级校验与写入在同一个写事务内，防止并发 PATCH 绕过两级目标约束。
+        with connection_transaction(conn, immediate=True):
+            row = conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone()
+            if not row:
+                raise HTTPException(404, "目标不存在")
+            if "parent_goal_id" in fields:
+                raw_parent = fields["parent_goal_id"]
+                fields["parent_goal_id"] = (str(raw_parent).strip() or None) if raw_parent is not None else None
+            if "goal_level" in fields and fields["goal_level"] is None:
+                raise HTTPException(422, "goal_level 不能为空")
+            # 校验 PATCH 之后的完整层级，而不只是本次提交的字段。
+            next_level = fields.get("goal_level", row["goal_level"] or "platform")
+            next_parent_id = fields.get("parent_goal_id", row["parent_goal_id"])
+            _validate_goal_hierarchy(conn, goal_id, next_level, next_parent_id)
+            if next_level == "north_star":
+                # 与创建口径一致：总目标是跨平台汇总，不绑定单一平台。
+                fields["target_platform"] = None
+            sets = ", ".join(f"{k} = ?" for k in fields)
+            conn.execute(f"UPDATE goals SET {sets} WHERE id = ?", (*fields.values(), goal_id))
+            item = dict(conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone())
         item["achievement_rate"] = GoalProgressUpdater.rate_for(item)
         return item
 
@@ -4301,7 +4389,7 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/api/task-queue")
     def list_global_task_queue(
         limit: int = Query(500, ge=1, le=500),
-        scope: str = Query("all", pattern="^(all|active|history|failed)$"),
+        scope: str = Query("all", pattern="^(all|active|history|failed|filtered)$"),
         page: int = Query(1, ge=1),
         page_size: int = Query(20, ge=1, le=100),
         task_type: str | None = Query(None, min_length=1, max_length=80),
@@ -4309,6 +4397,7 @@ def _register_routes(app: FastAPI) -> None:
         error_keyword: str | None = Query(None, min_length=1, max_length=120),
         date_from: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
         date_to: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        status: str | None = Query(None, pattern="^(queued|running|succeeded|failed|cancelled|interrupted)$"),
     ):
         if _task_queue is None:
             raise HTTPException(503, "全局任务队列尚未初始化")
@@ -4324,7 +4413,7 @@ def _register_routes(app: FastAPI) -> None:
                 page_size=page_size,
                 scope=scope, task_type=task_type,
                 tenant_id=tenant_id, error_keyword=error_keyword,
-                date_from=date_from, date_to=date_to,
+                date_from=date_from, date_to=date_to, status=status,
             )
         items = []
         round_numbers = _resolve_task_round_numbers(registry, tasks)
@@ -4368,6 +4457,25 @@ def _register_routes(app: FastAPI) -> None:
                 response["tenant_status_counts"] = _task_queue.status_counts(scope="failed")["by_tenant"]
         return response
 
+    @app.get("/api/task-queue/summary")
+    def global_task_queue_summary(
+        date_from: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        date_to: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        tenant_id: str | None = Query(None, min_length=1, max_length=100),
+        task_type: str | None = Query(None, min_length=1, max_length=80),
+        status: str | None = Query(None, pattern="^(queued|running|succeeded|failed|cancelled|interrupted)$"),
+    ):
+        """Aggregate global queue metrics using indexed SQL; task payloads are never loaded."""
+        if _task_queue is None:
+            raise HTTPException(503, "全局任务队列尚未初始化")
+        try:
+            return _task_queue.dispatch_summary(
+                date_from=date_from, date_to=date_to,
+                tenant_id=tenant_id, task_type=task_type, status=status,
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     @app.get("/api/task-queue/{task_id}")
     def get_global_task(task_id: str):
         if _task_queue is None:
@@ -4377,12 +4485,42 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(404, "任务不存在")
         round_id = _round_id_from_aggregate(task.task_type, task.aggregate_id)
         round_numbers = _resolve_task_round_numbers(_g().get("tenant_registry"), [task])
+        raw_steps = task.result.get("steps", []) if isinstance(task.result, dict) else []
+        execution_log = []
+        if isinstance(raw_steps, list):
+            for index, item in enumerate(raw_steps[:200], start=1):
+                if not isinstance(item, dict):
+                    continue
+                step_name = item.get("step") or item.get("name") or item.get("stage") or f"步骤 {index}"
+                safe_fields = (
+                    "status", "count", "scheduled", "saved", "failed", "pending",
+                    "attempted", "selected", "mode", "source", "shortfall",
+                    "allocation", "dimension_allocation", "skipped", "copy_hint_count",
+                    "dropped_hints", "file_type", "kb_count", "extra_count", "excluded_count",
+                )
+                safe_detail = {key: item[key] for key in safe_fields if key in item}
+                step_status = item.get("status") or ("partial" if item.get("failed") else "completed")
+                detail = item.get("message") or item.get("detail") or item.get("error") or (
+                    json.dumps(safe_detail, ensure_ascii=False, default=str) if safe_detail else ""
+                )
+                execution_log.append({
+                    "step": str(step_name)[:120],
+                    "status": str(step_status)[:40],
+                    "detail": str(detail)[:500],
+                })
+        if not execution_log and task.error_message:
+            execution_log.append({
+                "step": "任务执行失败",
+                "status": "failed",
+                "detail": task.error_message[:500],
+            })
         return {
+            "execution_log": execution_log,
             "queue_order": task.queue_order,
             "task_id": task.task_id, "task_type": task.task_type,
             "tenant_id": task.tenant_id, "aggregate_id": task.aggregate_id,
             "round_number": round_numbers.get((task.tenant_id, round_id)) if round_id is not None else None,
-            "status": task.status, "payload": task.payload, "result": task.result,
+            "status": task.status,
             "created_at": task.created_at, "available_at": task.available_at,
             "started_at": task.started_at,
             "finished_at": task.finished_at, "attempts": task.attempts,
@@ -4448,13 +4586,25 @@ def _register_routes(app: FastAPI) -> None:
             "confirmation_note": task.retry_confirmation_note,
         }
 
-    @app.post("/api/task-queue/{task_id}/cancel")
-    def cancel_global_task(task_id: str):
+    @app.get("/api/task-queue/{task_id}/audit")
+    def list_global_task_audit(task_id: str):
         if _task_queue is None:
             raise HTTPException(503, "全局任务队列尚未初始化")
         if _task_queue.get(task_id) is None:
             raise HTTPException(404, "任务不存在")
-        if not _task_queue.cancel(task_id):
+        return {"items": _task_queue.list_admin_audit(task_id)}
+
+    @app.post("/api/task-queue/{task_id}/cancel")
+    def cancel_global_task(task_id: str, request: Request):
+        if _task_queue is None:
+            raise HTTPException(503, "全局任务队列尚未初始化")
+        if _task_queue.get(task_id) is None:
+            raise HTTPException(404, "任务不存在")
+        try:
+            cancelled = _task_queue.cancel(task_id, actor=auth.audit_actor(request))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if not cancelled:
             raise HTTPException(409, "任务已开始执行或已结束，当前不能取消")
         return {"task_id": task_id, "status": "cancelled"}
 
@@ -4475,7 +4625,7 @@ def _register_routes(app: FastAPI) -> None:
                 params,
             ).fetchall()
             return [
-                {**dict(row), "created_at": _api_datetime(row["created_at"])}
+                {**dict(row), "created_at": _api_business_datetime(row["created_at"])}
                 for row in rows
             ]
         total = conn.execute("SELECT COUNT(*) FROM spiral_rounds" + where, params).fetchone()[0]
@@ -4560,10 +4710,13 @@ def _register_routes(app: FastAPI) -> None:
         result = dict(row)
         for timestamp_field in ("created_at", "producing_started_at", "collecting_metrics_started_at"):
             if result.get(timestamp_field):
-                result[timestamp_field] = _api_datetime(result[timestamp_field])
+                result[timestamp_field] = _api_business_datetime(result[timestamp_field])
         round_drafts = []
         for draft in drafts:
             item = dict(draft)
+            for field, value in tuple(item.items()):
+                if field.endswith("_at") and value:
+                    item[field] = _api_business_datetime(value)
             if item.get("save_verification_status") == "pending_verify":
                 item["status"] = "pending_verify"
             item.pop("save_verification_status", None)
@@ -4718,27 +4871,32 @@ def _register_routes(app: FastAPI) -> None:
             content_plan_id=plan_id, content_plan_version=int(plan["version"]),
         ))
         round_id = int(round_result["id"])
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         try:
-            conn.execute("BEGIN IMMEDIATE")
-            cursor = conn.execute(
-                "UPDATE content_plans SET status='generating',platforms_json=?,version=version+1,updated_at=? "
-                "WHERE id=? AND version=? AND status IN ('planned','failed')",
-                (json.dumps(platforms, ensure_ascii=False), now, plan_id, int(plan["version"])),
-            )
-            if cursor.rowcount != 1:
-                raise HTTPException(409, "计划已在其他窗口启动，请刷新后重试")
-            conn.execute(
-                "INSERT INTO content_plan_rounds(plan_id,round_id,created_at) VALUES(?,?,?)",
-                (plan_id, round_id, now),
-            )
-            conn.commit()
+            # Async routes are not wrapped by TransactionalAPIRoute. Use the connection-level
+            # transaction guard explicitly so BEGIN/UPDATE/INSERT/COMMIT cannot interleave
+            # with another request using this tenant's shared LockedConnection.
+            with connection_transaction(conn, immediate=True):
+                cursor = conn.execute(
+                    "UPDATE content_plans SET status='generating',platforms_json=?,version=version+1,updated_at=? "
+                    "WHERE id=? AND version=? AND status IN ('planned','failed')",
+                    (json.dumps(platforms, ensure_ascii=False), now, plan_id, int(plan["version"])),
+                )
+                if cursor.rowcount != 1:
+                    raise HTTPException(409, "计划已在其他窗口启动，请刷新后重试")
+                conn.execute(
+                    "INSERT INTO content_plan_rounds(plan_id,round_id,created_at) VALUES(?,?,?)",
+                    (plan_id, round_id, now),
+                )
         except Exception:
-            conn.rollback()
-            # create_round 的短时去重可能把并发请求指向同一轮；只有本请求新建的轮次才允许回滚取消。
+            # connection_transaction has already rolled back the failed plan update/link.
+            # create_round's short dedupe may return a shared round; only cancel a newly-created one.
             if not round_result.get("deduped"):
-                conn.execute("UPDATE spiral_rounds SET status='cancelled' WHERE id=? AND status='created'", (round_id,))
-                conn.commit()
+                with connection_transaction(conn, immediate=True):
+                    conn.execute(
+                        "UPDATE spiral_rounds SET status='cancelled' WHERE id=? AND status='created'",
+                        (round_id,),
+                    )
             raise
         try:
             queued = await run_round(round_id, RunRoundRequest(
@@ -4747,13 +4905,11 @@ def _register_routes(app: FastAPI) -> None:
         except Exception as exc:
             # 入队失败时 Worker 尚未开始执行；计划和未启动轮次必须一起补偿。
             try:
-                from src.core.timezone import business_now
-                with conn:
-                    conn.execute("BEGIN IMMEDIATE")
+                with connection_transaction(conn, immediate=True):
                     conn.execute(
                         "UPDATE content_plans SET status='failed',version=version+1,updated_at=? "
                         "WHERE id=? AND status='generating'",
-                        (business_now(_g()["cfg"]).isoformat(timespec="seconds"), plan_id),
+                        (_storage_now().isoformat(timespec="seconds"), plan_id),
                     )
                     conn.execute(
                         "UPDATE spiral_rounds SET status='cancelled' "
@@ -5089,7 +5245,7 @@ def _register_routes(app: FastAPI) -> None:
         conn.execute(
             "UPDATE draft_save_verifications SET status=?, verified_at=?, note=? WHERE draft_id=? AND status='pending_verify'",
             (
-                verification_status, _now().strftime("%Y-%m-%d %H:%M:%S"),
+                verification_status, _storage_now().isoformat(timespec="seconds"),
                 note, draft_id,
             ),
         )
@@ -5099,7 +5255,7 @@ def _register_routes(app: FastAPI) -> None:
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 row["round_id"], "draft_save_verify", "pending_verify", target,
-                note, "web-ui", _now().strftime("%Y-%m-%d %H:%M:%S"),
+                note, "web-ui", _storage_now().isoformat(timespec="seconds"),
             ),
         )
         return {
@@ -5235,7 +5391,7 @@ def _register_routes(app: FastAPI) -> None:
             cur = conn.execute(
                 "UPDATE drafts SET status='user_published', user_confirmed_at=? "
                 "WHERE id=? AND status IN ('draft_saved', 'draft_pending')",
-                (_now().isoformat(timespec="seconds"), draft_id),
+                (_storage_now().isoformat(timespec="seconds"), draft_id),
             )
             if cur.rowcount != 1:
                 latest = conn.execute(
@@ -5277,7 +5433,7 @@ def _register_routes(app: FastAPI) -> None:
                         }, ensure_ascii=False)[:500],
                         json.dumps({"status": "user_published"}, ensure_ascii=False),
                         override_reason, "publish-confirm-ui",
-                        _now().strftime("%Y-%m-%d %H:%M:%S"),
+                        _storage_now().isoformat(timespec="seconds"),
                     ),
                 )
                 conn.commit()
@@ -5301,7 +5457,7 @@ def _register_routes(app: FastAPI) -> None:
                         }, ensure_ascii=False)[:500],
                         json.dumps({"status": "user_published"}, ensure_ascii=False),
                         platform_sync_override_reason, "publish-confirm-ui",
-                        _now().strftime("%Y-%m-%d %H:%M:%S"),
+                        _storage_now().isoformat(timespec="seconds"),
                     ),
                 )
                 conn.commit()
@@ -5402,7 +5558,7 @@ def _register_routes(app: FastAPI) -> None:
                 json.dumps({"saved_content_hash": old_hash}, ensure_ascii=False)[:500],
                 json.dumps({"saved_content_hash": current_hash}, ensure_ascii=False)[:500],
                 req.reason.strip(), "publish-confirm-ui",
-                _now().strftime("%Y-%m-%d %H:%M:%S"),
+                _storage_now().isoformat(timespec="seconds"),
             ),
         )
         conn.commit()
@@ -5523,7 +5679,7 @@ def _register_routes(app: FastAPI) -> None:
             reason = str((req or {}).get("reason") or "人工审核未通过")[:500]
             cur = conn.execute(
                 """UPDATE master_plan_versions
-                   SET status='archived',reviewed_at=CURRENT_TIMESTAMP,reviewed_by='user',
+                   SET status='archived',reviewed_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),reviewed_by='user',
                        change_note=COALESCE(change_note,'') || ?
                    WHERE id=? AND status='draft'""",
                 ("；审核拒绝：" + reason, version_id),
@@ -5572,7 +5728,7 @@ def _register_routes(app: FastAPI) -> None:
             adoption = list(prior_adoptions) if isinstance(prior_adoptions, list) else []
             adoption.append({
                 "dimensions": dims,
-                "created_at": _now().isoformat(timespec="seconds"),
+                "created_at": _storage_now().isoformat(timespec="seconds"),
                 "source": "review_adoption",
                 "status": "suggestion",
             })
@@ -5746,24 +5902,31 @@ def _register_routes(app: FastAPI) -> None:
         return {"runs": out}
 
     @app.post("/api/diagnostics")
+    @manages_own_transaction
     def run_diagnostics(req: DiagnoseRequest):
         """8 点端到端流程诊断（§21.3）。"""
         from src.core.orchestration import diagnose
         return diagnose(_g()["cfg"], _g()["conn"], cb=_g()["cb"], live_llm=req.live_llm)
 
     # --- 删除：已生产内容 / 轮次 ---
+    # 同步写路由由 TransactionalAPIRoute 包在请求级事务内，响应前才提交；
+    # 卡片图片清理登记为 BackgroundTasks，在事务提交、响应发出后执行，提交失败则不删文件。
     @app.post("/api/contents/delete")
-    def delete_content_ids(req: IdsRequest):
+    def delete_content_ids(req: IdsRequest, background_tasks: BackgroundTasks):
         from src.core.content_admin import delete_contents
-        return delete_contents(_g()["cfg"], _g()["conn"], req.ids)
+        return delete_contents(
+            _g()["cfg"], _g()["conn"], req.ids, after_commit=background_tasks.add_task,
+        )
 
     @app.delete("/api/contents/{content_id}")
-    def delete_content(content_id: str):
+    def delete_content(content_id: str, background_tasks: BackgroundTasks):
         conn = _g()["conn"]
         row = _content_row(conn, content_id)
         _ensure_content_round_idle(row, "删除内容")
         from src.core.content_admin import delete_contents
-        res = delete_contents(_g()["cfg"], conn, [content_id])
+        res = delete_contents(
+            _g()["cfg"], conn, [content_id], after_commit=background_tasks.add_task,
+        )
         if res["not_found"]:
             raise HTTPException(404, f"内容 {content_id} 不存在")
         if res["blocked"]:
@@ -5771,12 +5934,14 @@ def _register_routes(app: FastAPI) -> None:
         return res
 
     @app.delete("/api/rounds/{round_id}")
-    def delete_round_api(round_id: int):
+    def delete_round_api(round_id: int, background_tasks: BackgroundTasks):
         from src.core.content_admin import DeleteBlocked, delete_round
         if _round_task_active(_g().get("runtime_tenant_id", "default"), round_id):
             raise HTTPException(409, f"轮次 {round_id} 正在排队或执行，不能删除")
         try:
-            return delete_round(_g()["cfg"], _g()["conn"], round_id)
+            return delete_round(
+                _g()["cfg"], _g()["conn"], round_id, after_commit=background_tasks.add_task,
+            )
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
         except DeleteBlocked as exc:
@@ -5835,6 +6000,153 @@ def _register_routes(app: FastAPI) -> None:
             items.append(row)
         return {"round_id": round_id, "items": items}
 
+    @app.get("/api/review-queue")
+    def list_review_queue(
+        status: str = Query("pending", pattern="^(pending|approved|rejected|all)$"),
+        platform: Optional[str] = Query(None, pattern="^(xhs|douyin|kuaishou|wechat_channels)$"),
+        task_type: Optional[str] = Query(None, max_length=40),
+        from_date: Optional[str] = Query(None, alias="from"),
+        to_date: Optional[str] = Query(None, alias="to"),
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+    ):
+        """跨生产轮次集中审核队列；只读，不触发生产或发布。"""
+        conn = _g()["conn"]
+        for label, value in (("from", from_date), ("to", to_date)):
+            if value:
+                try:
+                    datetime.strptime(value, "%Y-%m-%d")
+                except (TypeError, ValueError) as exc:
+                    raise HTTPException(422, f"{label} 必须为 YYYY-MM-DD") from exc
+        if from_date and to_date and to_date < from_date:
+            raise HTTPException(422, "to 不能早于 from")
+
+        where = ["d.id IS NOT NULL"]
+        params: list = []
+        if platform:
+            where.append("c.platform = ?")
+            params.append(platform)
+        if task_type:
+            where.append("d.status = ?")
+            params.append(task_type)
+        if from_date:
+            where.append("date(c.created_at) >= date(?)")
+            params.append(from_date)
+        if to_date:
+            where.append("date(c.created_at) <= date(?)")
+            params.append(to_date)
+        status_expr = (
+            "CASE WHEN c.review_rejected = 1 THEN 'rejected' "
+            "WHEN (SELECT u.override_field FROM user_override u "
+            "WHERE u.round_id = c.round_id "
+            "AND u.override_field IN ('review_approve','review_reject','review_resubmit') "
+            "AND CASE WHEN json_valid(u.original_value) "
+            "THEN json_extract(u.original_value, '$.content_id') ELSE NULL END = c.id "
+            "ORDER BY u.overridden_at DESC, u.rowid DESC LIMIT 1) = 'review_approve' "
+            "THEN 'approved' ELSE 'pending' END"
+        )
+        if status != "all":
+            where.append(f"({status_expr}) = ?")
+            params.append(status)
+        where_sql = " AND ".join(where)
+        base = (
+            " FROM contents c JOIN drafts d ON d.content_id = c.id "
+            "LEFT JOIN spiral_rounds r ON r.id = c.round_id WHERE " + where_sql
+        )
+        total = int(conn.execute("SELECT COUNT(*)" + base, params).fetchone()[0])
+        rows = conn.execute(
+            "SELECT c.id, c.round_id, r.round_number, r.status AS round_status, "
+            "c.topic_id, c.platform, c.title, c.body, c.tags, c.image_paths, "
+            "c.guard_outcome, c.guard_reason, "
+            "c.review_rejected, c.review_rejection_reason, c.created_at, "
+            "d.id AS draft_id, d.status AS draft_status, d.error_msg AS draft_error, "
+            "d.saved_at, d.scheduled_publish_at, "
+            + status_expr + " AS review_status "
+            + base + " ORDER BY c.created_at DESC, c.id DESC LIMIT ? OFFSET ?",
+            [*params, page_size, (page - 1) * page_size],
+        ).fetchall()
+        items = []
+        for raw in rows:
+            item = dict(raw)
+            try:
+                item["tags"] = json.loads(item.get("tags") or "[]")
+                if not isinstance(item["tags"], list):
+                    item["tags"] = []
+            except (TypeError, ValueError):
+                item["tags"] = []
+            try:
+                image_paths = json.loads(item.get("image_paths") or "[]")
+                item["image_count"] = len(image_paths) if isinstance(image_paths, list) else 0
+            except (TypeError, ValueError):
+                item["image_count"] = 0
+            # 不向集中列表暴露服务器绝对路径；图片只通过受保护的内容图片 API 读取。
+            item.pop("image_paths", None)
+            events = conn.execute(
+                "SELECT override_field, reason, overridden_by, overridden_at, override_value "
+                "FROM user_override WHERE round_id = ? "
+                "AND override_field IN ('review_approve','review_reject','review_resubmit') "
+                "AND CASE WHEN json_valid(original_value) "
+                "THEN json_extract(original_value, '$.content_id') ELSE NULL END = ? "
+                "ORDER BY overridden_at DESC, rowid DESC LIMIT 10",
+                (item["round_id"], item["id"]),
+            ).fetchall()
+            item["review_history"] = [dict(event) for event in events]
+            item["review_rejected"] = bool(item["review_rejected"])
+            items.append(item)
+        return {
+            "items": items, "total": total, "page": page,
+            "page_size": page_size, "pages": (total + page_size - 1) // page_size,
+        }
+
+    @app.post("/api/contents/{content_id}/approve")
+    def approve_content_review(content_id: str, req: dict):
+        """记录明确的人工审核通过；不执行发布，也不覆盖 G2 质量门禁。"""
+        conn = _g()["conn"]
+        row = _content_row(conn, content_id)
+        _ensure_content_round_idle(row, "审核通过")
+        if row["guard_outcome"] != "pass":
+            raise HTTPException(409, "内容必须先通过 G2 质量检查才能审核通过")
+        if bool(row["review_rejected"]):
+            raise HTTPException(409, "已驳回内容必须先通过重新提交审核流程，不能直接改为通过")
+        if conn.execute(
+            "SELECT COUNT(*) FROM drafts WHERE content_id = ? "
+            "AND (user_confirmed_at IS NOT NULL "
+            "OR status IN ('user_published','data_fetching','published'))",
+            (content_id,),
+        ).fetchone()[0]:
+            raise HTTPException(409, "该内容已有发布历史，不能作为待审核内容处理")
+        eligible = conn.execute(
+            "SELECT COUNT(*) FROM drafts WHERE content_id = ? "
+            "AND status IN ('draft_pending','draft_saved')",
+            (content_id,),
+        ).fetchone()[0]
+        if not eligible:
+            raise HTTPException(409, "当前内容没有可审核的待存内容或平台草稿")
+        reason = str((req or {}).get("reason") or "人工审核通过").strip()[:500]
+        # 将“最近一次审核决策不是通过”作为 INSERT 条件，避免并发重复点击生成多条通过记录。
+        inserted = conn.execute(
+            "INSERT INTO user_override (round_id, override_field, original_value, "
+            "override_value, reason, overridden_by, overridden_at) "
+            "SELECT ?, ?, ?, ?, ?, ?, ? WHERE COALESCE(("
+            "SELECT u.override_field FROM user_override u WHERE u.round_id IS ? "
+            "AND u.override_field IN ('review_approve','review_reject','review_resubmit') "
+            "AND CASE WHEN json_valid(u.original_value) "
+            "THEN json_extract(u.original_value, '$.content_id') ELSE NULL END = ? "
+            "ORDER BY u.overridden_at DESC, u.rowid DESC LIMIT 1"
+            "), '') != 'review_approve'",
+            (
+                row["round_id"], "review_approve",
+                json.dumps({"content_id": content_id, "title": row["title"]}, ensure_ascii=False)[:500],
+                "approved", reason, "web-ui", _storage_now().isoformat(timespec="seconds"),
+                row["round_id"], content_id,
+            ),
+        )
+        conn.commit()
+        return {
+            "id": content_id, "review_status": "approved",
+            "deduped": inserted.rowcount == 0,
+        }
+
     @app.get("/api/contents/{content_id}/images/{index}")
     def get_content_image(content_id: str, index: int, download: bool = Query(False)):
         """G-36：读取已生成的卡片图（只允许该内容登记过、且在本项目 output 目录下的文件）。
@@ -5857,6 +6169,341 @@ def _register_routes(app: FastAPI) -> None:
         if download:
             return FileResponse(str(path), filename=path.name, media_type="image/png")
         return FileResponse(str(path), media_type="image/png")
+
+    @app.get("/api/contents/{content_id}/visual-versions")
+    def list_content_visual_versions(content_id: str):
+        """Return immutable visual design history without exposing server filesystem paths."""
+        conn = _g()["conn"]
+        _content_row(conn, content_id)
+        from src.core.visual_persistence import get_visual_version_history
+        versions = get_visual_version_history(conn, content_id)
+        from src.core.content_pipeline import image_generation_settings
+        image_settings_ready = image_generation_settings(conn)[0] is not None
+        for version in versions:
+            design = version.get("design") or {}
+            safe_pages = []
+            for page in design.get("pages", []):
+                if not isinstance(page, dict):
+                    continue
+                output_root = Path(_g()["cfg"].resolve_path(_g()["cfg"].paths.output_dir)).resolve()
+                background_path = Path(str(page.get("background_path") or "")).resolve()
+                ai_revision_ready = image_settings_ready
+                can_revise = bool(
+                    ai_revision_ready
+                    and isinstance(page.get("page_index"), int)
+                    and output_root in background_path.parents
+                    and background_path.is_file()
+                )
+                safe_pages.append({
+                    "page_index": page.get("page_index"),
+                    "image_url": (
+                        f"/api/contents/{content_id}/visual-versions/{version.get('id')}/pages/{page.get('page_index')}"
+                        if isinstance(page.get("page_index"), int) else None
+                    ),
+                    "can_revise": can_revise,
+                })
+            design["pages"] = safe_pages
+            # 生图背景的本地绝对路径只留在服务端数据库，不向 API 暴露。
+            design.pop("background_path", None)
+            if isinstance(design.get("generation"), list):
+                design["generation"] = [
+                    {key: value for key, value in item.items() if key != "path"}
+                    for item in design["generation"] if isinstance(item, dict)
+                ]
+            version["design"] = design
+        jobs = conn.execute(
+            "SELECT id, visual_version_id, page_index, job_type, status, attempt, "
+            "error_code, error_message, created_at, started_at, completed_at "
+            "FROM visual_jobs WHERE content_id=? ORDER BY created_at DESC, page_index",
+            (content_id,),
+        ).fetchall()
+        return {"content_id": content_id, "versions": versions,
+                "jobs": [dict(item) for item in jobs]}
+
+    @app.get("/api/contents/{content_id}/visual-versions/{version_id}/pages/{page_index}")
+    def get_visual_version_page(content_id: str, version_id: int, page_index: int):
+        """Serve an image belonging to a specific immutable visual version."""
+        conn = _g()["conn"]
+        _content_row(conn, content_id)
+        version = conn.execute(
+            "SELECT design_json FROM visual_design_versions WHERE id=? AND content_id=?",
+            (version_id, content_id),
+        ).fetchone()
+        if not version:
+            raise HTTPException(404, "视觉版本不存在")
+        try:
+            design = json.loads(version["design_json"] or "{}")
+            pages = design.get("pages", [])
+            page = next(
+                item for item in pages
+                if isinstance(item, dict) and item.get("page_index") == page_index
+            )
+        except (TypeError, ValueError, StopIteration):
+            raise HTTPException(404, "视觉版本页面不存在") from None
+        root = _g()["cfg"].resolve_path(_g()["cfg"].paths.output_dir).resolve()
+        image_path = Path(str(page.get("image_path", ""))).resolve()
+        if root not in image_path.parents or not image_path.is_file():
+            raise HTTPException(404, "视觉版本图片不存在")
+        return FileResponse(str(image_path), media_type="image/png")
+
+
+    @app.post("/api/contents/{content_id}/visual-versions/{version_id}/pages/{page_index}/revise")
+    @manages_own_transaction
+    def revise_visual_version_page(content_id: str, version_id: int, page_index: int, req: dict | None = None):
+        """Regenerate one page only; create a new immutable version and preserve all other page files."""
+        ctx = _g()
+        conn, cfg = ctx["conn"], ctx["cfg"]
+        row = _content_row(conn, content_id)
+        _ensure_content_round_idle(row, "重做视觉页面")
+        published = conn.execute(
+            "SELECT 1 FROM drafts WHERE content_id=? AND "
+            "(user_confirmed_at IS NOT NULL OR status IN ('user_published','data_fetching','published')) LIMIT 1",
+            (content_id,),
+        ).fetchone()
+        if published:
+            raise HTTPException(409, "已确认发布的内容不能重做视觉页面")
+        current = conn.execute(
+            "SELECT * FROM visual_design_versions WHERE id=? AND content_id=?",
+            (version_id, content_id),
+        ).fetchone()
+        if not current:
+            raise HTTPException(404, "视觉版本不存在")
+        try:
+            design = json.loads(current["design_json"] or "{}")
+            pages = design.get("pages") or []
+            target_page = next(p for p in pages if p.get("page_index") == page_index)
+            background = Path(str(target_page.get("background_path") or design.get("background_path") or "")).resolve()
+        except (TypeError, ValueError, StopIteration):
+            raise HTTPException(409, "该历史版本缺少可编辑的页面设计数据") from None
+        output_root = Path(cfg.resolve_path(cfg.paths.output_dir)).resolve()
+        if output_root not in background.parents or not background.is_file():
+            raise HTTPException(409, "该页面没有可用的原始背景素材，无法进行单页重做")
+        from src.core.content_pipeline import image_generation_settings
+        image_settings, settings_reason = image_generation_settings(conn)
+        if image_settings is None:
+            raise HTTPException(409, f"单页 AI 重做不可用：{settings_reason}")
+        instruction = str((req or {}).get("instruction") or "改善本页构图、色彩协调和视觉层次").strip()[:500]
+        if not instruction:
+            raise HTTPException(422, "重做说明不能为空")
+        from src.core.visual_persistence import create_visual_page_job, create_visual_version, transition_visual_job
+        # 任务登记单独提交：调用图像模型（数十秒）期间绝不持有 SQLite 写事务，避免 database is locked。
+        with conn:
+            job_id = create_visual_page_job(
+                conn, content_id=content_id, visual_version_id=version_id,
+                page_index=page_index, job_type="revise",
+                input_data={"instruction": instruction, "source_version_id": version_id},
+            )
+            transition_visual_job(conn, job_id=job_id, expected_status="queued", new_status="running")
+        revised_path = None
+        try:
+            from src.core.visual_generation import revise_visual_background
+            result = revise_visual_background(
+                source_path=background, feedback=[instruction], output_dir=output_root,
+                settings=image_settings, cfg=cfg,
+            )
+            if result.get("status") != "revised" or not result.get("path"):
+                raise HTTPException(503, "AI 背景重做未成功，请检查图像模型配置")
+            revised_background = Path(result["path"]).resolve()
+            if output_root not in revised_background.parents or not revised_background.is_file():
+                raise HTTPException(500, "AI 返回的背景素材路径无效")
+            revised_path, _ = __import__("src.core.visual_renderer", fromlist=["render_single_page"]).render_single_page(
+                title=str(design.get("title") or row["title"]),
+                subtitle=str(design.get("subtitle") or ""),
+                body=str(design.get("body") or row["body"]),
+                page_index=page_index, total_pages=len(pages),
+                output_dir=output_root, platform=Platform(str(design.get("platform") or row["platform"])),
+                footer=str(design.get("footer") or ""),
+                theme=str(design.get("render_options", {}).get("theme") or current["style_key"]),
+                background_path=revised_background,
+                brand_palette=design.get("render_options", {}).get("brand_palette"),
+                font_family=str(design.get("render_options", {}).get("font_family")
+                                or __import__("src.core.visual_catalog", fromlist=["default_font"]).default_font()),
+            )
+            new_pages = [dict(item) for item in pages]
+            for item in new_pages:
+                if item.get("page_index") == page_index:
+                    item["image_path"] = str(revised_path)
+                    item["background_path"] = str(revised_background)
+            new_design = {**design, "pages": new_pages}
+            new_design["generation"] = list(new_design.get("generation") or []) + [{
+                "status": "revised", "model": result.get("model"),
+                "elapsed_ms": result.get("elapsed_ms"), "bytes": result.get("bytes"),
+            }]
+            from src.core.visual_persistence import compute_content_hash
+            content_hash = compute_content_hash(str(row["title"]), str(row["body"]))
+            with conn:
+                new_version_id = create_visual_version(
+                    conn, content_id=content_id, content_hash=content_hash,
+                    renderer=current["renderer"], style_key=current["style_key"],
+                    design=new_design, created_by="manual_page_revision",
+                )
+                conn.execute(
+                    "UPDATE visual_design_versions SET status='review_required' WHERE id=?",
+                    (new_version_id,),
+                )
+                transition_visual_job(
+                    conn, job_id=job_id, expected_status="running", new_status="succeeded",
+                    output_data={
+                        "new_version_id": new_version_id, "image_path": str(revised_path),
+                        "model": result.get("model"), "bytes": result.get("bytes"),
+                        "elapsed_ms": result.get("elapsed_ms"),
+                    },
+                )
+                conn.execute(
+                    "UPDATE contents SET image_paths=? WHERE id=?",
+                    (json.dumps([item["image_path"] for item in new_pages], ensure_ascii=False), content_id),
+                )
+            return {"content_id": content_id, "job_id": job_id, "version_id": new_version_id,
+                    "page_index": page_index, "image_url":
+                    f"/api/contents/{content_id}/visual-versions/{new_version_id}/pages/{page_index}",
+                    "status": "review_required"}
+        except HTTPException:
+            with conn:
+                transition_visual_job(
+                    conn, job_id=job_id, expected_status="running", new_status="failed",
+                    error_code="visual_revision_failed", error_message="单页重做失败",
+                )
+            raise
+        except Exception as exc:
+            logger.exception("单页视觉重做失败 content=%s page=%s", content_id, page_index)
+            with conn:
+                transition_visual_job(
+                    conn, job_id=job_id, expected_status="running", new_status="failed",
+                    error_code="visual_revision_failed", error_message=type(exc).__name__,
+                )
+            raise HTTPException(500, "单页视觉重做失败，请查看服务端日志") from exc
+
+    def _visual_brand_profile(conn, tenant_id: str) -> dict:
+        row = conn.execute(
+            "SELECT profile_json, updated_at FROM visual_brand_profiles WHERE tenant_id=?",
+            (tenant_id,),
+        ).fetchone()
+        if not row:
+            return {"tenant_id": tenant_id, "profile": {}, "updated_at": None}
+        try:
+            profile = json.loads(row["profile_json"])
+        except (TypeError, ValueError):
+            profile = {}
+        return {"tenant_id": tenant_id, "profile": profile, "updated_at": row["updated_at"]}
+
+    @app.get("/api/visual/usage")
+    def get_visual_usage(limit: int = Query(200, ge=1, le=1000)):
+        """Aggregate visual generation usage from persisted tenant-local round reports."""
+        conn = _g()["conn"]
+        rows = conn.execute(
+            "SELECT id, round_number, run_report FROM spiral_rounds "
+            "WHERE run_report IS NOT NULL ORDER BY id DESC LIMIT ?", (limit,),
+        ).fetchall()
+        totals = {"generation_count": 0, "bytes": 0, "elapsed_ms": 0, "items": 0}
+        by_platform: dict[str, dict] = {}
+        recent = []
+        for row in rows:
+            try:
+                report = json.loads(row["run_report"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(report, dict):
+                continue
+            for item in report.get("visual_usage", []):
+                if not isinstance(item, dict):
+                    continue
+                platform = str(item.get("platform") or "unknown")
+                count = int(item.get("generation_count") or 0)
+                size = int(item.get("bytes") or 0)
+                elapsed = int(item.get("elapsed_ms") or 0)
+                totals["generation_count"] += count
+                totals["bytes"] += size
+                totals["elapsed_ms"] += elapsed
+                totals["items"] += 1
+                bucket = by_platform.setdefault(platform, {
+                    "platform": platform, "generation_count": 0, "bytes": 0,
+                    "elapsed_ms": 0, "items": 0,
+                })
+                bucket["generation_count"] += count
+                bucket["bytes"] += size
+                bucket["elapsed_ms"] += elapsed
+                bucket["items"] += 1
+                recent.append({
+                    "round_id": row["id"], "round_number": row["round_number"],
+                    "topic_id": item.get("topic_id"), "platform": platform,
+                    "generation_count": count, "bytes": size, "elapsed_ms": elapsed,
+                    "ocr_status": item.get("ocr_status"),
+                    "review_status": item.get("review_status"),
+                    "review_score": item.get("review_score"),
+                })
+        revision_jobs = conn.execute(
+            "SELECT id, content_id, page_index, output_json FROM visual_jobs "
+            "WHERE job_type='revise' AND status='succeeded' ORDER BY created_at DESC LIMIT 500",
+        ).fetchall()
+        for job in revision_jobs:
+            try:
+                output = json.loads(job["output_json"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            size = int(output.get("bytes") or 0)
+            elapsed = int(output.get("elapsed_ms") or 0)
+            totals["generation_count"] += 1
+            totals["bytes"] += size
+            totals["elapsed_ms"] += elapsed
+            totals["items"] += 1
+            bucket = by_platform.setdefault("single_page_revision", {
+                "platform": "single_page_revision", "generation_count": 0,
+                "bytes": 0, "elapsed_ms": 0, "items": 0,
+            })
+            bucket["generation_count"] += 1
+            bucket["bytes"] += size
+            bucket["elapsed_ms"] += elapsed
+            bucket["items"] += 1
+            recent.append({
+                "round_id": None, "round_number": None,
+                "topic_id": job["content_id"], "platform": "single_page_revision",
+                "generation_count": 1, "bytes": size, "elapsed_ms": elapsed,
+                "ocr_status": "review_required", "review_status": "manual_review",
+                "review_score": None,
+            })
+        return {
+            "scanned_rounds": len(rows), "totals": totals,
+            "by_platform": list(by_platform.values()), "recent": recent[:100],
+        }
+
+    @app.get("/api/visual/catalog")
+    def get_visual_catalog():
+        """可选视觉风格/字体/组件样式的唯一来源（visual_catalog.json），含本机字体安装状态。"""
+        from src.core.visual_catalog import public_catalog
+        return public_catalog()
+
+    @app.get("/api/visual/brand-profile")
+    def get_visual_brand_profile():
+        ctx = _g()
+        tenant_id = str(ctx.get("runtime_tenant_id") or "default")
+        return _visual_brand_profile(ctx["conn"], tenant_id)
+
+    @app.put("/api/visual/brand-profile")
+    def put_visual_brand_profile(req: dict):
+        """Update only the active tenant's visual brand defaults."""
+        ctx = _g()
+        tenant_id = str(ctx.get("runtime_tenant_id") or "default")
+        from src.core.visual_catalog import validate_brand_profile
+        if not isinstance(req, dict):
+            raise HTTPException(422, "品牌配置必须是对象")
+        profile = _visual_brand_profile(ctx["conn"], tenant_id)["profile"]
+        merged = {**profile, **req}
+        # 空字符串表示「使用默认」，不落库
+        merged = {key: value for key, value in merged.items() if value not in ("", None)}
+        try:
+            validate_brand_profile(merged)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        # LockedConnection 的 __enter__ 持有事务级 RLock，避免语句锁之间被其他线程插入。
+        with ctx["conn"]:
+            ctx["conn"].execute(
+                "INSERT INTO visual_brand_profiles(tenant_id, profile_json, updated_at) "
+                "VALUES(?, ?, ?) ON CONFLICT(tenant_id) DO UPDATE SET "
+                "profile_json=excluded.profile_json, updated_at=excluded.updated_at",
+                (tenant_id, json.dumps(merged, ensure_ascii=False, sort_keys=True),
+                 storage_now().isoformat(timespec="seconds")),
+            )
+        return _visual_brand_profile(ctx["conn"], tenant_id)
 
     @app.patch("/api/contents/{content_id}")
     def update_content(content_id: str, req: UpdateContentRequest):
@@ -5921,7 +6568,7 @@ def _register_routes(app: FastAPI) -> None:
                         json.dumps({"title": title, "body_len": len(body or "")},
                                    ensure_ascii=False)[:500],
                         req.reason or "UI 编辑", "web-ui",
-                        _now().strftime("%Y-%m-%d %H:%M:%S"),
+                        _storage_now().isoformat(timespec="seconds"),
                     ),
                 )
             conn.commit()
@@ -5931,6 +6578,7 @@ def _register_routes(app: FastAPI) -> None:
             }
     
     @app.post("/api/contents/{content_id}/cards")
+    @manages_own_transaction
     def regenerate_cards(content_id: str):
         """按当前标题/正文重新出图（封面 + 正文分页），补上历史内容的「只有文没有图」。"""
         conn = _g()["conn"]
@@ -5955,33 +6603,38 @@ def _register_routes(app: FastAPI) -> None:
                 "SELECT dimension FROM topics WHERE id = ?", (row["topic_id"],)
             ).fetchone()
             dimension = (topic["dimension"] if topic else "") or ""
+        except sqlite3.Error:  # 维度只是装饰；仅数据库兼容/读取故障允许退回空值
+            logger.warning("重出图读取选题维度失败 content_id=%s", content_id, exc_info=True)
+            dimension = ""
 
         from ..core.content_pipeline import (
-            body_page_prompt, card_footer, cover_prompt, make_card_set, plan_body_pages,
-            render_ai_background,
+            body_page_prompt, card_footer, cover_prompt, image_generation_settings,
+            make_card_set, plan_visual_pages, render_ai_background,
+        )
+        from ..core.visual_catalog import brand_footer_text, resolve_render_options
+        tenant_id = _tenant_id()
+        profile = _visual_brand_profile(conn, tenant_id)["profile"]
+        try:
+            render_options = resolve_render_options(profile)
+        except ValueError as exc:
+            raise HTTPException(409, f"当前账号组视觉品牌配置无效：{exc}") from exc
+        footer = " · ".join(
+            item for item in (card_footer(cfg, platform), brand_footer_text(profile)) if item
         )
         output_dir = cfg.resolve_path(cfg.paths.output_dir)
-        # 重出图同样给正文页配 AI 底图（与轮次生产保持一致），单页失败退回渐变
-        settings = None
-        if "media_generation_settings" in tables:
-            mg_row = conn.execute(
-                "SELECT enabled, prompt_prefix, model, size, fallback_enabled "
-                "FROM media_generation_settings WHERE id = 1"
-            ).fetchone()
-            if mg_row and mg_row["enabled"]:
-                settings = {
-                    "prefix": (mg_row["prompt_prefix"] or "").strip(),
-                    "model": (mg_row["model"] or "").strip() or "gpt-image-1",
-                    "size": (mg_row["size"] or "").strip() or "1024x1536",
-                    "fallback_enabled": bool(mg_row["fallback_enabled"]),
-                }
+        subtitle = dimension or "知识卡片"
+        # AI 配图配置唯一来源：media_generation_settings（与轮次生产一致）。
+        settings, _settings_reason = image_generation_settings(conn)
         # 出图要调外部服务（数十秒），先结束读事务释放 SQLite 锁，避免长时间持锁把其它写入卡死
         conn.commit()
-        pages = plan_body_pages(body)
-        body_images = []
+        try:
+            pages = plan_visual_pages(title, subtitle, body, platform, footer, **render_options)
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(422, f"视觉排版失败：{exc}") from exc
+        body_images: list = []
         cover_image = None
         if settings:
-            cover_text = cover_prompt(title, dimension or "知识卡片")
+            cover_text = cover_prompt(title, subtitle)
             if settings["prefix"]:
                 cover_text = f"{settings['prefix']}\n\n{cover_text}"
             cover_image = render_ai_background(
@@ -5990,7 +6643,7 @@ def _register_routes(app: FastAPI) -> None:
                 allow_fallback=settings["fallback_enabled"],
             )
             for lines in pages:
-                prompt = body_page_prompt(title, dimension or "知识卡片", lines)
+                prompt = body_page_prompt(title, subtitle, lines)
                 if settings["prefix"]:
                     prompt = f"{settings['prefix']}\n\n{prompt}"
                 body_images.append(render_ai_background(
@@ -5998,26 +6651,71 @@ def _register_routes(app: FastAPI) -> None:
                     cfg=cfg, platform=platform,
                     allow_fallback=settings["fallback_enabled"],
                 ))
-        paths = make_card_set(title, dimension or "知识卡片", body, output_dir,
-                              platform, card_footer(cfg, platform),
-                              cover_image=cover_image,
-                              body_images=body_images, pages=pages)
-        old = []
         try:
-            old = json.loads(row["image_paths"] or "[]")
-        except (TypeError, ValueError):
-            old = []
-        conn.execute(
-            "UPDATE contents SET image_paths = ? WHERE id = ?",
-            (json.dumps([str(p) for p in paths], ensure_ascii=False), content_id),
+            paths = make_card_set(
+                title, subtitle, body, output_dir, platform, footer, **render_options,
+                cover_image=cover_image, body_images=body_images, pages=pages,
+            )
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(422, f"视觉硬门未通过：{exc}") from exc
+        from src.core.visual_ocr import load_ocr_report
+        from src.core.visual_persistence import (
+            compute_content_hash, create_visual_page_job, create_visual_version,
+            transition_visual_job,
         )
-        conn.commit()
-        # 旧图（旧版单封面）顺手清掉，避免 output 目录里堆孤儿文件
-        for p in old:
-            try:
-                Path(str(p)).unlink()
-            except OSError:
-                pass
+        ocr_report = load_ocr_report(paths)
+        content_hash = compute_content_hash(title, body)
+        body_ai = sum(1 for item in body_images if item)
+        has_ai = bool(cover_image) or body_ai > 0
+        visual_status = "generated" if has_ai else "degraded"
+        visual_reason = (
+            (f"{'封面底图 + ' if cover_image else ''}{body_ai}/{len(pages)} 张正文配图由文生图模型生成，"
+             "文字由 Chromium 排版叠加") if has_ai else "仅使用 Chromium 排版叠字（手动重出图）"
+        ) + ("；OCR 硬门通过，仍需人工审核" if ocr_report.get("status") == "passed"
+             else "；OCR 硬门未通过或不可用，需人工复核")
+        with conn:
+            version_id = create_visual_version(
+                conn, content_id=content_id, content_hash=content_hash,
+                renderer="chromium_v2", style_key=render_options["theme"],
+                design={
+                    "platform": platform.value, "title": title,
+                    "subtitle": subtitle, "body": body,
+                    "footer": footer,
+                    "render_options": render_options,
+                    "background_path": str(cover_image) if cover_image else None,
+                    "body_pages": pages,
+                    "pages": [
+                        {"page_index": index, "image_path": str(path),
+                         "background_path": (
+                             (str(cover_image) if cover_image else None) if index == 0 else
+                             (str(body_images[index - 1]) if index - 1 < len(body_images) and body_images[index - 1] else None)
+                         )}
+                        for index, path in enumerate(paths)
+                    ],
+                    "ocr": ocr_report,
+                },
+            )
+            conn.execute(
+                "UPDATE visual_design_versions SET status=? WHERE id=?",
+                ("rendered" if ocr_report.get("status") == "passed" else "review_required", version_id),
+            )
+            for index, path in enumerate(paths):
+                job_id = create_visual_page_job(
+                    conn, content_id=content_id, visual_version_id=version_id,
+                    page_index=index, job_type="rerender",
+                    input_data={"source": "manual_full_regeneration"},
+                )
+                transition_visual_job(conn, job_id=job_id, expected_status="queued", new_status="running")
+                transition_visual_job(
+                    conn, job_id=job_id, expected_status="running", new_status="succeeded",
+                    output_data={"image_path": str(path)},
+                )
+            conn.execute(
+                "UPDATE contents SET image_paths = ?, visual_status = ?, visual_reason = ? WHERE id = ?",
+                (json.dumps([str(path) for path in paths], ensure_ascii=False),
+                 visual_status, visual_reason, content_id),
+            )
+        # 历史版本图片保留，版本接口继续可读取；不做破坏性清理。
         return {"id": content_id, "image_count": len(paths),
                 "image_paths": [p.name for p in paths]}
 
@@ -6076,12 +6774,17 @@ def _register_routes(app: FastAPI) -> None:
         ).fetchall()
         if not eligible:
             raise HTTPException(409, "当前内容没有可驳回的待存内容或平台草稿")
+        if bool(row["review_rejected"]):
+            raise HTTPException(409, "该内容已被驳回，请勿重复提交审核操作")
         reason = req.reason.strip()
         message = f"[已驳回] {reason}"
-        conn.execute(
-            "UPDATE contents SET review_rejected = 1, review_rejection_reason = ? WHERE id = ?",
+        changed = conn.execute(
+            "UPDATE contents SET review_rejected = 1, review_rejection_reason = ? "
+            "WHERE id = ? AND COALESCE(review_rejected, 0) = 0",
             (reason, content_id),
         )
+        if changed.rowcount != 1:
+            raise HTTPException(409, "内容审核状态已被其他操作更新，请刷新后重试")
         cur = conn.execute(
             "UPDATE drafts SET error_msg = ? "
             "WHERE content_id = ? AND status IN ('draft_pending','draft_saved')",
@@ -6093,9 +6796,9 @@ def _register_routes(app: FastAPI) -> None:
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 row["round_id"], "review_reject",
-                json.dumps({"title": row["title"]}, ensure_ascii=False)[:500],
+                json.dumps({"content_id": content_id, "title": row["title"]}, ensure_ascii=False)[:500],
                 "rejected", reason, "web-ui",
-                _now().strftime("%Y-%m-%d %H:%M:%S"),
+                _storage_now().isoformat(timespec="seconds"),
             ),
         )
         conn.commit()
@@ -6147,9 +6850,9 @@ def _register_routes(app: FastAPI) -> None:
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 row["round_id"], "review_resubmit",
-                json.dumps({"review_rejection_reason": row["review_rejection_reason"]}, ensure_ascii=False)[:500],
+                json.dumps({"content_id": content_id, "review_rejection_reason": row["review_rejection_reason"]}, ensure_ascii=False)[:500],
                 "resubmitted", reason, "web-ui",
-                _now().strftime("%Y-%m-%d %H:%M:%S"),
+                _storage_now().isoformat(timespec="seconds"),
             ),
         )
         conn.commit()
@@ -6309,7 +7012,7 @@ def _register_routes(app: FastAPI) -> None:
                 raise HTTPException(422, "输入输出 schema 必须为 JSON 对象且单项不超过 2000 字")
         if len(json.dumps([inputs, outputs], ensure_ascii=False)) > 20000:
             raise HTTPException(422, "输入输出 schema 总大小不能超过 20000 字")
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         conn = _g()["conn"]
         if conn.execute("SELECT COUNT(*) FROM tenant_skill_registry").fetchone()[0] >= 200:
             raise HTTPException(409, "每个账号组最多登记 200 个自定义 Skills")
@@ -6387,7 +7090,7 @@ def _register_routes(app: FastAPI) -> None:
         if len(json.dumps([inputs, outputs], ensure_ascii=False)) > 20000:
             raise HTTPException(422, "输入输出 schema 总大小不能超过 20000 字")
 
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         cursor = conn.execute(
             "UPDATE tenant_skill_registry SET name=?,version=?,description=?,category=?,"
             "inputs_json=?,outputs_json=?,permissions_json=?,enabled=?,"
@@ -6448,7 +7151,7 @@ def _register_routes(app: FastAPI) -> None:
             "cancelled": "cancelled",
         }.get(task.status if task else "")
         if terminal:
-            now = _now().isoformat(timespec="seconds")
+            now = _storage_now().isoformat(timespec="seconds")
             if terminal in ("generated", "failed"):
                 drafts = conn.execute(
                     "SELECT d.id FROM drafts d JOIN contents c ON c.id=d.content_id WHERE c.round_id=?",
@@ -6541,7 +7244,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(422, "计划产出数量必须是整数") from exc
         if not 1 <= planned_count <= 50:
             raise HTTPException(422, "计划产出数量必须在 1 到 50 之间")
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         plan_id = uuid.uuid4().hex
         conn = _g()["conn"]
         conn.execute(
@@ -6614,7 +7317,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(422, "计划产出数量必须在 1 到 100 之间")
         if len(str(values["topic"] or "")) > 500 or len(str(values["notes"] or "")) > 4000:
             raise HTTPException(422, "选题或备注内容过长")
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         cursor = conn.execute(
             "UPDATE content_plans SET title=?,topic=?,platforms_json=?,planned_count=?,scheduled_date=?,status=?,notes=?,version=version+1,updated_at=? "
             "WHERE id=? AND version=?",
@@ -6668,7 +7371,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(422, "draft_ids 不能包含空值")
         conn = _g()["conn"]
         linked_now = []
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         conn.execute("BEGIN IMMEDIATE")
         try:
             plan = conn.execute("SELECT status FROM content_plans WHERE id=?", (plan_id,)).fetchone()
@@ -6729,7 +7432,7 @@ def _register_routes(app: FastAPI) -> None:
         cursor = conn.execute(
             "UPDATE content_plans SET status='cancelled',version=version+1,updated_at=? "
             "WHERE id=? AND version=? AND status IN ('planned','failed','generating')",
-            (_now().isoformat(timespec="seconds"), plan_id, version),
+            (_storage_now().isoformat(timespec="seconds"), plan_id, version),
         )
         conn.commit()
         if cursor.rowcount != 1:
@@ -6747,7 +7450,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(409, "计划已被其他窗口修改，请刷新后重试")
         if row["status"] not in ("generated", "reviewed", "failed", "cancelled"):
             raise HTTPException(409, "只有已结束的计划可以归档")
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         cursor = conn.execute(
             "UPDATE content_plans SET status='archived',version=version+1,updated_at=? "
             "WHERE id=? AND version=? AND status IN ('generated','reviewed','failed','cancelled')",
@@ -6770,7 +7473,7 @@ def _register_routes(app: FastAPI) -> None:
         restore_to = {"archived": "reviewed", "cancelled": "planned"}.get(str(row["status"]))
         if restore_to is None:
             raise HTTPException(409, "只有已归档或已停用的计划可以恢复")
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         cursor = conn.execute(
             "UPDATE content_plans SET status=?,version=version+1,updated_at=? "
             "WHERE id=? AND version=? AND status=?",
@@ -6795,6 +7498,13 @@ def _register_routes(app: FastAPI) -> None:
             start_date = _now().strftime("%Y-%m-%d")
         if end_date is None:
             end_date = (_now() + timedelta(days=30)).strftime("%Y-%m-%d")
+        for label, value in (("start_date", start_date), ("end_date", end_date)):
+            try:
+                datetime.strptime(value, "%Y-%m-%d")
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(422, f"{label} 必须为 YYYY-MM-DD") from exc
+        if end_date < start_date:
+            raise HTTPException(422, "end_date 不能早于 start_date")
 
         sql = (
             "SELECT d.id, d.platform, d.status, d.scheduled_publish_at, d.saved_at, "
@@ -7034,18 +7744,22 @@ def _register_routes(app: FastAPI) -> None:
         from datetime import timedelta
 
         conn = _g()["conn"]
-        since = (_now() - timedelta(days=days - 1)).strftime("%Y-%m-%d %H:%M:%S")
+        since_utc, since_legacy = storage_window_cutoffs(
+            _storage_now() - timedelta(days=days - 1), _g()["cfg"],
+        )
 
         contents_created = int(conn.execute(
-            "SELECT COUNT(*) FROM contents WHERE datetime(created_at) >= datetime(?)", (since,)
+            "SELECT COUNT(*) FROM contents WHERE " + timestamp_since_sql("created_at"),
+            (since_utc, since_legacy),
         ).fetchone()[0])
         drafts_created = int(conn.execute(
-            "SELECT COUNT(*) FROM drafts WHERE datetime(created_at) >= datetime(?)", (since,)
+            "SELECT COUNT(*) FROM drafts WHERE " + timestamp_since_sql("created_at"),
+            (since_utc, since_legacy),
         ).fetchone()[0])
         confirmed_published = int(conn.execute(
-            "SELECT COUNT(*) FROM drafts WHERE datetime(user_confirmed_at) >= datetime(?) "
-            "AND user_confirmed_at IS NOT NULL",
-            (since,),
+            "SELECT COUNT(*) FROM drafts WHERE " + timestamp_since_sql("user_confirmed_at")
+            + " AND user_confirmed_at IS NOT NULL",
+            (since_utc, since_legacy),
         ).fetchone()[0])
 
         # 每篇草稿仅取窗口内最新一条成功/部分成功快照，避免重复采集被重复求和。
@@ -7057,7 +7771,7 @@ def _register_routes(app: FastAPI) -> None:
                           ) AS rn
                    FROM metrics
                    WHERE draft_id IS NOT NULL
-                     AND datetime(fetched_at) >= datetime(?)
+                     AND """ + timestamp_since_sql("fetched_at") + """
                      AND fetch_status IN ('success','partial')
                )
                SELECT COUNT(*) AS sample_count,
@@ -7070,22 +7784,24 @@ def _register_routes(app: FastAPI) -> None:
                       SUM(CASE WHEN comments IS NOT NULL THEN 1 ELSE 0 END) AS comments_samples,
                       SUM(CASE WHEN shares IS NOT NULL THEN 1 ELSE 0 END) AS shares_samples
                FROM ranked WHERE rn = 1""",
-            (since,),
+            (since_utc, since_legacy),
         ).fetchone()
 
         followers_growth: dict[str, dict | None] = {}
         for platform in _g()["cfg"].platforms.enabled_keys():
             baseline = conn.execute(
                 "SELECT followers, captured_at FROM account_snapshots "
-                "WHERE platform=? AND followers IS NOT NULL AND datetime(captured_at) < datetime(?) "
+                "WHERE platform=? AND followers IS NOT NULL AND captured_at IS NOT NULL AND NOT ("
+                + timestamp_since_sql("captured_at") + ") "
                 "ORDER BY captured_at DESC, id DESC LIMIT 1",
-                (platform, since),
+                (platform, since_utc, since_legacy),
             ).fetchone()
             latest = conn.execute(
                 "SELECT followers, captured_at FROM account_snapshots "
-                "WHERE platform=? AND followers IS NOT NULL AND datetime(captured_at) >= datetime(?) "
+                "WHERE platform=? AND followers IS NOT NULL AND "
+                + timestamp_since_sql("captured_at") + " "
                 "ORDER BY captured_at DESC, id DESC LIMIT 1",
-                (platform, since),
+                (platform, since_utc, since_legacy),
             ).fetchone()
             followers_growth[platform] = (
                 {
@@ -7098,7 +7814,7 @@ def _register_routes(app: FastAPI) -> None:
 
         return {
             "window_days": days,
-            "since": since,
+            "since": since_utc,
             "contents_created": contents_created,
             "drafts_created": drafts_created,
             "confirmed_published": confirmed_published,
@@ -7266,7 +7982,7 @@ def _register_routes(app: FastAPI) -> None:
                         "INSERT INTO hot_topic_import_audit "
                         "(topic_id, title, categories, confirmed_by, confirmed_at) VALUES (?, ?, ?, ?, ?)",
                         (topic_id, title, json.dumps(sensitive_hits, ensure_ascii=False),
-                         confirmed_by, _now().isoformat(timespec="seconds")),
+                         confirmed_by, _storage_now().isoformat(timespec="seconds")),
                     )
                     conn.commit()
                 return {"id": topic_id, "imported": True,
@@ -7280,7 +7996,7 @@ def _register_routes(app: FastAPI) -> None:
             (
                 topic_id, title, dimension or None,
                 f"hot:{source}", _now().strftime("%Y-%m-%d"),
-                _now().strftime("%Y-%m-%d %H:%M:%S"),
+                _storage_now().isoformat(timespec="seconds"),
                 raw_url, str((req or {}).get("summary") or "").strip() or None,
             ),
         )
@@ -7291,7 +8007,7 @@ def _register_routes(app: FastAPI) -> None:
                 "INSERT INTO hot_topic_import_audit "
                 "(topic_id, title, categories, confirmed_by, confirmed_at) VALUES (?, ?, ?, ?, ?)",
                 (topic_id, title, json.dumps(sensitive_hits, ensure_ascii=False),
-                 confirmed_by, _now().isoformat(timespec="seconds")),
+                 confirmed_by, _storage_now().isoformat(timespec="seconds")),
             )
             conn.commit()
         return {"id": topic_id, "imported": True, "title": title,
@@ -7308,10 +8024,13 @@ def _register_routes(app: FastAPI) -> None:
         """
         conn = _g()["conn"]
         # ops_logs 统计（窗口由 days 决定；1 = 今日，R6/R16 计数口径不变）
+        ops_since_utc, ops_since_legacy = storage_window_cutoffs(
+            _storage_now() - timedelta(days=max(0, days - 1)), _g()["cfg"],
+        )
         today_ops = conn.execute(
-            "SELECT action_type, status, COUNT(*) AS n FROM ops_logs "
-            "WHERE executed_at >= datetime('now', ?) GROUP BY action_type, status",
-            (f"-{max(0, days - 1)} days",),
+            "SELECT action_type, status, COUNT(*) AS n FROM ops_logs WHERE "
+            + timestamp_since_sql("executed_at") + " GROUP BY action_type, status",
+            (ops_since_utc, ops_since_legacy),
         ).fetchall()
         ops_by_type: dict[str, dict] = {}
         for r in today_ops:
@@ -7456,11 +8175,13 @@ def _register_routes(app: FastAPI) -> None:
             where.append("status = ?")
             params.append(status)
         if date_from:
-            where.append("substr(COALESCE(executed_at, schedule_time), 1, 10) >= ?")
-            params.append(date_from)
+            start_utc, start_legacy = business_date_cutoffs(date_from, _g()["cfg"])
+            where.append(timestamp_since_sql("COALESCE(executed_at, schedule_time)"))
+            params.extend((start_utc, start_legacy))
         if date_to:
-            where.append("substr(COALESCE(executed_at, schedule_time), 1, 10) <= ?")
-            params.append(date_to)
+            end_utc, end_legacy = business_date_cutoffs(date_to, _g()["cfg"], end=True)
+            where.append(timestamp_before_sql("COALESCE(executed_at, schedule_time)"))
+            params.extend((end_utc, end_legacy))
         if date_from and date_to and date_from > date_to:
             raise HTTPException(422, "date_from 不能晚于 date_to")
         where_sql = " WHERE " + " AND ".join(where)
@@ -7497,7 +8218,7 @@ def _register_routes(app: FastAPI) -> None:
             if row["resolution_action"] == action:
                 return {"id": log_id, "status": row["status"], "already_resolved": True}
             raise HTTPException(409, f"当前状态 {row['status']} 已收口，不能重复或反向核实")
-        resolved_at = _now().strftime("%Y-%m-%d %H:%M:%S")
+        resolved_at = _storage_now().isoformat(timespec="seconds")
         note = "用户核实：已发出" if action == "sent" else "用户核实：未发出（不自动重发）"
         actor = auth.audit_actor(request)
         updated = conn.execute(
@@ -7564,11 +8285,13 @@ def _register_routes(app: FastAPI) -> None:
             where.append("platform = ?")
             params.append(platform)
         if date_from:
-            where.append("substr(created_at, 1, 10) >= ?")
-            params.append(date_from)
+            start_utc, start_legacy = business_date_cutoffs(date_from, _g()["cfg"])
+            where.append(timestamp_since_sql("created_at"))
+            params.extend((start_utc, start_legacy))
         if date_to:
-            where.append("substr(created_at, 1, 10) <= ?")
-            params.append(date_to)
+            end_utc, end_legacy = business_date_cutoffs(date_to, _g()["cfg"], end=True)
+            where.append(timestamp_before_sql("created_at"))
+            params.extend((end_utc, end_legacy))
         if date_from and date_to and date_from > date_to:
             raise HTTPException(422, "date_from 不能晚于 date_to")
         where_sql = " WHERE " + " AND ".join(where)
@@ -7610,7 +8333,7 @@ def _register_routes(app: FastAPI) -> None:
                 return {"id": run_id, "status": row["status"], "already_resolved": True}
             raise HTTPException(409, f"当前状态 {row['status']} 已收口，不能重复或反向核实")
         note = "用户核实：已发出" if action == "sent" else "用户核实：未发出（不自动重发）"
-        resolved_at = _now().strftime("%Y-%m-%d %H:%M:%S")
+        resolved_at = _storage_now().isoformat(timespec="seconds")
         actor = auth.audit_actor(request)
         updated = conn.execute(
             "UPDATE task_runs SET status = ?, finished_at = ?, error_msg = ?, "
@@ -7729,7 +8452,7 @@ def _register_routes(app: FastAPI) -> None:
         conn = _g()["conn"]
         cur = conn.execute(
             "UPDATE notifications SET read_at = COALESCE(read_at, ?) WHERE id = ?",
-            (_now().strftime("%Y-%m-%d %H:%M:%S"), notification_id),
+            (_storage_now().isoformat(timespec="seconds"), notification_id),
         )
         if cur.rowcount == 0:
             conn.commit()
@@ -7745,7 +8468,7 @@ def _register_routes(app: FastAPI) -> None:
         conn = _g()["conn"]
         cur = conn.execute(
             "UPDATE notifications SET read_at = ? WHERE read_at IS NULL",
-            (_now().strftime("%Y-%m-%d %H:%M:%S"),),
+            (_storage_now().isoformat(timespec="seconds"),),
         )
         conn.commit()
         return {"updated": cur.rowcount}
@@ -7815,7 +8538,7 @@ def _register_routes(app: FastAPI) -> None:
         if job is None:
             raise HTTPException(404, f"任务不存在或已关闭: {job_id}")
         job.modify(next_run_time=_now())
-        return {"job_id": job_id, "triggered_at": _now().isoformat(timespec="seconds")}
+        return {"job_id": job_id, "triggered_at": _storage_now().isoformat(timespec="seconds")}
 
     # --- 节奏调度配置（只读）---
     @app.get("/api/rhythm")
@@ -7981,7 +8704,7 @@ def _register_routes(app: FastAPI) -> None:
         if req.asset_type == "reference" and not (req.source_url or "").strip():
             raise HTTPException(422, "外部参考必须填写原始链接 source_url（可溯源）")
         conn = _g()["conn"]
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         cur = conn.execute(
             "INSERT INTO content_assets "
             "(asset_type, title, body, source_url, platform, created_at, updated_at, version, is_active) "
@@ -8012,7 +8735,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(409, "内容资产类型不可修改")
         if req.asset_type == "reference" and not (req.source_url or "").strip():
             raise HTTPException(422, "外部参考必须填写原始链接 source_url（可溯源）")
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         if req.asset_type == "template" and (
             req.title != existing["title"] or (req.body or "") != (existing["body"] or "")
         ):
@@ -8069,7 +8792,7 @@ def _register_routes(app: FastAPI) -> None:
         if previous is None:
             raise HTTPException(404, "模板版本不存在")
         next_version = int(current["version"] or 1) + 1
-        now = _now().isoformat(timespec="seconds")
+        now = _storage_now().isoformat(timespec="seconds")
         conn.execute(
             "INSERT INTO content_template_versions (template_id, version, title, body, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -8094,7 +8817,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(400, "目前只有内容模板支持停用")
         conn.execute(
             "UPDATE content_assets SET is_active=0, updated_at=? WHERE id=?",
-            (_now().isoformat(timespec="seconds"), asset_id),
+            (_storage_now().isoformat(timespec="seconds"), asset_id),
         )
         conn.commit()
         return {"id": asset_id, "is_active": False}
@@ -8111,7 +8834,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(400, "目前只有内容模板支持恢复")
         conn.execute(
             "UPDATE content_assets SET is_active=1, updated_at=? WHERE id=?",
-            (_now().isoformat(timespec="seconds"), asset_id),
+            (_storage_now().isoformat(timespec="seconds"), asset_id),
         )
         conn.commit()
         return {"id": asset_id, "is_active": True}
@@ -8122,6 +8845,7 @@ def _register_routes(app: FastAPI) -> None:
         return kb_sources.list_sources(_g()["cfg"])
 
     @app.post("/api/kb/sources/upload")
+    @manages_own_transaction
     def kb_source_upload(req: dict):
         cfg = _g()["cfg"]
         try:
@@ -8139,6 +8863,7 @@ def _register_routes(app: FastAPI) -> None:
         return source
 
     @app.post("/api/kb/sources/server")
+    @manages_own_transaction
     def kb_source_server(req: dict):
         cfg = _g()["cfg"]
         try:
@@ -8153,6 +8878,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(422, str(e)) from e
 
     @app.post("/api/kb/sources/remote")
+    @manages_own_transaction
     def kb_source_remote(req: dict):
         cfg = _g()["cfg"]
         try:
@@ -8168,10 +8894,12 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(422, str(e)) from e
 
     @app.post("/api/kb/sources/default")
+    @manages_own_transaction
     def kb_source_default():
         return kb_sources.add_default_empty(_g()["cfg"])
 
     @app.patch("/api/kb/sources/{source_id}")
+    @manages_own_transaction
     def kb_source_update(source_id: str, req: dict):
         try:
             return kb_sources.update_source(_g()["cfg"], source_id, req or {})
@@ -8181,6 +8909,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(422, str(e)) from e
 
     @app.delete("/api/kb/sources/{source_id}")
+    @manages_own_transaction
     def kb_source_delete(source_id: str):
         try:
             return kb_sources.delete_source(_g()["cfg"], source_id)
@@ -8198,6 +8927,7 @@ def _register_routes(app: FastAPI) -> None:
         return {"total": total, "inserted": total - before}
 
     @app.post("/api/kb/sources/{source_id}/sync")
+    @manages_own_transaction
     def kb_source_sync(source_id: str):
         cfg = _g()["cfg"]
         source = next((s for s in kb_sources.load_registry(cfg) if s["id"] == source_id), None)
@@ -8233,603 +8963,47 @@ def _register_routes(app: FastAPI) -> None:
     def kb_inspect():
         return kb_sources.legacy_inspect(_g()["cfg"])
 
-    # --- 主动运营目标（账号组业务数据，SQLite 持久化）---
-    @app.get("/api/ops-targets")
-    def get_ops_targets():
-        from src.core.ops_targets_repository import read_targets
-        return {"items": read_targets(_g()["conn"])}
+    app.include_router(build_tenant_settings_router(
+        _g, patch_config, ConfigNotAllowedError, ConfigPatchError,
+    ))
 
-    @app.put("/api/ops-targets")
-    def put_ops_targets(req: dict):
-        from src.core.ops_targets_repository import load_ops_targets, replace_targets
-        conn = _g()["conn"]
-        try:
-            items = replace_targets(conn, req, cfg=_g()["cfg"])
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
-        _g()["cfg"].ops_targets = load_ops_targets(conn)
-        return {"items": items, "message": "主动运营目标已保存；后续调度将读取新目标"}
-
-    # --- 行业模板（一键填画像 / 维度建议 / 合规红线），由账号组 SQLite 提供 ---
-    @app.get("/api/presets")
-    def list_presets():
-        from src.core.industry_presets_repository import list_presets as _list_presets
-        return {"items": _list_presets(_g()["conn"])}
-
-    @app.put("/api/presets/{key}")
-    def save_custom_preset(key: str, req: dict):
-        from src.core.industry_presets_repository import upsert_custom_preset
-        try:
-            return upsert_custom_preset(_g()["conn"], {**req, "key": key}, cfg=_g()["cfg"])
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
-
-    @app.delete("/api/presets/{key}")
-    def delete_custom_preset(key: str):
-        from src.core.industry_presets_repository import delete_custom_preset
-        try:
-            deleted = delete_custom_preset(_g()["conn"], key, cfg=_g()["cfg"])
-        except ValueError as exc:
-            raise HTTPException(409, str(exc)) from exc
-        if not deleted:
-            raise HTTPException(404, "自定义行业模板不存在")
-        return {"key": key, "deleted": True}
-
-    @app.post("/api/presets/{key}/restore")
-    def restore_custom_preset(key: str):
-        from src.core.industry_presets_repository import restore_custom_preset as _restore
-        try:
-            item = _restore(_g()["conn"], key, cfg=_g()["cfg"])
-        except ValueError as exc:
-            raise HTTPException(409, str(exc)) from exc
-        if item is None:
-            raise HTTPException(404, "行业模板不存在")
-        return item
-
-    @app.get("/api/presets/{key}/versions")
-    def get_preset_versions(key: str):
-        from src.core.industry_presets_repository import get_preset, list_preset_versions
-        if get_preset(_g()["conn"], key) is None:
-            raise HTTPException(404, "行业模板不存在")
-        return {"items": list_preset_versions(_g()["conn"], key)}
-
-    @app.post("/api/presets/{key}/apply")
-    def apply_preset(key: str):
-        from src.core.industry_presets_repository import get_preset
-        preset = get_preset(_g()["conn"], key)
-        if preset is None:
-            raise HTTPException(404, "行业模板不存在")
-        if not preset.get("is_active", True):
-            raise HTTPException(409, "该行业模板已归档，请先恢复后再应用")
-        cfg = _g()["cfg"]
-        updates = {
-            "ultimate_goal.positioning": preset["positioning"],
-            "ultimate_goal.persona_keywords": list(preset["persona_keywords"]),
-            "ultimate_goal.forbidden_directions": list(preset["forbidden_directions"]),
-            "ultimate_goal.redline_keywords": sorted(
-                set(cfg.ultimate_goal.redline_keywords) | set(preset["extra_redlines"])
-            ),
-        }
-        try:
-            patch_config(cfg, _g()["conn"], updates)
-        except (ConfigNotAllowedError, ConfigPatchError) as e:
-            raise HTTPException(422, str(e)) from e
-        return {
-            "key": key, "name": preset["name"],
-            "positioning": preset["positioning"],
-            "persona_keywords": preset["persona_keywords"],
-            "dimensions": preset["dimensions"],
-            "platform_notes": preset["platform_notes"],
-            "extra_redlines": preset["extra_redlines"],
-            "message": "画像与红线已更新；建议维度可在「内容生产」里填入母计划",
-        }
-
-    # --- 热点源（综合热榜可关，可加 RSS / JSON 行业源）---
-    def _public_hot_sources(items: list[dict]) -> list[dict]:
-        # URL 可能带签名/访问令牌；前端只需显示主机与脱敏占位符。
-        public = []
-        for item in items or []:
-            row = dict(item)
-            raw_url = str(row.get("url") or "")
-            row["url"] = kb_sources._redact_remote_url(raw_url) if raw_url else ""
-            raw_name = str(row.get("name") or "")
-            row["name"] = redact(raw_name) if raw_name else raw_name
-            public.append(row)
-        return public
-
-    def _restore_masked_hot_source_urls(items: list[dict], current: list[dict]) -> list[dict]:
-        # 列表操作会把脱敏后 URL 一起提交；按来源标识恢复服务器保存的原始 URL。
-        # 新增项的 URL 不匹配已有项的脱敏值，因此仍会正常保存。
-        restored = []
-        for incoming in items or []:
-            row = dict(incoming)
-            for old in current or []:
-                old_name = str(old.get("name") or "")
-                incoming_name = str(row.get("name") or "")
-                same_name = old_name == incoming_name or redact(old_name) == incoming_name
-                same_key = (
-                    same_name
-                    and str(old.get("type") or "aggregate") == str(row.get("type") or "aggregate")
-                    and str(old.get("platform") or "") == str(row.get("platform") or "")
-                    and tuple(old.get("platforms") or []) == tuple(row.get("platforms") or [])
-                )
-                if same_key and str(row.get("url") or "") == kb_sources._redact_remote_url(str(old.get("url") or "")):
-                    row["url"] = old.get("url") or ""
-                    break
-            restored.append(row)
-        return restored
-
-    def _hot_source_history_key(source: dict) -> str:
-        # 只持久化不可逆指纹；来源 URL 可能含 token，不得写入历史表。
-        identity = {
-            "name": str(source.get("name") or ""),
-            "type": str(source.get("type") or "aggregate"),
-            "platform": str(source.get("platform") or ""),
-            "platforms": sorted(str(v) for v in (source.get("platforms") or [])),
-            "url": str(source.get("url") or ""),
-        }
-        return hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
-
-    def _latest_hot_source_test(source: dict):
-        row = _g()["conn"].execute(
-            "SELECT status, item_count, sample_titles_json, message, tested_at "
-            "FROM hot_source_test_history WHERE source_key=? ORDER BY id DESC LIMIT 1",
-            (_hot_source_history_key(source),),
-        ).fetchone()
-        if row is None:
-            return None
-        try:
-            samples = json.loads(row["sample_titles_json"] or "[]")
-        except (TypeError, ValueError):
-            samples = []
-        return {
-            "status": row["status"], "item_count": int(row["item_count"] or 0),
-            "sample_titles": samples if isinstance(samples, list) else [],
-            "message": row["message"], "tested_at": row["tested_at"],
-        }
-
-    @app.get("/api/hot_topics/sources")
-    def hot_sources_list():
-        cfg_sources = _g()["cfg"].hot_topics.sources or []
-        public_items = _public_hot_sources(cfg_sources)
-        for index, item in enumerate(public_items):
-            item["last_test"] = _latest_hot_source_test(cfg_sources[index])
-        return {"items": public_items}
-
-    @app.get("/api/hot_topics/sources/history")
-    def hot_sources_test_history(limit: int = Query(100, ge=1, le=500)):
-        rows = _g()["conn"].execute(
-            "SELECT id, source_key, source_label, source_type, status, item_count, "
-            "sample_titles_json, message, tested_at FROM hot_source_test_history "
-            "ORDER BY id DESC LIMIT ?", (limit,),
-        ).fetchall()
-        items = []
-        for row in rows:
-            item = dict(row)
-            try:
-                item["sample_titles"] = json.loads(item.pop("sample_titles_json") or "[]")
-            except (TypeError, ValueError):
-                item["sample_titles"] = []
-                item.pop("sample_titles_json", None)
-            items.append(item)
-        return {"items": items, "total": len(items)}
-
-    @app.put("/api/hot_topics/sources")
-    def hot_sources_update(req: dict):
-        cfg = _g()["cfg"]
-        items = (req or {}).get("items")
-        if not isinstance(items, list):
-            raise HTTPException(422, "热点源必须是数组")
-        items = _restore_masked_hot_source_urls(items, cfg.hot_topics.sources)
-        try:
-            patch_config(cfg, _g()["conn"], {"hot_topics.sources": items})
-        except (ConfigNotAllowedError, ConfigPatchError) as e:
-            raise HTTPException(422, str(e)) from e
-        return {"items": _public_hot_sources(cfg.hot_topics.sources)}
-
-    @app.post("/api/hot_topics/sources/{source_index}/test")
-    def test_hot_source(source_index: int):
-        """只试抓取指定 RSS/JSON 来源，不写入热点库、不触发全量采集。"""
-        cfg = _g()["cfg"]
-        sources = cfg.hot_topics.sources or []
-        if source_index < 0 or source_index >= len(sources):
-            raise HTTPException(404, "热点来源不存在")
-        source = sources[source_index]
-        source_type = str(source.get("type") or "aggregate")
-        if source_type not in ("rss", "json"):
-            raise HTTPException(400, "单来源试抓取仅支持 RSS / JSON 来源")
-        label = str(source.get("platform") or source.get("name") or "行业源")
-        collector = HotTopicCollector(cfg, _g()["conn"])
-        try:
-            rows = collector._fetch_custom(source, label)
-        except Exception as exc:  # noqa: BLE001 — 试抓取仅返回脱敏诊断，不影响其他来源
-            safe_error = redact(str(exc))
-            logger.warning("热点来源试抓取失败 %s: %s", redact(label), safe_error)
-            rows = None
-            fetch_error = safe_error
-        else:
-            fetch_error = None
-        if fetch_error:
-            result = {
-                "ok": False, "status": "failed", "source": redact(label),
-                "item_count": 0, "sample_titles": [], "message": fetch_error,
-            }
-        elif not rows:
-            result = {
-                "ok": False, "status": "empty", "source": redact(label),
-                "item_count": 0, "sample_titles": [], "message": "来源可访问，但未解析到有效标题",
-            }
-        else:
-            result = {
-                "ok": True, "status": "success", "source": redact(label),
-                "item_count": len(rows),
-                "sample_titles": [redact(str(row.get("title") or ""))[:300] for row in rows[:3]],
-                "message": "试抓取成功，未写入热点库",
-            }
-        # 保存诊断历史，但绝不写入 hot_topics；只存 URL 的 SHA-256 指纹。
-        conn = _g()["conn"]
-        conn.execute(
-            "INSERT INTO hot_source_test_history "
-            "(source_key, source_label, source_type, status, item_count, sample_titles_json, message, tested_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                _hot_source_history_key(source), redact(label)[:160], source_type,
-                result["status"], result["item_count"],
-                json.dumps(result["sample_titles"], ensure_ascii=False),
-                redact(result["message"])[:1000],
-                business_now(cfg).isoformat(timespec="seconds"),
-            ),
-        )
-        conn.commit()
-        return result
+    app.include_router(build_hot_sources_router(
+        _g, patch_config, ConfigNotAllowedError, ConfigPatchError,
+        HotTopicCollector, redact, kb_sources._redact_remote_url, storage_now,
+        manages_own_transaction=manages_own_transaction,
+        route_class=TransactionalAPIRoute,
+    ))
 
     # ============================================================
     # Dashboard 补齐（对比报告 3.1 🔴 后端真缺失）
     # ============================================================
 
-    # --- 四平台进度聚合（Dashboard #11：四个平台独立进度）---
-    @app.get("/api/platform_progress")
-    def platform_progress():
-        """返回全部 4 个平台的：是否启用 / 总草稿数 / 各状态分布 / 熔断状态。
+    app.include_router(build_platform_progress_router(
+        _g, Platform, _platform_status_snapshot,
+    ))
 
-        启用判定与 /api/status 共用 cfg.platforms.enabled_keys()，避免两处口径不一致；
-        未启用的平台也返回（enabled=false），前端四平台 lane 不必自行补齐。
-        """
-        conn = _g()["conn"]
-        cfg = _g()["cfg"]
-        platform_status = _platform_status_snapshot(cfg, conn)
-        result = {}
-        for p in [pl.value for pl in Platform]:
-            # 各状态计数
-            status_rows = conn.execute(
-                "SELECT status, COUNT(*) as cnt FROM drafts WHERE platform=? GROUP BY status",
-                (p,),
-            ).fetchall()
-            status_map = {r[0]: r[1] for r in status_rows}
-            # 总数
-            total = sum(status_map.values())
-            result[p] = {
-                **platform_status[p],
-                "total_drafts": total,
-                "status_breakdown": status_map,
-            }
-        return result
-
-    # --- 决策待办聚合（Dashboard #9：需要你决策的事项）---
-    @app.get("/api/action_items")
-    def action_items():
-        """聚合三类需要人工决策的事项：
-
-        1. goals：有 target_platform、但 achievement_rate 为 NULL 且 baseline_at 过期
-        2. rounds：status='awaiting_publish' 超过 72h（R8 publish_confirm_timeout）
-        3. circuit_breaker：cooldown_until 已到期、但 resolved_at 仍 NULL（需要 try_recover）
-
-        返回统一 action_items[] 列表，前端按 type 分组显示。
-        """
-        from datetime import datetime, timedelta as td
-        conn = _g()["conn"]
-        now = _now()
-        items: list[dict] = []
-
-        def _pname(p: Optional[str]) -> str:
-            if not p:
-                return "全平台"
-            try:
-                return Platform(p).display_name
-            except ValueError:
-                return p
-
-        # 1. 目标已过统计周期仍未达成：达成率与 /api/goals 同一口径（GoalProgressUpdater.rate_for），
-        #    metric_period_end 是日期，必须按「日期 < 今天」比较，否则截止当天就会被误判超期
-        goal_rows = conn.execute(
-            """SELECT id, goal_text, target_platform, target_metric, target_value,
-                      metric_scope, baseline_value, baseline_at, current_value, metric_period_end
-               FROM goals
-               WHERE status='active'
-                 AND metric_period_end IS NOT NULL
-                 AND substr(metric_period_end, 1, 10) < ?
-            """,
-            (now.date().isoformat(),),
-        ).fetchall()
-        for r in goal_rows:
-            rate = GoalProgressUpdater.rate_for(r)
-            if rate is not None and rate >= 100:
-                continue
-            pct = f"{rate:.0f}%" if rate is not None else "数据待采集"
-            cur_val = r["current_value"]
-            items.append({
-                "id": f"goal:{r['id']}",
-                "type": "goal_strategy",
-                "title": f"目标「{r['goal_text']}」已过截止日期 {r['metric_period_end'][:10]} 但未达成（{pct}）",
-                "detail": (
-                    f"{_pname(r['target_platform'])} · {r['target_metric']} 目标 {r['target_value']}"
-                    f" · 当前 {cur_val if cur_val is not None else '待采集'}"
-                ),
-                "priority": "high",
-                "source": "goals",
-                "platform": r["target_platform"],
-                "created_at": r["metric_period_end"],
-                "actions": ["go_goal"],
-            })
-
-        # 2. 轮次等待发布超过 72h
-        rounds_rows = conn.execute(
-            """SELECT id, round_number, status, awaiting_publish_ended_at, created_at
-               FROM spiral_rounds
-               WHERE status='awaiting_publish'
-                 AND awaiting_publish_ended_at IS NOT NULL
-                 AND awaiting_publish_ended_at < ?
-            """,
-            (now.isoformat(),),
-        ).fetchall()
-        for r in rounds_rows:
-            items.append({
-                "id": f"round:{r['id']}",
-                "type": "publish_decision",
-                "title": f"Round {r['round_number']} 已超过 {r['awaiting_publish_ended_at'][:10]} 等待发布，需确认或取消",
-                "detail": f"超时 {(now - datetime.fromisoformat(r['awaiting_publish_ended_at'])).days} 天",
-                "priority": "high",
-                "source": "rounds",
-                "created_at": r["created_at"],
-                "actions": ["go_round"],
-            })
-
-        # 3. 熔断冷却到期未恢复（需要 try_recover 3 步验证）
-        cb_rows = conn.execute(
-            """SELECT id, platform, reason, detected_at, cooldown_until, resolved_at
-               FROM circuit_breaker_events
-               WHERE resolved_at IS NULL
-                 AND cooldown_until IS NOT NULL
-                 AND cooldown_until < ?
-            """,
-            (now.isoformat(),),
-        ).fetchall()
-        for r in cb_rows:
-            items.append({
-                "id": f"cb:{r['id']}",
-                "type": "circuit_recover",
-                "title": f"{_pname(r['platform'])} 熔断冷却已到期（原因：{r['reason']}），需执行 3 步恢复验证",
-                "platform": r["platform"],
-                "detail": f"冷却到期于 {r['cooldown_until'][:16]}",
-                "priority": "high",
-                "source": "circuit_breaker",
-                "created_at": r["detected_at"],
-                "actions": ["run_recover"],
-            })
-
-        # 4. circuits 熔断但 cooldown 未到期（低优先级提醒）
-        cb2 = conn.execute(
-            """SELECT id, platform, reason, detected_at, cooldown_until
-               FROM circuit_breaker_events
-               WHERE resolved_at IS NULL
-                 AND (cooldown_until IS NULL OR cooldown_until >= ?)
-               LIMIT 5
-            """,
-            (now.isoformat(),),
-        ).fetchall()
-        for r in cb2:
-            items.append({
-                "id": f"cb2:{r['id']}",
-                "type": "circuit_active",
-                "title": f"{_pname(r['platform'])} 熔断中（原因：{r['reason']}），冷却至 {r['cooldown_until'][:16] if r['cooldown_until'] else '—'}",
-                "platform": r["platform"],
-                "priority": "medium",
-                "source": "circuit_breaker",
-                "created_at": r["detected_at"],
-                "actions": ["go_ops"],
-            })
-
-        return {"items": items, "total": len(items)}
+    app.include_router(build_action_items_router(
+        _g, _now, Platform, GoalProgressUpdater.rate_for,
+    ))
 
     # ============================================================
     # Operations 补齐（对比报告 3.7 🔴 后端真缺失）
     # ============================================================
 
-    # --- 通知规则配置（目前规则硬编码在 notify 模块，补可编辑 CRUD）---
-    @app.get("/api/notify_rules")
-    def list_notify_rules():
-        conn = _g()["conn"]
-        try:
-            rows = conn.execute(
-                "SELECT * FROM notify_rules ORDER BY id ASC"
-            ).fetchall()
-        except sqlite3.OperationalError:
-            # 表不存在 — 自动建表（首次调用时 lazy create）
-            conn.executescript(_NOTIFY_RULES_SCHEMA)
-            conn.commit()
-            rows = []
-        return [dict(r) for r in rows]
+    app.include_router(build_notify_rules_router(
+        _g, _now, route_class=TransactionalAPIRoute,
+    ))
 
-    @app.post("/api/notify_rules")
-    def create_notify_rule(req: NotifyRuleRequest):
-        conn = _g()["conn"]
-        try:
-            conn.execute("SELECT 1 FROM notify_rules LIMIT 1")
-        except sqlite3.OperationalError:
-            conn.executescript(_NOTIFY_RULES_SCHEMA); conn.commit()
-        now = _now().isoformat(timespec="seconds")  # R5：本地时区
-        # 同场景同通道只保留一条（唯一索引兜底；老库没有索引时这里先做 upsert）
-        existing = conn.execute(
-            "SELECT id FROM notify_rules WHERE scenario=? AND channel=?",
-            (req.scenario, req.channel),
-        ).fetchone()
-        if existing:
-            conn.execute(
-                """UPDATE notify_rules SET level=?, enabled=?, condition=?, notes=?,
-                          updated_at=? WHERE id=?""",
-                (req.level, 1 if req.enabled else 0, req.condition, req.notes,
-                 now, existing[0]),
-            )
-            conn.commit()
-            return {"id": existing[0], "message": "同场景同通道规则已存在，已更新"}
-        cur = conn.execute(
-            """INSERT INTO notify_rules (scenario, channel, level, enabled, condition, notes, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (req.scenario, req.channel, req.level, 1 if req.enabled else 0,
-             req.condition, req.notes, now),
-        )
-        conn.commit()
-        return {"id": cur.lastrowid, "message": "创建成功"}
-
-    @app.patch("/api/notify_rules/{rule_id}")
-    def update_notify_rule(rule_id: int, req: NotifyRuleRequest):
-        conn = _g()["conn"]
-        conn.execute(
-            """UPDATE notify_rules SET scenario=?, channel=?, level=?, enabled=?,
-                      condition=?, notes=?, updated_at=?
-               WHERE id=?""",
-            (req.scenario, req.channel, req.level, 1 if req.enabled else 0,
-             req.condition, req.notes,
-             _now().isoformat(timespec="seconds"), rule_id),
-        )
-        conn.commit()
-        return {"id": rule_id, "message": "更新成功"}
-
-    @app.delete("/api/notify_rules/{rule_id}")
-    def delete_notify_rule(rule_id: int):
-        conn = _g()["conn"]
-        conn.execute("DELETE FROM notify_rules WHERE id=?", (rule_id,))
-        conn.commit()
-        return {"message": "删除成功"}
-
-    # --- 平台文案风格（platform_styles 表，migrations/016）---
-    @app.get("/api/platform_styles")
-    def list_platform_styles():
-        conn = _g()["conn"]
-        rows = conn.execute(
-            "SELECT platform, title_style, body_style, tone, hashtags, "
-            "updated_at, updated_by FROM platform_styles ORDER BY platform"
-        ).fetchall()
-        items = []
-        for r in rows:
-            try:
-                tags = json.loads(r["hashtags"] or "[]")
-            except (TypeError, ValueError):
-                tags = []
-            items.append({
-                "platform": r["platform"],
-                "title_style": r["title_style"],
-                "body_style": r["body_style"],
-                "tone": r["tone"],
-                # 存的是不带 # 的标签；空数组 = 只带选题维度标签
-                "hashtags": tags if isinstance(tags, list) else [],
-                "updated_at": r["updated_at"],
-                "updated_by": r["updated_by"],
-            })
-        return {"items": items}
-
-    @app.patch("/api/platform_styles/{platform}")
-    def update_platform_style(platform: str, req: PlatformStyleUpdate):
-        """改平台风格 / 话题标签：立即生效，逐字段写 config_changes 审计。"""
-        conn = _g()["conn"]
-        if platform not in {p.value for p in Platform}:
-            raise HTTPException(400, "platform 只能是 xhs / douyin / kuaishou / wechat_channels")
-        row = conn.execute(
-            "SELECT title_style, body_style, tone, hashtags FROM platform_styles "
-            "WHERE platform = ?",
-            (platform,),
-        ).fetchone()
-        if row is None:
-            raise HTTPException(
-                404, f"{platform} 尚无平台风格记录（请确认迁移 016 已执行）"
-            )
-
-        new_values: dict[str, str] = {}
-        for field in ("title_style", "body_style", "tone"):
-            value = getattr(req, field)
-            if value is None:
-                continue
-            text = value.strip()
-            if not text:
-                raise HTTPException(422, f"{field} 不能为空")
-            new_values[field] = text
-        if req.hashtags is not None:
-            tags: list[str] = []
-            for raw in req.hashtags:
-                tag = str(raw).strip().lstrip("#")
-                if tag and tag not in tags:
-                    tags.append(tag)
-            new_values["hashtags"] = json.dumps(tags, ensure_ascii=False)
-
-        old_values = {
-            "title_style": row["title_style"],
-            "body_style": row["body_style"],
-            "tone": row["tone"],
-            "hashtags": row["hashtags"] or "[]",
-        }
-        changed = [
-            (k, old_values[k], v) for k, v in new_values.items() if old_values[k] != v
-        ]
-        if not changed:
-            return {"platform": platform, "changed": 0, "message": "没有改动"}
-
-        now = _now().isoformat(timespec="seconds")  # R5：本地时区
-        for key, old, new in changed:
-            # 审计口径与 config_changes 一致：platform_styles.<platform>.<field>
-            conn.execute(
-                "INSERT INTO config_changes (key, old_value, new_value, changed_at) "
-                "VALUES (?, ?, ?, ?)",
-                (f"platform_styles.{platform}.{key}", str(old), str(new), now),
-            )
-        assignments = ", ".join(f"{k} = ?" for k in new_values)
-        conn.execute(
-            f"UPDATE platform_styles SET {assignments}, updated_at = ?, updated_by = ? "
-            "WHERE platform = ?",
-            (*new_values.values(), now, "settings_ui", platform),
-        )
-        conn.commit()
-        return {
-            "platform": platform,
-            "changed": len(changed),
-            "fields": {key: new for key, _old, new in changed},
-        }
+    app.include_router(build_platform_styles_router(
+        _g, _now, Platform, HTTPException, route_class=TransactionalAPIRoute,
+    ))
 
     # ============================================================
     # P1 — AI 证据审计链（对比报告缺口）
     # ============================================================
 
-    @app.get("/api/ai_calls")
-    def list_ai_calls(limit: int = Query(200, ge=1, le=2000), step: str | None = None):
-        conn = _g()["conn"]
-        sql = "SELECT * FROM ai_calls"
-        args: list = []
-        if step:
-            sql += " WHERE step = ?"
-            args.append(step)
-        sql += " ORDER BY called_at DESC LIMIT ?"
-        args.append(limit)
-        rows = conn.execute(sql, args).fetchall()
-        return [dict(r) for r in rows]
-
-    @app.get("/api/user_override")
-    def list_user_override(limit: int = Query(200, ge=1, le=2000)):
-        conn = _g()["conn"]
-        rows = conn.execute(
-            "SELECT u.*, r.round_number FROM user_override u "
-            "LEFT JOIN spiral_rounds r ON r.id = u.round_id "
-            "ORDER BY u.overridden_at DESC LIMIT ?", (limit,)
-        ).fetchall()
-        return [dict(r) for r in rows]
+    app.include_router(build_audit_query_router(_g))
+    app.include_router(build_tenant_skills_router(_g))
 
     # ============================================================
     # 账号管理（扫码登录四平台 — 直接调 Easel publish.py login）
@@ -8921,7 +9095,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(409, "一个账号组内每个平台只能登记一个账号，请编辑现有记录或先删除原记录")
         try:
             conn.execute(
-                "UPDATE platform_accounts SET platform=?, account_handle=?, normalized_handle=?, display_name=?, status=?, notes=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                "UPDATE platform_accounts SET platform=?, account_handle=?, normalized_handle=?, display_name=?, status=?, notes=?, updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now') WHERE id=?",
                 (req.platform, handle, handle.casefold(), req.display_name.strip(), req.status, req.notes.strip(), account_id),
             )
             conn.commit()
@@ -8942,6 +9116,7 @@ def _register_routes(app: FastAPI) -> None:
         return Response(status_code=204)
 
     @app.post("/api/accounts/{platform}/login")
+    @manages_own_transaction
     def start_platform_login(platform: str, restart: bool = Query(False)):
         """启动后台登录 subprocess（调 Easel vendor xhs_publish.py login / douyin_publish.py login / web_publisher.py login-qr）。
 
@@ -8964,12 +9139,14 @@ def _register_routes(app: FastAPI) -> None:
         return _read_account_identity(p, data_dir=_interactive_login_data_dir())
 
     @app.post("/api/accounts/{platform}/logout")
+    @manages_own_transaction
     def logout_platform(platform: str):
         """注销：清持久化 profile + storage_state + 登录标记（下次需重新扫码）。"""
         p = _valid_platform(platform)
         return _clear_login(p, data_dir=_interactive_login_data_dir())
 
     @app.post("/api/accounts/{platform}/sms")
+    @manages_own_transaction
     def submit_platform_sms(platform: str, req: SmsCodeRequest):
         """回填短信验证码（登录进入 sms_required 时由前端提交，runner 读走后继续登录）。"""
         p = _valid_platform(platform)
@@ -8979,6 +9156,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(400, str(e)) from e
 
     @app.post("/api/accounts/{platform}/cancel_login")
+    @manages_own_transaction
     def cancel_platform_login(platform: str):
         """取消进行中的登录（terminate subprocess + 清状态文件）。"""
         p = _valid_platform(platform)
@@ -9006,24 +9184,6 @@ def _register_routes(app: FastAPI) -> None:
 # ============================================================
 # notify_rules 表 schema（lazy create，首次调用 get/post 时自动建立）
 # ============================================================
-_NOTIFY_RULES_SCHEMA = """
-CREATE TABLE IF NOT EXISTS notify_rules (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    scenario   TEXT NOT NULL,            -- 触发场景（circuit_broken / round_completed / ...）
-    channel    TEXT NOT NULL CHECK (channel IN ('macos', 'wecom', 'feishu', 'console')),
-    level      TEXT NOT NULL DEFAULT 'warning'
-               CHECK (level IN ('info', 'warning', 'error', 'critical')),
-    enabled    INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
-    condition  TEXT,                     -- 条件表达式（SQL fragment / JSON filter）
-    notes      TEXT,
-    created_at DATETIME,
-    updated_at DATETIME
-);
-CREATE UNIQUE INDEX IF NOT EXISTS ux_notify_rules_scenario_channel
-    ON notify_rules (scenario, channel);
-"""
-
-
 def _find_round_for_draft(conn, draft_id: str) -> Optional[int]:
     row = conn.execute(
         "SELECT c.round_id FROM drafts d JOIN contents c ON d.content_id = c.id WHERE d.id = ?",

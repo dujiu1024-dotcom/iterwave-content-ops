@@ -92,9 +92,9 @@ def _publishability_status(
     return "可发布"
 
 
-def _utc_now_naive() -> datetime:
-    """数据库沿用无时区字段，但统一存 UTC；API 输出时再补 UTC offset。"""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+def _utc_now() -> datetime:
+    """Return an aware UTC instant for hot-topic persistence and freshness checks."""
+    return datetime.now(timezone.utc)
 
 
 def _api_utc(value):
@@ -133,15 +133,15 @@ def _parse_feed_ts(value) -> Optional[datetime]:
     text = str(value).strip()
     try:
         dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        return dt.astimezone(timezone.utc).replace(tzinfo=None) if dt.tzinfo else dt
+        return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
     except ValueError:
         pass
     try:
         from email.utils import parsedate_to_datetime
         dt = parsedate_to_datetime(text)
         if dt and dt.tzinfo:
-            return dt.astimezone(timezone.utc).replace(tzinfo=None)
-        return dt
+            return dt.astimezone(timezone.utc)
+        return dt.replace(tzinfo=timezone.utc)
     except (TypeError, ValueError):
         return None
 
@@ -179,7 +179,7 @@ def _parse_event_ts(raw: dict) -> Optional[datetime]:
             continue
         try:
             seconds = ts / 1000 if ts > 10_000_000_000 else ts
-            return datetime.fromtimestamp(seconds, tz=timezone.utc).replace(tzinfo=None)
+            return datetime.fromtimestamp(seconds, tz=timezone.utc)
         except (OverflowError, OSError, ValueError):
             continue
     return None
@@ -671,7 +671,7 @@ class HotTopicCollector:
             raise RuntimeError(f"接口返回 code={payload.get('code')} {payload.get('message', '')}")
 
         window_h = self.hcfg.filters.get("time_window_hours")
-        now = _utc_now_naive()
+        now = _utc_now()
         out: list[dict] = []
         for raw in (payload.get("data") or [])[:self.hcfg.max_items_per_source]:
             title = (raw.get("title") or "").strip()
@@ -726,7 +726,7 @@ class HotTopicCollector:
                     "heat": raw.get("heat") or raw.get("hot") or raw.get("hot_value"),
                 })
         window_h = self.hcfg.filters.get("time_window_hours")
-        now = _utc_now_naive()
+        now = _utc_now()
         out: list[dict] = []
         for raw in rows[:self.hcfg.max_items_per_source]:
             title = (raw.get("title") or "").strip()
@@ -764,7 +764,7 @@ class HotTopicCollector:
         else:
             source_label = str(source_label_or_rows)
         backfill(self.conn)   # 旧数据先补归一化字段并合并，保证新 id 不与旧行重复
-        now = _utc_now_naive().isoformat(timespec="seconds")
+        now = _utc_now().isoformat(timespec="seconds")
         platform = source_key.rsplit("/", 1)[-1]
         source = source_key
         seen_in_batch: set[str] = set()
@@ -825,8 +825,8 @@ class HotTopicCollector:
                 "heat_score=NULL, raw_url=NULL",
                 (
                     f"hot-failed-{platform}", source,
-                    _utc_now_naive().isoformat(timespec="seconds"),
-                    _utc_now_naive().isoformat(timespec="seconds"),
+                    _utc_now().isoformat(timespec="seconds"),
+                    _utc_now().isoformat(timespec="seconds"),
                     f"{platform} 热点采集失败：{reason[:100]}",
                 ),
             )
@@ -843,10 +843,13 @@ class HotTopicCollector:
         if not last:
             return False
         try:
-            dt = datetime.fromisoformat(last)
+            dt = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
         except ValueError:
             return False
-        return (_utc_now_naive() - dt) < timedelta(minutes=self.refresh_interval_minutes())
+        # Historical hot_topics rows were naive UTC, unlike older business-local tables.
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (_utc_now() - dt.astimezone(timezone.utc)) < timedelta(minutes=self.refresh_interval_minutes())
 
     def refresh_interval_minutes(self) -> Optional[int]:
         """采集频率来自 scheduler.jobs.hot_topics_refresh；cron 触发时按 24h 判断是否过期。"""

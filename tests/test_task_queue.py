@@ -474,6 +474,38 @@ def test_history_page_filters_created_date_range(tmp_path):
     else:
         raise AssertionError("reversed date range must be rejected")
 
+    for invalid_date in ("2026-02-30", "2026-2-01", "not-a-date"):
+        try:
+            queue.list_page(scope="failed", date_from=invalid_date)
+        except ValueError as exc:
+            assert "YYYY-MM-DD" in str(exc)
+        else:
+            raise AssertionError(f"invalid date must be rejected: {invalid_date}")
+
+
+def test_history_pagination_fails_closed_on_corrupt_row_instead_of_underreporting(tmp_path):
+    from src.core.task_queue import TaskQueueError
+
+    queue = make_queue(tmp_path)
+    task, _ = queue.enqueue(task_type="scheduler_job", tenant_id="tenant-a", payload={"ok": True})
+    conn = queue._connect()
+    try:
+        conn.execute(
+            "UPDATE global_task_queue SET status='failed', payload_json='not-json' WHERE task_id=?",
+            (task.task_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    try:
+        queue.list_page(scope="history", page=1, page_size=20)
+    except TaskQueueError as exc:
+        assert task.task_id in str(exc)
+        assert "分页结果不完整" in str(exc)
+    else:
+        raise AssertionError("corrupt history must not be silently omitted")
+
 
 def test_manual_retry_preserves_tenant_payload_and_audits_confirmation(tmp_path):
     queue = make_queue(tmp_path)
@@ -781,3 +813,150 @@ def test_reentrant_claim_does_not_drop_current_worker_lease(tmp_path):
     assert queue.claim_next("worker-a", lease_seconds=120) is None
     assert queue.renew(task.task_id, "worker-a", lease_seconds=120) is True
     assert queue.finish(task.task_id, "worker-a", result={"ok": True})
+
+
+def test_dispatch_summary_aggregates_all_statuses_and_daily_trends(tmp_path):
+    queue = make_queue(tmp_path)
+    tasks = []
+    for tenant, task_type in (("tenant-a", "round_run"), ("tenant-a", "scheduler_job"), ("tenant-b", "round_run")):
+        task, _ = queue.enqueue(task_type=task_type, tenant_id=tenant, payload={})
+        tasks.append(task)
+
+    conn = queue._connect()
+    try:
+        conn.execute("UPDATE global_task_queue SET status='succeeded', started_at=created_at, finished_at=created_at WHERE task_id=?", (tasks[0].task_id,))
+        conn.execute("UPDATE global_task_queue SET status='failed', started_at=created_at, finished_at=created_at WHERE task_id=?", (tasks[1].task_id,))
+        conn.execute("UPDATE global_task_queue SET status='cancelled' WHERE task_id=?", (tasks[2].task_id,))
+    finally:
+        conn.close()
+
+    summary = queue.dispatch_summary()
+    assert summary["total"] == 3
+    assert summary["by_status"] == {
+        "queued": 0, "running": 0, "succeeded": 1,
+        "failed": 1, "cancelled": 1, "interrupted": 0,
+    }
+    assert len(summary["daily"]) == 1
+    assert summary["daily"][0]["total"] == 3
+    assert summary["daily"][0]["succeeded"] == 1
+    assert summary["daily"][0]["failed"] == 1
+    assert summary["average_duration_seconds"] is not None
+
+    scoped = queue.dispatch_summary(tenant_id="tenant-a", task_type="round_run")
+    assert scoped["total"] == 1
+    assert scoped["by_status"]["succeeded"] == 1
+    assert scoped["filters"]["tenant_id"] == "tenant-a"
+
+
+def test_dispatch_summary_rejects_reversed_date_range(tmp_path):
+    queue = make_queue(tmp_path)
+    import pytest
+    with pytest.raises(ValueError, match="date_from"):
+        queue.dispatch_summary(date_from="2026-11-03", date_to="2026-11-02")
+
+
+def test_dispatch_summary_can_filter_by_status(tmp_path):
+    queue = make_queue(tmp_path)
+    queued, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={})
+    completed, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={})
+    conn = queue._connect()
+    try:
+        conn.execute("UPDATE global_task_queue SET status='succeeded' WHERE task_id=?", (completed.task_id,))
+    finally:
+        conn.close()
+
+    summary = queue.dispatch_summary(status="queued")
+    assert summary["total"] == 1
+    assert summary["by_status"]["queued"] == 1
+    assert summary["filters"]["status"] == "queued"
+
+
+def test_cancel_and_retry_admin_actions_are_audited(tmp_path):
+    queue = make_queue(tmp_path)
+    cancelled, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={})
+    assert queue.cancel(cancelled.task_id, actor="session:test-operator")
+    audit = queue.list_admin_audit(cancelled.task_id)
+    assert len(audit) == 1
+    assert audit[0]["action"] == "cancel"
+    assert audit[0]["actor"] == "session:test-operator"
+
+    failed, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={})
+    conn = queue._connect()
+    try:
+        conn.execute("UPDATE global_task_queue SET status='failed' WHERE task_id=?", (failed.task_id,))
+    finally:
+        conn.close()
+    retry, created = queue.retry_after_manual_verification(
+        failed.task_id, confirmed_by="session:test-operator",
+        confirmation_note="已核验平台无执行记录", confirmed_not_executed=True,
+    )
+    assert created
+    audit = queue.list_admin_audit(failed.task_id)
+    assert audit[0]["action"] == "retry"
+    assert audit[0]["actor"] == "session:test-operator"
+    assert audit[0]["details"]["retry_task_id"] == retry.task_id
+
+
+def test_resolve_action_is_recorded_in_admin_audit(tmp_path):
+    queue = make_queue(tmp_path)
+    task, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={})
+    conn = queue._connect()
+    try:
+        conn.execute("UPDATE global_task_queue SET status='failed' WHERE task_id=?", (task.task_id,))
+    finally:
+        conn.close()
+    queue.resolve_failed_task(task.task_id, action="handled", actor="session:auditor", note="已检查并修复相关配置")
+    audit = queue.list_admin_audit(task.task_id)
+    assert len(audit) == 1
+    assert audit[0]["action"] == "resolve_handled"
+    assert audit[0]["actor"] == "session:auditor"
+
+
+def test_queue_filtered_scope_supports_chart_drilldown(tmp_path):
+    queue = make_queue(tmp_path)
+    succeeded, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={"n": 1})
+    failed, _ = queue.enqueue(task_type="scheduler_job", tenant_id="tenant-a", payload={"n": 2})
+    other, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-b", payload={"n": 3})
+    conn = queue._connect()
+    try:
+        conn.executemany(
+            "UPDATE global_task_queue SET status=? WHERE task_id=?",
+            [("succeeded", succeeded.task_id), ("failed", failed.task_id)],
+        )
+    finally:
+        conn.close()
+
+    rows, total = queue.list_page(scope="filtered", status="failed", tenant_id="tenant-a")
+    assert total == 1
+    assert [row.task_id for row in rows] == [failed.task_id]
+
+    all_rows, all_total = queue.list_page(scope="filtered", tenant_id="tenant-a")
+    assert all_total == 2
+    assert {row.task_id for row in all_rows} == {succeeded.task_id, failed.task_id}
+
+    try:
+        queue.list_page(scope="filtered", status="unknown")
+    except ValueError as exc:
+        assert "status" in str(exc)
+    else:
+        raise AssertionError("unknown status must be rejected")
+
+def test_failed_task_persists_structured_execution_report(tmp_path):
+    queue = make_queue(tmp_path)
+    task, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={"round_id": 3})
+    claimed = queue.claim_next("worker-1")
+    assert claimed is not None and claimed.task_id == task.task_id
+    report = {
+        "final_status": "failed",
+        "steps": [{"step": "kb_read", "count": 4}, {"step": "score", "selected": 2}],
+        "errors": ["评分服务失败"],
+    }
+    assert queue.fail(
+        task.task_id, "worker-1", error_code="execution_failed",
+        error_message="TaskExecutionFailed: 评分服务失败", result=report,
+    )
+    saved = queue.get(task.task_id)
+    assert saved is not None
+    assert saved.status == "failed"
+    assert saved.result == report
+

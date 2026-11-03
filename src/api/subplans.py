@@ -20,6 +20,28 @@ from src.core.plan_version_store import PlanVersionError, PlanVersionStore
 logger = logging.getLogger(__name__)
 
 
+def _parse_subplan_model_content(raw: object) -> dict[str, Any]:
+    """Extract one JSON object from OpenAI-compatible text or content-part responses."""
+    if isinstance(raw, list):
+        parts = []
+        for part in raw:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                parts.append(part["text"])
+        raw = "".join(parts)
+    if not isinstance(raw, str):
+        raise ValueError("模型响应缺少文本内容")
+    start = raw.find("{")
+    if start < 0:
+        raise ValueError("模型未返回 JSON 对象")
+    try:
+        value, _end = json.JSONDecoder().raw_decode(raw[start:])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("模型返回的 JSON 对象无效") from exc
+    if not isinstance(value, dict) or not isinstance(value.get("subplans"), list):
+        raise ValueError("模型返回的 JSON 缺少 subplans 数组")
+    return value
+
+
 def register_subplan_routes(app: FastAPI, get_runtime) -> None:
     def store() -> PlanVersionStore:
         runtime = get_runtime()
@@ -428,6 +450,7 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
             })
 
         attempts = []
+        data: dict[str, Any] | None = None
         for spec in provider_specs:
             if not spec["base_url"] or not spec["model"] or not spec["api_key_env"]:
                 attempts.append({"provider": spec["name"], "error": "provider_configuration_incomplete"})
@@ -457,13 +480,9 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
                     )
                     response.raise_for_status()
                     payload = response.json()
-                    raw = payload["choices"][0]["message"]["content"]
-                    match = re.search(r"\\{[\\s\\S]*\\}", raw)
-                    if not match:
-                        raise ValueError("模型未返回 JSON 对象")
-                    candidate = json.loads(match.group(0))
-                    if not isinstance(candidate, dict) or not isinstance(candidate.get("subplans"), list):
-                        raise ValueError("模型返回的 JSON 缺少 subplans 数组")
+                    message = payload["choices"][0]["message"]
+                    raw = message.get("content") if isinstance(message, dict) else None
+                    candidate = _parse_subplan_model_content(raw)
                     data = candidate
                     break
             except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
@@ -478,11 +497,6 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
             raise HTTPException(
                 502, {"code": "ai_generation_failed", "message": "AI 拆解失败或返回格式不合法",
                       "manual_creation_available": True, "attempts": attempts},
-            )
-        if not isinstance(data, dict) or not isinstance(data.get("subplans"), list):
-            raise HTTPException(
-                502, {"code": "ai_generation_failed", "message": "AI 拆解失败或返回格式不合法",
-                      "manual_creation_available": True, "attempts": errors},
             )
         suggestions = data["subplans"]
         returned_platforms = [

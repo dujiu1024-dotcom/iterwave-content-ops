@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -60,7 +60,7 @@ def test_hot_topic_timestamps_are_emitted_with_explicit_utc_offset():
     assert _api_utc("2026-10-30T06:58:43") == "2026-10-30T06:58:43+00:00"
     assert _api_utc("2026-10-30T14:58:43+08:00") == "2026-10-30T14:58:43+08:00"
     parsed = _parse_feed_ts("2026-10-30T14:58:43+08:00")
-    assert parsed == datetime(2026, 10, 30, 6, 58, 43)
+    assert parsed == datetime(2026, 10, 30, 6, 58, 43, tzinfo=timezone.utc)
 
 
 def test_hot_source_dns_resolution_has_a_hard_timeout(monkeypatch):

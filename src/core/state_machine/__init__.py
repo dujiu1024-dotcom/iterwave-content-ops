@@ -17,7 +17,7 @@ import logging
 import uuid
 from datetime import datetime
 
-from src.core.timezone import business_now
+from src.core.timezone import business_now, parse_persisted_datetime, parse_server_local_legacy_datetime, storage_now
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -100,12 +100,12 @@ class RoundStateMachine:
             log.append({
                 "from": current,
                 "to": target,
-                "at": self._business_now().isoformat(),
+                "at": storage_now().isoformat(),
                 "reason": reason,
             })
 
             # R8：阶段起点独立落库，供 round_timeout_sweeper 分阶段判定超时
-            now_str = self._business_now().isoformat(timespec="seconds")
+            now_str = storage_now().isoformat(timespec="seconds")
             fields: dict = {
                 "status": target,
                 "transition_log": json.dumps(log, ensure_ascii=False),
@@ -260,9 +260,9 @@ class DraftStateMachine:
 
             update_fields = {"status": target}
             if target == "draft_saved":
-                update_fields["saved_at"] = self._business_now().isoformat()
+                update_fields["saved_at"] = storage_now().isoformat()
             if target == "user_published":
-                update_fields["user_confirmed_at"] = self._business_now().isoformat()
+                update_fields["user_confirmed_at"] = storage_now().isoformat()
             if extra_updates:
                 update_fields.update(extra_updates)
 
@@ -307,11 +307,11 @@ class DraftStateMachine:
         ).fetchone()
         if not row or row[0] != "collecting_metrics" or not row[1]:
             return False
-        try:
-            started = datetime.fromisoformat(row[1])
-        except ValueError:
+        started = parse_persisted_datetime(row[1], self.cfg)
+        current = parse_persisted_datetime(now, self.cfg) if now is not None else storage_now()
+        if started is None or current is None:
             return False
-        return (now or self._business_now()) - started > timedelta(hours=timeout_hours)
+        return current - started > timedelta(hours=timeout_hours)
 
     def check_expired_drafts(
         self, now: Optional[datetime] = None,
@@ -323,26 +323,25 @@ class DraftStateMachine:
         grace_hours），与轮次阶段超时互相独立；R9：按各自 saved_at 独立计时。
         """
         from datetime import timedelta
-        now = now or self._business_now()
+        current = parse_persisted_datetime(now, self.cfg) if now is not None else storage_now()
+        if current is None:
+            return []
         cursor = self.db.execute(
             "SELECT id, saved_at, created_at FROM drafts WHERE status = 'draft_saved'"
         )
         expired_ids: list[str] = []
         for draft_id, saved_at_str, created_at_str in cursor.fetchall():
             # 老版本/迁移数据可能没有 saved_at；以创建时间兜底，避免待发布草稿永远无法过期。
-            candidates = [value for value in (saved_at_str, created_at_str) if value]
-            saved_at = None
-            for candidate in candidates:
-                try:
-                    saved_at = datetime.fromisoformat(str(candidate))
-                    break
-                except ValueError:
-                    continue
+            # saved_at 在 UTC 持久化统一前由旧版本按服务器本地时区写入；
+            # 仅该历史字段使用 host-local 兼容解析。created_at 保持原有业务时区策略。
+            saved_at = parse_server_local_legacy_datetime(saved_at_str) if saved_at_str else None
+            if saved_at is None and created_at_str:
+                saved_at = parse_persisted_datetime(created_at_str, self.cfg)
             if saved_at is None:
                 logger.warning("草稿 %s 缺少有效 saved_at / created_at，无法自动判过期", draft_id)
                 continue
             total_wait = timedelta(hours=timeout_hours + grace_hours)
-            if now - saved_at > total_wait:
+            if current - saved_at > total_wait:
                 self.transition(draft_id, "expired", reason="publish_confirm_timeout + grace 到期")
                 expired_ids.append(draft_id)
         return expired_ids

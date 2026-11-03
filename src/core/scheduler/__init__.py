@@ -27,7 +27,7 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -38,7 +38,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.date import DateTrigger
 from zoneinfo import ZoneInfo
-from ..timezone import business_now
+from ..timezone import (business_now, storage_now, parse_persisted_datetime, business_zone as configured_business_zone, storage_window_cutoffs, timestamp_since_sql, timestamp_before_sql, business_date_predicate)
 from ..task_context import bind_task_context, business_timestamp, business_zone
 
 logger = logging.getLogger(__name__)
@@ -188,6 +188,17 @@ class SchedulerEngine:
                 else:
                     self._finish_tracked_task_run(task_run_id, "success", None)
         finally:
+            # Scheduler jobs execute on the API process' event-loop thread. If a job
+            # exits after an implicit write without its own rollback, clean it up here
+            # on the same owning thread before another in-process job can reuse conn.
+            if self.conn is not None and hasattr(self.conn, "rollback_if_open"):
+                try:
+                    if self.conn.rollback_if_open(timeout=2.0):
+                        logger.error("定时任务退出时发现未关闭的 SQLite 事务，已回滚 method=%s", method_name)
+                except TimeoutError:
+                    logger.error("定时任务退出时 SQLite 事务锁回滚兜底超时 method=%s", method_name)
+                except Exception:
+                    logger.exception("定时任务退出时 SQLite 事务回滚兜底失败 method=%s", method_name)
             self._active_job_count -= 1
 
     def _start_tracked_task_run(
@@ -196,7 +207,7 @@ class SchedulerEngine:
         if self.conn is None or task_type is None:
             return None
         try:
-            now = business_now(self.cfg).isoformat()
+            now = storage_now().isoformat()
             identity = json.dumps(args, ensure_ascii=False, default=str)[:300]
             with self.conn:
                 cur = self.conn.execute(
@@ -218,7 +229,7 @@ class SchedulerEngine:
             with self.conn:
                 self.conn.execute(
                     "UPDATE task_runs SET status = ?, finished_at = ?, error_msg = ? WHERE id = ?",
-                    (status, business_now(self.cfg).isoformat(), error_msg, task_run_id),
+                    (status, storage_now().isoformat(), error_msg, task_run_id),
                 )
         except Exception:  # noqa: BLE001 — do not mask scheduler outcome
             logger.exception("[APS] task_runs 收尾留痕失败 id=%s", task_run_id)
@@ -302,7 +313,7 @@ class SchedulerEngine:
 
         if self.conn is None or self.sm_draft is None:
             return False
-        now = confirmed_at or business_now(self.cfg)
+        now = parse_persisted_datetime(confirmed_at if confirmed_at is not None else business_now(self.cfg), self.cfg)
         # 原子条件更新：并发的手动确认与平台轮询只能有一个调用赢得状态迁移，
         # 只有赢家才注册一次性采集任务，避免两个请求都读到 draft_saved 后重复排程。
         with self.conn:
@@ -342,13 +353,15 @@ class SchedulerEngine:
         if self.conn is None:
             return 0
         delay = self.cfg.timeouts.metrics_initial_delay_hours
-        cutoff = (business_now(self.cfg) - timedelta(hours=delay)).isoformat()
+        cutoff = storage_now() - timedelta(hours=delay)
+        cutoff_utc, cutoff_legacy = storage_window_cutoffs(cutoff, self.cfg)
         rows = self.conn.execute(
             "SELECT d.id FROM drafts d WHERE d.status IN ('user_published', 'data_fetching') "
-            "AND d.user_confirmed_at IS NOT NULL AND d.user_confirmed_at <= ? "
-            "AND NOT EXISTS (SELECT 1 FROM metrics m WHERE m.draft_id = d.id "
+            "AND d.user_confirmed_at IS NOT NULL AND "
+            + timestamp_before_sql("d.user_confirmed_at")
+            + " AND NOT EXISTS (SELECT 1 FROM metrics m WHERE m.draft_id = d.id "
             "AND m.fetch_status IN ('success', 'partial'))",
-            (cutoff,),
+            (cutoff_utc, cutoff_legacy),
         ).fetchall()
         n = 0
         retry_times, _interval_min = self._metrics_retry_params()
@@ -367,7 +380,7 @@ class SchedulerEngine:
                         break
             if pending or queued:
                 continue
-            self.schedule_data_fetch(r["id"], business_now(self.cfg) + timedelta(seconds=5))
+            self.schedule_data_fetch(r["id"], storage_now() + timedelta(seconds=5))
             n += 1
         if n:
             logger.warning("[APS] 补登记数据采集 %d 篇（任务丢失或旧版本未注册）", n)
@@ -382,7 +395,7 @@ class SchedulerEngine:
         # Normalize at this single scheduling boundary so publish confirmation,
         # startup backfill, and retry paths cannot enqueue an invalid timestamp.
         if run_at.tzinfo is None:
-            run_at = run_at.replace(tzinfo=business_zone(self.cfg))
+            run_at = run_at.replace(tzinfo=configured_business_zone(self.cfg))
         if self.task_queue is not None and self.tenant_id:
             self.task_queue.enqueue(
                 task_type="scheduler_job",
@@ -520,7 +533,7 @@ class SchedulerEngine:
                                     json.dumps({"status": "user_published", "via": "platform_polling"}, ensure_ascii=False),
                                     "系统在平台侧检测到已发布作品，为保留真实运营数据继续采集",
                                     "publish-polling",
-                                    business_now(self.cfg).strftime("%Y-%m-%d %H:%M:%S"),
+                                    storage_now().isoformat(timespec="seconds"),
                                 ),
                             )
                     except Exception:  # noqa: BLE001 — 实际发布已发生，审计失败不能中断采集
@@ -561,7 +574,7 @@ class SchedulerEngine:
                                     }, ensure_ascii=False),
                                     f"系统已在平台侧确认作品发布；平台内容版本状态为 {sync_state}，保留真实发布并继续采集",
                                     "publish-polling",
-                                    business_now(self.cfg).strftime("%Y-%m-%d %H:%M:%S"),
+                                    storage_now().isoformat(timespec="seconds"),
                                 ),
                             )
                 except Exception:  # noqa: BLE001 — 已确认发布不应因审计问题中断采集
@@ -631,10 +644,11 @@ class SchedulerEngine:
         with self.conn:
             self.conn.execute("BEGIN IMMEDIATE")
             today = business_now(self.cfg).strftime("%Y-%m-%d")
+            day_predicate, day_bounds = business_date_predicate("fetched_at", today, self.cfg)
             prev = self.conn.execute(
-                "SELECT id, attempt FROM metrics WHERE draft_id = ? AND platform = ? "
-                "AND substr(COALESCE(fetched_at, ''), 1, 10) = ?",
-                (draft_id, platform.value, today),
+                "SELECT id, attempt FROM metrics WHERE draft_id = ? AND platform = ? AND "
+                + day_predicate,
+                (draft_id, platform.value, *day_bounds),
             ).fetchone()
             if prev:
                 # 注意：这里的 metrics_attempt 是「当天第几次采集」，与作业重试 attempt 无关
@@ -645,7 +659,7 @@ class SchedulerEngine:
                     "views = ?, new_followers = ?, like_rate = ?, collect_rate = ?, "
                     "interaction_rate = ?, follower_efficiency = ? WHERE id = ?",
                     (
-                        snap.fetch_status.value, business_now(self.cfg).isoformat(), metrics_attempt,
+                        snap.fetch_status.value, storage_now().isoformat(), metrics_attempt,
                         snap.raw_response, snap.error_msg, snap.likes, snap.collects, snap.comments,
                         snap.shares, snap.views, snap.new_followers,
                         snap.like_rate, snap.collect_rate, snap.interaction_rate,
@@ -662,7 +676,7 @@ class SchedulerEngine:
                     "VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         draft_id, row["content_id"], platform.value, snap.fetch_status.value,
-                        business_now(self.cfg).isoformat(), snap.raw_response, snap.error_msg,
+                        storage_now().isoformat(), snap.raw_response, snap.error_msg,
                         snap.likes, snap.collects, snap.comments, snap.shares, snap.views,
                         snap.new_followers,
                         snap.like_rate, snap.collect_rate, snap.interaction_rate,
@@ -696,7 +710,7 @@ class SchedulerEngine:
 
             retry_times, interval_min = self._metrics_retry_params()
             if attempt < retry_times:
-                next_at = business_now(self.cfg) + timedelta(minutes=interval_min)
+                next_at = storage_now() + timedelta(minutes=interval_min)
                 self.schedule_data_fetch(draft_id, next_at, attempt=attempt + 1)
                 retry_scheduled = True
                 logger.warning(
@@ -756,14 +770,12 @@ class SchedulerEngine:
 
         # 今日已执行的运营动作（ops_logs）
         # R5：SQLite date('now') 是 UTC，必须用本地时区当日 00:00
-        today_start = business_now(self.cfg).replace(
-            hour=0, minute=0, second=0, microsecond=0,
-        ).isoformat()
+        today_utc, today_legacy = self._today_cutoffs()
         rows = self.conn.execute(
             "SELECT platform, action_type, status, COUNT(*) AS n "
-            "FROM ops_logs WHERE executed_at >= ? "
+            "FROM ops_logs WHERE " + timestamp_since_sql("executed_at") + " "
             "GROUP BY platform, action_type, status",
-            (today_start,),
+            (today_utc, today_legacy),
         ).fetchall()
         usage: dict[str, dict[str, int]] = {}
         for r in rows:
@@ -771,9 +783,9 @@ class SchedulerEngine:
 
         # 今日活跃草稿（已存草稿但未 user_published）
         draft_count = self.conn.execute(
-            "SELECT COUNT(*) FROM drafts WHERE status IN ('draft_saved','user_published') "
-            "AND substr(created_at, 1, 10) = ?",
-            (today_start[:10],),
+            "SELECT COUNT(*) FROM drafts WHERE status IN ('draft_saved','user_published') AND "
+            + timestamp_since_sql("created_at"),
+            (today_utc, today_legacy),
         ).fetchone()[0]
 
         targets_map = getattr(self.cfg, "ops_targets", None) or {}
@@ -872,14 +884,18 @@ class SchedulerEngine:
         """剩余配额 = 上限 - 今日已成功/待核验（R17 灰色地带也计入）。"""
         return max(0, limit - self._today_action_count(platform, action_type))
 
-    def _today_action_count(self, platform, action_type: str) -> int:
-        today_start = business_now(self.cfg).replace(
+    def _today_cutoffs(self) -> tuple[str, str]:
+        local_midnight = business_now(self.cfg).replace(
             hour=0, minute=0, second=0, microsecond=0,
-        ).isoformat()
+        ).replace(tzinfo=configured_business_zone(self.cfg))
+        return storage_window_cutoffs(local_midnight.astimezone(timezone.utc), self.cfg)
+
+    def _today_action_count(self, platform, action_type: str) -> int:
         row = self.conn.execute(
-            "SELECT COUNT(*) FROM ops_logs WHERE platform = ? AND action_type = ? "
-            "AND executed_at >= ? AND status IN ('success','pending_verify')",
-            (platform.value, action_type, today_start),
+            "SELECT COUNT(*) FROM ops_logs WHERE platform = ? AND action_type = ? AND "
+            + timestamp_since_sql("executed_at")
+            + " AND status IN ('success','pending_verify')",
+            (platform.value, action_type, *self._today_cutoffs()),
         ).fetchone()
         return int(row[0]) if row else 0
 
@@ -948,7 +964,7 @@ class SchedulerEngine:
         """写 task_runs（biz_id=目标，R16 断点恢复留痕）。"""
         if self.conn is None:
             return None
-        now = business_now(self.cfg).isoformat()
+        now = storage_now().isoformat()
         with self.conn:
             cur = self.conn.execute(
                 "INSERT INTO task_runs (task_type, biz_id, platform, status, attempt, "
@@ -967,7 +983,7 @@ class SchedulerEngine:
         with self.conn:
             self.conn.execute(
                 "UPDATE task_runs SET status = ?, finished_at = ?, error_msg = ? WHERE id = ?",
-                (status, business_now(self.cfg).isoformat(), error_msg, task_run_id),
+                (status, storage_now().isoformat(), error_msg, task_run_id),
             )
 
     def _last_op_outcome(
@@ -1163,7 +1179,7 @@ class SchedulerEngine:
                         it.id, it.title, it.dimension,
                         getattr(it, "source", "kb"),
                         getattr(it, "date", None),
-                        business_now(self.cfg).strftime("%Y-%m-%d %H:%M:%S"),
+                        storage_now().isoformat(timespec="seconds"),
                     ),
                 )
                 inserted += 1
@@ -1244,7 +1260,7 @@ class SchedulerEngine:
         with self.conn:
             self.conn.execute("BEGIN IMMEDIATE")
             cutoff_raw = (
-                business_now(self.cfg) - timedelta(days=cfg.raw_response_days)
+                storage_now() - timedelta(days=cfg.raw_response_days)
             ).isoformat(timespec="seconds")
             cur = self.conn.execute(
                 "UPDATE metrics SET raw_response = NULL WHERE fetched_at < ? AND raw_response IS NOT NULL",
@@ -1253,7 +1269,7 @@ class SchedulerEngine:
             cleaned_raw = cur.rowcount
 
             cutoff_ops = (
-                business_now(self.cfg) - timedelta(days=cfg.ops_logs_days)
+                storage_now() - timedelta(days=cfg.ops_logs_days)
             ).isoformat(timespec="seconds")
             cur = self.conn.execute(
                 "DELETE FROM ops_logs WHERE executed_at < ?", (cutoff_ops,)
@@ -1261,7 +1277,7 @@ class SchedulerEngine:
             cleaned_ops = cur.rowcount
 
             cutoff_ai = (
-                business_now(self.cfg) - timedelta(days=cfg.ai_calls_detail_days)
+                storage_now() - timedelta(days=cfg.ai_calls_detail_days)
             ).isoformat(timespec="seconds")
             cur = self.conn.execute(
                 "DELETE FROM ai_calls WHERE called_at < ?", (cutoff_ai,)
@@ -1284,16 +1300,8 @@ class SchedulerEngine:
     # R8 · 轮次阶段超时扫描（每小时）
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _parse_dt(value) -> Optional[datetime]:
-        if not value:
-            return None
-        if isinstance(value, datetime):
-            return value
-        try:
-            return datetime.fromisoformat(str(value))
-        except ValueError:
-            return None
+    def _parse_dt(self, value) -> Optional[datetime]:
+        return parse_persisted_datetime(value, self.cfg)
 
     def _phase_started_at(self, row, phase: str) -> Optional[datetime]:
         """取某阶段起点：优先专用列，回退 transition_log 中最近一次进入该阶段的时间。"""
@@ -1329,7 +1337,7 @@ class SchedulerEngine:
             return {"final_status": "failed", "errors": ["轮次超时检查依赖未注入"]}
 
         t = self.cfg.timeouts
-        now = business_now(self.cfg)
+        now = storage_now()
 
         # R8/R9：单篇发布确认超时独立计时（timeout + grace），与轮次状态无关
         expired_drafts = self.sm_draft.check_expired_drafts(
