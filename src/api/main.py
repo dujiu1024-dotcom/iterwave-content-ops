@@ -1044,6 +1044,17 @@ def _build_app() -> FastAPI:
                     tracked_request = False
             return response
         finally:
+            # Safety net: a request must never leave an implicit SQLite transaction
+            # attached to the shared tenant connection after its endpoint has exited.
+            conn = _g_ctx.get("conn")
+            if conn is not None and hasattr(conn, "rollback_if_open"):
+                try:
+                    if conn.rollback_if_open(timeout=2.0):
+                        logger.error("请求结束时发现未关闭的 SQLite 事务，已执行回滚 path=%s", path)
+                except TimeoutError:
+                    logger.error("请求结束时 SQLite 事务锁仍被占用，回滚兜底超时 path=%s", path)
+                except Exception:
+                    logger.exception("请求结束时 SQLite 事务回滚兜底失败 path=%s", path)
             if tracked_request:
                 _tenant_switch_gate.leave_request()
 
