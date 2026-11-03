@@ -141,6 +141,8 @@ def recover_production_task(
         if task["status"] in {"failed", "pending"}:
             # Move through the normal claim transition to preserve attempt history.
             if task["status"] == "failed":
+                if int(task["attempt_count"]) >= int(task["max_attempts"]):
+                    store.extend_attempts(task_id, max_attempts=int(task["attempt_count"]) + 1)
                 store.retry_task(task_id, retry_failed=True)
             store.claim_task(task_id, worker_id="manual-recovery", lease_seconds=900)
             completed = store.complete_task(task_id, content_id=str(artifact["id"]))
@@ -153,6 +155,8 @@ def recover_production_task(
     if task["error_code"] in {"interrupted_requires_review", "lease_expired_requires_review"} and not confirmed_no_external_side_effect:
         raise ProductionTaskError("该任务需要人工核实；确认没有未完成的外部副作用后才能重试")
     if task["status"] == "failed":
+        if int(task["attempt_count"]) >= int(task["max_attempts"]):
+            store.extend_attempts(task_id, max_attempts=int(task["attempt_count"]) + 1)
         store.retry_task(task_id, retry_failed=True)
     elif task["status"] != "pending":
         raise ProductionTaskError("当前任务状态不支持恢复")
