@@ -773,6 +773,16 @@ class GlobalTaskQueue:
         if date_to is not None:
             where += " AND substr(q.created_at, 1, 10) <= ?"
             params.append(date_to)
+        # Validate calendar dates, not merely their lexical ordering. Invalid values
+        # otherwise produce silently empty result sets through SQLite substr().
+        for field_name, date_value in (("date_from", date_from), ("date_to", date_to)):
+            if date_value is not None:
+                try:
+                    parsed_date = datetime.strptime(date_value, "%Y-%m-%d")
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"{field_name} must be a valid YYYY-MM-DD date") from exc
+                if parsed_date.strftime("%Y-%m-%d") != date_value:
+                    raise ValueError(f"{field_name} must be a valid YYYY-MM-DD date")
         if date_from and date_to and date_from > date_to:
             raise ValueError("date_from cannot be later than date_to")
         offset = (page - 1) * page_size
@@ -793,11 +803,12 @@ class GlobalTaskQueue:
                 try:
                     task = self._decode(row)
                 except TaskQueueError as exc:
-                    logger.error(
-                        "跳过无法解码的队列记录 task_id=%s error=%s",
-                        row["task_id"], str(exc),
-                    )
-                    continue
+                    # Never silently omit corrupt history rows: doing so makes the
+                    # returned page disagree with COUNT(*) and hides persistent damage.
+                    logger.exception("队列历史记录损坏 task_id=%s", row["task_id"])
+                    raise TaskQueueError(
+                        f"队列任务 {row['task_id']} 数据损坏，分页结果不完整"
+                    ) from exc
                 if task is not None:
                     tasks.append(task)
             return tasks, int(total_row["n"] if total_row else 0)

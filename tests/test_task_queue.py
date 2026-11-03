@@ -474,6 +474,38 @@ def test_history_page_filters_created_date_range(tmp_path):
     else:
         raise AssertionError("reversed date range must be rejected")
 
+    for invalid_date in ("2026-02-30", "2026-2-01", "not-a-date"):
+        try:
+            queue.list_page(scope="failed", date_from=invalid_date)
+        except ValueError as exc:
+            assert "YYYY-MM-DD" in str(exc)
+        else:
+            raise AssertionError(f"invalid date must be rejected: {invalid_date}")
+
+
+def test_history_pagination_fails_closed_on_corrupt_row_instead_of_underreporting(tmp_path):
+    from src.core.task_queue import TaskQueueError
+
+    queue = make_queue(tmp_path)
+    task, _ = queue.enqueue(task_type="scheduler_job", tenant_id="tenant-a", payload={"ok": True})
+    conn = queue._connect()
+    try:
+        conn.execute(
+            "UPDATE global_task_queue SET status='failed', payload_json='not-json' WHERE task_id=?",
+            (task.task_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    try:
+        queue.list_page(scope="history", page=1, page_size=20)
+    except TaskQueueError as exc:
+        assert task.task_id in str(exc)
+        assert "分页结果不完整" in str(exc)
+    else:
+        raise AssertionError("corrupt history must not be silently omitted")
+
 
 def test_manual_retry_preserves_tenant_payload_and_audits_confirmation(tmp_path):
     queue = make_queue(tmp_path)
