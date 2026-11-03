@@ -50,7 +50,20 @@ def _db(path=None):
             stage_key TEXT NOT NULL, stage_order INTEGER NOT NULL, title TEXT NOT NULL, direction TEXT NOT NULL,
             target_count INTEGER NOT NULL, start_date TEXT, end_date TEXT,
             completion_condition TEXT NOT NULL, status TEXT NOT NULL, notes TEXT,
-            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            strategy_goal TEXT NOT NULL DEFAULT '', current_problem TEXT NOT NULL DEFAULT '',
+            execution_strategy TEXT NOT NULL DEFAULT '', prerequisites TEXT NOT NULL DEFAULT '',
+            input_info TEXT NOT NULL DEFAULT '', expected_result TEXT NOT NULL DEFAULT '',
+            completion_criteria TEXT NOT NULL DEFAULT '', effect_evaluation TEXT NOT NULL DEFAULT '',
+            entry_condition TEXT NOT NULL DEFAULT '', entry_condition_met INTEGER NOT NULL DEFAULT 1,
+            dependencies_json TEXT NOT NULL DEFAULT '[]'
+        );
+        CREATE TABLE sub_plan_stage_outcomes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, sub_plan_id TEXT NOT NULL,
+            stage_key TEXT NOT NULL, source_version_id INTEGER NOT NULL,
+            stage_id INTEGER NOT NULL, result_json TEXT NOT NULL,
+            evaluation TEXT NOT NULL DEFAULT '', recorded_at TEXT NOT NULL,
+            recorded_by TEXT NOT NULL DEFAULT 'user'
         );
         CREATE TABLE spiral_rounds (
             id INTEGER PRIMARY KEY, goal_id TEXT, round_number INTEGER, status TEXT,
@@ -265,6 +278,88 @@ def test_durable_round_open_lock_is_idempotent_and_rejects_key_reuse():
     )
     assert retry == {"acquired": False, "status": "created", "round_id": completed["round_id"]}
 
+
+
+def test_strategy_steps_persist_dependencies_and_require_real_predecessor_outcome():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    master = _active_master(store)
+    store.create_subplan("sub-strategy", master_plan_version_id=master["id"],
+                         platform="xhs", title="策略子计划")
+    version = store.create_subplan_version(
+        "sub-strategy", {"title": "策略子计划", "platform": "xhs"},
+        master_plan_version_id=master["id"],
+        stages=[
+            {"stage_key": "research", "title": "调研验证", "target_count": 1,
+             "strategy_goal": "验证用户需求", "current_problem": "缺少真实反馈",
+             "execution_strategy": "访谈并发布验证内容", "prerequisites": "准备访谈提纲",
+             "input_info": "母计划目标", "expected_result": "得到需求证据",
+             "completion_criteria": "收集到有效反馈", "effect_evaluation": "有效反馈率",
+             "entry_condition": "调研资源就绪"},
+            {"stage_key": "scale", "title": "规模化", "target_count": 2,
+             "dependencies": ["research"], "entry_condition_met": True},
+        ],
+    )
+    rows = conn.execute(
+        "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order",
+        (version["id"],),
+    ).fetchall()
+    assert rows[0]["strategy_goal"] == "验证用户需求"
+    assert json.loads(rows[1]["dependencies_json"]) == ["research"]
+
+    with pytest.raises(PlanVersionError, match="前置阶段"):
+        store.assert_stage_ready(rows[1]["id"], version["id"])
+
+    store.update_stage_status(rows[0]["id"], "in_progress")
+    store.update_stage_status(rows[0]["id"], "completed")
+    outcome = store.record_stage_outcome(
+        rows[0]["id"], version["id"], {"published_count": 1, "feedback": "用户明确提出需求"},
+        evaluation="有效反馈率达到目标",
+    )
+    assert outcome["result"]["published_count"] == 1
+    assert store.assert_stage_ready(rows[1]["id"], version["id"])["stage_key"] == "scale"
+
+    store.activate_subplan_version(version["id"], reviewer="reviewer")
+    lease = store.reserve_round_open(
+        "strategy-follow-up", "strategy-hash",
+        master_plan_version_id=master["id"], sub_plan_id="sub-strategy",
+        sub_plan_version_id=version["id"], sub_plan_stage_id=rows[1]["id"],
+    )
+    assert lease["acquired"] is True
+    created = store.create_round_once("strategy-follow-up")
+    stage_snapshot = json.loads(conn.execute(
+        "SELECT sub_plan_stage_snapshot FROM spiral_rounds WHERE id=?",
+        (created["round_id"],),
+    ).fetchone()[0])
+    assert stage_snapshot["dependency_outcomes"]["research"]["result"]["published_count"] == 1
+    assert stage_snapshot["dependency_outcomes"]["research"]["evaluation"] == "有效反馈率达到目标"
+
+
+def test_strategy_step_blocks_unmet_entry_condition_and_rejects_dependency_cycles():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    master = _active_master(store)
+    store.create_subplan("sub-gated", master_plan_version_id=master["id"],
+                         platform="xhs", title="条件子计划")
+    with pytest.raises(PlanVersionError, match="循环"):
+        store.create_subplan_version(
+            "sub-gated", {"title": "条件子计划"},
+            master_plan_version_id=master["id"],
+            stages=[
+                {"stage_key": "a", "title": "A", "dependencies": ["b"]},
+                {"stage_key": "b", "title": "B", "dependencies": ["a"]},
+            ],
+        )
+    version = store.create_subplan_version(
+        "sub-gated", {"title": "条件子计划"},
+        master_plan_version_id=master["id"],
+        stages=[{"stage_key": "gated", "title": "受限步骤", "entry_condition_met": False}],
+    )
+    stage_id = conn.execute(
+        "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=?", (version["id"],)
+    ).fetchone()[0]
+    with pytest.raises(PlanVersionError, match="进入条件"):
+        store.assert_stage_ready(stage_id, version["id"])
 
 
 def test_plan_versions_are_isolated_by_tenant_database_file(tmp_path):

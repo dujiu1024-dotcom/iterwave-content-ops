@@ -316,12 +316,27 @@ class RoundExecutor:
                 stage = self._subplan_context["stage"]
                 subplan = self._subplan_context["subplan"]
                 context_lines = [
-                    "已审核平台子计划执行约束：内容必须符合当前子计划和阶段方向。",
+                    "已审核平台子计划执行约束：内容必须符合当前子计划和策略步骤。",
                     f"子计划：{subplan.get('title') or ''}",
                     f"阶段：{stage.get('title') or ''}",
                     f"阶段方向：{stage.get('direction') or ''}",
-                    f"阶段完成条件：{stage.get('completion_condition') or ''}",
+                    f"策略目标：{stage.get('strategy_goal') or ''}",
+                    f"当前问题：{stage.get('current_problem') or ''}",
+                    f"执行策略：{stage.get('execution_strategy') or ''}",
+                    f"前置条件：{stage.get('prerequisites') or ''}",
+                    f"输入信息：{stage.get('input_info') or ''}",
+                    f"预期结果：{stage.get('expected_result') or ''}",
+                    f"完成标准：{stage.get('completion_criteria') or stage.get('completion_condition') or ''}",
+                    f"效果评估方法：{stage.get('effect_evaluation') or ''}",
+                    f"进入条件：{stage.get('entry_condition') or ''}",
                 ]
+                for dependency_key, outcome in (stage.get("dependency_outcomes") or {}).items():
+                    context_lines.append(
+                        f"前置步骤 {dependency_key} 实际结果："
+                        + json.dumps(outcome.get("result"), ensure_ascii=False, sort_keys=True)
+                    )
+                    if outcome.get("evaluation"):
+                        context_lines.append(f"前置步骤 {dependency_key} 效果评价：{outcome['evaluation']}")
                 for key in ("positioning", "audience", "content_strategy", "tone", "key_points"):
                     value = subplan.get(key)
                     if value:

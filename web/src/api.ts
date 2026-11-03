@@ -1149,8 +1149,12 @@ export interface MasterPlanVersion {
 export interface SubPlanStageRecord {
   id: number; sub_plan_version_id: number; stage_key: string; stage_order: number; title: string;
   direction: string; target_count: number; start_date: string | null; end_date: string | null;
-  completion_condition: string; status: "pending" | "in_progress" | "completed" | "paused" | "cancelled";
+  completion_condition: string; completion_criteria?: string; status: "pending" | "in_progress" | "completed" | "paused" | "cancelled";
   notes: string; confirmed_published_count?: number;
+  strategy_goal?: string; current_problem?: string; execution_strategy?: string;
+  prerequisites?: string; input_info?: string; expected_result?: string;
+  effect_evaluation?: string; entry_condition?: string; entry_condition_met?: boolean;
+  dependencies?: string[]; latest_outcome?: { result: Record<string, unknown>; evaluation: string; recorded_at: string } | null;
 }
 export interface SubPlanVersionRecord {
   id: number; sub_plan_id: string; version_no: number; master_plan_version_id: number;
@@ -1937,7 +1941,7 @@ export const api = {
     fetchJson<SubPlanVersionRecord>(`/api/subplans/${encodeURIComponent(id)}`, {
       method: "PATCH", body: JSON.stringify(data),
     }),
-  addSubplanStage: (id: string, data: { based_on_version_id: number; expected_version_no: number; stage: { title: string; direction?: string; target_count: number; start_date?: string | null; end_date?: string | null; completion_condition?: string; notes?: string } }) =>
+  addSubplanStage: (id: string, data: { based_on_version_id: number; expected_version_no: number; stage: Partial<SubPlanStageRecord> & { title: string; target_count: number } }) =>
     fetchJson<SubPlanVersionRecord>(`/api/subplans/${encodeURIComponent(id)}/stages`, {
       method: "POST", body: JSON.stringify(data),
     }),
@@ -1949,6 +1953,15 @@ export const api = {
     fetchJson<SubPlanVersionRecord>(`/api/subplans/${encodeURIComponent(id)}/stages/${stageId}?based_on_version_id=${versionId}&expected_version_no=${versionNo}`, {
       method: "DELETE",
     }),
+  reorderSubplanStages: (id: string, data: { based_on_version_id: number; expected_version_no: number; stage_ids: number[] }) =>
+    fetchJson<SubPlanVersionRecord>(`/api/subplans/${encodeURIComponent(id)}/stages/reorder`, {
+      method: "POST", body: JSON.stringify(data),
+    }),
+  recordSubplanStageOutcome: (id: string, stageId: number, data: { version_id: number; result: Record<string, unknown>; evaluation?: string }) =>
+    fetchJson<{ outcome: { id: number; result: Record<string, unknown>; evaluation: string } }>(
+      `/api/subplans/${encodeURIComponent(id)}/stages/${stageId}/outcomes`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
   reviewSubplan: (id: string, versionId: number, action: "approve" | "reject", reason?: string) =>
     fetchJson<{ version: SubPlanVersionRecord; authorization: string }>(`/api/subplans/${encodeURIComponent(id)}/review`, {
       method: "POST", body: JSON.stringify({ version_id: versionId, action, reason }),
