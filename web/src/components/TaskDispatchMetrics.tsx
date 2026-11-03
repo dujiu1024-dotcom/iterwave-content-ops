@@ -7,7 +7,9 @@ const STATUS_LABEL: Record<string, string> = {
 };
 const STATUS_KEYS = ["queued", "running", "succeeded", "failed", "cancelled", "interrupted"] as const;
 
-export default function TaskDispatchMetrics() {
+type DrilldownFilters = { status?: keyof GlobalTaskQueueSummary["by_status"]; dateFrom?: string; dateTo?: string; tenantId?: string; taskType?: string };
+
+export default function TaskDispatchMetrics({ onDrilldown }: { onDrilldown?: (filters: DrilldownFilters) => void }) {
   const [summary, setSummary] = useState<GlobalTaskQueueSummary | null>(null);
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
@@ -90,24 +92,30 @@ export default function TaskDispatchMetrics() {
               {STATUS_KEYS.map((key) => {
                 const count = statuses?.[key] ?? 0;
                 const width = summary.total ? (count / summary.total) * 100 : 0;
-                return <div key={key} style={{ display: "grid", gridTemplateColumns: "90px 1fr 48px", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                return <button key={key} type="button" title={`查看${STATUS_LABEL[key]}任务`} onClick={() => onDrilldown?.({
+                  status: key, dateFrom: dateFrom || undefined, dateTo: dateTo || undefined,
+                  tenantId: tenantId.trim() || undefined, taskType: taskType || undefined,
+                })} style={{ width: "100%", display: "grid", gridTemplateColumns: "90px 1fr 48px", gap: 8, alignItems: "center", marginBottom: 8, border: 0, padding: 0, background: "transparent", color: "inherit", cursor: "pointer", textAlign: "left" }}>
                   <span className="tiny">{STATUS_LABEL[key]}</span>
                   <div style={{ height: 8, borderRadius: 8, background: "var(--line)", overflow: "hidden" }}>
                     <div style={{ width: `${width}%`, height: "100%", background: key === "failed" || key === "interrupted" ? "var(--red)" : key === "running" ? "var(--green)" : "var(--accent)" }} />
                   </div>
                   <strong className="tiny" style={{ textAlign: "right" }}>{count}</strong>
-                </div>;
+                </button>;
               })}
             </div>
             <div>
               <h3 style={{ margin: "0 0 10px" }}>每日任务趋势</h3>
               {summary.daily.length ? <div style={{ display: "flex", alignItems: "end", gap: 5, minHeight: 116, overflowX: "auto", paddingTop: 8 }}>
                 {summary.daily.slice(-30).map((item) => (
-                  <div key={item.date} title={`${item.date}：${item.total} 项，成功 ${item.succeeded}，失败 ${item.failed}`} style={{ minWidth: 18, flex: 1, display: "flex", flexDirection: "column", justifyContent: "end", alignItems: "center", gap: 4 }}>
+                  <button key={item.date} type="button" title={`查看 ${item.date} 的任务`} onClick={() => onDrilldown?.({
+                    dateFrom: item.date, dateTo: item.date, tenantId: tenantId.trim() || undefined,
+                    taskType: taskType || undefined, status: status ? status as keyof GlobalTaskQueueSummary["by_status"] : undefined,
+                  })} style={{ minWidth: 18, flex: 1, display: "flex", flexDirection: "column", justifyContent: "end", alignItems: "center", gap: 4, border: 0, padding: 0, background: "transparent", color: "inherit", cursor: "pointer" }}>
                     <span className="tiny">{item.total}</span>
                     <div style={{ width: "100%", height: `${Math.max(3, (item.total / maxDaily) * 82)}px`, borderRadius: "4px 4px 0 0", background: item.failed ? "var(--red)" : "var(--accent)" }} />
                     <span className="tiny" style={{ writingMode: "vertical-rl", transform: "rotate(180deg)" }}>{item.date.slice(5)}</span>
-                  </div>
+                  </button>
                 ))}
               </div> : <div className="empty-state">当前筛选范围没有任务趋势数据。</div>}
             </div>
