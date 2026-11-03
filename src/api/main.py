@@ -3017,6 +3017,7 @@ def _register_routes(app: FastAPI) -> None:
         }
 
     @app.post("/api/media", status_code=201)
+    @manages_own_transaction
     def upload_media_asset(req: MediaAssetUploadRequest):
         registry = _g().get("tenant_registry")
         tenant_id = _g().get("runtime_tenant_id", "default")
@@ -8527,6 +8528,7 @@ def _register_routes(app: FastAPI) -> None:
         return kb_sources.list_sources(_g()["cfg"])
 
     @app.post("/api/kb/sources/upload")
+    @manages_own_transaction
     def kb_source_upload(req: dict):
         cfg = _g()["cfg"]
         try:
@@ -8544,6 +8546,7 @@ def _register_routes(app: FastAPI) -> None:
         return source
 
     @app.post("/api/kb/sources/server")
+    @manages_own_transaction
     def kb_source_server(req: dict):
         cfg = _g()["cfg"]
         try:
@@ -8574,10 +8577,12 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(422, str(e)) from e
 
     @app.post("/api/kb/sources/default")
+    @manages_own_transaction
     def kb_source_default():
         return kb_sources.add_default_empty(_g()["cfg"])
 
     @app.patch("/api/kb/sources/{source_id}")
+    @manages_own_transaction
     def kb_source_update(source_id: str, req: dict):
         try:
             return kb_sources.update_source(_g()["cfg"], source_id, req or {})
@@ -8587,6 +8592,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(422, str(e)) from e
 
     @app.delete("/api/kb/sources/{source_id}")
+    @manages_own_transaction
     def kb_source_delete(source_id: str):
         try:
             return kb_sources.delete_source(_g()["cfg"], source_id)
@@ -9221,12 +9227,14 @@ def _register_routes(app: FastAPI) -> None:
         return _read_account_identity(p, data_dir=_interactive_login_data_dir())
 
     @app.post("/api/accounts/{platform}/logout")
+    @manages_own_transaction
     def logout_platform(platform: str):
         """注销：清持久化 profile + storage_state + 登录标记（下次需重新扫码）。"""
         p = _valid_platform(platform)
         return _clear_login(p, data_dir=_interactive_login_data_dir())
 
     @app.post("/api/accounts/{platform}/sms")
+    @manages_own_transaction
     def submit_platform_sms(platform: str, req: SmsCodeRequest):
         """回填短信验证码（登录进入 sms_required 时由前端提交，runner 读走后继续登录）。"""
         p = _valid_platform(platform)
