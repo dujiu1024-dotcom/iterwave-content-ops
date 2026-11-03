@@ -12,6 +12,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import time
 import zipfile
 from src.core.timezone import business_now, storage_now
 from pathlib import Path, PurePosixPath
@@ -48,8 +49,11 @@ def create_backup(db_path: Path | str, data_dir: Path | str,
     if not db_path.is_file():
         raise BackupError("数据库文件不存在，无法创建快照")
     backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    ts = business_now(cfg).strftime("%Y%m%d_%H%M%S")
-    destination = backup_dir / f"iterwave_{tenant_id}_{ts}.zip"
+    backup_dir.chmod(0o700)
+    ts = business_now(cfg).strftime("%Y%m%d_%H%M%S_%f")
+    unique = time.time_ns()
+    destination = backup_dir / f"iterwave_{tenant_id}_{ts}_{unique}.zip"
+    temp_destination = backup_dir / f".{destination.name}.tmp"
     media_dir = data_dir / "media"
     overrides = data_dir / "config_overrides.json"
 
@@ -153,7 +157,7 @@ def create_backup(db_path: Path | str, data_dir: Path | str,
         if aggregate_size > max_backup_bytes:
             raise BackupError("备份内容总大小超过 2GB 上限")
         try:
-            with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            with zipfile.ZipFile(temp_destination, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                 archive.write(snapshot_db, "easel.db")
                 archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
                 for name in media_files:
@@ -162,13 +166,12 @@ def create_backup(db_path: Path | str, data_dir: Path | str,
                     archive.write(output_dir / name, f"outputs/{name}")
                 if overrides.is_file():
                     archive.write(overrides, "config_overrides.json")
+            temp_destination.chmod(0o600)
+            os.replace(temp_destination, destination)
         except Exception:
+            temp_destination.unlink(missing_ok=True)
             destination.unlink(missing_ok=True)
             raise
-    try:
-        destination.chmod(0o600)
-    except OSError:
-        pass
     backups = sorted(backup_dir.glob(f"iterwave_{tenant_id}_*.zip"), reverse=True)
     for old in backups[retention_count:]:
         old.unlink(missing_ok=True)
@@ -185,9 +188,12 @@ def restore_backup(backup_path: Path | str, db_path: Path | str, data_dir: Path 
     )
     if not backup_path.is_relative_to(backup_dir) or not backup_path.is_file():
         raise BackupError("只能恢复当前账号组备份目录中的文件")
-    ts = business_now(cfg).strftime("%Y%m%d_%H%M%S")
+    ts = business_now(cfg).strftime("%Y%m%d_%H%M%S_%f")
+    unique = time.time_ns()
     media_dir = data_dir / "media"
     data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    backup_dir.chmod(0o700)
 
     with tempfile.TemporaryDirectory(prefix="iterwave-restore-", dir=backup_dir) as temp_name:
         stage = Path(temp_name)
@@ -230,6 +236,7 @@ def restore_backup(backup_path: Path | str, db_path: Path | str, data_dir: Path 
                 db_bytes = archive.read("easel.db")
                 db_stage = stage / "easel.db"
                 db_stage.write_bytes(db_bytes)
+                db_stage.chmod(0o600)
                 if _sha256(db_stage) != manifest.get("database_sha256"):
                     raise BackupError("备份数据库校验失败")
                 check_conn = sqlite3.connect(str(db_stage))
@@ -276,13 +283,14 @@ def restore_backup(backup_path: Path | str, db_path: Path | str, data_dir: Path 
                 config_stage = stage / "config_overrides.json"
                 if "config_overrides.json" in archive.namelist():
                     config_stage.write_bytes(archive.read("config_overrides.json"))
+                    config_stage.chmod(0o600)
         except BackupError:
             raise
         except (zipfile.BadZipFile, KeyError, json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
             raise BackupError(f"备份读取失败：{type(exc).__name__}") from exc
 
         # 先保留回滚副本；数据库 WAL/SHM 在停机恢复前一并移走。
-        db_rollback = backup_dir / f"pre_restore_{tenant_id}_{ts}.db"
+        db_rollback = backup_dir / f"pre_restore_{tenant_id}_{ts}_{unique}.db"
         if db_path.exists():
             rollback_source = sqlite3.connect(str(db_path), timeout=30)
             rollback_target = sqlite3.connect(str(db_rollback))
@@ -291,15 +299,17 @@ def restore_backup(backup_path: Path | str, db_path: Path | str, data_dir: Path 
             finally:
                 rollback_target.close()
                 rollback_source.close()
+            db_rollback.chmod(0o600)
         for suffix in ("-wal", "-shm"):
             db_path.with_name(db_path.name + suffix).unlink(missing_ok=True)
-        media_rollback = backup_dir / f"pre_restore_media_{tenant_id}_{ts}"
+        media_rollback = backup_dir / f"pre_restore_media_{tenant_id}_{ts}_{unique}"
         output_dir = data_dir / "outputs"
-        output_rollback = backup_dir / f"pre_restore_outputs_{tenant_id}_{ts}"
+        output_rollback = backup_dir / f"pre_restore_outputs_{tenant_id}_{ts}_{unique}"
         config_path = data_dir / "config_overrides.json"
-        config_rollback = backup_dir / f"pre_restore_config_{tenant_id}_{ts}.json"
+        config_rollback = backup_dir / f"pre_restore_config_{tenant_id}_{ts}_{unique}.json"
         if config_path.exists():
             shutil.copy2(config_path, config_rollback)
+            config_rollback.chmod(0o600)
         created_outputs: list[Path] = []
         overwritten_outputs: list[str] = []
         if media_dir.exists():

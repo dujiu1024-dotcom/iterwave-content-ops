@@ -779,20 +779,28 @@ def test_sqlite_backup_files_are_private(tmp_path):
     from src.core.db import Database
 
     db_path = tmp_path / "source.sqlite3"
-    db_path.write_bytes(b"database")
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("CREATE TABLE private_rows (value TEXT)")
+    conn.execute("INSERT INTO private_rows VALUES ('private')")
+    conn.commit()
+    conn.close()
     db_path.chmod(0o644)
-    Path(str(db_path) + "-wal").write_bytes(b"wal")
-    Path(str(db_path) + "-wal").chmod(0o644)
-    Path(str(db_path) + "-shm").write_bytes(b"shm")
-    Path(str(db_path) + "-shm").chmod(0o644)
 
     database = object.__new__(Database)
     database.db_path = db_path
     database.backup_dir = tmp_path / "backups"
+    database.cfg = None
 
     backup = database._backup()
 
-    for path in (backup, Path(str(backup) + "-wal"), Path(str(backup) + "-shm")):
-        assert path.stat().st_mode & 0o777 == 0o600
+    assert backup.stat().st_mode & 0o777 == 0o600
+    snapshot = sqlite3.connect(backup)
+    try:
+        assert snapshot.execute("SELECT value FROM private_rows").fetchone()[0] == "private"
+    finally:
+        snapshot.close()
+    assert not Path(str(backup) + "-wal").exists()
+    assert not Path(str(backup) + "-shm").exists()
 
 

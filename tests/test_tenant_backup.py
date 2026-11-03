@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import stat
 from pathlib import Path
 
 from src.core.tenant_backup import create_backup, restore_backup
@@ -60,6 +61,10 @@ def test_tenant_backup_restores_database_media_and_overrides(tmp_path: Path) -> 
     assert card_path.read_bytes() == b"card-original"
     assert json.loads((data_dir / "config_overrides.json").read_text(encoding="utf-8")) == {"quota": 10}
     assert Path(result["rollback_db"]).is_file()
+    assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE((data_dir / "config_overrides.json").stat().st_mode) == 0o600
+    assert stat.S_IMODE(Path(result["rollback_db"]).stat().st_mode) == 0o600
+    assert stat.S_IMODE(backup_dir.stat().st_mode) == 0o700
 
 
 def test_restore_rejects_duplicate_zip_members(tmp_path: Path) -> None:
@@ -112,3 +117,28 @@ def test_create_backup_counts_manifest_overhead_in_aggregate_limit(tmp_path: Pat
     with pytest.raises(BackupError, match="总大小"):
         create_backup(db_path, data_dir, backup_dir, "brand_a")
     assert not list(backup_dir.glob("*.zip"))
+
+
+
+def test_concurrent_backup_invocations_publish_distinct_atomic_archives(tmp_path, monkeypatch):
+    from src.core import tenant_backup
+
+    data_dir = tmp_path / "data"
+    backup_dir = tmp_path / "backups"
+    data_dir.mkdir()
+    backup_dir.mkdir()
+    db_path = data_dir / "easel.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE state (value TEXT)")
+    conn.execute("INSERT INTO state VALUES ('snapshot')")
+    conn.commit()
+    conn.close()
+
+    ticks = iter((100, 200))
+    monkeypatch.setattr(tenant_backup.time, "time_ns", lambda: next(ticks))
+    first = create_backup(db_path, data_dir, backup_dir, "brand_a")
+    second = create_backup(db_path, data_dir, backup_dir, "brand_a")
+
+    assert first != second
+    assert first.is_file() and second.is_file()
+    assert not list(backup_dir.glob(".*.tmp"))
