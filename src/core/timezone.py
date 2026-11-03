@@ -127,3 +127,31 @@ def business_date_cutoffs(day: str, cfg=None, *, end: bool = False) -> tuple[str
     utc_value = local_midnight.astimezone(timezone.utc).isoformat(sep=" ", timespec="seconds")
     legacy_value = local_midnight.replace(tzinfo=None).isoformat(sep=" ", timespec="seconds")
     return utc_value, legacy_value
+
+
+
+def business_date_predicate(column: str, day: str, cfg=None) -> tuple[str, tuple[str, str, str, str]]:
+    """Return a mixed-format SQL predicate and bounds for one business calendar day.
+
+    Offset-aware rows are compared as UTC instants; legacy naive rows are interpreted
+    as business-local wall time. The inclusive end bound is second-precision to match
+    the persisted timestamp formats used by this application.
+    """
+    if not re.fullmatch(
+        r"(?:[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)?|"
+        r"COALESCE\\([A-Za-z_][A-Za-z0-9_]*,\\s*[A-Za-z_][A-Za-z0-9_]*\\))",
+        column,
+    ):
+        raise ValueError("invalid timestamp column")
+    utc_start, legacy_start = business_date_cutoffs(day, cfg)
+    utc_end, legacy_end = business_date_cutoffs(day, cfg, end=True)
+    aware = (
+        f"(instr(substr(COALESCE({column}, ''), 20), '+') > 0 "
+        f"OR instr(substr(COALESCE({column}, ''), 20), '-') > 0 "
+        f"OR substr(COALESCE({column}, ''), -1) = 'Z')"
+    )
+    sql = (
+        f"(({aware} AND datetime({column}) BETWEEN datetime(?) AND datetime(?)) "
+        f"OR (NOT {aware} AND datetime({column}) BETWEEN datetime(?) AND datetime(?)))"
+    )
+    return sql, (utc_start, utc_end, legacy_start, legacy_end)
