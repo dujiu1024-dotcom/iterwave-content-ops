@@ -157,6 +157,8 @@ def validate_manifest(manifest: dict) -> dict:
     for key in ("inputs", "outputs", "config"):
         if key in manifest and not isinstance(manifest[key], (dict, list)):
             errors.append({"field": key, "code": "type", "message": "必须为 JSON 对象或数组"})
+        elif key in ("inputs", "outputs") and isinstance(manifest.get(key), dict) and "type" in manifest[key]:
+            errors.extend(_schema_definition_errors(manifest[key], f"$.{key}"))
     try:
         encoded = _json(manifest).encode("utf-8")
         if len(encoded) > _MAX_MANIFEST_BYTES:

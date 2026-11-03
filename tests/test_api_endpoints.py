@@ -3398,3 +3398,17 @@ def test_skill_execution_history_is_metadata_only(client):
     assert item["status"] == "rejected"
     assert "private" not in item
     assert "input" not in item
+
+
+def test_skill_registry_input_contract_endpoint(client):
+    tc, _, _ = client
+    created = tc.post("/api/skill-registry/skills", json={
+        "skill_id": "contract_skill", "name": "Contract", "version": "1.0.0",
+        "inputs": {"type": "object", "properties": {"title": {"type": "string"}}, "required": ["title"]},
+        "outputs": {"type": "object"},
+    })
+    assert created.status_code == 201
+    valid = tc.post("/api/skill-registry/skills/contract_skill/validate-input", json={"value": {"title": "hello"}})
+    assert valid.status_code == 200 and valid.json()["valid"] is True
+    invalid = tc.post("/api/skill-registry/skills/contract_skill/validate-input", json={"value": {}})
+    assert invalid.status_code == 200 and invalid.json()["valid"] is False
