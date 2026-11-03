@@ -1217,6 +1217,17 @@ export interface ContentItem {
   review_rejection_reason: string | null;
 }
 
+export interface ReviewQueueItem {
+  id: string; round_id: number | null; round_number: number | null; round_status: string | null;
+  topic_id: string | null; platform: Platform; title: string; body: string; tags: string[]; image_count: number; guard_outcome: string | null;
+  guard_reason: string | null; review_rejected: boolean; review_rejection_reason: string | null;
+  created_at: string; draft_id: string; draft_status: string; draft_error: string | null;
+  saved_at: string | null; scheduled_publish_at: string | null;
+  review_status: "pending" | "approved" | "rejected";
+  review_history: { override_field: string; reason: string; overridden_by: string; overridden_at: string; override_value: string }[];
+}
+export interface ReviewQueuePage { items: ReviewQueueItem[]; total: number; page: number; page_size: number; pages: number; }
+
 export interface RecheckResult {
   id: string;
   result: "pass" | "warn" | "fail" | "error";
@@ -2346,6 +2357,19 @@ export const api = {
   regenerateContentCards: (id: string) =>
     fetchJson<{ id: string; image_count: number; image_paths: string[] }>(
       `/api/contents/${id}/cards`, { method: "POST" },
+    ),
+  reviewQueue: (filters: { status?: string; platform?: Platform | "all"; taskType?: string; from?: string; to?: string; page?: number; pageSize?: number } = {}) => {
+    const p = new URLSearchParams({ page: String(filters.page ?? 1), page_size: String(filters.pageSize ?? 30) });
+    if (filters.status) p.set("status", filters.status);
+    if (filters.platform && filters.platform !== "all") p.set("platform", filters.platform);
+    if (filters.taskType) p.set("task_type", filters.taskType);
+    if (filters.from) p.set("from", filters.from);
+    if (filters.to) p.set("to", filters.to);
+    return fetchJson<ReviewQueuePage>(`/api/review-queue?${p.toString()}`);
+  },
+  approveContent: (id: string, reason = "人工审核通过") =>
+    fetchJson<{ id: string; review_status: "approved"; deduped: boolean }>(
+      `/api/contents/${id}/approve`, { method: "POST", body: JSON.stringify({ reason }) },
     ),
   rejectContent: (id: string, reason: string) =>
     fetchJson<{

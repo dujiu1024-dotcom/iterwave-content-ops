@@ -3341,3 +3341,202 @@ def test_uncertain_draft_save_manual_verification_is_atomic_and_audited(
     assert audit[0]["original_value"] == "pending_verify"
     assert audit[0]["override_value"] == expected_draft_status
     assert audit[0]["reason"] == "已在平台草稿箱逐项核实"
+
+
+# ---------------------------------------------------------------- P1 日历排期安全
+def test_schedule_write_persists_only_draft_time_and_never_publishes(client):
+    tc, conn, seed = client
+    round_id = seed.round(status="awaiting_publish")
+    draft_id = seed.draft(
+        round_id, platform="xhs", draft_status="draft_saved", fetch_status=None,
+    )
+
+    response = tc.post("/api/schedule", json={
+        "draft_id": draft_id,
+        "scheduled_publish_at": "2026-12-01T10:30",
+    })
+    assert response.status_code == 200, response.text
+    row = conn.execute(
+        "SELECT status, scheduled_publish_at FROM drafts WHERE id = ?", (draft_id,)
+    ).fetchone()
+    assert row["status"] == "draft_saved"
+    assert row["scheduled_publish_at"] == "2026-12-01T10:30"
+    # 排期只更新 scheduled_publish_at；草稿状态保持待人工发布授权状态。
+    assert row["status"] not in ("published", "user_published")
+
+
+def test_schedule_rejects_same_platform_same_time_conflict(client):
+    tc, conn, seed = client
+    round_id = seed.round(status="awaiting_publish")
+    first_id = seed.draft(
+        round_id, platform="xhs", draft_status="draft_saved", fetch_status=None,
+    )
+    second_id = seed.draft(
+        round_id, platform="xhs", draft_status="draft_saved", topic_id="t2", fetch_status=None,
+    )
+    payload = {"scheduled_publish_at": "2026-12-02T11:00"}
+
+    first = tc.post("/api/schedule", json={"draft_id": first_id, **payload})
+    assert first.status_code == 200, first.text
+
+    second = tc.post("/api/schedule", json={"draft_id": second_id, **payload})
+    assert second.status_code == 409
+    assert "已有排期" in second.json()["detail"]
+    assert conn.execute(
+        "SELECT scheduled_publish_at FROM drafts WHERE id = ?", (second_id,)
+    ).fetchone()[0] is None
+
+
+def test_schedule_patch_can_cancel_and_rejects_timezone_ambiguous_values(client):
+    tc, conn, seed = client
+    round_id = seed.round(status="awaiting_publish")
+    draft_id = seed.draft(
+        round_id, platform="xhs", draft_status="draft_saved", fetch_status=None,
+    )
+
+    invalid = tc.post("/api/schedule", json={
+        "draft_id": draft_id,
+        "scheduled_publish_at": "2026-12-03T10:00:00Z",
+    })
+    assert invalid.status_code == 422
+
+    created = tc.post("/api/schedule", json={
+        "draft_id": draft_id,
+        "scheduled_publish_at": "2026-12-03T10:00",
+    })
+    assert created.status_code == 200, created.text
+    cancelled = tc.patch(f"/api/schedule/{draft_id}", json={"scheduled_publish_at": None})
+    assert cancelled.status_code == 200, cancelled.text
+    assert conn.execute(
+        "SELECT scheduled_publish_at FROM drafts WHERE id = ?", (draft_id,)
+    ).fetchone()[0] is None
+
+
+def test_schedule_calendar_rejects_invalid_or_reversed_date_ranges(client):
+    tc, _, _ = client
+    invalid = tc.get("/api/schedule?start_date=2026-02-30&end_date=2026-03-01")
+    assert invalid.status_code == 422
+    reversed_range = tc.get("/api/schedule?start_date=2026-03-02&end_date=2026-03-01")
+    assert reversed_range.status_code == 422
+
+
+# ---------------------------------------------------------------- P1 集中审核工作区
+def test_review_queue_filters_across_rounds_and_returns_audit_history(client):
+    tc, conn, seed = client
+    first_round = seed.round(status="awaiting_publish")
+    second_round = seed.round(status="awaiting_publish")
+    first_draft = seed.draft(first_round, platform="xhs", draft_status="draft_saved", fetch_status=None)
+    second_draft = seed.draft(second_round, platform="douyin", draft_status="draft_pending", fetch_status=None)
+    first_content = conn.execute("SELECT content_id FROM drafts WHERE id=?", (first_draft,)).fetchone()[0]
+    second_content = conn.execute("SELECT content_id FROM drafts WHERE id=?", (second_draft,)).fetchone()[0]
+    conn.execute("UPDATE contents SET guard_outcome='pass' WHERE id IN (?, ?)", (first_content, second_content))
+    conn.commit()
+
+    response = tc.get("/api/review-queue?status=pending&page=1&page_size=20")
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["total"] >= 2
+    ids = {item["id"] for item in payload["items"]}
+    assert {first_content, second_content}.issubset(ids)
+    first_item = next(item for item in payload["items"] if item["id"] == first_content)
+    assert first_item["body"] == "B"
+    assert first_item["tags"] == []
+    assert first_item["image_count"] == 0
+    assert {item["round_id"] for item in payload["items"] if item["id"] in ids} >= {first_round, second_round}
+
+    filtered = tc.get("/api/review-queue?platform=douyin&task_type=draft_pending")
+    assert filtered.status_code == 200
+    assert [item["id"] for item in filtered.json()["items"]] == [second_content]
+
+
+def test_central_review_approve_requires_g2_and_records_history(client):
+    tc, conn, seed = client
+    round_id = seed.round(status="awaiting_publish")
+    draft_id = seed.draft(round_id, platform="xhs", draft_status="draft_saved", fetch_status=None)
+    content_id = conn.execute("SELECT content_id FROM drafts WHERE id=?", (draft_id,)).fetchone()[0]
+
+    blocked = tc.post(f"/api/contents/{content_id}/approve", json={"reason": "人工通过"})
+    assert blocked.status_code == 409
+    conn.execute("UPDATE contents SET guard_outcome='pass' WHERE id=?", (content_id,))
+    conn.commit()
+
+    approved = tc.post(f"/api/contents/{content_id}/approve", json={"reason": "文案与账号定位一致"})
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["review_status"] == "approved"
+    replay = tc.post(f"/api/contents/{content_id}/approve", json={"reason": "重复点击"})
+    assert replay.status_code == 200
+    assert replay.json()["deduped"] is True
+
+    queue = tc.get("/api/review-queue?status=approved")
+    assert queue.status_code == 200
+    item = next(item for item in queue.json()["items"] if item["id"] == content_id)
+    assert item["review_history"][0]["override_field"] == "review_approve"
+    # 审核通过不得改变草稿状态，也不得发布。
+    assert conn.execute("SELECT status FROM drafts WHERE id=?", (draft_id,)).fetchone()[0] == "draft_saved"
+
+
+def test_central_review_reject_is_audited_and_duplicate_reject_is_blocked(client):
+    tc, conn, seed = client
+    round_id = seed.round(status="awaiting_publish")
+    draft_id = seed.draft(round_id, platform="xhs", draft_status="draft_saved", fetch_status=None)
+    content_id = conn.execute("SELECT content_id FROM drafts WHERE id=?", (draft_id,)).fetchone()[0]
+    conn.execute("UPDATE contents SET guard_outcome='pass' WHERE id=?", (content_id,))
+    conn.commit()
+
+    rejected = tc.post(f"/api/contents/{content_id}/reject", json={"reason": "缺少有效数据来源"})
+    assert rejected.status_code == 200, rejected.text
+    duplicate = tc.post(f"/api/contents/{content_id}/reject", json={"reason": "重复提交"})
+    assert duplicate.status_code == 409
+    bypass = tc.post(f"/api/contents/{content_id}/approve", json={"reason": "绕过重新提交"})
+    assert bypass.status_code == 409
+
+    queue = tc.get("/api/review-queue?status=rejected")
+    assert queue.status_code == 200
+    item = next(item for item in queue.json()["items"] if item["id"] == content_id)
+    assert item["review_history"][0]["override_field"] == "review_reject"
+    assert item["review_history"][0]["reason"] == "缺少有效数据来源"
+
+
+def test_review_queue_rejects_invalid_date_ranges(client):
+    tc, _, _ = client
+    invalid = tc.get("/api/review-queue?from=2026-02-30")
+    assert invalid.status_code == 422
+    reversed_range = tc.get("/api/review-queue?from=2026-03-02&to=2026-03-01")
+    assert reversed_range.status_code == 422
+
+
+def test_central_review_resubmit_returns_rejected_content_to_pending_queue(client):
+    tc, conn, seed = client
+    round_id = seed.round(status="awaiting_publish")
+    draft_id = seed.draft(round_id, platform="xhs", draft_status="draft_saved", fetch_status=None)
+    content_id = conn.execute("SELECT content_id FROM drafts WHERE id=?", (draft_id,)).fetchone()[0]
+    conn.execute("UPDATE contents SET guard_outcome='pass' WHERE id=?", (content_id,))
+    conn.commit()
+
+    rejected = tc.post(f"/api/contents/{content_id}/reject", json={"reason": "需要补充来源"})
+    assert rejected.status_code == 200
+    resubmitted = tc.post(f"/api/contents/{content_id}/resubmit", json={"reason": "已按意见修改并复检"})
+    assert resubmitted.status_code == 200, resubmitted.text
+    assert resubmitted.json()["review_rejected"] is False
+
+    queue = tc.get("/api/review-queue?status=pending")
+    item = next(item for item in queue.json()["items"] if item["id"] == content_id)
+    assert item["review_status"] == "pending"
+    assert [event["override_field"] for event in item["review_history"][:2]] == [
+        "review_resubmit", "review_reject",
+    ]
+
+
+def test_schedule_slot_conflict_ignores_completed_drafts(client):
+    tc, conn, seed = client
+    round_id = seed.round(status="awaiting_publish")
+    completed_id = seed.draft(round_id, platform="xhs", draft_status="published", fetch_status=None)
+    active_id = seed.draft(round_id, platform="xhs", draft_status="draft_saved", topic_id="t2", fetch_status=None)
+    slot = "2026-12-04T10:00"
+    conn.execute("UPDATE drafts SET scheduled_publish_at=? WHERE id=?", (slot, completed_id))
+    conn.commit()
+
+    response = tc.post("/api/schedule", json={
+        "draft_id": active_id, "scheduled_publish_at": slot,
+    })
+    assert response.status_code == 200, response.text
