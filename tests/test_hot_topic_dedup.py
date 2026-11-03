@@ -138,7 +138,7 @@ def test_cross_platform_dedup_updates_are_transactional():
 
     conn = _dedup_connection()
     cfg = SimpleNamespace(business_timezone="Asia/Shanghai")
-    now = timezone.business_now(cfg).strftime("%Y-%m-%dT%H:%M:%S")
+    now = timezone.storage_now().replace(tzinfo=None).isoformat(timespec="seconds")
     conn.executemany(
         "INSERT INTO hot_topics(id,platform,title_norm,evidence_status,discovered_at,last_seen_at) "
         "VALUES(?,?,?,?,?,?)",
