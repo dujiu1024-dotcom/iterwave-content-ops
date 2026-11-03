@@ -1456,6 +1456,7 @@ class UpdatePlanRequest(BaseModel):
     per_platform: dict[str, dict] = Field(default_factory=dict)
     # 节奏：{round_interval_days, rounds_planned, goal_id}
     cadence: dict = Field(default_factory=dict)
+    change_note: str = Field(default="母计划人工编辑草稿", min_length=1, max_length=2000)
 
     @field_validator("per_platform")
     @classmethod
@@ -5763,6 +5764,57 @@ def _register_routes(app: FastAPI) -> None:
         from src.core.plan_version_store import PlanVersionStore
         return {"items": PlanVersionStore(_g()["conn"]).list_master_versions(limit)}
 
+    @app.get("/api/plan-versions/{entity_type}/{version_id}/impact")
+    def get_plan_version_impact(
+        entity_type: str, version_id: int,
+    ):
+        from src.core.plan_change_audit import analyze_task_impact
+        conn = _g()["conn"]
+        table_by_type = {
+            "master_plan": ("master_plan_versions", "id"),
+            "sub_plan": ("sub_plan_versions", "id"),
+            "production_line": ("production_line_versions", "id"),
+        }
+        target = table_by_type.get(entity_type)
+        if target is None:
+            raise HTTPException(422, "不支持的计划版本类型")
+        exists = conn.execute(
+            f"SELECT 1 FROM {target[0]} WHERE {target[1]}=?", (version_id,),
+        ).fetchone()
+        if exists is None:
+            raise HTTPException(404, "计划版本不存在")
+        impact = analyze_task_impact(conn, entity_type, version_id)
+        return {"entity_type": entity_type, "version_id": version_id, **impact}
+
+    @app.get("/api/plan-change-audit")
+    def list_plan_change_audit(
+        entity_type: str | None = Query(None, pattern="^(master_plan|sub_plan|production_line)$"),
+        entity_id: str | None = Query(None, min_length=1, max_length=160),
+        limit: int = Query(100, ge=1, le=500),
+    ):
+        conn = _g()["conn"]
+        clauses, params = [], []
+        if entity_type:
+            clauses.append("entity_type=?"); params.append(entity_type)
+        if entity_id:
+            clauses.append("entity_id=?"); params.append(entity_id)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        rows = conn.execute(
+            "SELECT * FROM plan_change_audit" + where + " ORDER BY created_at DESC,id DESC LIMIT ?",
+            [*params, limit],
+        ).fetchall()
+        items = []
+        for raw in rows:
+            item = dict(raw)
+            for key in ("before_snapshot_json", "after_snapshot_json", "affected_tasks_json"):
+                try:
+                    item[key.removesuffix("_json")] = json.loads(item.pop(key)) if item.get(key) else None
+                except (TypeError, ValueError):
+                    item[key.removesuffix("_json")] = None
+                    item.pop(key, None)
+            items.append(item)
+        return {"items": items, "total": len(items)}
+
     @app.post("/api/plans")
     def update_plan(req: UpdatePlanRequest):
         """创建母计划草稿；只有显式审核通过后才切换生效版本。"""
@@ -5784,35 +5836,34 @@ def _register_routes(app: FastAPI) -> None:
         active = _g()["conn"].execute(
             "SELECT id FROM master_plan_versions WHERE status='effective'"
         ).fetchone()
+        base_version_id = int(active["id"]) if active else None
         try:
             draft = PlanVersionStore(_g()["conn"]).create_master_draft(
                 plan, author="web-ui", source="user",
-                based_on_version_id=int(active["id"]) if active else None,
-                change_note="母计划人工编辑草稿",
+                based_on_version_id=base_version_id,
+                change_note=req.change_note.strip() or "母计划人工编辑草稿",
             )
         except PlanVersionError as exc:
             raise HTTPException(409, str(exc)) from exc
-        return {"draft": draft, "requires_review": True, "effective": False}
+        from src.core.plan_change_audit import analyze_task_impact
+        impact = analyze_task_impact(_g()["conn"], "master_plan", base_version_id)
+        return {"draft": draft, "impact": impact,
+                "requires_review": True, "effective": False}
 
     @app.post("/api/plans/{version_id}/review")
     async def review_master_plan(version_id: int, req: dict):
         from src.core.plan_version_store import PlanVersionStore, PlanVersionError
         action = (req or {}).get("action", "approve")
         if action == "reject":
-            conn = _g()["conn"]
-            reason = str((req or {}).get("reason") or "人工审核未通过")[:500]
-            cur = conn.execute(
-                """UPDATE master_plan_versions
-                   SET status='archived',reviewed_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now'),reviewed_by='user',
-                       change_note=COALESCE(change_note,'') || ?
-                   WHERE id=? AND status='draft'""",
-                ("；审核拒绝：" + reason, version_id),
-            )
-            if cur.rowcount != 1:
-                raise HTTPException(409, "只有草稿版本可以拒绝")
-            conn.commit()
-            return {"version_id": version_id, "status": "archived", "effective": False,
-                    "reason": reason}
+            reason = str((req or {}).get("reason") or "").strip()
+            try:
+                rejected = PlanVersionStore(_g()["conn"]).reject_master_version(
+                    version_id, reviewer="user", reason=reason,
+                )
+            except PlanVersionError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            return {"version_id": version_id, "status": rejected["status"],
+                    "effective": False, "reason": reason}
         if action != "approve":
             raise HTTPException(422, "action 只能是 approve 或 reject")
         try:

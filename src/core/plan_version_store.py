@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from .plan_version import PlanVersionManager
+from .plan_change_audit import record_plan_change
 
 
 class PlanVersionError(ValueError):
@@ -26,8 +27,30 @@ class PlanVersionStore:
         self._signer = PlanVersionManager(None, conn)
 
     def _begin(self) -> None:
-        if not self.conn.in_transaction:
+        """Start an owned transaction or isolate this operation with a savepoint."""
+        if self.conn.in_transaction:
+            self._active_savepoint = "plan_version_" + uuid.uuid4().hex
+            self.conn.execute(f"SAVEPOINT {self._active_savepoint}")
+        else:
+            self._active_savepoint = None
             self.conn.execute("BEGIN IMMEDIATE")
+
+    def _commit(self) -> None:
+        savepoint = getattr(self, "_active_savepoint", None)
+        if savepoint:
+            self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        else:
+            self.conn.commit()
+        self._active_savepoint = None
+
+    def _rollback(self) -> None:
+        savepoint = getattr(self, "_active_savepoint", None)
+        if savepoint:
+            self.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        elif self.conn.in_transaction:
+            self.conn.rollback()
+        self._active_savepoint = None
 
     # ------------------------------------------------------------------
     # Master plan lifecycle
@@ -67,10 +90,16 @@ class PlanVersionStore:
             row = dict(self.conn.execute(
                 "SELECT * FROM master_plan_versions WHERE id=?", (cur.lastrowid,)
             ).fetchone())
-            self.conn.commit()
+            record_plan_change(
+                self.conn, entity_type="master_plan", entity_id=str(cur.lastrowid),
+                event_type="draft_created", from_version_id=based_on_version_id,
+                to_version_id=int(cur.lastrowid), change_reason=change_note or "创建母计划草稿",
+                actor=author,
+            )
+            self._commit()
             return row
         except Exception:
-            self.conn.rollback()
+            self._rollback()
             raise
 
     def create_master_draft_from_version(
@@ -118,6 +147,7 @@ class PlanVersionStore:
             previous_effective = self.conn.execute(
                 "SELECT id FROM master_plan_versions WHERE status='effective'"
             ).fetchone()
+            previous_version_id = int(previous_effective["id"]) if previous_effective else None
             if previous_effective is not None:
                 # A new mother plan pauses child plans still based on the superseded
                 # version. Existing rounds and child snapshots remain untouched.
@@ -167,12 +197,56 @@ class PlanVersionStore:
                    ) VALUES(?,?,NULL,?,?)""",
                 (signature, row["plan_snapshot"], now, reviewer),
             )
-            self.conn.commit()
+            record_plan_change(
+                self.conn, entity_type="master_plan", entity_id=str(version_id),
+                event_type="version_approved", from_version_id=previous_version_id,
+                to_version_id=version_id, change_reason=row["change_note"] or "母计划审核生效",
+                actor=reviewer,
+            )
+            self._commit()
             return dict(self.conn.execute(
                 "SELECT * FROM master_plan_versions WHERE id=?", (version_id,)
             ).fetchone())
         except Exception:
-            self.conn.rollback()
+            self._rollback()
+            raise
+
+    def reject_master_version(
+        self, version_id: int, *, reviewer: str, reason: str,
+    ) -> dict[str, Any]:
+        reason = str(reason or "").strip()
+        if not reason:
+            raise PlanVersionError("审核拒绝必须填写原因")
+        now = _now()
+        self._begin()
+        try:
+            row = self.conn.execute(
+                "SELECT * FROM master_plan_versions WHERE id=?", (version_id,)
+            ).fetchone()
+            if row is None:
+                raise PlanVersionError("主计划版本不存在")
+            if row["status"] != "draft":
+                raise PlanVersionError("只有草稿版本可以拒绝")
+            cursor = self.conn.execute(
+                """UPDATE master_plan_versions
+                   SET status='archived',reviewed_at=?,reviewed_by=?,
+                       change_note=COALESCE(change_note,'') || ?
+                   WHERE id=? AND status='draft'""",
+                (now, reviewer, "；审核拒绝：" + reason[:500], version_id),
+            )
+            if cursor.rowcount != 1:
+                raise PlanVersionError("主计划草稿状态已变化，请刷新后重试")
+            record_plan_change(
+                self.conn, entity_type="master_plan", entity_id=str(version_id),
+                event_type="version_rejected", from_version_id=row["based_on_version_id"],
+                to_version_id=version_id, change_reason=reason, actor=reviewer,
+            )
+            self._commit()
+            return dict(self.conn.execute(
+                "SELECT * FROM master_plan_versions WHERE id=?", (version_id,)
+            ).fetchone())
+        except Exception:
+            self._rollback()
             raise
 
     def delete_master_version(self, version_id: int, *, actor: str = "user") -> dict[str, Any]:
@@ -282,7 +356,19 @@ class PlanVersionStore:
                    ) VALUES(?,?,NULL,?,?)""",
                 (predecessor["plan_signature"], predecessor["plan_snapshot"], now, actor),
             )
-            self.conn.commit()
+            record_plan_change(
+                self.conn, entity_type="master_plan", entity_id=str(version_id),
+                event_type="version_deleted", from_version_id=version_id,
+                to_version_id=version_id, change_reason="软删除最新母计划",
+                actor=actor,
+            )
+            record_plan_change(
+                self.conn, entity_type="master_plan", entity_id=str(predecessor["id"]),
+                event_type="version_restored", from_version_id=version_id,
+                to_version_id=int(predecessor["id"]), change_reason="删除最新母计划后恢复上一份历史版本",
+                actor=actor,
+            )
+            self._commit()
             return {
                 "deleted_version": dict(self.conn.execute(
                     "SELECT * FROM master_plan_versions WHERE id=?", (version_id,)
@@ -292,7 +378,7 @@ class PlanVersionStore:
                 ).fetchone()),
             }
         except Exception:
-            self.conn.rollback()
+            self._rollback()
             raise
 
     def list_master_versions(self, limit: int = 100) -> list[dict[str, Any]]:
@@ -338,10 +424,10 @@ class PlanVersionStore:
             row = dict(self.conn.execute(
                 "SELECT * FROM sub_plans WHERE id=?", (sub_plan_id,)
             ).fetchone())
-            self.conn.commit()
+            self._commit()
             return row
         except Exception:
-            self.conn.rollback()
+            self._rollback()
             raise
 
     def create_subplan_version(
@@ -542,10 +628,16 @@ class PlanVersionStore:
             row = dict(self.conn.execute(
                 "SELECT * FROM sub_plan_versions WHERE id=?", (version_id,)
             ).fetchone())
-            self.conn.commit()
+            record_plan_change(
+                self.conn, entity_type="sub_plan", entity_id=sub_plan_id,
+                event_type="draft_created", from_version_id=based_on_version_id,
+                to_version_id=version_id, change_reason=change_note or "创建平台子计划草稿",
+                actor=author,
+            )
+            self._commit()
             return row
         except Exception:
-            self.conn.rollback()
+            self._rollback()
             raise
 
     def activate_subplan_version(self, version_id: int, *, reviewer: str) -> dict[str, Any]:
@@ -588,30 +680,51 @@ class PlanVersionStore:
                 (version_id, row["master_plan_version_id"], approved_title,
                  now, row["sub_plan_id"]),
             )
-            self.conn.commit()
+            previous_version_id = int(identity["current_version_id"]) if identity["current_version_id"] is not None else None
+            record_plan_change(
+                self.conn, entity_type="sub_plan", entity_id=str(row["sub_plan_id"]),
+                event_type="version_approved", from_version_id=previous_version_id,
+                to_version_id=version_id, change_reason=row["change_note"] or "平台子计划审核生效",
+                actor=reviewer,
+            )
+            self._commit()
             return dict(self.conn.execute(
                 "SELECT * FROM sub_plan_versions WHERE id=?", (version_id,)
             ).fetchone())
         except Exception:
-            self.conn.rollback()
+            self._rollback()
             raise
 
     def reject_subplan_version(self, version_id: int, *, reviewer: str, reason: str) -> dict[str, Any]:
         reason = str(reason or "").strip()
         if not reason:
             raise PlanVersionError("审核拒绝必须填写原因")
-        cur = self.conn.execute(
-            """UPDATE sub_plan_versions
-               SET status='rejected',reviewed_at=?,reviewed_by=?,review_note=?
-               WHERE id=? AND status='draft'""",
-            (_now(), reviewer, reason[:1000], version_id),
-        )
-        if cur.rowcount != 1:
-            raise PlanVersionError("只有存在的草稿版本可以审核拒绝")
-        self.conn.commit()
-        return dict(self.conn.execute(
-            "SELECT * FROM sub_plan_versions WHERE id=?", (version_id,)
-        ).fetchone())
+        self._begin()
+        try:
+            cur = self.conn.execute(
+                """UPDATE sub_plan_versions
+                   SET status='rejected',reviewed_at=?,reviewed_by=?,review_note=?
+                   WHERE id=? AND status='draft'""",
+                (_now(), reviewer, reason[:1000], version_id),
+            )
+            if cur.rowcount != 1:
+                raise PlanVersionError("只有存在的草稿版本可以审核拒绝")
+            rejected = self.conn.execute(
+                "SELECT * FROM sub_plan_versions WHERE id=?", (version_id,)
+            ).fetchone()
+            record_plan_change(
+                self.conn, entity_type="sub_plan", entity_id=str(rejected["sub_plan_id"]),
+                event_type="version_rejected", from_version_id=rejected["based_on_version_id"],
+                to_version_id=version_id, change_reason=reason,
+                actor=reviewer,
+            )
+            self._commit()
+            return dict(self.conn.execute(
+                "SELECT * FROM sub_plan_versions WHERE id=?", (version_id,)
+            ).fetchone())
+        except Exception:
+            self._rollback()
+            raise
 
     # ------------------------------------------------------------------
     # Stage lifecycle and publish progress
@@ -620,37 +733,43 @@ class PlanVersionStore:
         allowed = {"pending", "in_progress", "completed", "paused", "cancelled"}
         if status not in allowed:
             raise PlanVersionError("无效的阶段状态")
-        row = self.conn.execute(
-            "SELECT status FROM sub_plan_stages WHERE id=?", (stage_id,)
-        ).fetchone()
-        if row is None:
-            raise PlanVersionError("阶段不存在")
-        previous = row["status"]
-        transitions = {
-            "pending": {"pending", "in_progress", "paused", "cancelled"},
-            "in_progress": {"in_progress", "completed", "paused", "cancelled"},
-            "paused": {"paused", "in_progress", "cancelled"},
-            "completed": {"completed"},
-            "cancelled": {"cancelled"},
-        }
-        if status == "completed":
-            from .strategy_step_completion import assert_stage_completion_ready
-            try:
-                assert_stage_completion_ready(self.conn, stage_id)
-            except ValueError as exc:
-                raise PlanVersionError(str(exc)) from exc
-        if status not in transitions[previous]:
-            raise PlanVersionError(f"阶段状态不允许从 {previous} 变更为 {status}")
-        cur = self.conn.execute(
-            "UPDATE sub_plan_stages SET status=?,updated_at=? WHERE id=? AND status=?",
-            (status, _now(), stage_id, previous),
-        )
-        self.conn.commit()
-        if cur.rowcount != 1:
-            raise PlanVersionError("阶段状态已被并发修改，请刷新后重试")
-        return dict(self.conn.execute(
-            "SELECT * FROM sub_plan_stages WHERE id=?", (stage_id,)
-        ).fetchone())
+        self._begin()
+        try:
+            row = self.conn.execute(
+                "SELECT status FROM sub_plan_stages WHERE id=?", (stage_id,)
+            ).fetchone()
+            if row is None:
+                raise PlanVersionError("阶段不存在")
+            previous = row["status"]
+            transitions = {
+                "pending": {"pending", "in_progress", "paused", "cancelled"},
+                "in_progress": {"in_progress", "completed", "paused", "cancelled"},
+                "paused": {"paused", "in_progress", "cancelled"},
+                "completed": {"completed"},
+                "cancelled": {"cancelled"},
+            }
+            if status == "completed":
+                from .strategy_step_completion import assert_stage_completion_ready
+                try:
+                    assert_stage_completion_ready(self.conn, stage_id)
+                except ValueError as exc:
+                    raise PlanVersionError(str(exc)) from exc
+            if status not in transitions[previous]:
+                raise PlanVersionError(f"阶段状态不允许从 {previous} 变更为 {status}")
+            cur = self.conn.execute(
+                "UPDATE sub_plan_stages SET status=?,updated_at=? WHERE id=? AND status=?",
+                (status, _now(), stage_id, previous),
+            )
+            if cur.rowcount != 1:
+                raise PlanVersionError("阶段状态已被并发修改，请刷新后重试")
+            result = dict(self.conn.execute(
+                "SELECT * FROM sub_plan_stages WHERE id=?", (stage_id,)
+            ).fetchone())
+            self._commit()
+            return result
+        except Exception:
+            self._rollback()
+            raise
 
     def get_stage_publish_stats(self, stage_id: int) -> dict[str, Any]:
         row = self.conn.execute(
@@ -731,9 +850,9 @@ class PlanVersionStore:
             )
             if cur.rowcount != 1:
                 raise PlanVersionError("轮次不存在")
-            self.conn.commit()
+            self._commit()
         except Exception:
-            self.conn.rollback()
+            self._rollback()
             raise
 
     def assert_stage_ready(self, stage_id: int, version_id: int) -> dict[str, Any]:
@@ -838,10 +957,10 @@ class PlanVersionStore:
                 "SELECT * FROM sub_plan_stage_outcomes WHERE id=?", (cur.lastrowid,)
             ).fetchone())
             row["result"] = json.loads(row.pop("result_json"))
-            self.conn.commit()
+            self._commit()
             return row
         except Exception:
-            self.conn.rollback()
+            self._rollback()
             raise
 
     def reserve_round_open(
@@ -895,10 +1014,10 @@ class PlanVersionStore:
                 if actual != expected:
                     raise PlanVersionError("相同幂等键对应不同开轮请求，拒绝重复执行")
                 if row["status"] == "created":
-                    self.conn.commit()
+                    self._commit()
                     return {"acquired": False, "status": "created", "round_id": row["round_id"]}
                 if row["status"] == "reserved" and row["lease_until"] and row["lease_until"] > now:
-                    self.conn.commit()
+                    self._commit()
                     return {"acquired": False, "status": "in_progress", "round_id": None}
                 self.conn.execute(
                     """UPDATE round_open_idempotency
@@ -914,10 +1033,10 @@ class PlanVersionStore:
                     (key, digest, master_plan_version_id, sub_plan_id,
                      sub_plan_version_id, sub_plan_stage_id, lease_until, now, now),
                 )
-            self.conn.commit()
+            self._commit()
             return {"acquired": True, "status": "reserved", "round_id": None, "lease_until": lease_until}
         except Exception:
-            self.conn.rollback()
+            self._rollback()
             raise
 
     def create_round_once(
@@ -954,7 +1073,7 @@ class PlanVersionStore:
                 if (existing_round is None
                         or existing_round["production_line_version_id"] != production_line_version_id):
                     raise PlanVersionError("幂等开轮记录绑定了不同的生产线版本")
-                self.conn.commit()
+                self._commit()
                 return {"status": "created", "round_id": lock["round_id"], "deduped": True}
             if lock["status"] != "reserved" or not lock["lease_until"] or lock["lease_until"] <= now:
                 raise PlanVersionError("自动开轮租约已失效")
@@ -1031,20 +1150,25 @@ class PlanVersionStore:
                    WHERE idempotency_key=? AND status='reserved'""",
                 (round_id, now, idempotency_key),
             )
-            self.conn.commit()
+            self._commit()
             return {"status": "created", "round_id": round_id, "deduped": False}
         except Exception:
-            self.conn.rollback()
+            self._rollback()
             raise
 
     def fail_round_open(self, idempotency_key: str, error_message: str) -> None:
-        self.conn.execute(
-            """UPDATE round_open_idempotency
-               SET status='failed',lease_until=NULL,updated_at=?,error_message=?
-               WHERE idempotency_key=? AND status='reserved'""",
-            (_now(), str(error_message or "开轮失败")[:500], idempotency_key),
-        )
-        self.conn.commit()
+        self._begin()
+        try:
+            self.conn.execute(
+                """UPDATE round_open_idempotency
+                   SET status='failed',lease_until=NULL,updated_at=?,error_message=?
+                   WHERE idempotency_key=? AND status='reserved'""",
+                (_now(), str(error_message or "开轮失败")[:500], idempotency_key),
+            )
+            self._commit()
+        except Exception:
+            self._rollback()
+            raise
 
     # ------------------------------------------------------------------
     # Read-only consistency audit and legacy attribution queue
@@ -1196,13 +1320,13 @@ class PlanVersionStore:
                              "plan_signature": version["plan_signature"]}, ensure_ascii=False),
                  reason[:1000], reviewer, _now()),
             )
-            self.conn.commit()
+            self._commit()
             return dict(self.conn.execute(
                 """SELECT id,master_plan_version_id,plan_signature,plan_attribution_status
                    FROM spiral_rounds WHERE id=?""", (round_id,)
             ).fetchone())
         except Exception:
-            self.conn.rollback()
+            self._rollback()
             raise
 
     def list_pending_round_attribution(self, limit: int = 500) -> list[dict[str, Any]]:

@@ -155,8 +155,11 @@ def register_production_line_routes(app: FastAPI, get_runtime) -> None:
             )
         except (ProductionLineError, sqlite3.Error) as exc:
             raise HTTPException(422 if isinstance(exc, ProductionLineError) else 503, str(exc)) from exc
+        from src.core.plan_change_audit import analyze_task_impact
+        impact = analyze_task_impact(conn, "production_line", version.get("based_on_version_id"))
         return {"production_line": store().get_for_subplan(sub_plan_id),
-                "draft": version, "effective": False, "requires_human_review": True}
+                "draft": version, "impact": impact,
+                "effective": False, "requires_human_review": True}
 
     @app.post("/api/subplans/{sub_plan_id}/production-line/draft", status_code=201)
     def create_manual_production_line_draft(sub_plan_id: str, req: dict):
@@ -176,7 +179,10 @@ def register_production_line_routes(app: FastAPI, get_runtime) -> None:
             )
         except ProductionLineError as exc:
             raise HTTPException(422, str(exc)) from exc
-        return {"draft": version, "effective": False, "requires_human_review": True}
+        from src.core.plan_change_audit import analyze_task_impact
+        impact = analyze_task_impact(conn, "production_line", version.get("based_on_version_id"))
+        return {"draft": version, "impact": impact,
+                "effective": False, "requires_human_review": True}
 
     @app.post("/api/production-lines/{line_id}/versions/{version_id}/review")
     def review_production_line(line_id: str, version_id: int, req: dict):

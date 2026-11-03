@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from pathlib import Path
 
@@ -7,6 +8,7 @@ from src.core.production_line_store import ProductionLineError, ProductionLineSt
 
 
 MIGRATION = (Path(__file__).resolve().parents[1] / "migrations" / "139_production_line_lifecycle.sql").read_text(encoding="utf-8")
+AUDIT_MIGRATION = (Path(__file__).resolve().parents[1] / "migrations" / "145_plan_change_audit.sql").read_text(encoding="utf-8")
 
 
 @pytest.fixture()
@@ -33,9 +35,14 @@ def conn():
             status TEXT NOT NULL DEFAULT 'pending'
         );
         CREATE TABLE spiral_rounds(id INTEGER PRIMARY KEY);
-        CREATE TABLE production_tasks(id TEXT PRIMARY KEY, status TEXT);
+        CREATE TABLE production_tasks(
+            id TEXT PRIMARY KEY, round_id INTEGER, status TEXT, attempt_count INTEGER DEFAULT 0,
+            content_id TEXT, master_plan_version_id INTEGER, sub_plan_version_id INTEGER,
+            created_at TEXT
+        );
     """)
     db.executescript(MIGRATION)
+    db.executescript(AUDIT_MIGRATION)
     db.execute("INSERT INTO master_plan_versions VALUES(1,'effective')")
     db.execute("INSERT INTO sub_plans VALUES('sub-1',1,'xhs','测试子计划','active',10)")
     db.execute("INSERT INTO sub_plan_versions VALUES(10,'sub-1',1,1,'effective')")
@@ -69,6 +76,14 @@ def test_create_and_activate_line_binds_exact_subplan_version(conn):
     line = store.get_for_subplan("sub-1")
     assert line["status"] == "active"
     assert line["current_version_id"] == draft["id"]
+    events = conn.execute(
+        "SELECT event_type,from_version_id,to_version_id,change_reason,after_snapshot_json "
+        "FROM plan_change_audit WHERE entity_type='production_line' ORDER BY id"
+    ).fetchall()
+    assert [row["event_type"] for row in events] == ["draft_created", "version_approved"]
+    assert events[0]["to_version_id"] == draft["id"]
+    assert events[1]["to_version_id"] == draft["id"]
+    assert json.loads(events[0]["after_snapshot_json"])["title"] == "小红书生产线"
 
 
 def test_line_creation_joins_outer_transaction_and_rolls_back_with_it(conn):
