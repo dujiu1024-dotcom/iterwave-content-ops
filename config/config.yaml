@@ -448,6 +448,14 @@ media_generation:
   max_response_bytes: 20971520
   max_dimension: 20000
   max_pixels: 40000000
+  max_pages_per_article: 9
+  max_api_calls_per_page: 3
+  max_api_calls_per_article: 27
+  max_api_calls_per_run: 30
+  hard_timeout_seconds: 300
+  max_concurrency: 2
+  ocr_timeout_seconds: 45
+  ocr_languages: "chi_sim+eng"
 
 media_quality:
   resolution_weight: 25

@@ -1,6 +1,8 @@
 import sqlite3
 
 import pytest
+from pathlib import Path
+from types import SimpleNamespace
 
 from src.core import ai_card_generation as cards
 
@@ -67,7 +69,7 @@ def test_ai_card_generation_fails_closed_when_ocr_does_not_pass(monkeypatch, tmp
     ))
     monkeypatch.setattr(
         "src.core.visual_ocr.validate_rendered_pages",
-        lambda images, expected, report, **kwargs: {"status": "unavailable", "gate": "not_passed"},
+        lambda images, expected, report, **kwargs: {"status": "failed", "gate": "not_passed"},
     )
     with pytest.raises(ValueError, match="连续 3 次未通过 OCR"):
         cards.generate_ai_card_set(
@@ -79,7 +81,7 @@ def test_ai_card_generation_fails_closed_when_ocr_does_not_pass(monkeypatch, tmp
 
 def test_pagination_does_not_drop_long_sentence_content():
     source = "这是一个很长的句子，" * 40 + "最后一句。"
-    pages = cards._paginate_body(source, max_chars=40, segments_per_page=3)
+    pages = cards._paginate_body(source, max_chars=40, segments_per_page=3, max_pages=50)
     joined = "".join(segment for page in pages for segment in page)
     assert joined == source
 
@@ -196,3 +198,51 @@ def test_ai_card_generation_reuses_completed_pages_on_retry(monkeypatch, tmp_pat
     second, _ = cards.generate_ai_card_set(**kwargs)
     assert len(calls) == call_count
     assert [p.read_bytes() for p in first] == [p.read_bytes() for p in second]
+
+
+def test_ocr_preflight_failure_stops_before_any_paid_image_call(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        "src.core.visual_ocr.preflight_ocr",
+        lambda **_kwargs: {"status": "unavailable", "reason": "ocr_language_missing"},
+    )
+    monkeypatch.setattr(
+        cards, "generate_image_bytes",
+        lambda *args, **kwargs: calls.append(args) or (b"image", "image/png", ".png", 1, 1),
+    )
+    with pytest.raises(RuntimeError, match="OCR 前置预检失败"):
+        cards.generate_ai_card_set(
+            title="标题", subtitle="栏目", body="正文内容。",
+            output_dir=tmp_path, platform=type("P", (), {"value": "xhs"})(),
+            cfg=_Cfg(tmp_path), settings={"model": "image-model", "size": "1024x1536"},
+        )
+    assert calls == []
+
+
+def test_pagination_rejects_more_than_nine_total_pages():
+    source = "内容。" * 1000
+    with pytest.raises(ValueError, match="超过单篇最大"):
+        cards._paginate_body(source, max_chars=10, segments_per_page=1, max_pages=9)
+
+
+
+def test_ocr_becoming_unavailable_stops_without_paid_retry(monkeypatch, tmp_path):
+    from src.core import visual_ocr
+
+    calls = []
+    monkeypatch.setattr(visual_ocr, "preflight_ocr", lambda **_kwargs: {"status": "available"})
+    monkeypatch.setattr(
+        cards, "generate_image_bytes",
+        lambda *args, **kwargs: calls.append(args) or (b"image", "image/png", ".png", 1024, 1536),
+    )
+    monkeypatch.setattr(
+        visual_ocr, "validate_rendered_pages",
+        lambda *args, **kwargs: {"status": "unavailable", "reason": "ocr_execution_failed"},
+    )
+    with pytest.raises(RuntimeError, match="立即终止，不再进行付费重试"):
+        cards.generate_ai_card_set(
+            title="标题", subtitle="栏目", body="正文内容。",
+            output_dir=tmp_path, platform=type("P", (), {"value": "xhs"})(),
+            cfg=_Cfg(tmp_path), settings={"model": "image-model", "size": "1024x1536"},
+        )
+    assert len(calls) == 1

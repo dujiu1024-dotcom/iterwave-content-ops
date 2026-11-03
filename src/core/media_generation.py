@@ -269,10 +269,13 @@ def _request_endpoint(
     source_path: Path | None,
     source_mime_type: str | None,
     source_filename: str | None,
+    budget_timeout_seconds: float | None = None,
 ) -> tuple[bytes, str, str, int, int]:
     policy = cfg.media_generation
-    timeout_seconds = int(getattr(policy, "timeout_seconds", 150))
-    connect_timeout = int(getattr(policy, "connect_timeout_seconds", 15))
+    timeout_seconds = float(getattr(policy, "timeout_seconds", 150))
+    if budget_timeout_seconds is not None:
+        timeout_seconds = max(0.1, min(timeout_seconds, float(budget_timeout_seconds)))
+    connect_timeout = min(float(getattr(policy, "connect_timeout_seconds", 15)), timeout_seconds)
     max_response_bytes = int(getattr(policy, "max_response_bytes", 20 * 1024 * 1024))
     max_encoded_bytes = ((max_response_bytes + 2) // 3) * 4 + 1024 * 1024
     headers = {"Authorization": f"Bearer {endpoint.api_key}"}
@@ -353,6 +356,21 @@ def generate_image_bytes(
     allow_fallback=None 时按配置默认值；False 表示只用主模型，失败直接抛错。
     """
     cfg = _resolve_config(cfg)
+    from .image_generation_budget import article_budget, has_active_article, has_active_run, image_generation_run
+    if not has_active_run():
+        policy = cfg.media_generation
+        with image_generation_run(max_calls=int(getattr(policy, "max_api_calls_per_run", 30)), timeout_seconds=int(getattr(policy, "hard_timeout_seconds", 300)), max_concurrency=int(getattr(policy, "max_concurrency", 2))):
+            with article_budget(max_calls=int(getattr(policy, "max_api_calls_per_article", 27)), page_max_calls=int(getattr(policy, "max_api_calls_per_page", 3))):
+                return generate_image_bytes(prompt, model=model, size=size, source_path=source_path, source_mime_type=source_mime_type, source_filename=source_filename, cfg=cfg, allow_fallback=allow_fallback)
+    if not has_active_article():
+        policy = cfg.media_generation
+        with article_budget(max_calls=int(getattr(policy, "max_api_calls_per_article", 27)), page_max_calls=int(getattr(policy, "max_api_calls_per_page", 3))):
+            return generate_image_bytes(prompt, model=model, size=size, source_path=source_path, source_mime_type=source_mime_type, source_filename=source_filename, cfg=cfg, allow_fallback=allow_fallback)
+    from .visual_ocr import preflight_ocr
+    ocr_policy = cfg.media_generation
+    ocr_check = preflight_ocr(languages=getattr(ocr_policy, "ocr_languages", "chi_sim+eng"), timeout=getattr(ocr_policy, "ocr_timeout_seconds", 45))
+    if ocr_check.get("status") != "available":
+        raise ImageGenerationError(f"OCR 前置预检失败（{ocr_check.get('reason')}），已阻止图片 API 调用")
     endpoints = _endpoints(cfg, model, allow_fallback=allow_fallback)
     if not endpoints:
         raise ImageGenerationError(
@@ -367,10 +385,13 @@ def generate_image_bytes(
             errors.append(f"{endpoint.label} {endpoint.model}: 图片 API 地址无效")
             continue
         try:
-            result = _request_endpoint(
-                endpoint, prompt, size, cfg=cfg, source_path=source_path,
-                source_mime_type=source_mime_type, source_filename=source_filename,
-            )
+            from .image_generation_budget import provider_request
+            with provider_request() as remaining_seconds:
+                result = _request_endpoint(
+                    endpoint, prompt, size, cfg=cfg, source_path=source_path,
+                    source_mime_type=source_mime_type, source_filename=source_filename,
+                    budget_timeout_seconds=remaining_seconds,
+                )
             validate_target_image_spec(result[3], result[4], size, cfg=cfg)
             return result
         except ImageGenerationError as exc:

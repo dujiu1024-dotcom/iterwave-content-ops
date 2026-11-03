@@ -2869,12 +2869,31 @@ def _register_routes(app: FastAPI) -> None:
             source_mime = source["mime_type"]
             source_filename = source["original_filename"]
 
-        # 只保留并发互斥，避免同一账号组同时生成造成资源竞争；monthly_quota 为历史兼容字段，不再限制使用次数。
+        # 月度配额按已创建的生成任务计数，失败请求也可能已经产生供应商费用。
         if not _media_generation_lock.acquire(blocking=False):
             raise HTTPException(409, "已有图片生成任务正在执行，请稍后重试")
         try:
+            conn.execute("BEGIN IMMEDIATE")
             now = _storage_now().isoformat(timespec="seconds")
-            # 个人账号组素材库不设置人为月度次数上限；成功次数仅用于成本与使用分析。
+            month_local = _now().replace(
+                day=1, hour=0, minute=0, second=0, microsecond=0,
+            ).replace(tzinfo=business_zone(cfg))
+            month_utc, month_legacy = storage_window_cutoffs(
+                month_local.astimezone(timezone.utc), cfg,
+            )
+            used_this_month = int(conn.execute(
+                "SELECT COUNT(*) FROM media_generation_jobs WHERE "
+                + timestamp_since_sql("created_at"),
+                (month_utc, month_legacy),
+            ).fetchone()[0])
+            monthly_quota = max(0, int(settings.get("monthly_quota") or 0))
+            if used_this_month >= monthly_quota:
+                conn.rollback()
+                raise HTTPException(
+                    429,
+                    f"本月图片生成配额已用完（{used_this_month}/{monthly_quota}），下月自动恢复",
+                )
+            # 每个已创建任务都计入月度配额，失败请求也可能已经产生供应商费用。
             cur = conn.execute(
                 "INSERT INTO media_generation_jobs (prompt, final_prompt, model, status, created_at) "
                 "VALUES (?, ?, ?, 'running', ?)",
@@ -2883,14 +2902,31 @@ def _register_routes(app: FastAPI) -> None:
             job_id = int(cur.lastrowid)
             conn.commit()
             target = None
+            budget = None
             try:
                 from src.core.media_generation import ImageGenerationError, generate_image_bytes
                 from src.core.media_quality import score_image
-                raw, mime_type, suffix, width, height = generate_image_bytes(
-                    final_prompt, model=model, size=size, source_path=source_path,
-                    source_mime_type=source_mime, source_filename=source_filename, cfg=cfg,
-                    allow_fallback=bool(settings.get("fallback_enabled", 1)),
+                from src.core.image_generation_budget import image_generation_run, article_budget
+                with image_generation_run(
+                    max_calls=getattr(cfg.media_generation, "max_api_calls_per_run", 30),
+                    timeout_seconds=getattr(cfg.media_generation, "hard_timeout_seconds", 300),
+                    max_concurrency=getattr(cfg.media_generation, "max_concurrency", 2),
+                ) as budget:
+                    with article_budget(
+                        max_calls=getattr(cfg.media_generation, "max_api_calls_per_article", 27),
+                        page_max_calls=getattr(cfg.media_generation, "max_api_calls_per_page", 3),
+                    ):
+                        raw, mime_type, suffix, width, height = generate_image_bytes(
+                            final_prompt, model=model, size=size, source_path=source_path,
+                            source_mime_type=source_mime, source_filename=source_filename, cfg=cfg,
+                            allow_fallback=bool(settings.get("fallback_enabled", 1)),
+                        )
+                usage = budget.snapshot()
+                conn.execute(
+                    "UPDATE media_generation_jobs SET api_calls = ?, failed_api_calls = ? WHERE id = ?",
+                    (usage["api_calls"], usage["failed_calls"], job_id),
                 )
+                conn.commit()
                 stored_filename = f"{uuid.uuid4().hex}{suffix}"
                 target = (paths.media_dir / stored_filename).resolve()
                 if not target.is_relative_to(paths.media_dir.resolve()):
@@ -2935,6 +2971,12 @@ def _register_routes(app: FastAPI) -> None:
                     "job_id": job_id, "review_required": True,
                 }
             except HTTPException:
+                if budget is not None:
+                    usage = budget.snapshot()
+                    conn.execute(
+                        "UPDATE media_generation_jobs SET api_calls = ?, failed_api_calls = ? WHERE id = ?",
+                        (usage["api_calls"], usage["failed_calls"], job_id),
+                    )
                 if target is not None:
                     target.unlink(missing_ok=True)
                 conn.execute(
@@ -2944,6 +2986,12 @@ def _register_routes(app: FastAPI) -> None:
                 conn.commit()
                 raise
             except Exception as exc:  # noqa: BLE001 — 保存失败必须记账并留审计
+                if budget is not None:
+                    usage = budget.snapshot()
+                    conn.execute(
+                        "UPDATE media_generation_jobs SET api_calls = ?, failed_api_calls = ? WHERE id = ?",
+                        (usage["api_calls"], usage["failed_calls"], job_id),
+                    )
                 if target is not None:
                     target.unlink(missing_ok=True)
                 conn.execute(
@@ -2981,7 +3029,7 @@ def _register_routes(app: FastAPI) -> None:
         month_utc, month_legacy = storage_window_cutoffs(month_local.astimezone(timezone.utc), _g().get("cfg"))
         settings["used_this_month"] = int(conn.execute(
             "SELECT COUNT(*) FROM media_generation_jobs WHERE "
-            + timestamp_since_sql("created_at") + " AND status = 'succeeded'",
+            + timestamp_since_sql("created_at"),
             (month_utc, month_legacy),
         ).fetchone()[0])
         key_env = os.getenv("ITERWAVE_IMAGE_API_KEY_ENV", "OPENAI_API_KEY").strip()
@@ -3017,13 +3065,34 @@ def _register_routes(app: FastAPI) -> None:
     @manages_own_transaction
     def generate_media_for_content(content_id: str, usage_role: str = Query("cover", pattern="^(cover|illustration|background)$")):
         """根据现有内容生成候选配图；生成结果进入待审核状态，不自动分配。"""
-        row = _g()["conn"].execute("SELECT id, title, body, platform FROM contents WHERE id = ?", (content_id,)).fetchone()
+        row = _g()["conn"].execute("SELECT id, title, body, platform, tags FROM contents WHERE id = ?", (content_id,)).fetchone()
         if row is None:
             raise HTTPException(404, "目标内容不存在")
         title = str(row["title"] or "内容配图")
         body = str(row["body"] or "")
         if not body.strip():
             raise HTTPException(422, "请先补充正文后再生成配图")
+        guard = _g().get("guard")
+        if guard is None:
+            raise HTTPException(503, "质量检查服务不可用，已阻止图片生成")
+        try:
+            content_tags = json.loads(row["tags"]) if row["tags"] else []
+            if not isinstance(content_tags, list):
+                content_tags = []
+            outcome = guard.check_content(title, body, content_tags, platform=row["platform"])
+        except Exception as exc:
+            logger.exception("内容配图前 G2 检查异常 content=%s", content_id)
+            raise HTTPException(503, "质量检查服务暂时不可用，未放行图片生成") from exc
+        _g()["conn"].execute(
+            "UPDATE contents SET guard_outcome = ?, guard_reason = ? WHERE id = ?",
+            (outcome.result.value, outcome.reason, content_id),
+        )
+        _g()["conn"].commit()
+        if not outcome.passes:
+            raise HTTPException(
+                409,
+                f"当前内容未通过 G2（{outcome.result.value}），禁止生成图片：{outcome.reason}",
+            )
         role_label = {"cover": "封面主视觉", "illustration": "正文插图", "background": "背景图"}[usage_role]
         prompt = (f"为当前平台内容生成一张{role_label}。主题：{title}。正文摘要：{body[:900]}。" +
                   "画面与主题直接相关，构图清晰，适合移动端阅读；不要生成文字、二维码、水印或虚构品牌标识。" +
@@ -6341,6 +6410,101 @@ def _register_routes(app: FastAPI) -> None:
         instruction = str((req or {}).get("instruction") or "改善本页构图、色彩协调和视觉层次").strip()[:500]
         if not instruction:
             raise HTTPException(422, "重做说明不能为空")
+        guard = ctx.get("guard")
+        if guard is None:
+            raise HTTPException(503, "质量检查服务不可用，已阻止单页图片重做")
+        try:
+            content_tags = json.loads(row["tags"]) if row["tags"] else []
+            if not isinstance(content_tags, list):
+                content_tags = []
+            outcome = guard.check_content(row["title"], row["body"], content_tags, platform=row["platform"])
+        except Exception as exc:
+            logger.exception("单页重做前 G2 检查异常 content=%s", content_id)
+            raise HTTPException(503, "质量检查服务暂时不可用，未放行单页图片重做") from exc
+        conn.execute(
+            "UPDATE contents SET guard_outcome=?, guard_reason=? WHERE id=?",
+            (outcome.result.value, outcome.reason, content_id),
+        )
+        conn.commit()
+        if not outcome.passes:
+            raise HTTPException(
+                409, f"当前内容未通过 G2（{outcome.result.value}），禁止单页图片重做：{outcome.reason}",
+            )
+
+        def _generate_revision_with_budget():
+            if not _media_generation_lock.acquire(blocking=False):
+                raise HTTPException(409, "已有图片生成任务正在执行，请稍后重试")
+            manual_job_id = None
+            budget = None
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                month_local = _now().replace(
+                    day=1, hour=0, minute=0, second=0, microsecond=0,
+                ).replace(tzinfo=business_zone(cfg))
+                month_utc, month_legacy = storage_window_cutoffs(
+                    month_local.astimezone(timezone.utc), cfg,
+                )
+                quota_row = conn.execute(
+                    "SELECT monthly_quota FROM media_generation_settings WHERE id=1"
+                ).fetchone()
+                monthly_quota = max(0, int(quota_row["monthly_quota"] if quota_row else 20))
+                used = int(conn.execute(
+                    "SELECT COUNT(*) FROM media_generation_jobs WHERE "
+                    + timestamp_since_sql("created_at"),
+                    (month_utc, month_legacy),
+                ).fetchone()[0])
+                if used >= monthly_quota:
+                    conn.rollback()
+                    raise HTTPException(
+                        429, f"本月图片生成配额已用完（{used}/{monthly_quota}），下月自动恢复",
+                    )
+                prompt = f"manual_visual_page_revision:{content_id}:{version_id}:{page_index}"
+                cur = conn.execute(
+                    "INSERT INTO media_generation_jobs (prompt, final_prompt, model, status, created_at) "
+                    "VALUES (?, ?, ?, 'running', ?)",
+                    (prompt, prompt, image_settings["model"], _storage_now().isoformat(timespec="seconds")),
+                )
+                manual_job_id = int(cur.lastrowid)
+                conn.commit()
+                from src.core.image_generation_budget import image_generation_run
+                with image_generation_run(
+                    max_calls=getattr(cfg.media_generation, "max_api_calls_per_run", 30),
+                    timeout_seconds=getattr(cfg.media_generation, "hard_timeout_seconds", 300),
+                    max_concurrency=getattr(cfg.media_generation, "max_concurrency", 2),
+                ) as budget:
+                    generated = revise_visual_background(
+                        source_path=background, feedback=[instruction], output_dir=output_root,
+                        settings=image_settings, cfg=cfg,
+                    )
+                usage = budget.snapshot()
+                success = generated.get("status") == "revised" and bool(generated.get("path"))
+                conn.execute(
+                    "UPDATE media_generation_jobs SET status=?, api_calls=?, failed_api_calls=?, "
+                    "error_message=?, completed_at=? WHERE id=?",
+                    (
+                        "succeeded" if success else "failed",
+                        usage["api_calls"], usage["failed_calls"],
+                        None if success else "单页视觉重做未成功",
+                        _storage_now().isoformat(timespec="seconds"), manual_job_id,
+                    ),
+                )
+                conn.commit()
+                if not success:
+                    raise HTTPException(503, "AI 背景重做未成功，请检查图像模型配置")
+                return generated
+            except Exception:
+                if manual_job_id is not None:
+                    usage = budget.snapshot() if budget is not None else {"api_calls": 0, "failed_calls": 0}
+                    conn.execute(
+                        "UPDATE media_generation_jobs SET status='failed', api_calls=?, failed_api_calls=?, "
+                        "error_message='单页视觉重做失败', completed_at=? WHERE id=?",
+                        (usage["api_calls"], usage["failed_calls"], _storage_now().isoformat(timespec="seconds"), manual_job_id),
+                    )
+                    conn.commit()
+                raise
+            finally:
+                _media_generation_lock.release()
+
         from src.core.visual_persistence import create_visual_page_job, create_visual_version, transition_visual_job
         # 任务登记单独提交：调用图像模型（数十秒）期间绝不持有 SQLite 写事务，避免 database is locked。
         with conn:
@@ -6353,10 +6517,7 @@ def _register_routes(app: FastAPI) -> None:
         revised_path = None
         try:
             from src.core.visual_generation import revise_visual_background
-            result = revise_visual_background(
-                source_path=background, feedback=[instruction], output_dir=output_root,
-                settings=image_settings, cfg=cfg,
-            )
+            result = _generate_revision_with_budget()
             if result.get("status") != "revised" or not result.get("path"):
                 raise HTTPException(503, "AI 背景重做未成功，请检查图像模型配置")
             revised_background = Path(result["path"]).resolve()
@@ -6664,6 +6825,29 @@ def _register_routes(app: FastAPI) -> None:
                 logger.warning("重出图读取选题维度失败 content_id=%s", content_id, exc_info=True)
                 dimension = ""
 
+        # 手动重出图也必须先对当前标题/正文重新执行 G2，不能沿用历史 PASS。
+        guard = _g().get("guard")
+        if guard is None:
+            raise HTTPException(503, "质量检查服务不可用，已阻止图片生成")
+        try:
+            tags = json.loads(row["tags"]) if row["tags"] else []
+            if not isinstance(tags, list):
+                tags = []
+            outcome = guard.check_content(title, body, tags, platform=platform.value)
+        except Exception as exc:
+            logger.exception("手动重出图前 G2 检查异常 content=%s", content_id)
+            raise HTTPException(503, "质量检查服务暂时不可用，未放行图片生成") from exc
+        conn.execute(
+            "UPDATE contents SET guard_outcome = ?, guard_reason = ? WHERE id = ?",
+            (outcome.result.value, outcome.reason, content_id),
+        )
+        conn.commit()
+        if not outcome.passes:
+            raise HTTPException(
+                409,
+                f"当前内容未通过 G2（{outcome.result.value}），禁止生成图片：{outcome.reason}",
+            )
+
         from ..core.content_pipeline import image_generation_settings
         from ..core.ai_card_generation import generate_ai_card_set
         output_dir = cfg.resolve_path(cfg.paths.output_dir)
@@ -6673,22 +6857,87 @@ def _register_routes(app: FastAPI) -> None:
         settings, settings_reason = image_generation_settings(conn)
         if not settings:
             raise HTTPException(409, f"AI 图片生成未启用，拒绝模板降级：{settings_reason}")
-        conn.commit()
+        if not _media_generation_lock.acquire(blocking=False):
+            raise HTTPException(409, "已有图片生成任务正在执行，请稍后重试")
+        budget = None
+        job_id = None
         try:
-            import hashlib
-            generation_identity = json.dumps({
-                "content_id": content_id, "title": title, "subtitle": subtitle, "body": body,
-                "settings": settings, "brand_profile": profile,
-            }, ensure_ascii=False, sort_keys=True, default=str)
-            paths, pages = generate_ai_card_set(
-                title=title, subtitle=subtitle, body=body, output_dir=output_dir,
-                platform=platform, cfg=cfg, settings=settings,
-                allow_fallback=settings.get("fallback_enabled"),
-                brand_profile=profile,
-                task_id=hashlib.sha256(generation_identity.encode("utf-8")).hexdigest(),
+            conn.execute("BEGIN IMMEDIATE")
+            month_local = _now().replace(
+                day=1, hour=0, minute=0, second=0, microsecond=0,
+            ).replace(tzinfo=business_zone(cfg))
+            month_utc, month_legacy = storage_window_cutoffs(
+                month_local.astimezone(timezone.utc), cfg,
             )
-        except (ValueError, RuntimeError) as exc:
-            raise HTTPException(422, f"AI 完整卡片生成或 OCR 硬门失败：{exc}") from exc
+            quota_row = conn.execute(
+                "SELECT monthly_quota FROM media_generation_settings WHERE id = 1"
+            ).fetchone()
+            monthly_quota = max(0, int(quota_row["monthly_quota"] if quota_row else 20))
+            used_this_month = int(conn.execute(
+                "SELECT COUNT(*) FROM media_generation_jobs WHERE "
+                + timestamp_since_sql("created_at"),
+                (month_utc, month_legacy),
+            ).fetchone()[0])
+            if used_this_month >= monthly_quota:
+                conn.rollback()
+                raise HTTPException(
+                    429,
+                    f"本月图片生成配额已用完（{used_this_month}/{monthly_quota}），下月自动恢复",
+                )
+            job_prompt = f"manual_full_card_regeneration:{content_id}"
+            cur = conn.execute(
+                "INSERT INTO media_generation_jobs (prompt, final_prompt, model, status, created_at) "
+                "VALUES (?, ?, ?, 'running', ?)",
+                (job_prompt, job_prompt, settings["model"], _storage_now().isoformat(timespec="seconds")),
+            )
+            job_id = int(cur.lastrowid)
+            conn.commit()
+            from src.core.image_generation_budget import image_generation_run
+            with image_generation_run(
+                max_calls=getattr(cfg.media_generation, "max_api_calls_per_run", 30),
+                timeout_seconds=getattr(cfg.media_generation, "hard_timeout_seconds", 300),
+                max_concurrency=getattr(cfg.media_generation, "max_concurrency", 2),
+            ) as budget:
+                paths, pages = generate_ai_card_set(
+                    title=title, subtitle=subtitle, body=body, output_dir=output_dir,
+                    platform=platform, cfg=cfg, settings=settings,
+                    allow_fallback=settings.get("fallback_enabled"),
+                    brand_profile=profile,
+                )
+            usage = budget.snapshot()
+            conn.execute(
+                "UPDATE media_generation_jobs SET status='succeeded', api_calls=?, "
+                "failed_api_calls=?, completed_at=? WHERE id=?",
+                (usage["api_calls"], usage["failed_calls"], _storage_now().isoformat(timespec="seconds"), job_id),
+            )
+            conn.commit()
+        except HTTPException:
+            if job_id is not None:
+                conn.execute(
+                    "UPDATE media_generation_jobs SET status='failed', api_calls=?, failed_api_calls=?, "
+                    "error_message='图片生成任务未完成', completed_at=? WHERE id=?",
+                    (
+                        budget.snapshot()["api_calls"] if budget is not None else 0,
+                        budget.snapshot()["failed_calls"] if budget is not None else 0,
+                        _storage_now().isoformat(timespec="seconds"), job_id,
+                    ),
+                )
+                conn.commit()
+            raise
+        except Exception as exc:
+            if job_id is not None:
+                usage = budget.snapshot() if budget is not None else {"api_calls": 0, "failed_calls": 0}
+                conn.execute(
+                    "UPDATE media_generation_jobs SET status='failed', api_calls=?, failed_api_calls=?, "
+                    "error_message='图片生成失败，详细原因仅记录在服务端日志', completed_at=? WHERE id=?",
+                    (usage["api_calls"], usage["failed_calls"], _storage_now().isoformat(timespec="seconds"), job_id),
+                )
+                conn.commit()
+            if isinstance(exc, (ValueError, RuntimeError)):
+                raise HTTPException(422, f"AI 完整卡片生成或 OCR 硬门失败：{exc}") from exc
+            raise
+        finally:
+            _media_generation_lock.release()
         from src.core.visual_ocr import load_ocr_report
         from src.core.visual_persistence import (
             compute_content_hash, create_visual_page_job, create_visual_version,

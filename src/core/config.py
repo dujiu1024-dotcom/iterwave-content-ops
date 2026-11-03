@@ -475,14 +475,19 @@ class MediaGenerationConfig(BaseModel):
     fallback_api_key_env: str = "ARK_API_KEY"
     # 兜底通道默认启用；租户可在设置页关闭（关闭后主模型失败直接报错，不静默换供应商）
     fallback_enabled: bool = True
-    timeout_seconds: int = Field(150, ge=1, le=300)  # 单次图片 API 请求超时
+    timeout_seconds: int = Field(150, ge=1, le=300)
     connect_timeout_seconds: int = Field(15, ge=1, le=60)
-    page_timeout_seconds: int = Field(600, ge=30, le=1800)
-    group_timeout_seconds: int = Field(1800, ge=60, le=7200)
-    task_timeout_seconds: int = Field(1800, ge=60, le=7200)
     max_response_bytes: int = Field(20 * 1024 * 1024, ge=1024, le=20 * 1024 * 1024)
     max_dimension: int = Field(20000, ge=256, le=20000)
     max_pixels: int = Field(40_000_000, ge=1_000_000, le=40_000_000)
+    max_pages_per_article: int = Field(9, ge=1, le=9)
+    max_api_calls_per_page: int = Field(3, ge=1, le=3)
+    max_api_calls_per_article: int = Field(27, ge=1, le=27)
+    max_api_calls_per_run: int = Field(30, ge=1, le=30)
+    hard_timeout_seconds: int = Field(300, ge=1, le=300)
+    max_concurrency: int = Field(2, ge=1, le=2)
+    ocr_timeout_seconds: int = Field(45, ge=1, le=300)
+    ocr_languages: str = "chi_sim+eng"
 
     @field_validator("base_url")
     @classmethod

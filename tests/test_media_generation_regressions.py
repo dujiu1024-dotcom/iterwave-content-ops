@@ -12,7 +12,7 @@ def _client(test_auth):
     return test_auth(TestClient(api_main._build_app(), base_url="http://127.0.0.1"))
 
 
-def test_failed_image_generation_does_not_consume_monthly_quota(
+def test_failed_image_generation_consumes_monthly_quota(
     conn, cfg, test_auth, monkeypatch, tmp_path
 ):
     registry = TenantRegistry(tmp_path / "workspace")
@@ -38,16 +38,17 @@ def test_failed_image_generation_does_not_consume_monthly_quota(
     })
     try:
         client = _client(test_auth)
-        for _ in range(2):
-            response = client.post("/api/media/generate", json={"prompt": "a detailed test image prompt"})
-            assert response.status_code == 502
-            assert "sk-masked-secret-fragment" not in response.text
-            assert "provider error" not in response.text
+        first = client.post("/api/media/generate", json={"prompt": "a detailed test image prompt"})
+        second = client.post("/api/media/generate", json={"prompt": "a detailed test image prompt"})
+        assert first.status_code == 502
+        assert second.status_code == 429
+        assert "sk-masked-secret-fragment" not in first.text
+        assert "provider error" not in first.text
         settings = client.get("/api/media/generation-settings")
         assert settings.status_code == 200
-        assert settings.json()["used_this_month"] == 0
+        assert settings.json()["used_this_month"] == 1
         jobs = conn.execute("SELECT status FROM media_generation_jobs").fetchall()
-        assert len(jobs) == 2
+        assert len(jobs) == 1
         assert all(row["status"] == "failed" for row in jobs)
     finally:
         api_main._g_ctx.clear()
@@ -194,10 +195,10 @@ def test_recommendation_limit_can_return_more_than_eight_items(conn, seed, test_
 
 
 
-def test_successful_image_generation_ignores_legacy_monthly_quota(
+def test_successful_image_generation_enforces_monthly_quota(
     conn, cfg, test_auth, monkeypatch, tmp_path
 ):
-    """旧 monthly_quota 字段只保留兼容，不再限制个人素材库生成次数。"""
+    """月度配额按已启动的生成任务计数，成功或失败都不能重复绕过。"""
     from src.core import media_quality
 
     registry = TenantRegistry(tmp_path / "workspace")
@@ -228,10 +229,10 @@ def test_successful_image_generation_ignores_legacy_monthly_quota(
             client.post("/api/media/generate", json={"prompt": "a detailed test image prompt"}),
             client.post("/api/media/generate", json={"prompt": "another detailed test image prompt"}),
         ]
-        assert [response.status_code for response in responses] == [201, 201]
+        assert [response.status_code for response in responses] == [201, 429]
         assert conn.execute(
             "SELECT COUNT(*) FROM media_generation_jobs WHERE status='succeeded'"
-        ).fetchone()[0] == 2
+        ).fetchone()[0] == 1
         assert conn.execute("SELECT monthly_quota FROM media_generation_settings WHERE id=1").fetchone()[0] == 1
     finally:
         api_main._g_ctx.clear()
@@ -292,3 +293,56 @@ def test_image_fallback_can_be_disabled(monkeypatch):
     assert [e.label for e in _endpoints(cfg, "")] == ["primary", "fallback"]
     assert [e.label for e in _endpoints(cfg, "", allow_fallback=False)] == ["primary"]
     assert [e.label for e in _endpoints(cfg, "", allow_fallback=True)] == ["primary", "fallback"]
+
+
+def test_primary_and_fallback_provider_calls_are_both_persisted(monkeypatch, conn, cfg, test_auth, tmp_path):
+    from src.core import media_quality, visual_ocr
+
+    registry = TenantRegistry(tmp_path / "workspace")
+    registry.initialize()
+    conn.execute(
+        "INSERT INTO media_generation_settings (id, enabled, monthly_quota, prompt_prefix, model, size) "
+        "VALUES (1, 1, 5, '', 'test-model', '1024x1024') "
+        "ON CONFLICT(id) DO UPDATE SET enabled=1, monthly_quota=5, model='test-model', size='1024x1024'"
+    )
+    conn.commit()
+    monkeypatch.setenv("SENSENOVA_API_KEY", "primary-test-key")
+    monkeypatch.setenv("ARK_API_KEY", "fallback-test-key")
+    monkeypatch.setattr(
+        visual_ocr, "preflight_ocr",
+        lambda **_kwargs: {"status": "available"},
+    )
+    calls = []
+
+    def fake_endpoint(endpoint, *args, **kwargs):
+        calls.append(endpoint.label)
+        if endpoint.label == "primary":
+            raise media_generation.ImageGenerationError("primary unavailable")
+        return b"test-image", "image/png", ".png", 1024, 1024
+
+    monkeypatch.setattr(media_generation, "_request_endpoint", fake_endpoint)
+    monkeypatch.setattr(
+        media_quality, "score_image",
+        lambda raw, cfg=None: {"score": 90, "reasons": []},
+    )
+    saved = dict(api_main._g_ctx)
+    api_main._g_ctx.clear()
+    api_main._g_ctx.update({
+        "conn": conn, "cfg": cfg, "tenant_registry": registry,
+        "runtime_tenant_id": "default",
+    })
+    try:
+        response = _client(test_auth).post(
+            "/api/media/generate", json={"prompt": "a detailed test image prompt"},
+        )
+        assert response.status_code == 201, response.text
+        assert calls == ["primary", "fallback"]
+        job = conn.execute(
+            "SELECT api_calls, failed_api_calls, status FROM media_generation_jobs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert job["api_calls"] == 2
+        assert job["failed_api_calls"] == 1
+        assert job["status"] == "succeeded"
+    finally:
+        api_main._g_ctx.clear()
+        api_main._g_ctx.update(saved)
