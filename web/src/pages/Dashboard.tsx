@@ -485,7 +485,7 @@ function PlatformLane({ platform, enabled, credentialPresent, accountRegistered,
   const failed = (breakdown.failed ?? 0) + (breakdown.expired ?? 0);
   const next = !enabled ? "在系统设置中启用该平台"
     : progress?.configured === false ? "检查平台基础配置"
-    : broken ? "到运营控制台执行熔断恢复验证"
+    : broken ? "到运营控制台查看熔断原因，并按建议执行 3 步恢复"
     : !accountRegistered ? "到账号与登录登记平台账号昵称和标识"
     : !accountActive ? "到账号与登录启用该账号登记"
     : !credentialPresent ? "扫码登录并生成本机登录态文件"

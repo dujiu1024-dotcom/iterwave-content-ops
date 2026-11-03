@@ -433,6 +433,9 @@ export interface CircuitBreakerEvent {
   id: number;
   platform: Platform;
   reason: string;
+  reason_label?: string;
+  guidance?: string;
+  cooldown_expired?: boolean | null;
   detected_at: string;
   cooldown_until: string | null;
   resolved_at: string | null;

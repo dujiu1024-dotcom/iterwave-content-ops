@@ -108,7 +108,7 @@ from src.core.config_store import (
     ConfigNotAllowedError, ConfigPatchError, apply_overrides, config_metadata_view, current_config_view,
     changed_job_ids, config_audit_page, load_overrides, patch_config, scheduler_jobs_view,
 )
-from src.adapters.base import Platform
+from src.adapters.base import Platform, circuit_reason_guidance, circuit_reason_label
 from src.adapters import get_adapters
 
 logger = logging.getLogger(__name__)
@@ -7617,8 +7617,17 @@ def _register_routes(app: FastAPI) -> None:
     def circuit_breaker_status():
         cb = _g()["cb"]
         events = cb.active_events()
+        now_utc = _storage_now()
         for e in events:
             e["is_broken"] = cb.is_circuit_broken(Platform(e["platform"]))
+            e["reason_label"] = circuit_reason_label(e["reason"])
+            e["guidance"] = circuit_reason_guidance(e["reason"])
+            try:
+                e["cooldown_expired"] = bool(
+                    e.get("cooldown_until") and parse_persisted_datetime(e["cooldown_until"]) < now_utc
+                )
+            except (TypeError, ValueError):
+                e["cooldown_expired"] = None
         return {"events": events, "broken_platforms": sorted({e["platform"] for e in events})}
 
     @app.post("/api/circuit_breaker/recover")
