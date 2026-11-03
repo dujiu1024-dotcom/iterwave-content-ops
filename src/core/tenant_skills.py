@@ -26,7 +26,7 @@ def validate_manifest(manifest: dict) -> dict:
     errors: list[dict] = []
     if not isinstance(manifest, dict):
         return {"valid": False, "errors": [{"field": "manifest", "code": "type", "message": "必须是 JSON 对象"}]}
-    allowed = {"skill_id", "name", "version", "description", "instructions", "permissions", "inputs", "outputs", "config"}
+    allowed = {"skill_id", "name", "version", "description", "category", "instructions", "permissions", "inputs", "outputs", "config"}
     for key in sorted(set(manifest) - allowed):
         errors.append({"field": key, "code": "unknown_field", "message": "不支持的字段"})
     skill_id = manifest.get("skill_id")
@@ -41,6 +41,9 @@ def validate_manifest(manifest: dict) -> dict:
     description = manifest.get("description", "")
     if not isinstance(description, str) or len(description) > 2000:
         errors.append({"field": "description", "code": "length", "message": "描述必须为字符串且最多 2000 字符"})
+    category = manifest.get("category", "custom")
+    if not isinstance(category, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{1,39}", category):
+        errors.append({"field": "category", "code": "format", "message": "分类标识格式无效"})
     instructions = manifest.get("instructions", "")
     if not isinstance(instructions, str) or len(instructions) > 16000:
         errors.append({"field": "instructions", "code": "length", "message": "指令必须为字符串且最多 16000 字符"})
@@ -104,7 +107,7 @@ def create_skill(conn: sqlite3.Connection, manifest: dict, actor: str = "system"
          enabled,manifest_version,created_at,updated_at,source,manifest_json,content_sha256,validation_json,execution_state)
         VALUES(?,?,?,?,?,?,?,?,0,1,?,?,?,?,?,'{}','blocked_no_sandbox')""",
         (skill_id, manifest["name"].strip(), manifest["version"], manifest.get("description",""),
-         "custom", _json(manifest.get("inputs",{})), _json(manifest.get("outputs",{})),
+         manifest.get("category", "custom"), _json(manifest.get("inputs",{})), _json(manifest.get("outputs",{})),
          _json(manifest.get("permissions",[])), now, now, "user", payload, result["content_sha256"]))
     conn.execute("UPDATE tenant_skill_registry SET validation_json=? WHERE skill_id=?",
                  (_json(result), skill_id))
@@ -129,12 +132,12 @@ def update_skill(conn: sqlite3.Connection, skill_id: str, manifest: dict, actor:
         raise ValueError({"valid": False, "errors": [{"field":"version","code":"not_increased","message":"更新必须使用更高的主/次/修订版本号"}]})
     now, payload = _now(), _json(manifest)
     try:
-        conn.execute("""UPDATE tenant_skill_registry SET name=?,version=?,description=?,inputs_json=?,outputs_json=?,
+        conn.execute("""UPDATE tenant_skill_registry SET name=?,version=?,description=?,category=?,inputs_json=?,outputs_json=?,
             permissions_json=?,manifest_json=?,content_sha256=?,validation_json=?,manifest_version=manifest_version+1,
             updated_at=? WHERE skill_id=?""",
-            (manifest["name"].strip(),manifest["version"],manifest.get("description",""),_json(manifest.get("inputs",{})),
-             _json(manifest.get("outputs",{})),_json(manifest.get("permissions",[])),payload,result["content_sha256"],
-             _json(result),now,skill_id))
+            (manifest["name"].strip(),manifest["version"],manifest.get("description",""),manifest.get("category","custom"),
+             _json(manifest.get("inputs",{})),_json(manifest.get("outputs",{})),_json(manifest.get("permissions",[])),
+             payload,result["content_sha256"],_json(result),now,skill_id))
         conn.execute("INSERT INTO tenant_skill_versions(skill_id,version,manifest_json,content_sha256,created_at) VALUES(?,?,?,?,?)",
                      (skill_id,manifest["version"],payload,result["content_sha256"],now))
     except sqlite3.IntegrityError as exc:
