@@ -1351,6 +1351,105 @@ class Database:
                 governance_foreign_keys - actual_governance_foreign_keys
             )
 
+            # Historical business-data integrity checks (DB-G2). These checks are
+            # deliberately read-only and tolerate databases where a migration has not
+            # created the relevant tables yet; schema absence is reported separately.
+            governance_data_checks = {
+                "business_profile_current_version_missing": """
+                    SELECT COUNT(*) FROM business_profiles p
+                    WHERE p.id=1 AND p.version_no>0
+                      AND NOT EXISTS (
+                        SELECT 1 FROM business_profile_versions v
+                        WHERE v.version_no=p.version_no
+                      )
+                """,
+                "business_profile_history_json_invalid": """
+                    SELECT COUNT(*) FROM business_profile_versions
+                    WHERE snapshot_json IS NULL OR json_valid(snapshot_json)=0
+                """,
+                "business_catalog_json_invalid": """
+                    SELECT COUNT(*) FROM business_catalog_items
+                    WHERE json_valid(details_json)=0 OR json_valid(field_evidence_json)=0
+                """,
+                "effective_master_plan_snapshot_missing": """
+                    SELECT COUNT(*) FROM master_plan_versions p
+                    WHERE p.status='effective'
+                      AND NOT EXISTS (
+                        SELECT 1 FROM master_plan_business_snapshots s
+                        WHERE s.master_plan_version_id=p.id
+                      )
+                """,
+                "master_plan_snapshot_json_invalid": """
+                    SELECT COUNT(*) FROM master_plan_business_snapshots
+                    WHERE snapshot_json IS NULL OR json_valid(snapshot_json)=0
+                """,
+                "master_plan_snapshot_profile_version_missing": """
+                    SELECT COUNT(*) FROM master_plan_business_snapshots s
+                    WHERE s.business_profile_version_no>0
+                      AND NOT EXISTS (
+                        SELECT 1 FROM business_profile_versions v
+                        WHERE v.version_no=s.business_profile_version_no
+                      )
+                """,
+                "original_asset_current_version_missing": """
+                    SELECT COUNT(*) FROM original_assets a
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM original_asset_versions v
+                        WHERE v.original_asset_id=a.id
+                          AND v.version_no=a.current_version_no
+                    )
+                """,
+                "original_asset_metadata_json_invalid": """
+                    SELECT COUNT(*) FROM original_assets
+                    WHERE json_valid(metadata_json)=0
+                """,
+                "original_asset_version_metadata_json_invalid": """
+                    SELECT COUNT(*) FROM original_asset_versions
+                    WHERE json_valid(metadata_json)=0
+                """,
+                "original_asset_analysis_json_invalid": """
+                    SELECT COUNT(*) FROM original_asset_analyses
+                    WHERE json_valid(result_json)=0 OR json_valid(warnings_json)=0
+                """,
+                "production_task_asset_usage_version_mismatch": """
+                    SELECT COUNT(*) FROM production_task_asset_usages u
+                    LEFT JOIN original_asset_versions v
+                      ON v.original_asset_id=u.original_asset_id
+                     AND v.version_no=u.asset_version_no
+                    WHERE v.id IS NULL
+                """,
+                "plan_change_audit_json_invalid": """
+                    SELECT COUNT(*) FROM plan_change_audit
+                    WHERE json_valid(affected_tasks_json)=0
+                       OR (before_snapshot_json IS NOT NULL AND json_valid(before_snapshot_json)=0)
+                       OR json_valid(after_snapshot_json)=0
+                """,
+            }
+            available_data_checks = {
+                "business_profile_current_version_missing": {"business_profiles", "business_profile_versions"},
+                "business_profile_history_json_invalid": {"business_profile_versions"},
+                "business_catalog_json_invalid": {"business_catalog_items"},
+                "effective_master_plan_snapshot_missing": {"master_plan_versions", "master_plan_business_snapshots"},
+                "master_plan_snapshot_json_invalid": {"master_plan_business_snapshots"},
+                "master_plan_snapshot_profile_version_missing": {"master_plan_business_snapshots", "business_profile_versions"},
+                "original_asset_current_version_missing": {"original_assets", "original_asset_versions"},
+                "original_asset_metadata_json_invalid": {"original_assets"},
+                "original_asset_version_metadata_json_invalid": {"original_asset_versions"},
+                "original_asset_analysis_json_invalid": {"original_asset_analyses"},
+                "production_task_asset_usage_version_mismatch": {"production_task_asset_usages", "original_asset_versions"},
+                "plan_change_audit_json_invalid": {"plan_change_audit"},
+            }
+            governance_data_violations = {}
+            for check_name, sql in governance_data_checks.items():
+                if available_data_checks[check_name].issubset(existing):
+                    governance_data_violations[check_name] = int(
+                        conn.execute(sql).fetchone()[0]
+                    )
+            result["governance_data_violations"] = governance_data_violations
+            result["governance_data_integrity_check"] = not any(
+                governance_data_violations.values()
+            )
+
             governance_column_types = {
                 "business_profiles": {
                     "id": "INTEGER", "business_name": "TEXT", "introduction": "TEXT",
