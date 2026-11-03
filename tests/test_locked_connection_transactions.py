@@ -485,3 +485,36 @@ def test_connection_lock_wait_has_a_bounded_timeout(tmp_path):
         release_owner.set()
         worker.join(timeout=1)
     assert not worker.is_alive()
+
+
+
+def test_managed_route_skips_request_commit_but_finalizes_implicit_write(tmp_path):
+    raw = sqlite3.connect(tmp_path / "managed-finalizer.db", check_same_thread=False)
+    conn = LockedConnection(raw)
+    conn.execute("CREATE TABLE t (v INTEGER)")
+    conn.commit()
+    saved = dict(api_main._g_ctx)
+    api_main._g_ctx.clear()
+    api_main._g_ctx["conn"] = conn
+
+    def endpoint():
+        conn.execute("INSERT INTO t VALUES (1)")
+        return {"ok": True}
+
+    managed = api_main.manages_own_transaction(endpoint)
+    route = api_main.TransactionalAPIRoute("/managed-finalizer", managed, methods=["POST"])
+    try:
+        assert route.endpoint is managed
+        assert route.endpoint() == {"ok": True}
+        assert conn.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 0
+
+        finished = threading.Event()
+        reader = threading.Thread(
+            target=lambda: (conn.execute("SELECT COUNT(*) FROM t").fetchone(), finished.set())
+        )
+        reader.start()
+        reader.join(timeout=1)
+        assert finished.is_set(), "managed endpoint finalizer leaked the transaction lock"
+    finally:
+        api_main._g_ctx.clear()
+        api_main._g_ctx.update(saved)
