@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Callable
 from fastapi import APIRouter, HTTPException, Query
 
-from src.core import tenant_skills
+from src.core import skill_execution, tenant_skills
 
 
 def build_tenant_skills_router(get_context: Callable[[], dict]) -> APIRouter:
@@ -95,8 +95,15 @@ def build_tenant_skills_router(get_context: Callable[[], dict]) -> APIRouter:
 
     @router.post("/api/skills/{skill_id}/execute")
     def execute_skill(skill_id: str, request: dict):
-        if tenant_skills.get_skill(get_context()["conn"], skill_id) is None:
+        conn = get_context()["conn"]
+        skill = tenant_skills.get_skill(conn, skill_id)
+        if skill is None:
             raise HTTPException(404, "Skill 不存在")
-        raise HTTPException(409, detail={"code":"execution_blocked","message":"自定义 Skill 执行器尚未通过安全验收；当前仅允许登记、校验和预览","execution_enabled":False})
+        result = skill_execution.request_execution(conn, skill, request)
+        raise HTTPException(409, detail={
+            "code": "execution_blocked",
+            "message": "自定义 Skill 执行器尚未通过独立隔离安全验收；请求已拒绝并记录审计",
+            **result,
+        })
 
     return router
