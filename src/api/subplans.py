@@ -1417,7 +1417,7 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         except ProductionTaskError as exc:
             raise HTTPException(409, str(exc)) from exc
 
-    @app.post("/api/production-tasks/reconcile-expired")
+    @app.post("/api/production-tasks/recovery/reconcile-expired")
     def reconcile_expired_production_tasks_endpoint(limit: int = Query(200, ge=1, le=1000)):
         from src.core.production_task_recovery import reconcile_expired_production_tasks
         conn = get_runtime()["conn"]
