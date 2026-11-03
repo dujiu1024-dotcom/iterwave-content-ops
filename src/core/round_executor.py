@@ -1775,3 +1775,40 @@ class RoundExecutor:
         # 仍存在不属于生产收尾范围的状态时 fail closed，避免进入无草稿可发的等待态。
         self.sm_round.transition(round_id, "failed", "未发现可发布草稿，且存在未预期的草稿状态组合")
         report["final_status"] = "failed"
+
+# Task-level crash closure. Keep the round executor's business flow unchanged while
+# ensuring every claimed task is finalized even when any downstream stage raises.
+_original_produce_contents = RoundExecutor._produce_contents
+
+
+async def _produce_contents_with_task_recovery(self, round_id, scored, platforms, report, template_data=None):
+    try:
+        return await _original_produce_contents(
+            self, round_id, scored, platforms, report, template_data=template_data,
+        )
+    except Exception as exc:
+        if getattr(self, "_subplan_context", None):
+            try:
+                from .production_task_recovery import reconcile_round_tasks
+                reconciliation = reconcile_round_tasks(
+                    self.conn, round_id=round_id, interrupted=True,
+                    error=exc,
+                )
+                report.setdefault("production_task_recovery", []).extend(reconciliation)
+            except Exception:
+                logger.exception("生产任务异常收尾失败 round=%s", round_id)
+        raise
+    finally:
+        if getattr(self, "_subplan_context", None):
+            try:
+                from .production_task_recovery import reconcile_round_tasks
+                reconciliation = reconcile_round_tasks(
+                    self.conn, round_id=round_id, interrupted=False,
+                )
+                if reconciliation:
+                    report.setdefault("production_task_recovery", []).extend(reconciliation)
+            except Exception:
+                logger.exception("生产任务成品对账失败 round=%s", round_id)
+
+
+RoundExecutor._produce_contents = _produce_contents_with_task_recovery
