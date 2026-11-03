@@ -6599,13 +6599,14 @@ def _register_routes(app: FastAPI) -> None:
         }
         dimension = ""
         if "topics" in tables:
-            topic = conn.execute(
-                "SELECT dimension FROM topics WHERE id = ?", (row["topic_id"],)
-            ).fetchone()
-            dimension = (topic["dimension"] if topic else "") or ""
-        except sqlite3.Error:  # 维度只是装饰；仅数据库兼容/读取故障允许退回空值
-            logger.warning("重出图读取选题维度失败 content_id=%s", content_id, exc_info=True)
-            dimension = ""
+            try:
+                topic = conn.execute(
+                    "SELECT dimension FROM topics WHERE id = ?", (row["topic_id"],)
+                ).fetchone()
+                dimension = (topic["dimension"] if topic else "") or ""
+            except sqlite3.Error:  # 维度只是装饰；仅数据库兼容/读取故障允许退回空值
+                logger.warning("重出图读取选题维度失败 content_id=%s", content_id, exc_info=True)
+                dimension = ""
 
         from ..core.content_pipeline import (
             body_page_prompt, card_footer, cover_prompt, image_generation_settings,
