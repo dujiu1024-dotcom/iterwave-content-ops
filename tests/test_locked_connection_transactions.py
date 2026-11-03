@@ -405,6 +405,14 @@ def test_sync_get_endpoint_finalizer_rolls_back_implicit_write(tmp_path):
         route = api_main.TransactionalAPIRoute("/legacy-get", legacy_get_route, methods=["GET"])
         assert route.endpoint() == {"ok": True}
         assert conn.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 0
+
+        completed = threading.Event()
+        reader = threading.Thread(
+            target=lambda: (conn.execute("SELECT COUNT(*) FROM t").fetchone(), completed.set())
+        )
+        reader.start()
+        reader.join(timeout=1)
+        assert completed.is_set(), "endpoint finalizer leaked the retained transaction lock"
     finally:
         api_main._g_ctx.clear()
         api_main._g_ctx.update(saved)
