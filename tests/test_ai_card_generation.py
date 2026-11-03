@@ -90,7 +90,7 @@ def test_ai_card_generation_keeps_images_when_ocr_failure_allowed(monkeypatch, t
     paths, pages = cards.generate_ai_card_set(
         title="标题", subtitle="栏目", body="正文内容。",
         output_dir=tmp_path, platform=type("P", (), {"value": "xhs"})(),
-        cfg=_Cfg(), settings={"model": "image-model", "size": "1024x1536"},
+        cfg=_Cfg(tmp_path), settings={"model": "image-model", "size": "1024x1536"},
         allow_ocr_failure=True,
     )
     assert len(paths) == len(pages) + 1
