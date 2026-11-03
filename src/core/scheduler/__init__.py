@@ -38,7 +38,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.date import DateTrigger
 from zoneinfo import ZoneInfo
-from ..timezone import (business_now, storage_now, parse_persisted_datetime, business_zone as configured_business_zone, storage_window_cutoffs, timestamp_since_sql, timestamp_before_sql)
+from ..timezone import (business_now, storage_now, parse_persisted_datetime, business_zone as configured_business_zone, storage_window_cutoffs, timestamp_since_sql, timestamp_before_sql, business_date_predicate)
 from ..task_context import bind_task_context, business_timestamp, business_zone
 
 logger = logging.getLogger(__name__)
@@ -633,20 +633,11 @@ class SchedulerEngine:
         with self.conn:
             self.conn.execute("BEGIN IMMEDIATE")
             today = business_now(self.cfg).strftime("%Y-%m-%d")
-            utc_start, legacy_start = business_date_cutoffs(today, self.cfg)
-            utc_end, legacy_end = business_date_cutoffs(today, self.cfg, end=True)
-            fetched_at_aware = (
-                "(instr(substr(COALESCE(fetched_at, ''), 20), '+') > 0 "
-                "OR instr(substr(COALESCE(fetched_at, ''), 20), '-') > 0 "
-                "OR substr(COALESCE(fetched_at, ''), -1) = 'Z')"
-            )
+            day_predicate, day_bounds = business_date_predicate("fetched_at", today, self.cfg)
             prev = self.conn.execute(
-                "SELECT id, attempt FROM metrics WHERE draft_id = ? AND platform = ? "
-                f"AND (({fetched_at_aware} AND datetime(fetched_at) "
-                "BETWEEN datetime(?) AND datetime(?)) "
-                f"OR (NOT {fetched_at_aware} AND datetime(fetched_at) "
-                "BETWEEN datetime(?) AND datetime(?)))",
-                (draft_id, platform.value, utc_start, utc_end, legacy_start, legacy_end),
+                "SELECT id, attempt FROM metrics WHERE draft_id = ? AND platform = ? AND "
+                + day_predicate,
+                (draft_id, platform.value, *day_bounds),
             ).fetchone()
             if prev:
                 # 注意：这里的 metrics_attempt 是「当天第几次采集」，与作业重试 attempt 无关
