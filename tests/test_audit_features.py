@@ -294,7 +294,20 @@ def test_http_orchestration_and_diagnostics(client):
     assert client.get("/api/orchestration/runs").status_code == 200
 
 
-def test_http_plan_v2(client):
+def test_http_plan_v2(client, conn, cfg):
+    # The T6 gate is intentional: this legacy plan-flow test must provide a
+    # user-confirmed diagnosis whose source fingerprint matches current data.
+    from src.core.business_diagnosis import collect_business_context
+    source = collect_business_context(conn, cfg)
+    conn.execute(
+        """INSERT INTO business_diagnosis_reports
+           (version_no,status,report_json,source_snapshot_json,source_fingerprint,model_name,
+            created_at,created_by,updated_at,confirmed_at,confirmed_by,change_note)
+           VALUES(1,'confirmed','{}','{}',?,'test',CURRENT_TIMESTAMP,'test',
+                  CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,'test','test fixture')""",
+        (source["fingerprint"],),
+    )
+    conn.commit()
     r = client.post("/api/plans", json={
         "topic_count_per_platform": 4, "enabled_platforms": ["xhs"],
         "dimension_allocation": {"维度A": 2},
