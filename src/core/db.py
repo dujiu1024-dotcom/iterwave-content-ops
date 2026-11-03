@@ -554,10 +554,15 @@ class LockedConnection:
 
     def rollback_if_open(self, timeout: float = 2.0) -> bool:
         """Best-effort request-finalizer safety net for an abandoned SQLite transaction."""
+        owner = _threading.current_thread()
+        # Never let an unrelated request finalizer roll back another live worker's
+        # transaction or wait behind it. Dead owners are reclaimed below.
+        for active_owner in (self._context_owner, self._transaction_owner):
+            if active_owner is not None and active_owner is not owner and active_owner.is_alive():
+                return False
         self._acquire_lock(timeout=timeout)
         release_retained = False
         rolled_back = False
-        owner = _threading.current_thread()
         try:
             self._recover_abandoned_state()
             if self._conn.in_transaction:
