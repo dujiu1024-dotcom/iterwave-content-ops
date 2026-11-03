@@ -3,6 +3,7 @@ import { api, GlobalTaskQueueItem } from "../api";
 import { useApp } from "../AppContext";
 import { roundTaskLabel } from "../roundLabel";
 import TaskDispatchMetrics from "../components/TaskDispatchMetrics";
+import TaskProgressPanel from "../components/TaskProgressPanel";
 
 const STATUS_LABEL: Record<GlobalTaskQueueItem["status"], string> = {
   queued: "等待执行",
@@ -248,6 +249,16 @@ export default function TaskQueue() {
     }
   };
 
+  // 详情弹层内运行中任务每 3s 刷新一次，实时展示“现在到哪一步”
+  const detailRunning = detailTask?.status === "running" || detailTask?.status === "queued";
+  useEffect(() => {
+    if (!detailTask || !detailRunning) return;
+    const timer = window.setInterval(() => {
+      api.taskQueueDetail(detailTask.task_id).then((detail) => setDetailTask(detail)).catch(() => {});
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [detailTask?.task_id, detailRunning]);
+
   const cancel = async (task: GlobalTaskQueueItem) => {
     setCancellingId(task.task_id);
     try {
@@ -461,6 +472,13 @@ export default function TaskQueue() {
                   <div><div className="muted">结束时间</div>{timeLabel(detailTask.finished_at)}</div>
                   <div><div className="muted">执行次数</div>{detailTask.attempts}</div>
                 </div>
+                {detailRunning && (
+                  <TaskProgressPanel
+                    progress={detailTask.progress ?? null}
+                    elapsedSeconds={detailTask.elapsed_seconds}
+                    queued={detailTask.status === "queued"}
+                  />
+                )}
                 {detailTask.error_code && <div className="notice danger" style={{ marginTop: 14 }}>错误代码：{detailTask.error_code}</div>}
                 {detailTask.error_message && <div style={{ marginTop: 10, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{detailTask.error_message}</div>}
                 {detailTask.retry_of_task_id && <div className="muted" style={{ marginTop: 12 }}>恢复自任务：{detailTask.retry_of_task_id}</div>}
@@ -479,7 +497,7 @@ export default function TaskQueue() {
                         {entry.detail && <div className="tiny" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{entry.detail}</div>}
                       </div>
                     </div>)}
-                  </div> : <div className="empty-state">该任务没有持久化步骤明细；运行中任务的实时步骤流尚不可用。</div>}
+                  </div> : <div className="empty-state">该任务没有步骤明细（历史任务或尚未开始执行）。</div>}
                 </section>
                 <section style={{ marginTop: 16 }}>
                   <h3>操作审计</h3>

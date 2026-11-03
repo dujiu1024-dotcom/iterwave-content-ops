@@ -89,13 +89,14 @@ def run_ocr(
     with tempfile.TemporaryDirectory(prefix="iterwave-ocr-") as temp_dir:
         output = Path(temp_dir) / "recognized"
         command = [
-            executable, str(image_path), str(output), "-l", language,
+            executable, str(Path(image_path).resolve()), str(output), "-l", language,
             "--oem", "1", "--psm", str(page_segmentation_mode),
         ]
         for item in extra_config:
             command += ["-c", item]
         try:
-            subprocess.run(command, check=True, capture_output=True, text=True, timeout=timeout)
+            subprocess.run(command, check=True, capture_output=True, text=True,
+                           errors="replace", timeout=timeout)
         except subprocess.TimeoutExpired:
             return {"status": "unavailable", "reason": "ocr_timeout", "text": ""}
         except subprocess.CalledProcessError as exc:

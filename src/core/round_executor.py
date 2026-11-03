@@ -34,6 +34,7 @@ from .config import PROJECT_ROOT
 
 from .timezone import business_now, storage_now
 from .task_context import bind_task_context
+from .task_progress import fail_current, start_progress, update_detail, update_step
 from .kb_reader import KbReader  # noqa: F401 — 兼容旧引用
 from .topic_pool import load_pool
 from .persona import effective_persona
@@ -265,6 +266,13 @@ class RoundExecutor:
             "final_status": None,
         }
 
+        start_progress(
+            [{"id": s["id"], "label": s.get("label") or s["id"]} for s in self._orch.steps if s["enabled"]],
+            detail="正在准备本轮执行",
+        )
+        if self._orch.on("await_publish"):
+            update_step("await_publish", status="skipped", detail="等你手动发布后开始采集")
+
         if not self.sm_round.transition(round_id, "producing", "执行器启动"):
             raise ValueError(f"轮次 {round_id} 无法进入 producing")
 
@@ -304,9 +312,11 @@ class RoundExecutor:
                 })
 
             # ① + ② 选题读取与评分（G 节点）
+            update_step("topic_eval", status="running", detail="正在读取选题库并评分")
             scored = self._select_topics(topic_count, report)
             if not scored:
                 report["errors"].append("选题库无可用选题")
+                update_step("topic_eval", status="failed", detail="选题库无可用选题")
                 self.sm_round.transition(round_id, "failed", "选题库无可用选题")
                 report["final_status"] = "failed"
                 self._finish_task_run(task_run_id, "failed", "选题库无可用选题")
@@ -333,6 +343,7 @@ class RoundExecutor:
                 )
 
             # §19 母计划签名（R18）：选题分布确定后立即固化，改计划可追溯
+            update_step("topic_eval", status="done", detail=f"选出 {len(scored)} 个选题")
             self._record_plan_signature(round_id, topic_count, platforms, scored, report)
 
             # ③④⑤⑥ 每选题 × 每平台产出内容
@@ -345,7 +356,9 @@ class RoundExecutor:
                 await self._save_all_drafts(content_rows, round_id, report)
                 # ⑧ 自动排期（编排开启 + 母计划配置了平台发布时段）
                 if self._orch.on("auto_schedule"):
+                    update_step("auto_schedule", status="running", detail="正在写入内容日历")
                     self._auto_schedule(round_id, report)
+                    update_step("auto_schedule", status="done", detail="已写入内容日历")
 
             # 收尾状态
             self._finalize_round(round_id, report, save_drafts)
@@ -359,6 +372,7 @@ class RoundExecutor:
             report["failure_message"] = str(exc)
             report["errors"].append(str(exc))
             report["final_status"] = "failed"
+            fail_current(f"文案生成失败：{exc.code}")
             try:
                 transitioned = self.sm_round.transition(
                     round_id, "failed", f"文案生成失败：{exc.code}",
@@ -373,6 +387,7 @@ class RoundExecutor:
             report["errors"].append("执行异常，请检查运行日志")
             report["failure_code"] = "generation_pipeline_failed"
             report["final_status"] = "failed"
+            fail_current("执行异常，请检查运行日志")
             # 状态迁移本身也可能因数据库/状态机异常失败；不能让它覆盖原始异常，
             # 否则下方 task_runs 收尾和 run_report 持久化都不会执行。
             try:
@@ -542,6 +557,10 @@ class RoundExecutor:
             "operation": "resume_save_drafts",
         }
 
+        start_progress(
+            [{"id": "save_draft", "label": "⑤ 平台存草稿"}],
+            detail=f"准备恢复存草稿：共 {len(rows)} 篇",
+        )
         await self._save_all_drafts(rows, round_id, report)
         self._finalize_round(round_id, report, save_drafts=True)
         report["pending_drafts"] = int(self.conn.execute(
@@ -889,6 +908,10 @@ class RoundExecutor:
                 "reason": "图文内容必须包含视觉素材；旧编排中的关闭设置不再跳过出图",
             })
         card_first = bool(orch and orch.card_before_gate and make_cards)
+        update_step(
+            "copywriting", status="running",
+            detail=f"准备生成：{len(scored)} 个选题 × {len(platforms)} 个平台",
+        )
         for rank, st in enumerate(scored):
             if self._subplan_context:
                 confirmed = int(self.conn.execute(
@@ -901,6 +924,9 @@ class RoundExecutor:
                     report["errors"].append("阶段确认发布目标已达成，本轮停止继续生成")
                     break
             topic = st.topic
+            update_detail(
+                f"正在生成第 {rank + 1}/{len(scored)} 个选题：{topic.title[:20]}"
+            )
             # 第二道独立防线：进入内容生产前再次检查原始选题标题。
             sensitive_hits = _sensitive_topic_hits(topic.title)
             if sensitive_hits:
@@ -975,6 +1001,7 @@ class RoundExecutor:
                             cfg=self.cfg, settings=image_settings,
                             allow_fallback=image_settings.get("fallback_enabled"),
                             brand_profile=self._visual_brand_profile(),
+                            allow_ocr_failure=True,
                         )
                         cover_path = str(image_paths[0])
                         body_page_count = len(image_paths) - 1
@@ -1045,6 +1072,7 @@ class RoundExecutor:
                             cfg=self.cfg, settings=image_settings,
                             allow_fallback=image_settings.get("fallback_enabled"),
                             brand_profile=self._visual_brand_profile(),
+                            allow_ocr_failure=True,
                         )
                         cover_path = str(image_paths[0])
                         body_page_count = len(image_paths) - 1
@@ -1232,6 +1260,10 @@ class RoundExecutor:
                 })
                 report["contents_created"] += 1
                 report["drafts_created"] += 1
+                update_detail(
+                    f"已产出 {report['contents_created']} 篇（"
+                    f"第 {rank + 1}/{len(scored)} 个选题）"
+                )
 
             variant_summary.append({
                 "topic_id": topic.id,
@@ -1243,6 +1275,14 @@ class RoundExecutor:
             "contents": report["contents_created"],
             "guard_rejected": report["guard_rejected"],
         })
+        update_step(
+            "copywriting", status="done", detail=f"共产出 {report['contents_created']} 篇"
+        )
+        update_step(
+            "quality_gate", status="done",
+            detail=f"拦截 {report['guard_rejected']} 篇，通过 {report['contents_created']} 篇",
+        )
+        update_step("image_card", status="done", detail="视觉素材已随内容生成")
 
         self.conn.execute(
             "UPDATE spiral_rounds SET topic_ids = ?, content_variants = ?, guard_rejections = ? "
@@ -1266,8 +1306,12 @@ class RoundExecutor:
         skipped_login_platforms: set[str] = set()
         from .login_manager import has_login_state
 
-        for row in rows:
+        total_drafts = len(rows)
+        update_step("save_draft", status="running", detail=f"0/{total_drafts} 篇待存")
+
+        for position, row in enumerate(rows, 1):
             platform: Platform = row["platform"]
+            update_detail(f"正在存草稿 {position}/{total_drafts}：{platform.display_name}")
             # 未登录平台不调用 Playwright；保留 draft_pending，登录后可安全恢复。
             try:
                 logged_in = has_login_state(platform)
@@ -1406,6 +1450,14 @@ class RoundExecutor:
                 "skipped": report["drafts_skipped_login"],
                 "note": "未登录平台未执行存草稿，内容保留为待存状态；登录后可恢复",
             })
+        update_step(
+            "save_draft", status="done",
+            detail=(
+                f"成功 {report['drafts_saved']} / 共 {total_drafts} 篇"
+                + (f"，跳过未登录 {report['drafts_skipped_login']} 篇"
+                   if report.get("drafts_skipped_login") else "")
+            ),
+        )
 
         # 恢复存草稿可能是分批执行；不能用本次成功的 ID 覆盖此前已存成功的草稿关联。
         round_row = self.conn.execute(

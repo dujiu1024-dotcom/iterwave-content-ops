@@ -163,34 +163,36 @@ class GlobalTaskWorker:
                 bind_config(context["cfg"]),
             ):
                 if task.task_type == "round_run":
-                    round_id = int(task.payload["round_id"])
-                    operation = task.payload.get("operation", "run")
-                    feedback_data = task.payload.get("feedback")
-                    feedback = None
-                    if isinstance(feedback_data, dict):
-                        from src.core.autogrow import StrategyFeedback
-                        feedback = StrategyFeedback(**feedback_data)
-                    if operation == "save_pending_drafts":
-                        return await context["executor"].save_pending_drafts(round_id)
-                    if operation == "run":
-                        try:
-                            report = await context["executor"].run(
-                                round_id,
-                                topic_count=task.payload.get("topic_count"),
-                                platform_values=task.payload.get("platforms"),
-                                save_drafts=task.payload.get("save_drafts"),
-                                feedback=feedback,
-                                template_data=task.payload.get("template_snapshot"),
-                            )
-                        except asyncio.CancelledError:
-                            self._mark_content_plan_failed(context["conn"], round_id, cfg=context["cfg"])
-                            raise
-                        except Exception:
-                            self._mark_content_plan_failed(context["conn"], round_id, cfg=context["cfg"])
-                            raise
-                        self._complete_content_plan(context["conn"], round_id, report, cfg=context["cfg"])
-                        return report
-                    raise ValueError(f"不支持的轮次任务操作：{operation}")
+                    from src.core.task_progress import bind_task_progress
+                    with bind_task_progress(self.queue, task.task_id):
+                        round_id = int(task.payload["round_id"])
+                        operation = task.payload.get("operation", "run")
+                        feedback_data = task.payload.get("feedback")
+                        feedback = None
+                        if isinstance(feedback_data, dict):
+                            from src.core.autogrow import StrategyFeedback
+                            feedback = StrategyFeedback(**feedback_data)
+                        if operation == "save_pending_drafts":
+                            return await context["executor"].save_pending_drafts(round_id)
+                        if operation == "run":
+                            try:
+                                report = await context["executor"].run(
+                                    round_id,
+                                    topic_count=task.payload.get("topic_count"),
+                                    platform_values=task.payload.get("platforms"),
+                                    save_drafts=task.payload.get("save_drafts"),
+                                    feedback=feedback,
+                                    template_data=task.payload.get("template_snapshot"),
+                                )
+                            except asyncio.CancelledError:
+                                self._mark_content_plan_failed(context["conn"], round_id, cfg=context["cfg"])
+                                raise
+                            except Exception:
+                                self._mark_content_plan_failed(context["conn"], round_id, cfg=context["cfg"])
+                                raise
+                            self._complete_content_plan(context["conn"], round_id, report, cfg=context["cfg"])
+                            return report
+                        raise ValueError(f"不支持的轮次任务操作：{operation}")
 
                 method = task.payload.get("method")
                 args = task.payload.get("args", [])
