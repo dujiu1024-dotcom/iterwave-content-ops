@@ -13,6 +13,110 @@ _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0
 _ALLOWED_PERMISSIONS = {"read:own_inputs"}
 _MAX_MANIFEST_BYTES = 64 * 1024
 
+_SCHEMA_TYPES = {"object", "array", "string", "number", "integer", "boolean", "null"}
+_SCHEMA_KEYS = {"type", "properties", "required", "items", "enum", "additionalProperties",
+                "minLength", "maxLength", "minItems", "maxItems", "minimum", "maximum"}
+
+
+def _schema_definition_errors(schema: Any, path: str = "$", depth: int = 0) -> list[dict]:
+    errors: list[dict] = []
+    if depth > 12 or not isinstance(schema, dict):
+        return [{"field": path, "code": "schema_type", "message": "契约 Schema 必须是有限深度的 JSON 对象"}]
+    for key in sorted(set(schema) - _SCHEMA_KEYS):
+        errors.append({"field": f"{path}.{key}", "code": "unsupported_schema_keyword", "message": "不支持的 Schema 关键字"})
+    kind = schema.get("type")
+    if kind is not None and kind not in _SCHEMA_TYPES:
+        errors.append({"field": f"{path}.type", "code": "schema_type", "message": "不支持的类型"})
+    props = schema.get("properties", {})
+    if not isinstance(props, dict) or any(not isinstance(k, str) for k in props):
+        errors.append({"field": f"{path}.properties", "code": "schema_type", "message": "properties 必须是对象"})
+    else:
+        for key, child in props.items():
+            errors.extend(_schema_definition_errors(child, f"{path}.properties.{key}", depth + 1))
+    required = schema.get("required", [])
+    if not isinstance(required, list) or any(not isinstance(x, str) for x in required):
+        errors.append({"field": f"{path}.required", "code": "schema_type", "message": "required 必须是字符串数组"})
+    elif isinstance(props, dict) and any(x not in props for x in required):
+        errors.append({"field": f"{path}.required", "code": "unknown_required", "message": "required 字段必须在 properties 中定义"})
+    if "items" in schema:
+        errors.extend(_schema_definition_errors(schema["items"], f"{path}.items", depth + 1))
+    if "enum" in schema and (not isinstance(schema["enum"], list) or not schema["enum"]):
+        errors.append({"field": f"{path}.enum", "code": "schema_type", "message": "enum 必须是非空数组"})
+    if "additionalProperties" in schema and not isinstance(schema["additionalProperties"], bool):
+        errors.append({"field": f"{path}.additionalProperties", "code": "schema_type", "message": "additionalProperties 只支持布尔值"})
+    for key in ("minLength", "maxLength", "minItems", "maxItems"):
+        if key in schema and (not isinstance(schema[key], int) or isinstance(schema[key], bool) or schema[key] < 0):
+            errors.append({"field": f"{path}.{key}", "code": "schema_bound", "message": "长度边界必须是非负整数"})
+    for key in ("minimum", "maximum"):
+        if key in schema and (not isinstance(schema[key], (int, float)) or isinstance(schema[key], bool)):
+            errors.append({"field": f"{path}.{key}", "code": "schema_bound", "message": "数值边界必须是数字"})
+    if isinstance(schema.get("minLength"), int) and isinstance(schema.get("maxLength"), int) and schema["minLength"] > schema["maxLength"]:
+        errors.append({"field": path, "code": "schema_bounds", "message": "最小长度不能大于最大长度"})
+    if isinstance(schema.get("minItems"), int) and isinstance(schema.get("maxItems"), int) and schema["minItems"] > schema["maxItems"]:
+        errors.append({"field": path, "code": "schema_bounds", "message": "最小数组长度不能大于最大值"})
+    if isinstance(schema.get("minimum"), (int, float)) and isinstance(schema.get("maximum"), (int, float)) and schema["minimum"] > schema["maximum"]:
+        errors.append({"field": path, "code": "schema_bounds", "message": "最小值不能大于最大值"})
+    return errors
+
+
+def validate_contract(schema: Any, value: Any) -> dict:
+    """Validate JSON data against the deliberately small, non-executable schema subset."""
+    definition_errors = _schema_definition_errors(schema)
+    if definition_errors:
+        return {"supported": True, "valid": False, "errors": definition_errors}
+    errors: list[dict] = []
+
+    def visit(rule: dict, item: Any, path: str, depth: int = 0) -> None:
+        if depth > 16:
+            errors.append({"path": path, "code": "max_depth"})
+            return
+        kind = rule.get("type")
+        checks = {
+            "object": lambda x: isinstance(x, dict),
+            "array": lambda x: isinstance(x, list),
+            "string": lambda x: isinstance(x, str),
+            "number": lambda x: isinstance(x, (int, float)) and not isinstance(x, bool),
+            "integer": lambda x: isinstance(x, int) and not isinstance(x, bool),
+            "boolean": lambda x: isinstance(x, bool),
+            "null": lambda x: x is None,
+        }
+        if kind in checks and not checks[kind](item):
+            errors.append({"path": path, "code": "type", "expected": kind})
+            return
+        if "enum" in rule and item not in rule["enum"]:
+            errors.append({"path": path, "code": "enum"})
+        if isinstance(item, dict):
+            props = rule.get("properties", {})
+            for required in rule.get("required", []):
+                if required not in item:
+                    errors.append({"path": f"{path}.{required}", "code": "required"})
+            for key, child_value in item.items():
+                if key in props:
+                    visit(props[key], child_value, f"{path}.{key}", depth + 1)
+                elif rule.get("additionalProperties") is False:
+                    errors.append({"path": f"{path}.{key}", "code": "additional_property"})
+        elif isinstance(item, list):
+            if len(item) < rule.get("minItems", 0):
+                errors.append({"path": path, "code": "min_items"})
+            if len(item) > rule.get("maxItems", float("inf")):
+                errors.append({"path": path, "code": "max_items"})
+            if "items" in rule:
+                for index, child_value in enumerate(item):
+                    visit(rule["items"], child_value, f"{path}[{index}]", depth + 1)
+        elif isinstance(item, str):
+            if len(item) < rule.get("minLength", 0):
+                errors.append({"path": path, "code": "min_length"})
+            if len(item) > rule.get("maxLength", float("inf")):
+                errors.append({"path": path, "code": "max_length"})
+        elif isinstance(item, (int, float)) and not isinstance(item, bool):
+            if item < rule.get("minimum", float("-inf")):
+                errors.append({"path": path, "code": "minimum"})
+            if item > rule.get("maximum", float("inf")):
+                errors.append({"path": path, "code": "maximum"})
+
+    visit(schema, value, "$")
+    return {"supported": True, "valid": not errors, "errors": errors}
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
