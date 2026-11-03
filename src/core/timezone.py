@@ -133,7 +133,7 @@ def business_date_cutoffs(day: str, cfg=None, *, end: bool = False) -> tuple[str
 
 def timestamp_before_exclusive_sql(column: str) -> str:
     """SQLite predicate for timestamps strictly before a cutoff in mixed formats."""
-    if not re.fullmatch(r"(?:[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)?|COALESCE\\([A-Za-z_][A-Za-z0-9_]*,\\s*[A-Za-z_][A-Za-z0-9_]*\\))", column):
+    if not re.fullmatch(r"(?:[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?|COALESCE\([A-Za-z_][A-Za-z0-9_]*,\s*[A-Za-z_][A-Za-z0-9_]*\))", column):
         raise ValueError("invalid timestamp column")
     aware = (
         f"(instr(substr({column}, 20), '+') > 0 "
