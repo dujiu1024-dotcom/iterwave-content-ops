@@ -6869,6 +6869,158 @@ def _register_routes(app: FastAPI) -> None:
                 "tags": json.loads(tags_json) if tags_json else [],
             }
     
+    @app.get("/api/contents/{content_id}/visual-generation-task")
+    def visual_generation_task_status(content_id: str):
+        """Read the durable image-generation lifecycle without exposing filesystem paths."""
+        from src.core.visual_task_store import VisualTaskStore
+
+        conn = _g()["conn"]
+        cfg = _g()["cfg"]
+        row = _content_row(conn, content_id)
+        job = conn.execute(
+            "SELECT id,status,created_at,error_message FROM media_generation_jobs WHERE prompt=? ORDER BY id DESC LIMIT 1",
+            (f"manual_full_card_regeneration:{content_id}",),
+        ).fetchone()
+        if job is None:
+            return {"task_id": None, "status": "not_found", "message": "", "pages": []}
+        task_id = f"manual-card-{int(job['id'])}"
+        db_path = getattr(getattr(cfg, "paths", None), "db_file", "data/easel.db")
+        if callable(getattr(cfg, "resolve_path", None)):
+            db_path = cfg.resolve_path(db_path)
+        task = VisualTaskStore(db_path).get_task(task_id)
+        from src.core.ai_card_generation import _paginate_body
+        try:
+            total_pages = 1 + len(_paginate_body(
+                row["body"] or "", max_chars=60, segments_per_page=3,
+            ))
+        except ValueError:
+            total_pages = max(1, len(task["pages"]) if task else 1)
+        if task is None:
+            if job["status"] == "running":
+                try:
+                    created_at = datetime.fromisoformat(str(job["created_at"]))
+                    if created_at.tzinfo is None:
+                        created_at = created_at.replace(tzinfo=_storage_now().tzinfo)
+                    startup_stale = (_storage_now() - created_at).total_seconds() > 60
+                except (TypeError, ValueError):
+                    startup_stale = False
+                if startup_stale:
+                    conn.execute(
+                        "UPDATE media_generation_jobs SET status='failed', "
+                        "error_message='图片任务启动中断，详细原因仅记录在服务端日志', completed_at=? WHERE id=?",
+                        (_storage_now().isoformat(timespec="seconds"), job["id"]),
+                    )
+                    conn.commit()
+                    return {
+                        "task_id": task_id, "status": "interrupted",
+                        "message": "图片任务启动后未建立页面检查点，可能因服务重启或超时中断。请人工核实后再安全重试；不会自动重放整轮生产任务。",
+                        "pages": [
+                            {"page_index": index, "status": "pending", "attempts": 0, "message": ""}
+                            for index in range(total_pages)
+                        ],
+                    }
+                return {
+                    "task_id": task_id, "status": "running",
+                    "message": "图片生成任务已登记，正在准备执行。",
+                    "pages": [
+                        {"page_index": index, "status": "pending", "attempts": 0, "message": ""}
+                        for index in range(total_pages)
+                    ],
+                }
+            if job["status"] == "failed" and "图片任务启动中断" in str(job["error_message"] or ""):
+                return {
+                    "task_id": task_id, "status": "interrupted",
+                    "message": "图片任务启动后未建立页面检查点，可能因服务重启或超时中断。请人工核实后再安全重试；不会自动重放整轮生产任务。",
+                    "pages": [
+                        {"page_index": index, "status": "pending", "attempts": 0, "message": ""}
+                        for index in range(total_pages)
+                    ],
+                }
+            return {
+                "task_id": task_id, "status": "failed",
+                "message": "图片生成任务未完成。请人工核实后再决定是否重新生成。",
+                "pages": [
+                    {"page_index": index, "status": "pending", "attempts": 0, "message": ""}
+                    for index in range(total_pages)
+                ],
+            }
+        checkpoint_by_index = {page["page_index"]: page for page in task["pages"]}
+        try:
+            final_image_paths = json.loads(row["image_paths"] or "[]")
+        except (TypeError, ValueError):
+            final_image_paths = []
+        missing_final_pages = []
+        if task["status"] == "completed" and job["status"] == "succeeded":
+            missing_final_pages = [
+                index for index in range(total_pages)
+                if index >= len(final_image_paths)
+                or not final_image_paths[index]
+                or not Path(final_image_paths[index]).is_file()
+            ]
+        missing_pages = sorted(set(task["artifact_missing_pages"]) | set(missing_final_pages))
+        finalization_stale = bool(
+            task["status"] == "completed" and job["status"] == "running"
+            and task["finished_at"] is not None
+            and _storage_now().timestamp() - float(task["finished_at"]) > 60
+        )
+        if finalization_stale:
+            task_status = "interrupted"
+        elif task["status"] == "completed" and job["status"] == "running":
+            task_status = "running"
+        elif task["status"] == "completed" and (job["status"] == "failed" or missing_pages):
+            task_status = "failed"
+        else:
+            task_status = task["status"]
+
+        messages = {
+            "running": "图片正在生成。刷新页面或重新进入后，任务状态会继续同步。",
+            "retrying": "任务正在恢复；已完成页面会复用，未完成页面才会继续生成。",
+            "interrupted": "任务已中断。请先核实已完成页面；系统不会自动重放整轮生产任务。",
+            "completed": "图片生成已完成，页面文件已通过完整校验。",
+            "failed": "图片生成未完成。请核实已生成页面和文件后，再由人工发起安全重试。",
+        }
+        if finalization_stale:
+            message = "图片页面已生成，但最终文件保存未确认，可能因服务重启或超时中断。请人工核实已完成页面后再安全重试；不会自动重放整轮生产任务。"
+        elif task["status"] == "completed" and job["status"] == "running":
+            message = "图片页面已生成，正在保存最终文件与审核记录；请勿重复点击。"
+        elif missing_pages:
+            message = "检测到已完成页面文件缺失，已停止按成功处理。请人工核实文件后再决定是否重新生成。"
+        elif task["error_kind"] == "timeout":
+            message = "图片生成超时或服务中断。请人工核实已完成页面文件后，再安全重试；系统不会自动重放整轮生产任务。"
+        elif task["error_kind"] == "ocr":
+            message = "OCR 校验未通过。请人工核对图片文字与数字，确认内容正确后再安全重试。"
+        else:
+            message = messages.get(task_status, "图片任务状态未知，请人工核实。")
+        return {
+            "task_id": task["task_id"],
+            "status": task_status,
+            "message": message,
+            "started_at": task["started_at"],
+            "updated_at": task["updated_at"],
+            "finished_at": task["finished_at"],
+            "artifact_missing_pages": missing_pages,
+            "failure_kind": task["error_kind"],
+            "pages": [
+                {
+                    "page_index": page_index,
+                    "status": (
+                        "missing" if page_index in missing_pages
+                        else checkpoint_by_index[page_index]["status"] if page_index in checkpoint_by_index
+                        else "pending"
+                    ),
+                    "attempts": checkpoint_by_index[page_index]["attempts"] if page_index in checkpoint_by_index else 0,
+                    "message": (
+                        "页面文件缺失" if checkpoint_by_index.get(page_index, {}).get("status") == "missing"
+                        else "OCR 校验未通过" if checkpoint_by_index.get(page_index, {}).get("error_kind") == "ocr"
+                        else "页面生成超时" if checkpoint_by_index.get(page_index, {}).get("error_kind") == "timeout"
+                        else "页面生成失败" if checkpoint_by_index.get(page_index, {}).get("status") == "failed"
+                        else ""
+                    ),
+                }
+                for page_index in range(total_pages)
+            ],
+        }
+
     @app.post("/api/contents/{content_id}/cards")
     @manages_own_transaction
     def regenerate_cards(content_id: str):
@@ -6978,12 +7130,12 @@ def _register_routes(app: FastAPI) -> None:
                     platform=platform, cfg=cfg, settings=settings,
                     allow_fallback=settings.get("fallback_enabled"),
                     brand_profile=profile,
+                    task_id=f"manual-card-{job_id}",
                 )
             usage = budget.snapshot()
             conn.execute(
-                "UPDATE media_generation_jobs SET status='succeeded', api_calls=?, "
-                "failed_api_calls=?, completed_at=? WHERE id=?",
-                (usage["api_calls"], usage["failed_calls"], _storage_now().isoformat(timespec="seconds"), job_id),
+                "UPDATE media_generation_jobs SET api_calls=?, failed_api_calls=? WHERE id=?",
+                (usage["api_calls"], usage["failed_calls"], job_id),
             )
             conn.commit()
         except HTTPException:
@@ -7008,68 +7160,99 @@ def _register_routes(app: FastAPI) -> None:
                     (usage["api_calls"], usage["failed_calls"], _storage_now().isoformat(timespec="seconds"), job_id),
                 )
                 conn.commit()
+            from src.core.visual_task_store import VisualTaskBusy
+            if isinstance(exc, VisualTaskBusy):
+                if job_id is not None:
+                    conn.execute("DELETE FROM media_generation_jobs WHERE id=?", (job_id,))
+                    conn.commit()
+                raise HTTPException(409, "已有图片生成任务正在执行，请勿重复点击；稍后刷新查看任务状态") from exc
             if isinstance(exc, (ValueError, RuntimeError)):
                 raise HTTPException(422, f"AI 完整卡片生成或 OCR 硬门失败：{exc}") from exc
             raise
         finally:
             _media_generation_lock.release()
-        from src.core.visual_ocr import load_ocr_report
-        from src.core.visual_persistence import (
-            compute_content_hash, create_visual_page_job, create_visual_version,
-            transition_visual_job,
-        )
-        ocr_report = load_ocr_report(paths)
-        content_hash = compute_content_hash(title, body)
-        body_ai = max(0, len(paths) - 1)
-        has_ai = bool(paths)
-        visual_status = "generated" if has_ai else "degraded"
-        visual_reason = (
-            (f"图片 API 直接生成完整卡片：封面 + {body_ai} 张正文页；无模板叠字、无背景图后期拼字")
-            if has_ai else "AI 完整卡片生成失败，不允许模板降级"
-        ) + ("；OCR 硬门通过，仍需人工审核" if ocr_report.get("status") == "passed"
-             else "；OCR 硬门未通过或不可用，需人工复核")
-        with conn:
-            version_id = create_visual_version(
-                conn, content_id=content_id, content_hash=content_hash,
-                renderer="ai_image_api", style_key="ai_complete_card",
-                design={
-                    "platform": platform.value, "title": title,
-                    "subtitle": subtitle, "body": body,
-                    "generation_mode": "ai_complete_card",
-                    "background_path": None,
-                    "body_pages": pages,
-                    "pages": [
-                        {"page_index": index, "image_path": str(path),
-                         "background_path": None,
-                         "generation_mode": "ai_complete_card"}
-                        for index, path in enumerate(paths)
-                    ],
-                    "ocr": ocr_report,
-                },
+        try:
+            from src.core.visual_ocr import load_ocr_report
+            from src.core.visual_persistence import (
+                compute_content_hash, create_visual_page_job, create_visual_version,
+                transition_visual_job,
             )
-            conn.execute(
-                "UPDATE visual_design_versions SET status=? WHERE id=?",
-                ("rendered" if ocr_report.get("status") == "passed" else "review_required", version_id),
-            )
-            for index, path in enumerate(paths):
-                job_id = create_visual_page_job(
-                    conn, content_id=content_id, visual_version_id=version_id,
-                    page_index=index, job_type="rerender",
-                    input_data={"source": "manual_full_regeneration"},
+            ocr_report = load_ocr_report(paths)
+            content_hash = compute_content_hash(title, body)
+            body_ai = max(0, len(paths) - 1)
+            has_ai = bool(paths)
+            visual_status = "generated" if has_ai else "degraded"
+            visual_reason = (
+                (f"图片 API 直接生成完整卡片：封面 + {body_ai} 张正文页；无模板叠字、无背景图后期拼字")
+                if has_ai else "AI 完整卡片生成失败，不允许模板降级"
+            ) + ("；OCR 硬门通过，仍需人工审核" if ocr_report.get("status") == "passed"
+                 else "；OCR 硬门未通过或不可用，需人工复核")
+            with conn:
+                version_id = create_visual_version(
+                    conn, content_id=content_id, content_hash=content_hash,
+                    renderer="ai_image_api", style_key="ai_complete_card",
+                    design={
+                        "platform": platform.value, "title": title,
+                        "subtitle": subtitle, "body": body,
+                        "generation_mode": "ai_complete_card",
+                        "background_path": None,
+                        "body_pages": pages,
+                        "pages": [
+                            {"page_index": index, "image_path": str(path),
+                             "background_path": None,
+                             "generation_mode": "ai_complete_card"}
+                            for index, path in enumerate(paths)
+                        ],
+                        "ocr": ocr_report,
+                    },
                 )
-                transition_visual_job(conn, job_id=job_id, expected_status="queued", new_status="running")
-                transition_visual_job(
-                    conn, job_id=job_id, expected_status="running", new_status="succeeded",
-                    output_data={"image_path": str(path)},
+                conn.execute(
+                    "UPDATE visual_design_versions SET status=? WHERE id=?",
+                    ("rendered" if ocr_report.get("status") == "passed" else "review_required", version_id),
                 )
+                for index, path in enumerate(paths):
+                    visual_page_job_id = create_visual_page_job(
+                        conn, content_id=content_id, visual_version_id=version_id,
+                        page_index=index, job_type="rerender",
+                        input_data={"source": "manual_full_regeneration"},
+                    )
+                    transition_visual_job(conn, job_id=visual_page_job_id, expected_status="queued", new_status="running")
+                    transition_visual_job(
+                        conn, job_id=visual_page_job_id, expected_status="running", new_status="succeeded",
+                        output_data={"image_path": str(path)},
+                    )
+                conn.execute(
+                    "UPDATE contents SET image_paths = ?, visual_status = ?, visual_reason = ? WHERE id = ?",
+                    (json.dumps([str(path) for path in paths], ensure_ascii=False),
+                     visual_status, visual_reason, content_id),
+                )
+            # 历史版本图片保留，版本接口继续可读取；不做破坏性清理。
+            usage = budget.snapshot()
             conn.execute(
-                "UPDATE contents SET image_paths = ?, visual_status = ?, visual_reason = ? WHERE id = ?",
-                (json.dumps([str(path) for path in paths], ensure_ascii=False),
-                 visual_status, visual_reason, content_id),
+                "UPDATE media_generation_jobs SET status='succeeded', api_calls=?, "
+                "failed_api_calls=?, completed_at=? WHERE id=?",
+                (usage["api_calls"], usage["failed_calls"], _storage_now().isoformat(timespec="seconds"), job_id),
             )
-        # 历史版本图片保留，版本接口继续可读取；不做破坏性清理。
-        return {"id": content_id, "image_count": len(paths),
-                "image_paths": [p.name for p in paths]}
+            conn.commit()
+            return {"id": content_id, "image_count": len(paths),
+                    "image_paths": [p.name for p in paths]}
+        except Exception as exc:
+            logger.exception(
+                "图片生成最终文件持久化失败 content=%s job=%s",
+                content_id, job_id,
+            )
+            usage = budget.snapshot() if budget is not None else {"api_calls": 0, "failed_calls": 0}
+            if job_id is not None:
+                conn.execute(
+                    "UPDATE media_generation_jobs SET status='failed', api_calls=?, failed_api_calls=?, "
+                    "error_message='图片生成结果保存失败，详细原因仅记录在服务端日志', completed_at=? WHERE id=?",
+                    (usage["api_calls"], usage["failed_calls"], _storage_now().isoformat(timespec="seconds"), job_id),
+                )
+                conn.commit()
+            if isinstance(exc, HTTPException):
+                raise
+            raise HTTPException(500, "图片生成结果保存失败，请人工核实已生成页面后再重试") from exc
+
 
     @app.post("/api/contents/{content_id}/recheck")
     def recheck_content(content_id: str):

@@ -4,7 +4,7 @@ import { navigate, useUrlTab } from "../nav";
 import {
   api, RunRoundReport, SpiralRound, Draft, Platform, AssetItem,
   PlanResponse, ContentItem, PipelineResponse, RecheckResult, Goal, AutogrowStatus,
-  TaskProgress,
+  TaskProgress, VisualGenerationTask,
 } from "../api";
 import DemoBadge from "../components/DemoBadge";
 import EmptyHint from "../components/EmptyHint";
@@ -117,6 +117,8 @@ export default function Production() {
   const [rejectReason, setRejectReason] = useState("");
   /** 卡片图加载失败的序号（避免破图静默留白，明确提示文件缺失） */
   const [brokenCards, setBrokenCards] = useState<Record<number, true>>({});
+  const [visualTask, setVisualTask] = useState<VisualGenerationTask | null>(null);
+  const [regenActive, setRegenActive] = useState(false);
   /** 当前弹层预览的卡片序号（null = 不展示预览层） */
   const [previewCard, setPreviewCard] = useState<number | null>(null);
 
@@ -253,6 +255,41 @@ export default function Production() {
     setEditTags(item.tags.join(" "));
     setRecheck(null);
   }, [selectedContentId, contents]);
+
+  useEffect(() => {
+    setVisualTask(null);
+  }, [selectedContentId]);
+
+  // 图片任务状态由后端持久化；刷新/重新进入后继续读取，运行中每 2 秒同步检查点。
+  useEffect(() => {
+    if (!selectedContentId) {
+      setVisualTask(null);
+      return;
+    }
+    let active = true;
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const task = await api.visualGenerationTask(selectedContentId);
+        if (!active) return;
+        setVisualTask(task);
+        if (task.status === "completed") {
+          if (currentRoundId) await loadRoundData(currentRoundId);
+          return;
+        }
+        if (regenActive || task.status === "running" || task.status === "retrying") {
+          timer = window.setTimeout(poll, 2000);
+        }
+      } catch {
+        if (active && regenActive) timer = window.setTimeout(poll, 2000);
+      }
+    };
+    poll();
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [selectedContentId, currentRoundId, regenActive]);
 
   // 卡片大图预览层：Esc 关闭
   useEffect(() => {
@@ -504,17 +541,29 @@ export default function Production() {
 
   /** 按当前标题/正文重新出图：封面 + 正文分页（历史内容也能补图） */
   const handleRegenerateCards = async () => {
-    if (!selectedContentId) return;
+    if (!selectedContentId || regenActive) return;
+    setRegenActive(true);
     await withPending("regen-cards", async () => {
       try {
         const res = await api.regenerateContentCards(selectedContentId);
         showToast(`✓ 已生成 ${res.image_count} 张卡片`, "success");
         await loadRoundData(currentRoundId!);
+        const task = await api.visualGenerationTask(selectedContentId);
+        setVisualTask(task);
       } catch (e: any) {
-        showToast(`生成卡片失败: ${e.message}`, "error");
+        const message = String(e?.message ?? "未知原因");
+        showToast(
+          message.includes("已有图片生成任务正在执行")
+            ? "已有图片生成任务正在执行，已切换为状态跟踪；不会重复发起图片生成。"
+            : `生成卡片失败: ${message}`,
+          "error",
+        );
+      } finally {
+        setRegenActive(false);
       }
     });
   };
+
 
   const handleRecheck = async () => {
     if (!selectedContentId) return;
@@ -1227,6 +1276,41 @@ export default function Production() {
               </div>
             </div>
 
+            {visualTask && visualTask.status !== "not_found" && (
+              <div className="note" role="status" aria-live="polite" style={{ marginBottom: 12 }}>
+                <div style={{ fontWeight: 700, marginBottom: 4 }}>
+                  {{
+                    running: "图片生成中",
+                    retrying: "正在恢复任务",
+                    interrupted: "任务已中断",
+                    completed: "图片生成完成",
+                    failed: "图片生成失败",
+                    not_found: "",
+                  }[visualTask.status]}
+                </div>
+                <div>{visualTask.message}</div>
+                {visualTask.pages.length > 0 && (
+                  <div style={{ display: "grid", gap: 4, marginTop: 8 }}>
+                    {visualTask.pages.map((page) => {
+                      const labels: Record<string, string> = {
+                        pending: "待生成",
+                        running: "生成中",
+                        completed: "已完成",
+                        failed: "校验失败",
+                        missing: "文件缺失",
+                      };
+                      return (
+                        <div key={page.page_index} style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                          <span>第 {page.page_index + 1} 张</span>
+                          <span>{labels[page.status]}{page.attempts ? ` · 尝试 ${page.attempts} 次` : ""}{page.message ? ` · ${page.message}` : ""}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
             {!selectedContent && (
               <EmptyHint next="在左侧「本轮内容」列表点击一篇文案">尚未选择内容</EmptyHint>
             )}
@@ -1332,8 +1416,8 @@ export default function Production() {
                 <div className="panel-sub">封面 + 正文分页，点图看原图</div>
               </div>
               {selectedContent && (
-                <button className="btn sm" onClick={handleRegenerateCards} disabled={isPending("regen-cards")}>
-                  {isPending("regen-cards") ? "生成中…" : "↻ 重新生成"}
+                <button className="btn sm" onClick={handleRegenerateCards} disabled={isPending("regen-cards") || regenActive || visualTask?.status === "running" || visualTask?.status === "retrying"}>
+                  {isPending("regen-cards") || regenActive || visualTask?.status === "running" || visualTask?.status === "retrying" ? "生成中…" : visualTask?.status === "interrupted" || visualTask?.status === "failed" ? "↻ 人工核实后重试" : "↻ 重新生成"}
                 </button>
               )}
             </div>

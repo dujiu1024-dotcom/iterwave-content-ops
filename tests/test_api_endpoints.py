@@ -109,6 +109,239 @@ def test_activation_samples_reject_second_active_run_and_replay_idempotently(cli
         "AND status IN ('created','generating','quality_check')"
     ).fetchone()[0] == 1
 
+def test_visual_generation_task_status_is_durable_and_redacts_paths(client, tmp_path):
+    from src.core.visual_task_store import VisualTaskStore
+
+    tc, conn, seed = client
+    round_id = seed.round()
+    topic_id = seed.topic("visual-task-topic")
+    content_id = "visual-task-content"
+    title, body = "图片任务状态", "正文第一页内容。"
+    conn.execute(
+        "INSERT INTO contents (id,round_id,topic_id,platform,title,body) VALUES (?,?,?,?,?,?)",
+        (content_id, round_id, topic_id, "xhs", title, body),
+    )
+    cur = conn.execute(
+        "INSERT INTO media_generation_jobs (prompt,final_prompt,model,status,created_at) "
+        "VALUES (?,?,?,'running',?)",
+        (f"manual_full_card_regeneration:{content_id}", "test", "test-model", datetime.now().isoformat()),
+    )
+    conn.commit()
+    task_id = f"manual-card-{int(cur.lastrowid)}"
+    cfg = api_main._g_ctx["cfg"]
+    db_path = cfg.resolve_path(cfg.paths.db_file)
+    store = VisualTaskStore(db_path)
+    owner = store.acquire(task_id, "test-account-group", owner="browser-test")
+    store.start_page(task_id, 0)
+
+    response = tc.get(f"/api/contents/{content_id}/visual-generation-task")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["task_id"] == task_id
+    assert payload["status"] == "running"
+    assert [page["status"] for page in payload["pages"]] == ["running", "pending"]
+    assert all("output_path" not in page for page in payload["pages"])
+    store.finish(task_id, owner, "failed", "private internal error")
+
+
+def test_visual_generation_task_status_tracks_registered_job_before_first_checkpoint(client):
+    tc, conn, seed = client
+    round_id = seed.round()
+    topic_id = seed.topic("visual-task-queued")
+    content_id = "visual-task-queued-content"
+    conn.execute(
+        "INSERT INTO contents (id,round_id,topic_id,platform,title,body) VALUES (?,?,?,?,?,?)",
+        (content_id, round_id, topic_id, "xhs", "正在准备", "正文第一页。"),
+    )
+    conn.execute(
+        "INSERT INTO media_generation_jobs (prompt,final_prompt,model,status,created_at) "
+        "VALUES (?,?,?,'running',?)",
+        (f"manual_full_card_regeneration:{content_id}", "test", "test-model", datetime.now().isoformat()),
+    )
+    conn.commit()
+
+    response = tc.get(f"/api/contents/{content_id}/visual-generation-task")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "running"
+    assert payload["message"] == "图片生成任务已登记，正在准备执行。"
+    assert [page["status"] for page in payload["pages"]] == ["pending", "pending"]
+
+
+def test_visual_generation_task_status_fails_when_final_content_image_is_missing(client, tmp_path):
+    import json
+    from src.core.visual_task_store import VisualTaskStore
+
+    tc, conn, seed = client
+    round_id = seed.round()
+    topic_id = seed.topic("visual-task-final-missing")
+    content_id = "visual-task-final-missing-content"
+    valid_final = tmp_path / "final-page-1.png"
+    valid_final.write_bytes(b"image")
+    conn.execute(
+        "INSERT INTO contents (id,round_id,topic_id,platform,title,body,image_paths) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (content_id, round_id, topic_id, "xhs", "缺失最终文件", "正文第一页。",
+         json.dumps([str(tmp_path / "missing-final-page.png"), str(valid_final)])),
+    )
+    cur = conn.execute(
+        "INSERT INTO media_generation_jobs (prompt,final_prompt,model,status,created_at) "
+        "VALUES (?,?,?,'succeeded',?)",
+        (f"manual_full_card_regeneration:{content_id}", "test", "test-model", datetime.now().isoformat()),
+    )
+    conn.commit()
+    task_id = f"manual-card-{int(cur.lastrowid)}"
+    cfg = api_main._g_ctx["cfg"]
+    store = VisualTaskStore(cfg.resolve_path(cfg.paths.db_file))
+    owner = store.acquire(task_id, "test-account-group", owner="final-artifact-test")
+    cached_pages = []
+    for page_index in range(2):
+        cached = tmp_path / f"cached-{page_index}.png"
+        cached.write_bytes(b"cached image")
+        cached_pages.append(cached)
+        store.start_page(task_id, page_index)
+        store.complete_page(task_id, page_index, str(cached))
+    store.finish(task_id, owner, "completed")
+
+    response = tc.get(f"/api/contents/{content_id}/visual-generation-task")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "failed"
+    assert payload["artifact_missing_pages"] == [0]
+    assert payload["pages"][0]["status"] == "missing"
+    assert "页面文件缺失" in payload["message"]
+    assert str(tmp_path) not in payload["message"]
+
+
+def test_visual_generation_task_status_marks_stale_job_without_checkpoints_interrupted(client):
+    from datetime import timedelta
+
+    tc, conn, seed = client
+    round_id = seed.round()
+    topic_id = seed.topic("visual-task-startup-stale")
+    content_id = "visual-task-startup-stale-content"
+    conn.execute(
+        "INSERT INTO contents (id,round_id,topic_id,platform,title,body) VALUES (?,?,?,?,?,?)",
+        (content_id, round_id, topic_id, "xhs", "启动中断", "正文第一页。"),
+    )
+    stale_created_at = (datetime.now() - timedelta(minutes=2)).isoformat()
+    cur = conn.execute(
+        "INSERT INTO media_generation_jobs (prompt,final_prompt,model,status,created_at) "
+        "VALUES (?,?,?,'running',?)",
+        (f"manual_full_card_regeneration:{content_id}", "test", "test-model", stale_created_at),
+    )
+    conn.commit()
+
+    response = tc.get(f"/api/contents/{content_id}/visual-generation-task")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "interrupted"
+    assert "未建立页面检查点" in payload["message"]
+    job = conn.execute(
+        "SELECT status FROM media_generation_jobs WHERE id=?", (cur.lastrowid,)
+    ).fetchone()
+    assert job["status"] == "failed"
+    assert tc.get(f"/api/contents/{content_id}/visual-generation-task").json()["status"] == "interrupted"
+
+
+def test_visual_generation_task_status_marks_stale_finalization_interrupted(client, tmp_path):
+    from src.core.visual_task_store import VisualTaskStore
+
+    tc, conn, seed = client
+    round_id = seed.round()
+    topic_id = seed.topic("visual-task-finalization-stale")
+    content_id = "visual-task-finalization-stale-content"
+    conn.execute(
+        "INSERT INTO contents (id,round_id,topic_id,platform,title,body) VALUES (?,?,?,?,?,?)",
+        (content_id, round_id, topic_id, "xhs", "保存中断", "正文第一页。"),
+    )
+    cur = conn.execute(
+        "INSERT INTO media_generation_jobs (prompt,final_prompt,model,status,created_at) "
+        "VALUES (?,?,?,'running',?)",
+        (f"manual_full_card_regeneration:{content_id}", "test", "test-model", datetime.now().isoformat()),
+    )
+    conn.commit()
+    task_id = f"manual-card-{int(cur.lastrowid)}"
+    cfg = api_main._g_ctx["cfg"]
+    store = VisualTaskStore(cfg.resolve_path(cfg.paths.db_file))
+    owner = store.acquire(task_id, "test-account-group", owner="finalization-test")
+    for page_index in range(2):
+        cached = tmp_path / f"finalizing-cache-{page_index}.png"
+        cached.write_bytes(b"cached image")
+        store.start_page(task_id, page_index)
+        store.complete_page(task_id, page_index, str(cached))
+    store.finish(task_id, owner, "completed")
+    conn.execute(
+        "UPDATE visual_generation_tasks SET finished_at=0 WHERE task_id=?",
+        (task_id,),
+    )
+    conn.commit()
+
+    response = tc.get(f"/api/contents/{content_id}/visual-generation-task")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "interrupted"
+    assert "服务重启或超时中断" in payload["message"]
+    assert "不会自动重放整轮" in payload["message"]
+
+
+def test_visual_generation_task_status_explains_timeout_recovery_boundary(client):
+    from src.core.visual_task_store import VisualTaskStore
+
+    tc, conn, seed = client
+    round_id = seed.round()
+    topic_id = seed.topic("visual-task-timeout")
+    content_id = "visual-task-timeout-content"
+    conn.execute(
+        "INSERT INTO contents (id,round_id,topic_id,platform,title,body) VALUES (?,?,?,?,?,?)",
+        (content_id, round_id, topic_id, "xhs", "超时任务", "正文第一页。"),
+    )
+    cur = conn.execute(
+        "INSERT INTO media_generation_jobs (prompt,final_prompt,model,status,created_at) "
+        "VALUES (?,?,?,'failed',?)",
+        (f"manual_full_card_regeneration:{content_id}", "test", "test-model", datetime.now().isoformat()),
+    )
+    conn.commit()
+    task_id = f"manual-card-{int(cur.lastrowid)}"
+    cfg = api_main._g_ctx["cfg"]
+    store = VisualTaskStore(cfg.resolve_path(cfg.paths.db_file))
+    owner = store.acquire(task_id, "test-account-group", owner="timeout-test")
+    store.finish(task_id, owner, "failed", "图片单页超时：/private/path")
+
+    response = tc.get(f"/api/contents/{content_id}/visual-generation-task")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "failed"
+    assert payload["failure_kind"] == "timeout"
+    assert "超时" in payload["message"]
+    assert "不会自动重放整轮" in payload["message"]
+    assert "/private/path" not in payload["message"]
+
+
+def test_visual_generation_task_status_returns_not_found_without_starting_generation(client):
+    tc, conn, seed = client
+    round_id = seed.round()
+    topic_id = seed.topic("visual-task-empty")
+    content_id = "visual-task-not-started"
+    conn.execute(
+        "INSERT INTO contents (id,round_id,topic_id,platform,title,body) VALUES (?,?,?,?,?,?)",
+        (content_id, round_id, topic_id, "xhs", "未开始", "正文"),
+    )
+    conn.commit()
+
+    response = tc.get(f"/api/contents/{content_id}/visual-generation-task")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "not_found"
+    assert response.json()["pages"] == []
+
+
 def test_rhythm_config_exposes_quota_slots_for_all_supported_platforms(client):
     tc, _, _ = client
     response = tc.get("/api/rhythm")

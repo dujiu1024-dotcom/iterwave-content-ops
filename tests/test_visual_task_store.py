@@ -91,3 +91,77 @@ def test_completed_task_without_page_checkpoint_fails_closed(tmp_path):
     store.finish("task-a", owner, "completed")
     with pytest.raises(FileNotFoundError, match="completed visual task has no page checkpoint"):
         store.completed_page("task-a", 0)
+
+
+
+def test_task_snapshot_exposes_page_state_without_filesystem_paths(tmp_path):
+    store = _store(tmp_path)
+    owner = store.acquire("task-a", "account-a", owner="worker-a")
+    output = tmp_path / "page.png"
+    output.write_bytes(b"validated image")
+    store.start_page("task-a", 0)
+    store.complete_page("task-a", 0, str(output))
+
+    snapshot = store.get_task("task-a")
+
+    assert snapshot["status"] == "running"
+    assert snapshot["pages"] == [{
+        "page_index": 0, "status": "completed", "attempts": 1,
+        "has_error": False, "error_kind": None,
+    }]
+    assert "output_path" not in snapshot["pages"][0]
+
+
+def test_task_snapshot_marks_expired_lease_interrupted(tmp_path):
+    store = _store(tmp_path)
+    store.acquire("task-a", "account-a", owner="worker-a", lease_seconds=1)
+    conn = sqlite3.connect(tmp_path / "visual.db")
+    conn.execute(
+        "UPDATE visual_generation_account_leases SET expires_at=0 WHERE account_group='account-a'"
+    )
+    conn.commit()
+    conn.close()
+
+    snapshot = store.get_task("task-a")
+
+    assert snapshot["status"] == "interrupted"
+    assert snapshot["has_error"] is True
+    assert snapshot["error_kind"] == "generation"
+
+
+def test_task_snapshot_fails_closed_when_completed_artifact_is_missing(tmp_path):
+    store = _store(tmp_path)
+    owner = store.acquire("task-a", "account-a", owner="worker-a")
+    store.start_page("task-a", 0)
+    store.complete_page("task-a", 0, str(tmp_path / "deleted-page.png"))
+    store.finish("task-a", owner, "completed")
+
+    snapshot = store.get_task("task-a")
+
+    assert snapshot["status"] == "failed"
+    assert snapshot["artifact_missing_pages"] == [0]
+    assert snapshot["pages"][0]["status"] == "missing"
+
+
+def test_task_snapshot_classifies_timeout_without_returning_raw_error(tmp_path):
+    store = _store(tmp_path)
+    owner = store.acquire("task-timeout", "account-a", owner="worker-a")
+    store.finish("task-timeout", owner, "failed", "图片单页超时：/private/path")
+    snapshot = store.get_task("task-timeout")
+
+    assert snapshot["status"] == "failed"
+    assert snapshot["error_kind"] == "timeout"
+    assert snapshot["has_error"] is True
+    assert "error" not in snapshot
+
+
+def test_task_snapshot_classifies_ocr_failure_without_returning_raw_error(tmp_path):
+    store = _store(tmp_path)
+    owner = store.acquire("task-ocr", "account-a", owner="worker-a")
+    store.finish("task-ocr", owner, "failed", "OCR 校验未通过：检测到数字错误")
+    snapshot = store.get_task("task-ocr")
+
+    assert snapshot["status"] == "failed"
+    assert snapshot["error_kind"] == "ocr"
+    assert snapshot["has_error"] is True
+    assert "error" not in snapshot
