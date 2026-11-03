@@ -23,7 +23,7 @@ def _connection():
     return conn
 
 
-def test_prune_uses_business_timezone_and_enforces_retention_and_row_cap(monkeypatch):
+def test_prune_uses_utc_storage_window_and_enforces_retention_and_row_cap(monkeypatch):
     conn = _connection()
     cfg = SimpleNamespace(business_timezone="Asia/Shanghai")
     def fixed_now():
