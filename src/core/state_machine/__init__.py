@@ -17,7 +17,7 @@ import logging
 import uuid
 from datetime import datetime
 
-from src.core.timezone import business_now, parse_persisted_datetime, storage_now
+from src.core.timezone import business_now, parse_persisted_datetime, parse_server_local_legacy_datetime, storage_now
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -332,15 +332,11 @@ class DraftStateMachine:
         expired_ids: list[str] = []
         for draft_id, saved_at_str, created_at_str in cursor.fetchall():
             # 老版本/迁移数据可能没有 saved_at；以创建时间兜底，避免待发布草稿永远无法过期。
-            candidates = [value for value in (saved_at_str, created_at_str) if value]
-            saved_at = None
-            for candidate in candidates:
-                try:
-                    saved_at = parse_persisted_datetime(candidate, self.cfg)
-                    if saved_at is not None:
-                        break
-                except (TypeError, ValueError):
-                    continue
+            # saved_at 在 UTC 持久化统一前由旧版本按服务器本地时区写入；
+            # 仅该历史字段使用 host-local 兼容解析。created_at 保持原有业务时区策略。
+            saved_at = parse_server_local_legacy_datetime(saved_at_str) if saved_at_str else None
+            if saved_at is None and created_at_str:
+                saved_at = parse_persisted_datetime(created_at_str, self.cfg)
             if saved_at is None:
                 logger.warning("草稿 %s 缺少有效 saved_at / created_at，无法自动判过期", draft_id)
                 continue

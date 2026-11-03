@@ -18,7 +18,10 @@ def test_marker_skips_request_level_transaction():
         return {"ok": True}
 
     route = api_main.TransactionalAPIRoute("/api/x", endpoint, methods=["POST"])
+    # The decorator owns cleanup; APIRoute must not add a second wrapper.
     assert route.endpoint is endpoint
+    assert route.endpoint() == {"ok": True}
+    assert calls == ["own"]
 
 
 def test_unmarked_sync_write_route_is_wrapped():

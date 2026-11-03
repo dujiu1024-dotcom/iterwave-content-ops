@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
 
-from .timezone import business_now
+from .timezone import business_now, storage_now, storage_window_cutoffs, timestamp_since_sql
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +168,9 @@ class PlatformInsightsEngine:
     # ------------------------------------------------------------------
 
     def _analyze_one(self, platform: str, round_id: Optional[int], days: int) -> PlatformInsight:
-        since = (business_now(self.cfg) - timedelta(days=days)).isoformat(timespec="seconds")
+        since_utc, since_legacy = storage_window_cutoffs(
+            storage_now() - timedelta(days=days), self.cfg,
+        )
         rows = self.db.execute(
             "SELECT m.interaction_rate, m.like_rate, m.collect_rate, "
             "       c.title, c.word_count, c.card_style, t.dimension, "
@@ -183,12 +185,12 @@ class PlatformInsightsEngine:
             "  ORDER BY d2.user_confirmed_at DESC, d2.id DESC LIMIT 1"
             ") "
             "WHERE m.platform = ? AND m.fetch_status IN ('success','partial') "
-            "  AND m.fetched_at >= ? "
+            "  AND " + timestamp_since_sql("m.fetched_at") + " "
             "  AND m.id = (SELECT MAX(m2.id) FROM metrics m2 "
             "             WHERE m2.content_id = m.content_id AND m2.platform = m.platform "
             "               AND m2.fetch_status IN ('success','partial')) "
             "  AND (? IS NULL OR c.round_id = ?)",
-            (platform, since, round_id, round_id),
+            (platform, since_utc, since_legacy, round_id, round_id),
         ).fetchall()
 
         samples = [
