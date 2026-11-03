@@ -61,6 +61,7 @@ function TaskRow({
   retrying,
   onResolve,
   resolving,
+  onDetails,
 }: {
   task: GlobalTaskQueueItem;
   onCancel: (task: GlobalTaskQueueItem) => void;
@@ -69,6 +70,7 @@ function TaskRow({
   retrying: boolean;
   onResolve: (task: GlobalTaskQueueItem, action: "handled" | "ignored") => void;
   resolving: boolean;
+  onDetails: (task: GlobalTaskQueueItem) => void;
 }) {
   const active = task.status === "queued" || task.status === "running";
   return (
@@ -78,6 +80,7 @@ function TaskRow({
         <div className="muted" style={{ fontSize: 12, marginTop: 4, overflowWrap: "anywhere" }}>
           {task.tenant_name} · {aggregateLabel(task)}
         </div>
+        <button className="btn sm ghost" type="button" style={{ marginTop: 6 }} onClick={() => onDetails(task)}>查看详情</button>
       </div>
       <div>
         <span className={`status-pill ${task.status === "failed" || task.status === "interrupted" ? "failed" : task.status === "running" ? "producing" : task.status === "succeeded" ? "completed" : task.status === "cancelled" ? "cancelled" : "creating"}`}>
@@ -161,6 +164,9 @@ export default function TaskQueue() {
   const [resolutionAction, setResolutionAction] = useState<"handled" | "ignored">("handled");
   const [resolutionNote, setResolutionNote] = useState("");
   const [resolvingId, setResolvingId] = useState<string | null>(null);
+  const [detailTask, setDetailTask] = useState<import("../api").GlobalTaskQueueDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState("");
 
   const refresh = useCallback(async () => {
     try {
@@ -214,6 +220,19 @@ export default function TaskQueue() {
     [activeItems],
   );
   const history = historyItems;
+
+  const openDetails = async (task: GlobalTaskQueueItem) => {
+    setDetailTask(null);
+    setDetailError("");
+    setDetailLoading(true);
+    try {
+      setDetailTask(await api.taskQueueDetail(task.task_id));
+    } catch (err) {
+      setDetailError((err as Error).message || "任务详情读取失败");
+    } finally {
+      setDetailLoading(false);
+    }
+  };
 
   const cancel = async (task: GlobalTaskQueueItem) => {
     setCancellingId(task.task_id);
@@ -308,7 +327,7 @@ export default function TaskQueue() {
           <span className="muted">共 {activeTotal} 项 · 第 {activePage}/{activePages} 页</span>
         </div>
         {loading ? <div className="empty-state">正在读取队列…</div> : active.length ? (
-          <div>{active.map((task) => <TaskRow key={task.task_id} task={task} onCancel={cancel} cancelling={cancellingId === task.task_id} onRetry={requestRetry} retrying={retryingId === task.task_id} onResolve={requestResolve} resolving={resolvingId === task.task_id} />)}</div>
+          <div>{active.map((task) => <TaskRow key={task.task_id} task={task} onCancel={cancel} cancelling={cancellingId === task.task_id} onRetry={requestRetry} retrying={retryingId === task.task_id} onResolve={requestResolve} resolving={resolvingId === task.task_id} onDetails={openDetails} />)}</div>
         ) : <div className="empty-state">当前没有等待或执行中的任务。</div>}
         <div className="panel-foot" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "12px 16px" }}>
           <span className="muted">每页 {activePageSize} 条，队列列表由服务端分页读取。</span>
@@ -338,7 +357,7 @@ export default function TaskQueue() {
             <span className="muted">共 {historyTotal} 项 · 第 {historyPage}/{historyPages} 页</span>
           </div>
         </div>
-        {history.length ? <div>{history.map((task) => <TaskRow key={task.task_id} task={task} onCancel={cancel} cancelling={false} onRetry={requestRetry} retrying={retryingId === task.task_id} onResolve={requestResolve} resolving={resolvingId === task.task_id} />)}</div> : <div className="empty-state">暂无历史任务。</div>}
+        {history.length ? <div>{history.map((task) => <TaskRow key={task.task_id} task={task} onCancel={cancel} cancelling={false} onRetry={requestRetry} retrying={retryingId === task.task_id} onResolve={requestResolve} resolving={resolvingId === task.task_id} onDetails={openDetails} />)}</div> : <div className="empty-state">暂无历史任务。</div>}
         <div className="panel-foot" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "12px 16px" }}>
           <span className="muted">每页 {historyPageSize} 条，历史记录与失败任务均由服务端分页读取。</span>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -401,6 +420,42 @@ export default function TaskQueue() {
                 {retryingId ? "正在创建…" : "确认创建恢复任务"}
               </button>
             </div>
+          </section>
+        </div>
+      )}
+
+      {(detailLoading || detailError || detailTask) && (
+        <div role="presentation" onClick={(event) => { if (event.target === event.currentTarget && !detailLoading) { setDetailTask(null); setDetailError(""); } }}
+          style={{ position: "fixed", inset: 0, zIndex: 1002, background: "rgba(15, 23, 42, .48)", display: "grid", placeItems: "center", padding: 20 }}>
+          <section role="dialog" aria-modal="true" aria-labelledby="task-detail-title" className="panel"
+            style={{ width: "min(640px, 100%)", maxHeight: "85vh", overflowY: "auto", padding: 22, boxShadow: "0 20px 60px rgba(0,0,0,.24)" }}>
+            <div className="panel-head">
+              <h2 id="task-detail-title">任务详情</h2>
+              <button className="btn sm" type="button" disabled={detailLoading} onClick={() => { setDetailTask(null); setDetailError(""); }}>关闭</button>
+            </div>
+            {detailLoading ? <div className="empty-state">正在读取任务详情…</div> : detailError ? <div className="notice danger" role="alert">{detailError}</div> : detailTask && (
+              <>
+                <div className="grid two">
+                  <div><div className="muted">任务 ID</div><code>{detailTask.task_id}</code></div>
+                  <div><div className="muted">队列序号</div><strong>#{detailTask.queue_order}</strong></div>
+                  <div><div className="muted">所属账号组</div><strong>{detailTask.tenant_id}</strong></div>
+                  <div><div className="muted">任务类型 / 状态</div><strong>{detailTask.task_type} · {STATUS_LABEL[detailTask.status]}</strong></div>
+                  <div><div className="muted">创建时间</div>{timeLabel(detailTask.created_at)}</div>
+                  <div><div className="muted">开始时间</div>{timeLabel(detailTask.started_at)}</div>
+                  <div><div className="muted">结束时间</div>{timeLabel(detailTask.finished_at)}</div>
+                  <div><div className="muted">执行次数</div>{detailTask.attempts}</div>
+                </div>
+                {detailTask.error_code && <div className="notice danger" style={{ marginTop: 14 }}>错误代码：{detailTask.error_code}</div>}
+                {detailTask.error_message && <div style={{ marginTop: 10, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{detailTask.error_message}</div>}
+                {detailTask.retry_of_task_id && <div className="muted" style={{ marginTop: 12 }}>恢复自任务：{detailTask.retry_of_task_id}</div>}
+                {detailTask.retry_confirmation_note && <div className="muted" style={{ marginTop: 6 }}>恢复核验：{detailTask.retry_confirmation_note}</div>}
+                {detailTask.resolution_action && <div className="muted" style={{ marginTop: 12 }}>
+                  处理记录：{detailTask.resolution_action === "handled" ? "已处理" : "已忽略"} · {detailTask.resolution_actor || "操作人未知"} · {timeLabel(detailTask.resolution_at)}
+                  {detailTask.resolution_note && <div>{detailTask.resolution_note}</div>}
+                </div>}
+                <div className="tiny" style={{ marginTop: 16 }}>仅展示队列持久化的状态与诊断字段；系统未记录的步骤级执行进度不会在此处推断。</div>
+              </>
+            )}
           </section>
         </div>
       )}
