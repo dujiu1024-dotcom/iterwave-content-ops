@@ -409,6 +409,36 @@ def _build_tenant_runtime_context(
     scheduler = None
     try:
         db.initialize()
+        verify_schema = getattr(db, "verify_schema", None)
+        schema_report = verify_schema() if callable(verify_schema) else {}
+        missing_schema_objects = (
+            len(schema_report.get("missing_tables", []))
+            + len(schema_report.get("missing_views", []))
+            + len(schema_report.get("missing_indexes", []))
+            + len(schema_report.get("missing_foreign_keys", []))
+            + len(schema_report.get("missing_unique_constraints", []))
+            + len(schema_report.get("unapplied_migrations", []))
+            + len(schema_report.get("unknown_applied_migrations", []))
+        )
+        if missing_schema_objects:
+            logger.warning(
+                "SQLite schema drift tenant=%s missing_tables=%d missing_views=%d missing_indexes=%d missing_foreign_keys=%d missing_unique_constraints=%d unapplied_migrations=%d unknown_applied_migrations=%d",
+                tenant_id,
+                len(schema_report.get("missing_tables", [])),
+                len(schema_report.get("missing_views", [])),
+                len(schema_report.get("missing_indexes", [])),
+                len(schema_report.get("missing_foreign_keys", [])),
+                len(schema_report.get("missing_unique_constraints", [])),
+                len(schema_report.get("unapplied_migrations", [])),
+                len(schema_report.get("unknown_applied_migrations", [])),
+            )
+        if schema_report.get("integrity_check") != "ok" or schema_report.get("foreign_key_violations"):
+            logger.error(
+                "SQLite integrity diagnostics tenant=%s integrity=%s foreign_key_violations=%d",
+                tenant_id,
+                schema_report.get("integrity_check"),
+                len(schema_report.get("foreign_key_violations", [])),
+            )
         from src.core.db import LockedConnection
         conn = LockedConnection(db.connect())
         from src.core.config_repository import (
@@ -504,7 +534,8 @@ def _build_tenant_runtime_context(
         scheduler.autogrow = autogrow
         return {
             "tenant_registry": tenant_registry, "runtime_tenant_id": tenant_id,
-            "cfg": cfg, "db": db, "conn": conn, "adapters": adapters,
+            "cfg": cfg, "db": db, "conn": conn, "schema_report": schema_report,
+            "adapters": adapters,
             "cb": cb, "rhythm": rhythm, "sm_round": sm_round, "sm_draft": sm_draft,
             "scoring": scoring, "guard": guard, "normalizer": normalizer,
             "spiral": spiral, "scheduler": scheduler, "ops": ops,
@@ -2770,7 +2801,32 @@ def _register_routes(app: FastAPI) -> None:
     # --- 健康检查 ---
     @app.get("/health")
     def health():
-        return {"status": "ok", "version": "0.1.0", "timestamp": _storage_now().isoformat()}
+        report = _g().get("schema_report") or {}
+        has_report = bool(report)
+        missing_objects = (
+            len(report.get("missing_tables", []))
+            + len(report.get("missing_views", []))
+            + len(report.get("missing_indexes", []))
+            + len(report.get("missing_foreign_keys", []))
+            + len(report.get("missing_unique_constraints", []))
+            + len(report.get("unapplied_migrations", []))
+            + len(report.get("unknown_applied_migrations", []))
+        )
+        violations = len(report.get("foreign_key_violations", []))
+        integrity = report.get("integrity_check", "unknown")
+        healthy = not has_report or (
+            missing_objects == 0 and violations == 0 and integrity == "ok"
+        )
+        return {
+            "status": "ok" if healthy else "degraded",
+            "version": "0.1.0",
+            "timestamp": _storage_now().isoformat(),
+            "database": {
+                "integrity_check": integrity,
+                "missing_schema_objects": missing_objects,
+                "foreign_key_violation_count": violations,
+            },
+        }
 
     def _generate_media_asset(req: MediaGenerationRequest, source_asset_id: int | None = None):
         registry = _g().get("tenant_registry")
