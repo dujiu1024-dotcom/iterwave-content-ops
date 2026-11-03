@@ -1216,6 +1216,210 @@ class Database:
                 ddl = cur.fetchone()[0] or ""
                 result["ops_logs_has_pending_verify"] = "pending_verify" in ddl
 
+            # Schema contract for business profile, original asset inventory and
+            # plan-change audit migrations (143–146). Keep this additive so older
+            # migration contracts remain stable and every tenant DB is checked.
+            governance_tables = {
+                "business_profiles", "business_catalog_items",
+                "business_profile_versions", "master_plan_business_snapshots",
+                "original_assets", "original_asset_versions", "original_asset_links",
+                "original_asset_analyses", "original_asset_gaps",
+                "production_task_asset_usages", "plan_change_audit",
+            }
+            result["missing_governance_tables"] = sorted(governance_tables - existing)
+
+            governance_indexes = {
+                "idx_business_catalog_type_active",
+                "idx_original_assets_media_source", "idx_original_assets_content_source",
+                "idx_original_assets_kb_source", "idx_original_assets_type_review",
+                "idx_original_assets_quality", "idx_original_asset_versions_asset",
+                "idx_original_asset_links_entity", "idx_original_asset_links_asset",
+                "idx_original_asset_analyses_asset", "idx_original_asset_gaps_status",
+                "idx_production_task_asset_usages_task",
+                "idx_production_task_asset_usages_asset",
+                "idx_plan_change_audit_entity", "idx_plan_change_audit_versions",
+            }
+            result["missing_governance_indexes"] = sorted(
+                governance_indexes - existing_indexes
+            )
+
+            governance_triggers = {
+                "trg_capture_business_snapshot_on_master_activation",
+                "trg_original_asset_versions_immutable_update",
+                "trg_original_asset_versions_immutable_delete",
+                "trg_production_task_asset_usages_immutable_update",
+                "trg_production_task_asset_usages_immutable_delete",
+                "trg_plan_change_audit_no_update",
+                "trg_plan_change_audit_no_delete",
+                "trg_business_profile_versions_no_update",
+                "trg_business_profile_versions_no_delete",
+                "trg_master_plan_business_snapshots_no_update",
+                "trg_master_plan_business_snapshots_no_delete",
+            }
+            result["missing_governance_triggers"] = sorted(
+                governance_triggers - existing_triggers
+            )
+
+            governance_columns = {
+                "business_profiles": {
+                    "id", "business_name", "introduction", "industry", "business_model",
+                    "business_stage", "operating_goal", "field_evidence_json", "version_no", "updated_at",
+                },
+                "business_catalog_items": {
+                    "id", "entity_type", "name", "details_json", "field_evidence_json",
+                    "is_active", "created_at", "updated_at",
+                },
+                "business_profile_versions": {
+                    "version_no", "snapshot_json", "change_note", "created_at", "created_by",
+                },
+                "master_plan_business_snapshots": {
+                    "master_plan_version_id", "business_profile_version_no", "snapshot_json", "captured_at",
+                },
+                "original_assets": {
+                    "id", "asset_type", "title", "description", "source_kind",
+                    "source_media_asset_id", "source_content_asset_id", "source_kb_id",
+                    "source_uri", "source_version", "current_version_no", "readability_status",
+                    "completeness_status", "duplicate_status", "freshness_status",
+                    "description_status", "commercial_use_status", "privacy_status",
+                    "review_status", "review_note", "metadata_json", "archived_at",
+                    "created_at", "updated_at",
+                },
+                "original_asset_versions": {
+                    "id", "original_asset_id", "version_no", "source_version", "title",
+                    "description", "metadata_json", "review_status", "commercial_use_status", "created_at",
+                },
+                "original_asset_links": {
+                    "id", "original_asset_id", "entity_type", "entity_id", "relation_type", "created_at",
+                },
+                "original_asset_analyses": {
+                    "id", "original_asset_id", "asset_version_no", "analysis_type", "status",
+                    "result_json", "warnings_json", "provider", "model", "error_code",
+                    "review_status", "review_note", "reviewed_at", "created_at", "completed_at",
+                },
+                "original_asset_gaps": {
+                    "id", "entity_type", "entity_id", "asset_type", "title", "reason",
+                    "priority", "status", "source_plan_id", "resolved_asset_id", "created_at", "updated_at",
+                },
+                "production_task_asset_usages": {
+                    "id", "production_task_id", "original_asset_id", "asset_version_no",
+                    "usage_role", "permission_snapshot", "created_at",
+                },
+                "plan_change_audit": {
+                    "id", "entity_type", "entity_id", "event_type", "from_version_id",
+                    "to_version_id", "change_reason", "before_snapshot_json",
+                    "after_snapshot_json", "affected_tasks_json", "actor", "created_at",
+                },
+            }
+            missing_governance_columns = []
+            for table_name, required_columns in governance_columns.items():
+                if table_name not in existing:
+                    continue
+                actual_columns = {
+                    row["name"] for row in conn.execute(
+                        f'PRAGMA table_info("{table_name}")'
+                    ).fetchall()
+                }
+                missing_governance_columns.extend(
+                    (table_name, column) for column in sorted(required_columns - actual_columns)
+                )
+            result["missing_governance_columns"] = sorted(missing_governance_columns)
+
+            governance_foreign_keys = {
+                ("master_plan_business_snapshots", "master_plan_version_id", "master_plan_versions", "id", "RESTRICT"),
+                ("original_assets", "source_media_asset_id", "media_assets", "id", "RESTRICT"),
+                ("original_assets", "source_content_asset_id", "content_assets", "id", "RESTRICT"),
+                ("original_asset_versions", "original_asset_id", "original_assets", "id", "RESTRICT"),
+                ("original_asset_links", "original_asset_id", "original_assets", "id", "RESTRICT"),
+                ("original_asset_analyses", "original_asset_id", "original_assets", "id", "RESTRICT"),
+                ("original_asset_analyses", "original_asset_id", "original_asset_versions", "original_asset_id", "RESTRICT"),
+                ("original_asset_analyses", "asset_version_no", "original_asset_versions", "version_no", "RESTRICT"),
+                ("original_asset_gaps", "resolved_asset_id", "original_assets", "id", "RESTRICT"),
+                ("production_task_asset_usages", "production_task_id", "production_tasks", "id", "RESTRICT"),
+                ("production_task_asset_usages", "original_asset_id", "original_assets", "id", "RESTRICT"),
+                ("production_task_asset_usages", "original_asset_id", "original_asset_versions", "original_asset_id", "RESTRICT"),
+                ("production_task_asset_usages", "asset_version_no", "original_asset_versions", "version_no", "RESTRICT"),
+            }
+            actual_governance_foreign_keys = set()
+            for table_name in governance_tables & existing:
+                escaped_table = table_name.replace('"', '""')
+                for fk in conn.execute(f'PRAGMA foreign_key_list("{escaped_table}")').fetchall():
+                    actual_governance_foreign_keys.add((
+                        table_name, fk["from"], fk["table"], fk["to"], fk["on_delete"].upper()
+                    ))
+            result["missing_governance_foreign_keys"] = sorted(
+                governance_foreign_keys - actual_governance_foreign_keys
+            )
+
+            governance_column_types = {
+                "business_profiles": {
+                    "id": "INTEGER", "business_name": "TEXT", "introduction": "TEXT",
+                    "industry": "TEXT", "business_model": "TEXT", "business_stage": "TEXT",
+                    "operating_goal": "TEXT", "field_evidence_json": "TEXT",
+                    "version_no": "INTEGER", "updated_at": "TEXT",
+                },
+                "business_catalog_items": {
+                    "id": "TEXT", "entity_type": "TEXT", "name": "TEXT",
+                    "details_json": "TEXT", "field_evidence_json": "TEXT",
+                    "is_active": "INTEGER", "created_at": "TEXT", "updated_at": "TEXT",
+                },
+                "business_profile_versions": {
+                    "version_no": "INTEGER", "snapshot_json": "TEXT",
+                    "change_note": "TEXT", "created_at": "TEXT", "created_by": "TEXT",
+                },
+                "master_plan_business_snapshots": {
+                    "master_plan_version_id": "INTEGER", "business_profile_version_no": "INTEGER",
+                    "snapshot_json": "TEXT", "captured_at": "TEXT",
+                },
+                "original_assets": {
+                    "id": "INTEGER", "source_media_asset_id": "INTEGER",
+                    "source_content_asset_id": "INTEGER", "current_version_no": "INTEGER",
+                },
+                "original_asset_versions": {
+                    "id": "INTEGER", "original_asset_id": "INTEGER", "version_no": "INTEGER",
+                },
+                "original_asset_links": {
+                    "id": "INTEGER", "original_asset_id": "INTEGER",
+                },
+                "original_asset_analyses": {
+                    "id": "INTEGER", "original_asset_id": "INTEGER", "asset_version_no": "INTEGER",
+                },
+                "original_asset_gaps": {
+                    "id": "INTEGER", "resolved_asset_id": "INTEGER",
+                },
+                "production_task_asset_usages": {
+                    "id": "INTEGER", "asset_version_no": "INTEGER",
+                },
+                "plan_change_audit": {
+                    "id": "INTEGER", "from_version_id": "INTEGER", "to_version_id": "INTEGER",
+                },
+            }
+            governance_type_mismatches = []
+            for table_name, required_types in governance_column_types.items():
+                if table_name not in existing:
+                    continue
+                actual_types = {
+                    row["name"]: str(row["type"] or "").upper()
+                    for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+                }
+                for column_name, expected_type in required_types.items():
+                    actual_type = actual_types.get(column_name)
+                    if actual_type is not None and actual_type != expected_type:
+                        governance_type_mismatches.append(
+                            (table_name, column_name, expected_type, actual_type)
+                        )
+            result["governance_column_type_mismatches"] = sorted(governance_type_mismatches)
+
+            # Polymorphic links cannot use ordinary SQLite FKs. Report them separately
+            # for repository/service-level validation rather than pretending they are enforced.
+            result["governance_integrity_check"] = (
+                not result["missing_governance_tables"]
+                and not result["missing_governance_indexes"]
+                and not result["missing_governance_triggers"]
+                and not result["missing_governance_columns"]
+                and not result["governance_column_type_mismatches"]
+                and not result["missing_governance_foreign_keys"]
+            )
+
             return result
         finally:
             conn.close()
