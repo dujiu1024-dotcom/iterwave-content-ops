@@ -25,7 +25,7 @@ def _schema_definition_errors(schema: Any, path: str = "$", depth: int = 0) -> l
     for key in sorted(set(schema) - _SCHEMA_KEYS):
         errors.append({"field": f"{path}.{key}", "code": "unsupported_schema_keyword", "message": "不支持的 Schema 关键字"})
     kind = schema.get("type")
-    if kind is not None and kind not in _SCHEMA_TYPES:
+    if kind is not None and (not isinstance(kind, str) or kind not in _SCHEMA_TYPES):
         errors.append({"field": f"{path}.type", "code": "schema_type", "message": "不支持的类型"})
     props = schema.get("properties", {})
     if not isinstance(props, dict) or any(not isinstance(k, str) for k in props):
@@ -123,7 +123,7 @@ def _now() -> str:
 
 
 def _json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 def validate_manifest(manifest: dict) -> dict:
