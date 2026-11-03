@@ -25,7 +25,7 @@ def create_visual_version(
     conn, *, content_id: str, content_hash: str, renderer: str,
     style_key: str, design: dict[str, Any], created_by: str | None = None,
 ) -> int:
-    if renderer not in {"chromium_v2", "legacy_v1"}:
+    if renderer not in {"chromium_v2", "legacy_v1", "ai_image_api"}:
         raise ValueError("unsupported visual renderer")
     if not isinstance(design, dict):
         raise TypeError("design must be a JSON object")

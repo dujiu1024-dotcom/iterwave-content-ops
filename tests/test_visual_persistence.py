@@ -20,7 +20,7 @@ def conn():
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("CREATE TABLE contents (id TEXT PRIMARY KEY)")
     connection.execute("INSERT INTO contents(id) VALUES ('content-1')")
-    migration = Path(__file__).parents[1] / "migrations" / "117_visual_design_versions_jobs.sql"
+    migration = Path(__file__).parents[1] / "migrations" / "121_visual_design_versions_jobs.sql"
     connection.executescript(migration.read_text(encoding="utf-8"))
     yield connection
     connection.close()
@@ -92,3 +92,38 @@ def test_content_hash_uses_one_canonical_text_delimiter():
     assert compute_content_hash("标题", "正文") == compute_content_hash("标题", "正文")
     assert compute_content_hash("标题", "正文") != compute_content_hash("标题正文", "")
     assert compute_content_hash("标题", "正文") != compute_content_hash("标题", "正文2")
+
+
+def test_ai_image_renderer_migration_preserves_visual_history_and_jobs():
+    from pathlib import Path
+    connection = sqlite3.connect(":memory:")
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute("CREATE TABLE contents (id TEXT PRIMARY KEY)")
+    connection.execute("INSERT INTO contents(id) VALUES ('content-1')")
+    root = Path(__file__).parents[1] / "migrations"
+    connection.executescript((root / "121_visual_design_versions_jobs.sql").read_text(encoding="utf-8"))
+    connection.execute(
+        "INSERT INTO visual_design_versions "
+        "(content_id, version, content_hash, renderer, style_key, design_json) "
+        "VALUES ('content-1', 1, 'hash', 'chromium_v2', 'old', '{}')"
+    )
+    version_id = connection.execute("SELECT id FROM visual_design_versions").fetchone()[0]
+    connection.execute(
+        "INSERT INTO visual_jobs (id, content_id, visual_version_id, page_index, job_type) "
+        "VALUES ('job-1', 'content-1', ?, 0, 'generate')", (version_id,)
+    )
+    connection.commit()
+    connection.executescript((root / "126_visual_ai_image_renderer.sql").read_text(encoding="utf-8"))
+    assert connection.execute(
+        "SELECT renderer FROM visual_design_versions WHERE id=?", (version_id,)
+    ).fetchone()[0] == "chromium_v2"
+    assert connection.execute(
+        "SELECT visual_version_id FROM visual_jobs WHERE id='job-1'"
+    ).fetchone()[0] == version_id
+    create_visual_version(
+        connection, content_id="content-1", content_hash="hash-2",
+        renderer="ai_image_api", style_key="ai_complete_card",
+        design={"generation_mode": "ai_complete_card"},
+    )
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    connection.close()

@@ -39,10 +39,7 @@ from .topic_pool import load_pool
 from .persona import effective_persona
 from .hot_topics import _sensitive_topic_hits
 from .orchestration import Orchestration, step_status_from_report
-from .content_pipeline import (
-    ContentGenerationError, body_page_prompt, cover_prompt, generate_copy_content,
-    make_card_set, plan_visual_pages, render_ai_background, _llm_available,
-)
+from .content_pipeline import ContentGenerationError, generate_copy_content, _llm_available
 from .plan_version import PlanVersionManager
 from .guard.ultimate_goal_checker import CheckOutcome, CheckResult
 from ..adapters.base import Platform, ContentToPublish
@@ -852,13 +849,6 @@ class RoundExecutor:
     # ③ ④ ⑤ ⑥ 内容产出（G2 串行拦截）
     # ------------------------------------------------------------------
 
-    def _card_footer(self, platform: Platform) -> str:
-        from .content_pipeline import card_footer
-        from .visual_catalog import brand_footer_text
-        base = card_footer(self.cfg, platform)
-        configured = brand_footer_text(self._visual_brand_profile())
-        return " · ".join(item for item in (base, configured) if item)
-
     def _visual_brand_profile(self) -> dict:
         tenant_id = getattr(self, "tenant_id", None)
         if not tenant_id:
@@ -868,89 +858,16 @@ class RoundExecutor:
                 "SELECT profile_json FROM visual_brand_profiles WHERE tenant_id=?",
                 (str(tenant_id),),
             ).fetchone()
-            import json
             value = json.loads(row["profile_json"]) if row else {}
             return value if isinstance(value, dict) else {}
         except Exception:
             logger.exception("读取账号组视觉品牌配置失败 tenant=%s", tenant_id)
             return {}
 
-    def _visual_render_options(self) -> dict:
-        """渲染参数统一来自 visual_catalog（风格/字体/组件样式单一来源）+ 账号组品牌配置。"""
-        from .visual_catalog import resolve_render_options
-        return resolve_render_options(self._visual_brand_profile())
-
     def _image_settings(self) -> tuple[Optional[dict], str]:
         """读取图片素材库设置（media_generation_settings）；返回 (settings, 不可用原因)。"""
         from .content_pipeline import image_generation_settings
         return image_generation_settings(self.conn)
-
-    def _persist_image(self, raw: bytes, suffix: str, platform: Platform, kind: str) -> str:
-        out_dir = Path(self.cfg.resolve_path(self.cfg.paths.output_dir))
-        out_dir.mkdir(parents=True, exist_ok=True)
-        path = out_dir / f"{kind}_{platform.value}_{uuid.uuid4().hex[:8]}{suffix}"
-        path.write_bytes(raw)
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
-        return str(path)
-
-    async def _maybe_generate_cover(
-        self, title: str, dimension: str, platform: Platform,
-    ) -> tuple[Optional[str], str]:
-        """文生图封面底图：media_generation_settings 启用时调用图片模型。
-
-        配置（模型/尺寸/风格前缀）来自平台设置，不写死；任何失败都返回 (None, 原因)，
-        由调用方退回本地模板，不阻断轮次。
-        """
-        settings, reason = self._image_settings()
-        if settings is None:
-            return None, reason
-        scene = cover_prompt(title, dimension)
-        prompt = f"{settings['prefix']}\n\n{scene}" if settings["prefix"] else scene
-        try:
-            from .media_generation import generate_image_bytes
-            raw, _mime, suffix, _w, _h = await asyncio.to_thread(
-                generate_image_bytes, prompt,
-                model=settings["model"], size=settings["size"], cfg=self.cfg,
-                allow_fallback=settings["fallback_enabled"],
-            )
-        except Exception as exc:  # noqa: BLE001 — 失败必须降级而不是阻断轮次
-            logger.warning("文生图封面失败，退回模板：%s", exc)
-            return None, str(exc)
-        return self._persist_image(raw, suffix, platform, "cover"), "ok"
-
-    async def _generate_body_backgrounds(
-        self, title: str, dimension: str, platform: Platform, pages: list[list[str]],
-    ) -> list:
-        """正文每页配一张 AI 底图（并发请求）；单页失败返回 None，该页退回渐变。"""
-        settings, reason = self._image_settings()
-        if settings is None:
-            logger.info("正文配图跳过：%s", reason)
-            return []
-        prompts = []
-        for lines in pages:
-            prompt = body_page_prompt(title, dimension, lines)
-            if settings["prefix"]:
-                prompt = f"{settings['prefix']}\n\n{prompt}"
-            prompts.append(prompt)
-        results = await asyncio.gather(*(
-            asyncio.to_thread(
-                render_ai_background, prompt,
-                model=settings["model"], size=settings["size"], cfg=self.cfg,
-                platform=platform, allow_fallback=settings["fallback_enabled"],
-            )
-            for prompt in prompts
-        ), return_exceptions=True)
-        images: list = []
-        for result in results:
-            if isinstance(result, Exception):
-                logger.warning("正文配图异常，该页退回渐变：%s", result)
-                images.append(None)
-            else:
-                images.append(result)
-        return images
 
     async def _produce_contents(
         self, round_id: int, scored: list, platforms: list[Platform], report: dict,
@@ -1011,6 +928,10 @@ class RoundExecutor:
                 #    ERROR 不能默认通过）
                 accepted = None
                 image_paths: list = []
+                cover_path = None
+                body_ai_count = 0
+                body_page_count = 0
+                pages: list = []
                 reject_reason: Optional[str] = None
                 visual_generation_attempts: list[dict] = []
                 for attempt in range(self.cfg.copy_generation.max_guard_retries + 1):
@@ -1043,12 +964,28 @@ class RoundExecutor:
                             })
                             await asyncio.sleep(delay)
                     if card_first:
-                        # 编排把出图排在质量门之前：每个候选版本都先出图再质检。
-                        # 候选版本可能被拦截重写，此处只做排版叠字，不为每个候选调用文生图。
-                        image_paths = await asyncio.to_thread(
-                            make_card_set, title, topic.dimension, body, output_dir, platform,
-                            self._card_footer(platform), **self._visual_render_options(),
+                        # 编排把出图排在质量门之前；候选版本也必须由图片 API 生成完整卡片。
+                        from .ai_card_generation import generate_ai_card_set
+                        image_settings, image_reason = self._image_settings()
+                        if not image_settings:
+                            raise RuntimeError(f"AI 图片生成未启用，拒绝模板降级：{image_reason}")
+                        image_paths, pages = await asyncio.to_thread(
+                            generate_ai_card_set, title=title, subtitle=topic.dimension,
+                            body=body, output_dir=output_dir, platform=platform,
+                            cfg=self.cfg, settings=image_settings,
+                            allow_fallback=image_settings.get("fallback_enabled"),
+                            brand_profile=self._visual_brand_profile(),
                         )
+                        cover_path = str(image_paths[0])
+                        body_page_count = len(image_paths) - 1
+                        body_ai_count = body_page_count
+                        visual_generation_attempts.extend({
+                            "kind": "cover" if index == 0 else "body",
+                            "status": "generated", "model": image_settings["model"],
+                            "bytes": Path(path).stat().st_size,
+                        } for index, path in enumerate(image_paths))
+                        report.setdefault("model_visuals", 0)
+                        report["model_visuals"] += len(image_paths)
 
                     try:
                         outcome = self.guard.check_content(title, body, tags, platform=platform.value)
@@ -1093,57 +1030,32 @@ class RoundExecutor:
 
                 title, body, tags, outcome = accepted
 
-                cover_path = None
-                cover_reason = "出图在质量门之前（编排模式），使用模板卡片"
-                body_ai_count = 0
-                body_page_count = 0
-                body_images: list = []
-                pages: list = []
                 # ⑤ 图片卡片（编排可关闭；可调到质量门之前——此时被拦重写的版本也会出图）
                 if not card_first:
                     image_paths = []
                     if make_cards:
-                        # 封面与正文页都优先用文生图底图（media_generation_settings 启用时），失败逐页退回主题底色。
-                        # 正文分页由浏览器实测得到，逐页配图与最终排版一一对应。
-                        render_options = self._visual_render_options()
-                        footer_text = self._card_footer(platform)
-                        cover_path, cover_reason = await self._maybe_generate_cover(
-                            title, topic.dimension, platform,
+                        # 每一页均由图片 API 直接生成完整成品；API/质量门失败即终止本内容，不退回模板。
+                        from .ai_card_generation import generate_ai_card_set
+                        image_settings, image_reason = self._image_settings()
+                        if not image_settings:
+                            raise RuntimeError(f"AI 图片生成未启用，拒绝模板降级：{image_reason}")
+                        image_paths, pages = await asyncio.to_thread(
+                            generate_ai_card_set, title=title, subtitle=topic.dimension,
+                            body=body, output_dir=output_dir, platform=platform,
+                            cfg=self.cfg, settings=image_settings,
+                            allow_fallback=image_settings.get("fallback_enabled"),
+                            brand_profile=self._visual_brand_profile(),
                         )
-                        visual_generation_attempts.append({
-                            "kind": "cover", "status": "generated" if cover_path else "skipped",
-                            "reason": None if cover_path else cover_reason,
-                            "model": (self._image_settings()[0] or {}).get("model") if cover_path else None,
-                            "bytes": Path(cover_path).stat().st_size if cover_path else 0,
-                        })
-                        pages = await asyncio.to_thread(
-                            plan_visual_pages, title, topic.dimension, body, platform,
-                            footer_text, **render_options,
-                        )
-                        body_page_count = len(pages)
-                        body_images = await self._generate_body_backgrounds(
-                            title, topic.dimension, platform, pages,
-                        )
-                        body_ai_count = sum(1 for p in body_images if p)
-                        for item in body_images:
-                            if item:
-                                visual_generation_attempts.append({
-                                    "kind": "body", "status": "generated",
-                                    "model": (self._image_settings()[0] or {}).get("model"),
-                                    "bytes": Path(item).stat().st_size,
-                                })
-                        image_paths = await asyncio.to_thread(
-                            make_card_set, title, topic.dimension, body, output_dir, platform,
-                            footer_text, **render_options,
-                            cover_image=Path(cover_path) if cover_path else None,
-                            body_images=body_images,
-                            pages=pages,
-                        )
+                        cover_path = str(image_paths[0])
+                        body_page_count = len(image_paths) - 1
+                        body_ai_count = body_page_count
+                        visual_generation_attempts.extend({
+                            "kind": "cover" if index == 0 else "body",
+                            "status": "generated", "model": image_settings["model"],
+                            "bytes": Path(path).stat().st_size,
+                        } for index, path in enumerate(image_paths))
                         report.setdefault("model_visuals", 0)
-                        report["model_visuals"] += (1 if cover_path else 0) + body_ai_count
-                        report["degraded_visuals"] += (0 if cover_path else 1) + (
-                            body_page_count - body_ai_count
-                        )
+                        report["model_visuals"] += len(image_paths)
 
                 # 视觉硬门结果与生图用量写入轮次报告，缺失报告绝不视为通过。
                 visual_ocr = {"status": "not_run", "gate": "not_passed"}
@@ -1163,50 +1075,7 @@ class RoundExecutor:
                     except Exception:
                         logger.exception("AI 视觉审美评估失败 platform=%s", platform.value)
                         visual_review = {"status": "not_evaluated", "reason": "review_adapter_error", "score": None}
-                # 软门低于 80 分时最多优化一次（仅当封面有 AI 底图可编辑）；重渲染后必须重新执行
-                # OCR 硬门和视觉复评。配置同样来自 media_generation_settings。
-                if (visual_review.get("status") == "evaluated"
-                        and float(visual_review.get("score") or 0) < 80
-                        and cover_path and image_paths and not card_first):
-                    try:
-                        from .visual_generation import revise_visual_background
-                        image_settings, _reason = self._image_settings()
-                        revision = await asyncio.to_thread(
-                            revise_visual_background,
-                            source_path=Path(cover_path),
-                            feedback=visual_review.get("feedback", []),
-                            output_dir=output_dir,
-                            settings=image_settings,
-                            cfg=self.cfg,
-                        )
-                        visual_generation_attempts.append({
-                            "kind": "cover_revision",
-                            **{k: revision.get(k) for k in ("status", "model", "elapsed_ms", "bytes")},
-                        })
-                        if revision.get("status") == "revised" and revision.get("path"):
-                            revised_paths = await asyncio.to_thread(
-                                make_card_set, title, topic.dimension, body, output_dir,
-                                platform, self._card_footer(platform), **self._visual_render_options(),
-                                cover_image=Path(revision["path"]),
-                                body_images=body_images, pages=pages,
-                            )
-                            image_paths = revised_paths
-                            cover_path = revision["path"]
-                            from .visual_ocr import load_ocr_report
-                            from .visual_review import assess_visual_pages
-                            visual_ocr = load_ocr_report(image_paths)
-                            visual_review = await asyncio.to_thread(
-                                assess_visual_pages, image_paths
-                            )
-                            visual_review["revision_attempted"] = True
-                            visual_review["revision_status"] = "revised"
-                        else:
-                            visual_review["revision_attempted"] = True
-                            visual_review["revision_status"] = revision.get("status", "not_revised")
-                    except Exception:
-                        logger.exception("单次 AI 视觉优化失败 platform=%s", platform.value)
-                        visual_review["revision_attempted"] = True
-                        visual_review["revision_status"] = "failed"
+                # AI 审美评估仅记录结果；禁止旧的“修改背景图 + Chromium 重新叠字”返工路径。
                 report.setdefault("visual_usage", []).append({
                     "topic_id": topic.id, "platform": platform.value,
                     "status": "generated" if (cover_path or body_ai_count) else "degraded",
@@ -1251,11 +1120,11 @@ class RoundExecutor:
                 visual_status = "generated" if has_ai else "degraded"
                 if has_ai:
                     visual_reason = (
-                        f"{'封面底图 + ' if cover_path else ''}{body_ai_count}/{body_page_count} 张正文配图由文生图模型生成，"
-                        "文字由 Chromium 排版叠加"
+                        f"图片 API 直接生成完整卡片：封面 + {body_ai_count} 张正文页；"
+                        "无模板叠字、无背景图后期拼字"
                     )
                 else:
-                    visual_reason = f"仅使用 Chromium 排版叠字（{cover_reason}）"
+                    visual_reason = "AI 完整卡片生成失败，不允许模板降级"
                 visual_reason += (
                     "；OCR 硬门通过，仍需人工审核" if visual_ocr.get("status") == "passed"
                     else "；OCR 硬门未通过或不可用，需人工复核"
@@ -1290,22 +1159,19 @@ class RoundExecutor:
                             content_hash = compute_content_hash(title, body)
                             visual_version_id = create_visual_version(
                                 self.conn, content_id=content_id, content_hash=content_hash,
-                                renderer="chromium_v2", style_key=self._visual_render_options()["theme"],
+                                renderer="ai_image_api", style_key="ai_complete_card",
                                 design={
                                     "platform": platform.value,
                                     "title": title,
                                     "subtitle": topic.dimension,
                                     "body": body,
-                                    "footer": self._card_footer(platform),
-                                    "render_options": self._visual_render_options(),
-                                    "background_path": cover_path,
+                                    "generation_mode": "ai_complete_card",
+                                    "background_path": None,
                                     "body_pages": pages or None,
                                     "pages": [
                                         {"page_index": index, "image_path": str(path),
-                                         "background_path": (
-                                             cover_path if index == 0 else
-                                             (str(body_images[index - 1]) if index - 1 < len(body_images) and body_images[index - 1] else None)
-                                         ) if not card_first else None}
+                                         "background_path": None,
+                                         "generation_mode": "ai_complete_card"}
                                         for index, path in enumerate(image_paths)
                                     ],
                                     "ocr": visual_ocr,

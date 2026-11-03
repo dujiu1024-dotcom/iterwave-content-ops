@@ -33,7 +33,7 @@ def test_renderer_rejects_unapproved_font_family():
 def test_brand_profile_is_tenant_scoped(tmp_path):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    migration = Path(__file__).parents[1] / "migrations" / "118_visual_brand_profiles.sql"
+    migration = Path(__file__).parents[1] / "migrations" / "122_visual_brand_profiles.sql"
     conn.executescript(migration.read_text(encoding="utf-8"))
     conn.execute(
         "INSERT INTO visual_brand_profiles(tenant_id, profile_json) VALUES(?, ?)",

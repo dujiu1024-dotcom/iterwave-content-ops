@@ -6608,57 +6608,25 @@ def _register_routes(app: FastAPI) -> None:
                 logger.warning("重出图读取选题维度失败 content_id=%s", content_id, exc_info=True)
                 dimension = ""
 
-        from ..core.content_pipeline import (
-            body_page_prompt, card_footer, cover_prompt, image_generation_settings,
-            make_card_set, plan_visual_pages, render_ai_background,
-        )
-        from ..core.visual_catalog import brand_footer_text, resolve_render_options
-        tenant_id = _tenant_id()
-        profile = _visual_brand_profile(conn, tenant_id)["profile"]
-        try:
-            render_options = resolve_render_options(profile)
-        except ValueError as exc:
-            raise HTTPException(409, f"当前账号组视觉品牌配置无效：{exc}") from exc
-        footer = " · ".join(
-            item for item in (card_footer(cfg, platform), brand_footer_text(profile)) if item
-        )
+        from ..core.content_pipeline import image_generation_settings
+        from ..core.ai_card_generation import generate_ai_card_set
         output_dir = cfg.resolve_path(cfg.paths.output_dir)
         subtitle = dimension or "知识卡片"
-        # AI 配图配置唯一来源：media_generation_settings（与轮次生产一致）。
-        settings, _settings_reason = image_generation_settings(conn)
-        # 出图要调外部服务（数十秒），先结束读事务释放 SQLite 锁，避免长时间持锁把其它写入卡死
+        tenant_id = _tenant_id()
+        profile = _visual_brand_profile(conn, tenant_id)["profile"]
+        settings, settings_reason = image_generation_settings(conn)
+        if not settings:
+            raise HTTPException(409, f"AI 图片生成未启用，拒绝模板降级：{settings_reason}")
         conn.commit()
         try:
-            pages = plan_visual_pages(title, subtitle, body, platform, footer, **render_options)
-        except (ValueError, RuntimeError) as exc:
-            raise HTTPException(422, f"视觉排版失败：{exc}") from exc
-        body_images: list = []
-        cover_image = None
-        if settings:
-            cover_text = cover_prompt(title, subtitle)
-            if settings["prefix"]:
-                cover_text = f"{settings['prefix']}\n\n{cover_text}"
-            cover_image = render_ai_background(
-                cover_text, model=settings["model"], size=settings["size"],
-                cfg=cfg, platform=platform, kind="cover",
-                allow_fallback=settings.get("fallback_enabled", True),
-            )
-            for lines in pages:
-                prompt = body_page_prompt(title, subtitle, lines)
-                if settings["prefix"]:
-                    prompt = f"{settings['prefix']}\n\n{prompt}"
-                body_images.append(render_ai_background(
-                    prompt, model=settings["model"], size=settings["size"],
-                    cfg=cfg, platform=platform,
-                    allow_fallback=settings.get("fallback_enabled", True),
-                ))
-        try:
-            paths = make_card_set(
-                title, subtitle, body, output_dir, platform, footer, **render_options,
-                cover_image=cover_image, body_images=body_images, pages=pages,
+            paths, pages = generate_ai_card_set(
+                title=title, subtitle=subtitle, body=body, output_dir=output_dir,
+                platform=platform, cfg=cfg, settings=settings,
+                allow_fallback=settings.get("fallback_enabled"),
+                brand_profile=profile,
             )
         except (ValueError, RuntimeError) as exc:
-            raise HTTPException(422, f"视觉硬门未通过：{exc}") from exc
+            raise HTTPException(422, f"AI 完整卡片生成或 OCR 硬门失败：{exc}") from exc
         from src.core.visual_ocr import load_ocr_report
         from src.core.visual_persistence import (
             compute_content_hash, create_visual_page_job, create_visual_version,
@@ -6666,31 +6634,28 @@ def _register_routes(app: FastAPI) -> None:
         )
         ocr_report = load_ocr_report(paths)
         content_hash = compute_content_hash(title, body)
-        body_ai = sum(1 for item in body_images if item)
-        has_ai = bool(cover_image) or body_ai > 0
+        body_ai = max(0, len(paths) - 1)
+        has_ai = bool(paths)
         visual_status = "generated" if has_ai else "degraded"
         visual_reason = (
-            (f"{'封面底图 + ' if cover_image else ''}{body_ai}/{len(pages)} 张正文配图由文生图模型生成，"
-             "文字由 Chromium 排版叠加") if has_ai else "仅使用 Chromium 排版叠字（手动重出图）"
+            (f"图片 API 直接生成完整卡片：封面 + {body_ai} 张正文页；无模板叠字、无背景图后期拼字")
+            if has_ai else "AI 完整卡片生成失败，不允许模板降级"
         ) + ("；OCR 硬门通过，仍需人工审核" if ocr_report.get("status") == "passed"
              else "；OCR 硬门未通过或不可用，需人工复核")
         with conn:
             version_id = create_visual_version(
                 conn, content_id=content_id, content_hash=content_hash,
-                renderer="chromium_v2", style_key=render_options["theme"],
+                renderer="ai_image_api", style_key="ai_complete_card",
                 design={
                     "platform": platform.value, "title": title,
                     "subtitle": subtitle, "body": body,
-                    "footer": footer,
-                    "render_options": render_options,
-                    "background_path": str(cover_image) if cover_image else None,
+                    "generation_mode": "ai_complete_card",
+                    "background_path": None,
                     "body_pages": pages,
                     "pages": [
                         {"page_index": index, "image_path": str(path),
-                         "background_path": (
-                             (str(cover_image) if cover_image else None) if index == 0 else
-                             (str(body_images[index - 1]) if index - 1 < len(body_images) and body_images[index - 1] else None)
-                         )}
+                         "background_path": None,
+                         "generation_mode": "ai_complete_card"}
                         for index, path in enumerate(paths)
                     ],
                     "ocr": ocr_report,
