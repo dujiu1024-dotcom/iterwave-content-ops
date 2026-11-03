@@ -4,8 +4,9 @@ import { api, Goal, MasterPlan, PlanResponse, PlanSignatureHistory, SpiralAnalys
 import { ALL_PLATFORMS, Platform, platformMeta } from "../platforms";
 import EmptyHint from "../components/EmptyHint";
 import ProductionLinePanel from "../components/ProductionLinePanel";
+import OriginalAssetInventoryPanel from "../components/OriginalAssetInventoryPanel";
 
-type Tab = "master" | "platforms" | "stages" | "production-line";
+type Tab = "master" | "platforms" | "stages" | "production-line" | "assets";
 type StageStatus = "pending" | "active" | "completed" | "paused" | "cancelled";
 type Stage = { id: string; name: string; direction: string; count: number; start: string; end: string; rule: string; status: StageStatus; confirmed: number; strategyGoal: string; currentProblem: string; executionStrategy: string; prerequisites: string; inputInfo: string; expectedResult: string; completionCriteria: string; effectEvaluation: string; entryCondition: string; entryConditionMet: boolean; dependencies: string[]; latestOutcome?: SubPlanStageRecord["latest_outcome"] };
 type Child = { id: string; platform: Platform; name: string; direction: string; count: number; status: "draft" | "review" | "effective"; signature: string; versionId: number; versionNo: number; stageRecords: SubPlanStageRecord[] };
@@ -341,9 +342,11 @@ export default function PlanCenter() {
   return <div className="page plan-center-page">
     <div className="page-head"><div><div className="eyebrow">内容生产 · 计划体系</div><h1 className="page-title">计划管理</h1><div className="page-desc">主计划确定目标与策略，平台子计划承接平台差异，阶段负责节奏与完成条件，生产轮次按已生效计划执行。</div></div><div className="head-actions"><button className="btn" onClick={() => void load()} disabled={loading}>↻ 刷新</button><button className="btn primary" disabled={!data} onClick={() => { if (data) { setDraft({ ...structuredClone(data.plan), content_format: "image_text" }); setDirty(true); setSaved(false); setTab("master"); } }}>＋ 新建版本草稿</button></div></div>
     <div className="plan-hierarchy"><div className="plan-hierarchy-node active"><b>主计划</b><small>目标 · 策略 · 版本</small></div><span>→</span><div className={"plan-hierarchy-node " + (tab === "platforms" ? "active" : "")}><b>平台子计划</b><small>平台方向 · 产量 · 授权</small></div><span>→</span><div className={"plan-hierarchy-node " + (tab === "stages" ? "active" : "")}><b>阶段</b><small>时间 · 目标 · 完成条件</small></div><span>→</span><div className={"plan-hierarchy-node " + (tab === "production-line" ? "active" : "")}><b>生产线</b><small>AI 编排 · 编辑 · 确认</small></div><span>→</span><div className="plan-hierarchy-node"><b>生产轮次</b><small>执行 · 内容 · 复盘</small></div></div>
-    <div className="tabs page-tabs"><button className={"tab " + (tab === "master" ? "active" : "")} onClick={() => setTab("master")}>主计划与版本</button><button className={"tab " + (tab === "platforms" ? "active" : "")} onClick={() => setTab("platforms")}>平台子计划</button><button className={"tab " + (tab === "stages" ? "active" : "")} onClick={() => setTab("stages")}>阶段管理</button><button className={"tab " + (tab === "production-line" ? "active" : "")} onClick={() => setTab("production-line")}>生产线管理</button></div>
+    <div className="tabs page-tabs"><button className={"tab " + (tab === "master" ? "active" : "")} onClick={() => setTab("master")}>主计划与版本</button><button className={"tab " + (tab === "platforms" ? "active" : "")} onClick={() => setTab("platforms")}>平台子计划</button><button className={"tab " + (tab === "stages" ? "active" : "")} onClick={() => setTab("stages")}>阶段管理</button><button className={"tab " + (tab === "production-line" ? "active" : "")} onClick={() => setTab("production-line")}>生产线管理</button><button className={"tab " + (tab === "assets" ? "active" : "")} onClick={() => setTab("assets")}>素材盘点</button></div>
     {loading && <div className="panel"><div className="loading"><div className="spinner" />正在读取计划…</div></div>}
     {error && <div className="panel"><div className="note" role="alert" style={{ color: "var(--red)" }}>{error}</div><button className="btn sm" onClick={() => void load()}>重试</button></div>}
+
+    {tab === "assets" && <OriginalAssetInventoryPanel />}
 
     {!loading && !error && tab === "master" && data && draft && <>
       <div className="panel">

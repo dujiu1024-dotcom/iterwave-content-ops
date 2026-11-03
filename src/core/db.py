@@ -532,6 +532,8 @@ class Database:
                 "notifications", "task_runs", "ai_calls", "user_override",
                 "signature_history", "hot_topics", "plan_settings",
                 "content_assets", "media_assets", "media_asset_usages",
+                "original_assets", "original_asset_versions", "original_asset_links",
+                "original_asset_analyses", "original_asset_gaps", "production_task_asset_usages",
                 "media_generation_settings", "media_generation_jobs",
                 "tenant_settings", "tenant_setting_versions", "tenant_setting_migrations",
                 "ops_targets", "industry_presets",
