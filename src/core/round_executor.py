@@ -158,7 +158,17 @@ class RoundExecutor:
             pending_tasks = 0
             if round_row["sub_plan_id"]:
                 pending_tasks = int(self.conn.execute(
-                    "SELECT COUNT(*) FROM production_tasks WHERE round_id=? AND status='pending'",
+                    """SELECT COUNT(*) FROM production_tasks t
+                       WHERE t.round_id=? AND (
+                           t.status='pending' OR (
+                               t.status='succeeded'
+                               AND EXISTS (SELECT 1 FROM contents c
+                                           WHERE c.production_task_id=t.id)
+                               AND NOT EXISTS (SELECT 1 FROM drafts d
+                                               JOIN contents c ON c.id=d.content_id
+                                               WHERE c.production_task_id=t.id)
+                           )
+                       )""",
                     (round_id,),
                 ).fetchone()[0] or 0)
             # Existing artifacts are reusable only when an explicit task-level recovery
