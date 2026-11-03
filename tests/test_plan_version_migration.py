@@ -117,6 +117,23 @@ def test_stage_publish_stats_count_only_user_confirmed_drafts():
     db._run_migration(conn, Migration(131, lifecycle_migration, "master_plan_lifecycle_restore"))
     strategy_migration = Path(__file__).resolve().parents[1] / "migrations" / "136_platform_subplan_strategy_model.sql"
     db._run_migration(conn, Migration(136, strategy_migration, "platform_subplan_strategy_model"))
+    # Migration 133 creates this canonical table; the focused fixture builds only
+    # the schema needed by migration 138's historical effect-review backfill.
+    conn.executescript("""
+        CREATE TABLE strategy_effect_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stage_id INTEGER NOT NULL REFERENCES sub_plan_stages(id) ON DELETE RESTRICT,
+            assessment TEXT NOT NULL CHECK(assessment IN ('effective','mixed','ineffective','insufficient_data')),
+            recommendation TEXT NOT NULL,
+            evidence_note TEXT NOT NULL DEFAULT '',
+            confidence TEXT NOT NULL DEFAULT 'low',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            created_by TEXT NOT NULL DEFAULT 'web-ui',
+            created_at TEXT NOT NULL
+        );
+    """)
+    business_gate_migration = Path(__file__).resolve().parents[1] / "migrations" / "138_strategy_step_business_completion.sql"
+    db._run_migration(conn, Migration(138, business_gate_migration, "strategy_step_business_completion"))
     conn.execute(
         "INSERT INTO spiral_rounds(id,round_number,status,plan_signature,created_at) "
         "VALUES(3,3,'created',NULL,'2026-01-03')"
@@ -136,7 +153,7 @@ def test_stage_publish_stats_count_only_user_confirmed_drafts():
     subplan = store.create_subplan_version(
         "sub-xhs", {"title": "subplan", "platform": "xhs"},
         master_plan_version_id=master["id"],
-        stages=[{"title": "stage 1", "target_count": 2}],
+        stages=[{"title": "stage 1", "target_count": 1}],
     )
     stage_id = conn.execute(
         "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=?", (subplan["id"],)
@@ -263,4 +280,52 @@ def test_master_plan_lifecycle_migration_adds_soft_delete_provenance_and_db_guar
     assert conn.execute(
         "SELECT id FROM master_plan_versions WHERE status='effective' AND deleted_at IS NULL"
     ).fetchone()[0] == first_id
+    conn.close()
+
+
+def test_business_gate_migration_reopens_completed_stages_with_unreviewed_gates():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.executescript("""
+        CREATE TABLE schema_version(
+            version INTEGER PRIMARY KEY, description TEXT NOT NULL
+        );
+        CREATE TABLE sub_plan_stages(
+            id INTEGER PRIMARY KEY,
+            completion_criteria TEXT,
+            completion_condition TEXT,
+            effect_evaluation TEXT,
+            status TEXT NOT NULL,
+            updated_at TEXT
+        );
+        CREATE TABLE strategy_effect_reviews(
+            id INTEGER PRIMARY KEY,
+            stage_id INTEGER NOT NULL REFERENCES sub_plan_stages(id),
+            assessment TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO sub_plan_stages(
+            id,completion_criteria,completion_condition,effect_evaluation,status
+        ) VALUES(1,'业务目标已达成','数量目标','有效反馈率达到目标','completed');
+        INSERT INTO sub_plan_stages(
+            id,completion_criteria,effect_evaluation,status
+        ) VALUES(2,'','', 'completed');
+    """)
+    db = Database.__new__(Database)
+    migration = Path(__file__).resolve().parents[1] / "migrations" / "138_strategy_step_business_completion.sql"
+    db._run_migration(conn, Migration(138, migration, "strategy_step_business_completion"))
+
+    gated = conn.execute(
+        "SELECT status,business_completion_status,effect_status FROM sub_plan_stages WHERE id=1"
+    ).fetchone()
+    ungated = conn.execute(
+        "SELECT status,business_completion_status,effect_status FROM sub_plan_stages WHERE id=2"
+    ).fetchone()
+    assert gated["status"] == "in_progress"
+    assert gated["business_completion_status"] == "pending"
+    assert gated["effect_status"] == "pending"
+    assert ungated["status"] == "completed"
+    assert ungated["business_completion_status"] == "not_required"
+    assert ungated["effect_status"] == "not_required"
     conn.close()

@@ -462,14 +462,29 @@ class PlanVersionStore:
                     entry_met = bool(entry_met)
                 if not isinstance(entry_met, bool):
                     raise PlanVersionError("阶段进入条件状态必须是布尔值")
+                completion_criteria = str(stage.get("completion_criteria") or stage.get("completion_condition") or "")[:4000]
+                business_required = stage.get("business_completion_required", bool(completion_criteria.strip()))
+                effect_required = stage.get("effect_required", bool(str(stage.get("effect_evaluation") or "").strip()))
+                for field_name, value in (("business_completion_required", business_required),
+                                          ("effect_required", effect_required)):
+                    if isinstance(value, int) and not isinstance(value, bool) and value in (0, 1):
+                        if field_name == "business_completion_required":
+                            business_required = bool(value)
+                        else:
+                            effect_required = bool(value)
+                    elif not isinstance(value, bool):
+                        raise PlanVersionError(f"{field_name} 必须是布尔值")
+                business_status = "pending" if business_required else "not_required"
+                effect_status = "pending" if effect_required else "not_required"
                 self.conn.execute(
                     """INSERT INTO sub_plan_stages(
                         sub_plan_version_id,stage_key,stage_order,title,direction,target_count,
                         start_date,end_date,completion_condition,status,notes,created_at,updated_at,
                         strategy_goal,current_problem,execution_strategy,prerequisites,input_info,
                         expected_result,completion_criteria,effect_evaluation,entry_condition,
-                        entry_condition_met,dependencies_json
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        entry_condition_met,dependencies_json,business_completion_required,
+                        business_completion_status,effect_required,effect_status
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (version_id, stage_key, stage_order, title,
                      str(stage.get("direction") or ""), target_count,
                      start_date, end_date, str(stage.get("completion_condition") or ""),
@@ -480,11 +495,13 @@ class PlanVersionStore:
                      str(stage.get("prerequisites") or "")[:4000],
                      str(stage.get("input_info") or "")[:4000],
                      str(stage.get("expected_result") or "")[:4000],
-                     str(stage.get("completion_criteria") or stage.get("completion_condition") or "")[:4000],
+                     completion_criteria,
                      str(stage.get("effect_evaluation") or "")[:4000],
                      str(stage.get("entry_condition") or "")[:4000],
                      1 if entry_met else 0,
-                     json.dumps(stage.get("dependencies") or [], ensure_ascii=False)),
+                     json.dumps(stage.get("dependencies") or [], ensure_ascii=False),
+                     1 if business_required else 0, business_status,
+                     1 if effect_required else 0, effect_status),
                 )
             row = dict(self.conn.execute(
                 "SELECT * FROM sub_plan_versions WHERE id=?", (version_id,)
@@ -580,6 +597,12 @@ class PlanVersionStore:
             "completed": {"completed"},
             "cancelled": {"cancelled"},
         }
+        if status == "completed":
+            from .strategy_step_completion import assert_stage_completion_ready
+            try:
+                assert_stage_completion_ready(self.conn, stage_id)
+            except ValueError as exc:
+                raise PlanVersionError(str(exc)) from exc
         if status not in transitions[previous]:
             raise PlanVersionError(f"阶段状态不允许从 {previous} 变更为 {status}")
         cur = self.conn.execute(
@@ -689,6 +712,10 @@ class PlanVersionStore:
             raise PlanVersionError("阶段不属于指定子计划版本")
         if not bool(stage["entry_condition_met"]):
             raise PlanVersionError("阶段进入条件尚未满足")
+        from .strategy_step_completion import completion_gate_state
+        gate_state = completion_gate_state(dict(stage))
+        if gate_state["production_blocked"]:
+            raise PlanVersionError("策略完成条件未通过或等待人工复核，必须先调整策略或完成复核")
         try:
             dependencies = json.loads(stage["dependencies_json"] or "[]")
         except (TypeError, ValueError) as exc:
@@ -698,8 +725,10 @@ class PlanVersionStore:
         dependency_outcomes = {}
         for dependency_key in dependencies:
             predecessor = self.conn.execute(
-                """SELECT status FROM sub_plan_stages
-                   WHERE sub_plan_version_id=? AND stage_key=?""",
+                """SELECT s.*,COALESCE(stats.confirmed_published_count,0) AS confirmed_published_count
+                   FROM sub_plan_stages s
+                   LEFT JOIN sub_plan_stage_publish_stats stats ON stats.stage_id=s.id
+                   WHERE s.sub_plan_version_id=? AND s.stage_key=?""",
                 (version_id, dependency_key),
             ).fetchone()
             outcome = self.conn.execute(
@@ -711,6 +740,11 @@ class PlanVersionStore:
             if predecessor is None or predecessor["status"] != "completed" or outcome is None:
                 raise PlanVersionError(
                     f"前置阶段 {dependency_key} 尚未完成或缺少实际效果记录"
+                )
+            predecessor_gates = completion_gate_state(dict(predecessor))
+            if not predecessor_gates["can_complete"]:
+                raise PlanVersionError(
+                    f"前置阶段 {dependency_key} 的业务完成或效果条件已失效，不能进入后续步骤"
                 )
             if not str(outcome["evaluation"] or "").strip():
                 raise PlanVersionError(f"前置阶段 {dependency_key} 缺少效果评价，不能进入后续步骤")
@@ -743,8 +777,16 @@ class PlanVersionStore:
         ).fetchone()
         if stage is None:
             raise PlanVersionError("阶段不属于指定子计划版本")
-        if stage["status"] != "completed":
-            raise PlanVersionError("只有已完成的阶段才能记录实际效果")
+        if stage["status"] not in ("in_progress", "completed"):
+            raise PlanVersionError("只有执行中或已完成的阶段才能记录实际效果")
+        published = self.conn.execute(
+            "SELECT COALESCE(confirmed_published_count,0) FROM sub_plan_stage_publish_stats WHERE stage_id=?",
+            (stage_id,),
+        ).fetchone()
+        if int(published[0] or 0) < int(self.conn.execute(
+            "SELECT target_count FROM sub_plan_stages WHERE id=?", (stage_id,)
+        ).fetchone()[0]):
+            raise PlanVersionError("发布数量目标尚未达标，不能提交阶段实际结果")
         self._begin()
         try:
             cur = self.conn.execute(

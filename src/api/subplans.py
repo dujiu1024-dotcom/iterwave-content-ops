@@ -645,6 +645,8 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
                     "input_info": str(stage.get("input_info") or ""),
                     "expected_result": str(stage.get("expected_result") or ""),
                     "effect_evaluation": str(stage.get("effect_evaluation") or ""),
+                    "effect_required": stage.get("effect_required", bool(str(stage.get("effect_evaluation") or "").strip())),
+                    "business_completion_required": stage.get("business_completion_required", bool(stage.get("completion_criteria") or stage.get("completion_condition"))),
                     "entry_condition": str(stage.get("entry_condition") or ""),
                     "entry_condition_met": stage.get("entry_condition_met", True),
                     "dependencies": stage.get("dependencies") or [],
@@ -735,6 +737,133 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         except PlanVersionError as exc:
             fail(exc)
 
+    @app.post("/api/subplans/{sub_plan_id}/stages/{stage_id}/condition-review")
+    def review_stage_condition(sub_plan_id: str, stage_id: int, req: dict):
+        """Record an auditable human decision for a declared business/effect gate."""
+        condition_type = str(req.get("condition_type") or "").strip()
+        decision = str(req.get("decision") or "").strip()
+        reason = str(req.get("reason") or "").strip()
+        evidence = req.get("evidence") or {}
+        if condition_type not in {"business", "effect"}:
+            raise HTTPException(422, "condition_type 只能是 business 或 effect")
+        if decision not in {"passed", "failed", "needs_review"}:
+            raise HTTPException(422, "decision 只能是 passed、failed 或 needs_review")
+        if not isinstance(evidence, dict):
+            raise HTTPException(422, "evidence 必须是对象")
+        if decision != "passed" and not reason:
+            raise HTTPException(422, "未通过或待复核时必须填写原因")
+        if decision == "passed" and not reason and not evidence:
+            raise HTTPException(422, "确认通过时必须提供原因或证据")
+        conn = get_runtime()["conn"]
+        stage = conn.execute(
+            """SELECT s.*,v.sub_plan_id FROM sub_plan_stages s
+               JOIN sub_plan_versions v ON v.id=s.sub_plan_version_id
+               JOIN sub_plans p ON p.id=v.sub_plan_id AND p.current_version_id=v.id
+               WHERE s.id=? AND v.sub_plan_id=? AND v.status='effective'""",
+            (stage_id, sub_plan_id),
+        ).fetchone()
+        if stage is None:
+            raise HTTPException(404, "策略步骤不存在或不属于当前生效版本")
+        if condition_type == "business" and not bool(stage["business_completion_required"]):
+            raise HTTPException(409, "该步骤未声明需要人工确认业务完成条件")
+        if condition_type == "effect" and not bool(stage["effect_required"]):
+            raise HTTPException(409, "该步骤未声明效果达标为必需条件")
+        if condition_type == "business" and decision == "passed":
+            count = conn.execute(
+                "SELECT COALESCE(confirmed_published_count,0) FROM sub_plan_stage_publish_stats WHERE stage_id=?",
+                (stage_id,),
+            ).fetchone()
+            published = int(count[0] or 0) if count else 0
+            if published < int(stage["target_count"]):
+                raise HTTPException(409, "发布数量目标尚未达标，不能确认业务完成")
+        assessment = None
+        recommendation = None
+        confidence = None
+        if condition_type == "effect":
+            assessment = {
+                "passed": "effective",
+                "failed": "ineffective",
+                "needs_review": "insufficient_data",
+            }[decision]
+            recommendation = str(req.get("recommendation") or reason or {
+                "passed": "效果评估通过",
+                "failed": "效果未达标，需要调整策略",
+                "needs_review": "效果证据不足，需要补充评估",
+            }[decision]).strip()
+            if not recommendation or len(recommendation) > 2000:
+                raise HTTPException(422, "效果评估 recommendation 必须为 1-2000 个字符")
+            confidence = str(req.get("confidence") or "medium")
+            if confidence not in {"low", "medium", "high"}:
+                raise HTTPException(422, "confidence 只能是 low、medium 或 high")
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        column = "business_completion_status" if condition_type == "business" else "effect_status"
+        conn.execute(
+            f"UPDATE sub_plan_stages SET {column}=?,updated_at=? WHERE id=?",
+            (decision, now, stage_id),
+        )
+        if condition_type == "effect":
+            conn.execute(
+                """INSERT INTO strategy_effect_reviews(
+                       stage_id,assessment,recommendation,evidence_note,confidence,
+                       evidence_json,created_by,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?)""",
+                (stage_id, assessment, recommendation, reason[:2000], confidence,
+                 json.dumps(evidence, ensure_ascii=False, sort_keys=True), "user", now),
+            )
+        conn.execute(
+            """INSERT INTO strategy_step_condition_reviews(
+                   stage_id,condition_type,decision,reason,evidence_json,reviewed_by,created_at
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (stage_id, condition_type, decision, reason[:2000],
+             json.dumps(evidence, ensure_ascii=False, sort_keys=True), "user", now),
+        )
+        conn.commit()
+        updated = dict(conn.execute(
+            "SELECT * FROM sub_plan_stages WHERE id=?", (stage_id,)
+        ).fetchone())
+        from src.core.strategy_step_completion import completion_gate_state
+        gates = completion_gate_state(updated | {
+            "confirmed_published_count": int((conn.execute(
+                "SELECT COALESCE(confirmed_published_count,0) FROM sub_plan_stage_publish_stats WHERE stage_id=?",
+                (stage_id,),
+            ).fetchone() or [0])[0] or 0)
+        })
+        return {"stage": updated, "completion_gates": gates}
+
+    @app.get("/api/subplans/{sub_plan_id}/stages/{stage_id}/condition-reviews")
+    def list_stage_condition_reviews(sub_plan_id: str, stage_id: int):
+        conn = get_runtime()["conn"]
+        stage = conn.execute(
+            """SELECT s.id FROM sub_plan_stages s
+               JOIN sub_plan_versions v ON v.id=s.sub_plan_version_id
+               WHERE s.id=? AND v.sub_plan_id=?""",
+            (stage_id, sub_plan_id),
+        ).fetchone()
+        if stage is None:
+            raise HTTPException(404, "策略步骤不存在")
+        reviews = []
+        for row in conn.execute(
+            """SELECT * FROM strategy_step_condition_reviews
+               WHERE stage_id=? ORDER BY created_at DESC,id DESC""", (stage_id,)
+        ).fetchall():
+            item = dict(row)
+            try:
+                item["evidence"] = json.loads(item.pop("evidence_json") or "{}")
+            except (TypeError, ValueError):
+                item["evidence"] = None
+            reviews.append(item)
+        effect_reviews = [dict(row) for row in conn.execute(
+            """SELECT * FROM strategy_effect_reviews
+               WHERE stage_id=? ORDER BY created_at DESC,id DESC""", (stage_id,)
+        ).fetchall()]
+        for item in effect_reviews:
+            try:
+                item["evidence"] = json.loads(item.pop("evidence_json") or "{}")
+            except (TypeError, ValueError):
+                item["evidence"] = None
+        return {"condition_reviews": reviews, "effect_reviews": effect_reviews}
+
     @app.post("/api/subplans/{sub_plan_id}/rounds", status_code=201)
     def create_subplan_round(sub_plan_id: str, req: dict):
         """Manual first/next round: still binds an approved stage and durable idempotency."""
@@ -767,6 +896,11 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
                 raise HTTPException(409, "当前阶段已暂停")
             confirmed = int(candidate["confirmed_published_count"] or 0)
             if confirmed >= int(candidate["target_count"]):
+                from src.core.strategy_step_completion import completion_gate_state
+                gates = completion_gate_state(dict(candidate))
+                if not gates["can_complete"]:
+                    stage = candidate
+                    break
                 if candidate["status"] == "pending":
                     lifecycle.update_stage_status(int(candidate["id"]), "in_progress")
                 lifecycle.update_stage_status(int(candidate["id"]), "completed")
@@ -789,9 +923,7 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
                              (sub_plan_id,))
             conn.commit()
             raise HTTPException(409, "子计划没有待执行阶段，所有阶段已完成或取消")
-        # Fail closed before acquiring an idempotency lease: the selected stage must
-        # satisfy its entry condition and every predecessor must have a completed,
-        # evaluated outcome. create_round_once rechecks this atomically before insert.
+        # Recheck entry conditions and predecessor outcomes before acquiring an idempotency lease.
         try:
             ready_stage = lifecycle.assert_stage_ready(
                 int(stage["id"]), int(identity["current_version_id"])
