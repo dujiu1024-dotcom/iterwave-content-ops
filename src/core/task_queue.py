@@ -800,21 +800,28 @@ class GlobalTaskQueue:
         scope: str = "history", tenant_id: str | None = None,
         task_type: str | None = None, error_keyword: str | None = None,
         date_from: str | None = None, date_to: str | None = None,
-        unresolved_only: bool = False,
+        unresolved_only: bool = False, status: str | None = None,
     ) -> tuple[list[QueuedTask], int]:
         """Return a stable, database-paginated slice of active or historical tasks."""
         page = max(1, int(page))
         page_size = max(1, min(int(page_size), 500))
-        if scope not in {"active", "history", "failed"}:
-            raise ValueError("scope must be active or history")
+        if scope not in {"active", "history", "failed", "filtered"}:
+            raise ValueError("scope must be active, history, failed, or filtered")
         statuses = (
             ("queued", "running") if scope == "active"
             else ("failed", "interrupted") if scope == "failed"
+            else ("queued", "running", "succeeded", "failed", "cancelled", "interrupted")
+            if scope == "filtered"
             else ("succeeded", "failed", "cancelled", "interrupted")
         )
         placeholders = ",".join("?" for _ in statuses)
         where = f"q.status IN ({placeholders})"
         params: list[object] = list(statuses)
+        if status is not None:
+            if status not in {"queued", "running", "succeeded", "failed", "cancelled", "interrupted"}:
+                raise ValueError("status is invalid")
+            where += " AND q.status=?"
+            params.append(status)
         if unresolved_only:
             if scope != "failed":
                 raise ValueError("unresolved_only 仅适用于 failed scope")
