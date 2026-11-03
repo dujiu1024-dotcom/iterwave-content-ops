@@ -23,6 +23,7 @@ from contextlib import contextmanager
 import logging
 import shutil
 import sqlite3
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -494,7 +495,7 @@ class _RecoverableRLock:
 
     def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
         current = _threading.current_thread()
-        deadline = None if timeout is None or timeout < 0 else _threading.monotonic() + timeout
+        deadline = None if timeout is None or timeout < 0 else time.monotonic() + timeout
         with self._condition:
             while True:
                 if self._owner is not None and not self._owner.is_alive():
