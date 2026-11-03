@@ -3083,23 +3083,42 @@ def _register_routes(app: FastAPI) -> None:
             target.chmod(0o600)
         except OSError:
             pass
+        duplicate_after_processing = None
         try:
-            cur = conn.execute(
-                "INSERT INTO media_assets "
-                "(title, original_filename, stored_filename, mime_type, byte_size, sha256, "
-                "width, height, alt_text, tags, source_type, status, quality_score, quality_details) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'upload', 'active', ?, ?)",
-                (
-                    title, safe_filename, stored_filename, mime_type,
-                    len(raw), digest, width, height, req.alt_text.strip(),
-                    json.dumps(tags, ensure_ascii=False), quality["score"],
-                    json.dumps(quality, ensure_ascii=False),
-                ),
-            )
-            conn.commit()
+            # File decoding, quality scoring and disk I/O above intentionally happen
+            # without a tenant transaction. Recheck the digest under a short write
+            # transaction to preserve concurrent-upload idempotency.
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                duplicate_after_processing = conn.execute(
+                    "SELECT id, title, original_filename, mime_type, byte_size, width, height, "
+                    "alt_text, tags, status, review_status, review_note, created_at "
+                    "FROM media_assets WHERE sha256 = ? AND status = 'active' LIMIT 1",
+                    (digest,),
+                ).fetchone()
+                if duplicate_after_processing is None:
+                    cur = conn.execute(
+                        "INSERT INTO media_assets "
+                        "(title, original_filename, stored_filename, mime_type, byte_size, sha256, "
+                        "width, height, alt_text, tags, source_type, status, quality_score, quality_details) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'upload', 'active', ?, ?)",
+                        (
+                            title, safe_filename, stored_filename, mime_type,
+                            len(raw), digest, width, height, req.alt_text.strip(),
+                            json.dumps(tags, ensure_ascii=False), quality["score"],
+                            json.dumps(quality, ensure_ascii=False),
+                        ),
+                    )
         except Exception:
             target.unlink(missing_ok=True)
             raise
+        if duplicate_after_processing is not None:
+            target.unlink(missing_ok=True)
+            item = dict(duplicate_after_processing)
+            item["tags"] = json.loads(item["tags"] or "[]")
+            item["duplicate"] = True
+            item["file_url"] = f"/api/media/{item['id']}/file"
+            return item
         return {
             "id": cur.lastrowid, "title": title,
             "original_filename": Path(req.filename).name[:255],
