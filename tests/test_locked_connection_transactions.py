@@ -347,3 +347,40 @@ def test_connection_transaction_supports_raw_sqlite_connection():
 
     assert conn.execute("SELECT value FROM events").fetchall() == [("committed",)]
     conn.close()
+
+
+
+def test_abandoned_worker_transaction_is_rolled_back_and_lock_recovered(tmp_path):
+    import threading
+
+    conn = _locked(sqlite3.connect(tmp_path / "abandoned.db", check_same_thread=False))
+    conn.execute("CREATE TABLE t (v INTEGER)")
+    conn.commit()
+    finished = threading.Event()
+
+    def abandon_after_insert():
+        conn.execute("INSERT INTO t VALUES (99)")
+        # Deliberately exit with an implicit SQLite transaction still open.
+        finished.set()
+
+    worker = threading.Thread(target=abandon_after_insert)
+    worker.start()
+    worker.join(timeout=2)
+    assert finished.is_set()
+    assert not worker.is_alive()
+
+    # The next owner detects the dead worker, rolls back its transaction, and proceeds.
+    count = conn.execute("SELECT COUNT(*) FROM t").fetchone()[0]
+    assert count == 0
+
+
+def test_transactional_route_respects_own_transaction_marker():
+    def endpoint():
+        return {"ok": True}
+
+    managed = api_main.manages_own_transaction(endpoint)
+    route = api_main.TransactionalAPIRoute("/managed", managed, methods=["POST"])
+    assert route.endpoint is managed
+
+    plain_route = api_main.TransactionalAPIRoute("/plain", endpoint, methods=["POST"])
+    assert plain_route.endpoint is not endpoint
