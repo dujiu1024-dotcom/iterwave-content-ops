@@ -127,6 +127,9 @@ def test_global_expired_sweeper_holds_write_transaction_during_reconciliation(st
         "UPDATE production_tasks SET lease_expires_at='2000-01-01T00:00:00+00:00' WHERE id=?",
         (task["id"],),
     )
+    # End the setup write transaction so the sweeper itself must acquire its
+    # BEGIN IMMEDIATE reservation before selecting expired tasks.
+    store.conn.commit()
     statements.clear()
 
     reconcile_expired_production_tasks(store.conn)
