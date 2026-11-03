@@ -91,6 +91,37 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
                 raise HTTPException(422, "阶段结束日期不能早于开始日期")
         if len(set(orders)) != len(orders):
             raise HTTPException(422, "阶段排序不能重复")
+        keys = [str(stage.get("stage_key") or "").strip() for stage in stages if stage.get("stage_key")]
+        if len(set(keys)) != len(keys):
+            raise HTTPException(422, "阶段稳定标识不能重复")
+        known = set(keys)
+        graph = {}
+        for stage in stages:
+            key = str(stage.get("stage_key") or "").strip()
+            deps = stage.get("dependencies", stage.get("depends_on", []))
+            if not isinstance(deps, list) or any(not isinstance(dep, str) or not dep.strip() for dep in deps):
+                raise HTTPException(422, "阶段依赖必须是稳定阶段标识数组")
+            deps = [dep.strip() for dep in deps]
+            if len(set(deps)) != len(deps) or (key and key in deps):
+                raise HTTPException(422, "阶段依赖不能重复或依赖自身")
+            if deps and (not key or any(dep not in known for dep in deps)):
+                raise HTTPException(422, "阶段依赖必须引用同一版本中已定义的稳定阶段标识")
+            graph[key] = deps
+            if "entry_condition_met" in stage and not isinstance(stage["entry_condition_met"], bool):
+                raise HTTPException(422, "entry_condition_met 必须是布尔值")
+        visiting, visited = set(), set()
+        def visit(key):
+            if key in visiting:
+                raise HTTPException(422, "阶段依赖关系存在循环")
+            if key in visited:
+                return
+            visiting.add(key)
+            for dep in graph.get(key, []):
+                visit(dep)
+            visiting.remove(key)
+            visited.add(key)
+        for key in graph:
+            visit(key)
     def _stages(version_id: int) -> list[dict[str, Any]]:
         return [dict(row) for row in get_runtime()["conn"].execute(
             "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order,id",
@@ -109,6 +140,30 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         except (TypeError, ValueError):
             raise HTTPException(409, "子计划版本快照损坏")
         result["stages"] = _stages(version_id)
+        for stage in result["stages"]:
+            try:
+                stage["dependencies"] = json.loads(stage.get("dependencies_json") or "[]")
+                stage["entry_condition_met"] = bool(stage.get("entry_condition_met", 1))
+            except (TypeError, ValueError):
+                raise HTTPException(409, "阶段依赖快照损坏")
+        outcomes = get_runtime()["conn"].execute(
+            """SELECT o.* FROM sub_plan_stage_outcomes o
+               JOIN sub_plan_stages s ON s.stage_key=o.stage_key
+               WHERE s.sub_plan_version_id=? AND o.sub_plan_id=?
+               ORDER BY o.recorded_at DESC,o.id DESC""",
+            (version_id, result["sub_plan_id"]),
+        ).fetchall()
+        latest = {}
+        for outcome in outcomes:
+            latest.setdefault(outcome["stage_key"], dict(outcome))
+        for stage in result["stages"]:
+            outcome = latest.get(stage.get("stage_key"))
+            if outcome:
+                try:
+                    outcome["result"] = json.loads(outcome.pop("result_json"))
+                except (TypeError, ValueError):
+                    outcome["result"] = None
+            stage["latest_outcome"] = outcome
         return result
 
     def _check_expected_version(version: dict[str, Any], expected: Any) -> None:
@@ -288,6 +343,7 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         stages = [{k: v for k, v in s.items() if k not in ("id", "sub_plan_version_id", "created_at", "updated_at")}
                   for s in version["stages"]]
         new_stage = dict(req["stage"])
+        new_stage.setdefault("stage_key", uuid.uuid4().hex)
         new_stage["stage_order"] = len(stages) + 1
         stages.append(new_stage)
         _validate_stage_inputs(stages)
@@ -417,15 +473,55 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         enabled_master_platforms = set(master_snapshot.get("enabled_platforms") or [])
         if not set(platforms).issubset(enabled_master_platforms):
             raise HTTPException(422, "AI 拆解平台必须属于生效主计划启用的平台")
+        outcome_context = {}
+        conn = get_runtime()["conn"]
+        for platform in platforms:
+            active_subplan = conn.execute(
+                """SELECT id FROM sub_plans WHERE platform=? AND status='active'
+                   ORDER BY updated_at DESC LIMIT 1""",
+                (platform,),
+            ).fetchone()
+            if active_subplan is None:
+                continue
+            history = conn.execute(
+                """SELECT o.stage_key,s.title,o.result_json,o.evaluation,o.recorded_at
+                   FROM sub_plan_stage_outcomes o
+                   JOIN sub_plan_stages s ON s.id=o.stage_id
+                   WHERE o.sub_plan_id=?
+                   ORDER BY o.recorded_at DESC,o.id DESC LIMIT 30""",
+                (active_subplan["id"],),
+            ).fetchall()
+            parsed_history = []
+            for item in history:
+                try:
+                    actual_result = json.loads(item["result_json"])
+                except (TypeError, ValueError):
+                    actual_result = {"unreadable_result": True}
+                parsed_history.append({
+                    "stage_key": item["stage_key"], "stage_title": item["title"],
+                    "actual_result": actual_result, "evaluation": item["evaluation"],
+                    "recorded_at": item["recorded_at"],
+                })
+            if parsed_history:
+                outcome_context[platform] = parsed_history
+
         prompt = (
             "你是内容运营计划拆解器。根据母计划，为每个平台分别生成子计划草稿。"
             "只返回 JSON 对象，格式为 {subplans:[{platform,title,snapshot,stages:["
-            "{title,direction,target_count,start_date,end_date,completion_condition,notes}]}]}。"
+            "{stage_key,title,direction,target_count,start_date,end_date,completion_condition,"
+            "strategy_goal,current_problem,execution_strategy,prerequisites,input_info,"
+            "expected_result,completion_criteria,effect_evaluation,entry_condition,"
+            "entry_condition_met,dependencies,notes}]}]}。"
+            "每个阶段必须有唯一 stage_key；dependencies 是前置阶段 stage_key 数组，只能引用本子计划中更早的阶段；"
+            "不得生成循环依赖。前置阶段的实际结果将供后续阶段引用。"
             "每个子计划至少 1 个阶段；阶段顺序按数组顺序；target_count 是用户最终确认发布篇数，"
             "不是生成草稿数。不得输出审核状态或要求自动生效。"
             "\n母计划："
             + json.dumps(master_snapshot, ensure_ascii=False)
             + "\n目标平台：" + json.dumps(platforms, ensure_ascii=False)
+            + "\n历史阶段实际结果：" + json.dumps(outcome_context, ensure_ascii=False)
+            + "\n必须基于历史实际结果调整后续策略步骤：未达成预期时明确修正问题和执行策略；"
+              "已达成时说明可复用做法及是否扩大规模；不得忽略历史结果或把历史结果伪装成新的预期结果。"
         )
 
         # Use the same independently configured primary/fallback providers as content
@@ -531,12 +627,27 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
                 if target < 1 or target > 10000:
                     raise HTTPException(502, {"code": "ai_target_invalid", "message": "AI 阶段目标数量不合理",
                                               "manual_creation_available": True})
+                if "entry_condition_met" in stage and not isinstance(stage["entry_condition_met"], bool):
+                    raise HTTPException(502, {"code": "ai_entry_condition_invalid", "message": "AI 阶段进入条件格式不合法",
+                                              "manual_creation_available": True})
                 clean_stages.append({
-                    "stage_order": index, "title": str(stage["title"]).strip(),
+                    "stage_order": index, "stage_key": str(stage.get("stage_key") or ("ai-stage-" + uuid.uuid4().hex)),
+                    "title": str(stage["title"]).strip(),
                     "direction": str(stage.get("direction") or ""),
                     "target_count": target, "start_date": stage.get("start_date"),
                     "end_date": stage.get("end_date"),
-                    "completion_condition": str(stage.get("completion_condition") or ""),
+                    "completion_condition": str(stage.get("completion_condition") or stage.get("completion_criteria") or ""),
+                    "completion_criteria": str(stage.get("completion_criteria") or stage.get("completion_condition") or ""),
+                    "strategy_goal": str(stage.get("strategy_goal") or ""),
+                    "current_problem": str(stage.get("current_problem") or ""),
+                    "execution_strategy": str(stage.get("execution_strategy") or ""),
+                    "prerequisites": str(stage.get("prerequisites") or ""),
+                    "input_info": str(stage.get("input_info") or ""),
+                    "expected_result": str(stage.get("expected_result") or ""),
+                    "effect_evaluation": str(stage.get("effect_evaluation") or ""),
+                    "entry_condition": str(stage.get("entry_condition") or ""),
+                    "entry_condition_met": stage.get("entry_condition_met", True),
+                    "dependencies": stage.get("dependencies") or [],
                     "notes": str(stage.get("notes") or ""),
                 })
             title = str(item.get("title") or f"{item['platform']} 平台子计划").strip()
@@ -578,6 +689,51 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         return {"items": created, "effective": False, "requires_human_review": True,
                 "manual_creation_available": True}
 
+
+    @app.post("/api/subplans/{sub_plan_id}/stages/{stage_id}/outcomes", status_code=201)
+    def record_stage_outcome(sub_plan_id: str, stage_id: int, req: dict):
+        version_id = req.get("version_id")
+        result = req.get("result")
+        if isinstance(version_id, bool):
+            raise HTTPException(422, "version_id 必须是正整数")
+        try:
+            version_id = int(version_id)
+        except (TypeError, ValueError, OverflowError):
+            raise HTTPException(422, "version_id 必须是正整数")
+        if not isinstance(result, dict):
+            raise HTTPException(422, "result 必须是实际执行结果对象")
+        conn = get_runtime()["conn"]
+        identity = conn.execute(
+            "SELECT current_version_id FROM sub_plans WHERE id=?", (sub_plan_id,)
+        ).fetchone()
+        if identity is None:
+            raise HTTPException(404, "子计划不存在")
+        current_version_id = int(identity["current_version_id"] or 0)
+        if current_version_id < 1:
+            raise HTTPException(409, "子计划尚无生效版本，不能记录实际结果")
+        requested_stage = conn.execute(
+            """SELECT s.stage_key FROM sub_plan_stages s
+               JOIN sub_plan_versions v ON v.id=s.sub_plan_version_id
+               WHERE s.id=? AND v.id=? AND v.sub_plan_id=?""",
+            (stage_id, version_id, sub_plan_id),
+        ).fetchone()
+        if requested_stage is None:
+            raise HTTPException(404, "阶段不属于指定子计划版本")
+        effective_stage = conn.execute(
+            """SELECT id FROM sub_plan_stages
+               WHERE sub_plan_version_id=? AND stage_key=?""",
+            (current_version_id, requested_stage["stage_key"]),
+        ).fetchone()
+        if effective_stage is None:
+            raise HTTPException(409, "当前生效版本已移除该策略步骤，不能记录其执行结果")
+        try:
+            outcome = store().record_stage_outcome(
+                int(effective_stage["id"]), current_version_id, result,
+                evaluation=str(req.get("evaluation") or ""), author="user",
+            )
+            return {"outcome": outcome}
+        except PlanVersionError as exc:
+            fail(exc)
 
     @app.post("/api/subplans/{sub_plan_id}/rounds", status_code=201)
     def create_subplan_round(sub_plan_id: str, req: dict):

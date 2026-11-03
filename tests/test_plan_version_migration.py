@@ -115,6 +115,8 @@ def test_stage_publish_stats_count_only_user_confirmed_drafts():
     db._run_migration(conn, Migration(116, stage_migration, "subplan_round_metadata"))
     lifecycle_migration = Path(__file__).resolve().parents[1] / "migrations" / "131_master_plan_lifecycle_restore.sql"
     db._run_migration(conn, Migration(131, lifecycle_migration, "master_plan_lifecycle_restore"))
+    strategy_migration = Path(__file__).resolve().parents[1] / "migrations" / "136_platform_subplan_strategy_model.sql"
+    db._run_migration(conn, Migration(136, strategy_migration, "platform_subplan_strategy_model"))
     conn.execute(
         "INSERT INTO spiral_rounds(id,round_number,status,plan_signature,created_at) "
         "VALUES(3,3,'created',NULL,'2026-01-03')"
