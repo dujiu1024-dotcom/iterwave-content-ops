@@ -23,6 +23,8 @@ Base path: `/api/skill-registry/skills`
 | GET | `/api/skill-registry/skills/{skill_id}/audit` | Read lifecycle audit records |
 | POST | `/api/skill-registry/skills/{skill_id}/execute` | Fail-closed execution request (409) |
 | GET | `/api/skill-registry/skills/{skill_id}/executions` | Read metadata-only execution history |
+| POST | `/api/skill-registry/skills/{skill_id}/validate-input` | Validate input data against the declared contract |
+| POST | `/api/skill-registry/skills/{skill_id}/validate-output` | Validate output data against the declared contract |
 
 The existing `/api/skills` routes are retained for backward compatibility. New registry lifecycle APIs deliberately use a separate namespace to avoid route shadowing.
 
@@ -50,6 +52,8 @@ Example:
 - Manifest size is limited to 64 KiB.
 - Unknown fields and unsupported permissions are rejected.
 - Validation results and canonical manifest SHA-256 are persisted for traceability.
+- `inputs` and `outputs` may declare a bounded JSON Schema subset (`object`, `array`, scalar types, required fields, properties, enum, and basic size/value bounds). Unsupported keywords are rejected rather than silently ignored.
+- Contract validation endpoints accept `{"value": ...}` and return structured path/code errors. Legacy field-list contracts are reported as unsupported for this validator; they are not guessed or silently coerced.
 - Versions are immutable; updates append a version record.
 
 ## Lifecycle and safety
