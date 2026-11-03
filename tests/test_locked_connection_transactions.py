@@ -385,7 +385,7 @@ def test_transactional_route_respects_own_transaction_marker():
 
     managed = api_main.manages_own_transaction(endpoint)
     route = api_main.TransactionalAPIRoute("/managed", managed, methods=["POST"])
-    assert route.endpoint is not managed
+    assert route.endpoint is managed
     assert getattr(route.endpoint, "_manages_own_transaction", False)
 
     plain_route = api_main.TransactionalAPIRoute("/plain", endpoint, methods=["POST"])
