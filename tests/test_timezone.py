@@ -160,3 +160,14 @@ def test_legacy_saved_at_preserves_explicit_timezone_offset():
 
     parsed = parse_server_local_legacy_datetime("2026-11-02T10:00:00+08:00")
     assert parsed == datetime(2026, 11, 2, 2, 0, tzinfo=timezone.utc)
+
+
+def test_business_date_predicate_accepts_qualified_and_coalesce_columns(cfg):
+    from src.core.timezone import business_date_predicate
+
+    qualified, _ = business_date_predicate("m.fetched_at", "2026-11-03", cfg)
+    coalesced, _ = business_date_predicate(
+        "COALESCE(last_seen_at, discovered_at)", "2026-11-03", cfg,
+    )
+    assert "m.fetched_at" in qualified
+    assert "COALESCE(last_seen_at, discovered_at)" in coalesced
