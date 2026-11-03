@@ -49,6 +49,22 @@ from ..adapters.base import DraftStatus, CircuitBreakerReason
 
 logger = logging.getLogger(__name__)
 
+
+def start_progress(steps: list[dict], *, detail: str = "") -> None:
+    """Record the initial orchestration progress without requiring a UI websocket."""
+    logger.info("轮次进度初始化 steps=%s detail=%s", [s.get("id") for s in steps], detail)
+
+
+def update_step(step_id: str, *, status: str, detail: str = "") -> None:
+    """Record an orchestration step transition; durable status lives in run_report."""
+    logger.info("轮次步骤进度 step=%s status=%s detail=%s", step_id, status, detail)
+
+
+def update_detail(detail: str) -> None:
+    """Record the current executor detail for deployments without a live progress sink."""
+    logger.info("轮次执行进度 detail=%s", detail)
+
+
 class RoundPreconditionError(ValueError):
     """执行前置条件不满足；错误文案经过业务层整理，可安全展示给用户。"""
 
