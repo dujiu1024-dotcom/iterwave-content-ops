@@ -1265,3 +1265,59 @@ def test_ai_generation_guard_creates_only_a_draft_when_base_is_unchanged():
         "SELECT active_version_id FROM plan_settings WHERE id=1"
     ).fetchone()[0] == active["id"]
     conn.close()
+
+
+def test_ai_generation_guard_serializes_competing_draft_creation(tmp_path):
+    import threading
+
+    db_path = tmp_path / "plan-generation-race.db"
+    first_conn = _db(db_path)
+    store = PlanVersionStore(first_conn)
+    active = _active_master(store)
+    first_conn.commit()
+
+    second_conn = sqlite3.connect(str(db_path), timeout=5)
+    second_conn.row_factory = sqlite3.Row
+    second_store = PlanVersionStore(second_conn)
+    first_conn.execute("BEGIN IMMEDIATE")
+
+    started = threading.Event()
+    outcome = {}
+
+    def competing_generation():
+        started.set()
+        try:
+            second_store.create_master_draft(
+                _plan(9), based_on_version_id=active["id"], author="ai", source="system",
+                enforce_generation_guard=True, expected_active_version_id=active["id"],
+            )
+            outcome["result"] = "created"
+        except PlanVersionError as exc:
+            outcome["error"] = str(exc)
+
+    worker = threading.Thread(target=competing_generation)
+    worker.start()
+    assert started.wait(timeout=2)
+
+    # The first writer wins while holding the SQLite write reservation. The
+    # competing AI writer must re-check after the lock is released.
+    first_store_draft = store.create_master_draft(
+        _plan(7), based_on_version_id=active["id"], author="user",
+        change_note="用户草稿",
+    )
+    first_conn.commit()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert outcome.get("result") != "created"
+    assert "已有待审核母计划草稿" in outcome.get("error", "")
+    assert conn_count := first_conn.execute(
+        "SELECT COUNT(*) FROM master_plan_versions WHERE status='draft'"
+    ).fetchone()[0]
+    assert conn_count == 1
+    assert first_conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='draft'"
+    ).fetchone()["id"] == first_store_draft["id"]
+
+    second_conn.close()
+    first_conn.close()
