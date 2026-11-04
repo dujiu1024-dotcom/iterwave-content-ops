@@ -49,13 +49,13 @@ def build_production_context_snapshot(
     """Capture all decision inputs; missing required facts block task creation unless waived."""
     tables = _tables(conn)
     required = (
-        "goals", "master_plan_versions", "master_plan_business_snapshots",
+        "goals", "master_plan_versions", "account_group_north_star_versions", "master_plan_business_snapshots",
         "sub_plans", "sub_plan_versions", "sub_plan_stages", "platform_accounts",
         "content_production_lines", "content_production_line_events",
         "production_context_waivers", "business_diagnosis_reports", "contents", "drafts", "metrics",
         "platform_insights", "account_snapshots", "content_review_events", "strategy_effect_reviews",
         "original_assets", "original_asset_versions", "original_asset_links",
-        "original_asset_gaps",
+        "original_asset_gaps", "sub_goals", "sub_goal_dependencies", "sub_goal_production_plans",
     )
     for table in required:
         _required_table(tables, table)
@@ -126,15 +126,65 @@ def build_production_context_snapshot(
         raise ProductionContextError(f"子目标依赖或验收条件未通过：{exc}") from exc
     stage_data["dependency_outcomes"] = ready_stage.get("dependency_outcomes", {})
 
+    # The formal task-2 subgoal model is the production gate. Legacy strategy-stage
+    # dependencies above remain useful context, but cannot substitute for a version-bound
+    # business subgoal with an enabled production plan and satisfied predecessor evidence.
+    from .subgoal_store import stage_production_goals, assert_goal_ready
+    production_goals = stage_production_goals(
+        conn, int(sub_plan_version_id), int(stage_data["id"])
+    )
+    ready_sub_goal = None
+    blocked_sub_goals: list[str] = []
+    for candidate in production_goals:
+        if candidate["status"] in {"completed", "cancelled"}:
+            continue
+        try:
+            ready_sub_goal = assert_goal_ready(
+                conn, str(candidate["id"]), int(sub_plan_version_id), int(stage_data["id"])
+            )
+            break
+        except Exception as exc:
+            blocked_sub_goals.append(str(exc))
+    if ready_sub_goal is None:
+        reason = "；".join(blocked_sub_goals) if blocked_sub_goals else "当前策略阶段没有配置需要生产的正式子目标"
+        raise ProductionContextError(f"正式子目标生产门禁未通过：{reason}")
+    stage_data["formal_production_goals"] = production_goals
+    stage_data["selected_sub_goal"] = ready_sub_goal
+
     missing: list[str] = []
-    north_star = conn.execute(
-        """SELECT id,goal_text,target_metric,target_value,current_value,baseline_value,
-                  goal_level,status,weight,contribution_note
-           FROM goals WHERE goal_level='north_star' AND status='active'
-           ORDER BY created_at DESC,id DESC LIMIT 1"""
+    north_star_row = conn.execute(
+        """SELECT mv.north_star_version_id,mv.north_star_snapshot_json,
+                  mv.north_star_attribution_status,ns.version_no,ns.snapshot_json,
+                  ns.status AS north_star_status
+           FROM master_plan_versions mv
+           LEFT JOIN account_group_north_star_versions ns
+             ON ns.id=mv.north_star_version_id
+           WHERE mv.id=?""",
+        (master_plan_version_id,),
     ).fetchone()
-    if north_star is None:
+    north_star = None
+    if north_star_row is None:
+        raise ProductionContextError("母计划版本不存在，无法读取其北极星版本")
+    if (
+        north_star_row["north_star_attribution_status"] != "attributed"
+        or north_star_row["north_star_version_id"] is None
+        or north_star_row["snapshot_json"] is None
+    ):
         missing.append("north_star")
+    else:
+        try:
+            north_star_snapshot = json.loads(
+                north_star_row["north_star_snapshot_json"] or north_star_row["snapshot_json"]
+            )
+        except (TypeError, ValueError) as exc:
+            raise ProductionContextError("母计划绑定的北极星快照损坏") from exc
+        if not isinstance(north_star_snapshot, dict):
+            raise ProductionContextError("母计划绑定的北极星快照格式无效")
+        north_star = {
+            "id": int(north_star_row["north_star_version_id"]),
+            "version_no": int(north_star_row["version_no"]),
+            **north_star_snapshot,
+        }
 
     business_snapshot = conn.execute(
         """SELECT business_profile_version_no,snapshot_json,captured_at
@@ -371,6 +421,7 @@ def build_production_context_snapshot(
             "sub_plan_version_no": int(subplan["version_no"]),
             "strategy_step_id": strategy_step_id,
             "strategy_step_id_db": int(stage_data["id"]),
+            "sub_goal_id": str(ready_sub_goal["id"]),
             "production_line_version_id": round_data["production_line_version_id"],
         },
         "north_star": dict(north_star) if north_star else None,
