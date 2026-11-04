@@ -9851,6 +9851,8 @@ def _register_routes(app: FastAPI) -> None:
     app.include_router(build_business_diagnosis_router(_g))
     from src.api.subplans import register_subplan_routes
     register_subplan_routes(app, _g)
+    from src.api.subgoals import register_subgoal_routes
+    register_subgoal_routes(app, _g)
     from src.api.production_lines import register_production_line_routes
     register_production_line_routes(app, _g)
     from src.api.business_profile import register_business_profile_routes
