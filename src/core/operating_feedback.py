@@ -406,7 +406,7 @@ def create_collection_run(
         raise OperatingFeedbackError("成功或部分成功必须至少包含一项真实采集值；真实零值请明确传入 0")
     try:
         business_zone = ZoneInfo(timezone_name)
-    except (TypeError, ZoneInfoNotFoundError):
+    except (TypeError, ValueError, ZoneInfoNotFoundError):
         raise OperatingFeedbackError("采集时区无效") from None
     business_now = datetime.now(business_zone)
     if window_start is None:
