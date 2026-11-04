@@ -298,9 +298,9 @@ def test_concurrent_master_plan_review_has_one_winner_and_stable_409(
     barrier = threading.Barrier(2)
     original_activate = PlanVersionStore.activate_master_version
 
-    def synchronized_activate(self, version_id, *, reviewer):
+    def synchronized_activate(self, version_id, *, reviewer, **kwargs):
         barrier.wait(timeout=10)
-        return original_activate(self, version_id, reviewer=reviewer)
+        return original_activate(self, version_id, reviewer=reviewer, **kwargs)
 
     monkeypatch.setattr(PlanVersionStore, "activate_master_version", synchronized_activate)
 
