@@ -324,3 +324,50 @@ def test_manual_retry_starts_a_new_cycle_and_clears_stale_error(conn, seed):
     assert retried["collection_cycle_id"] != old
     assert retried["last_error"] is None
     assert retried["conclusion_json"] == "{}"
+
+
+def test_operating_feedback_persists_explicit_audit_actors(conn, seed):
+    draft_id, verification = _verification(conn, seed)
+    conn.execute(
+        "UPDATE content_publish_verifications SET verified_by=? WHERE verification_id=?",
+        ("session:publisher", verification["verification_id"]),
+    )
+    conn.execute(
+        "UPDATE review_tasks SET created_by=? WHERE task_id=?",
+        ("session:publisher", verification["review_task_id"]),
+    )
+    run = create_collection_run(
+        conn, task_id=verification["review_task_id"], source="manual",
+        status="succeeded", metrics={"views": 0}, idempotency_key="actor-collection",
+        actor="session:collector",
+    )
+    save_review_conclusion(
+        conn, task_id=verification["review_task_id"], conclusion="复盘完成",
+        evidence={"views": 0}, target_impact={}, recommendations=[],
+        gap_changes=[{
+            "gap_key": "actor-audit-gap", "title": "审计主体测试",
+            "severity": "low", "status": "active",
+        }],
+        actor="session:reviewer",
+    )
+    retry_row = conn.execute(
+        "SELECT recorded_by FROM review_collection_runs WHERE run_id=?", (run["run_id"],)
+    ).fetchone()
+    publish_row = conn.execute(
+        "SELECT verified_by FROM content_publish_verifications WHERE verification_id=?",
+        (verification["verification_id"],),
+    ).fetchone()
+    task_row = conn.execute(
+        "SELECT created_by,conclusion_by FROM review_tasks WHERE task_id=?",
+        (verification["review_task_id"],),
+    ).fetchone()
+    gap_event = conn.execute(
+        "SELECT actor FROM business_gap_events WHERE review_task_id=?",
+        (verification["review_task_id"],),
+    ).fetchone()
+
+    assert publish_row["verified_by"] == "session:publisher"
+    assert task_row["created_by"] == "session:publisher"
+    assert retry_row["recorded_by"] == "session:collector"
+    assert task_row["conclusion_by"] == "session:reviewer"
+    assert gap_event["actor"] == "session:reviewer"
