@@ -133,21 +133,21 @@ def build_production_context_snapshot(
     production_goals = stage_production_goals(
         conn, int(sub_plan_version_id), int(stage_data["id"])
     )
-    ready_sub_goal = None
-    blocked_sub_goals: list[str] = []
-    for candidate in production_goals:
-        if candidate["status"] in {"completed", "cancelled"}:
-            continue
-        try:
-            ready_sub_goal = assert_goal_ready(
-                conn, str(candidate["id"]), int(sub_plan_version_id), int(stage_data["id"])
-            )
-            break
-        except Exception as exc:
-            blocked_sub_goals.append(str(exc))
-    if ready_sub_goal is None:
-        reason = "；".join(blocked_sub_goals) if blocked_sub_goals else "当前策略阶段没有配置需要生产的正式子目标"
-        raise ProductionContextError(f"正式子目标生产门禁未通过：{reason}")
+    active_production_goals = [
+        goal for goal in production_goals
+        if goal["status"] not in {"completed", "cancelled"}
+    ]
+    if not active_production_goals:
+        raise ProductionContextError("当前策略阶段没有未完成的正式子目标生产计划")
+    # Respect goal_order: do not skip a blocked earlier goal and silently produce a
+    # later one. The next goal becomes eligible only after the preceding goal is accepted.
+    next_goal = active_production_goals[0]
+    try:
+        ready_sub_goal = assert_goal_ready(
+            conn, str(next_goal["id"]), int(sub_plan_version_id), int(stage_data["id"])
+        )
+    except Exception as exc:
+        raise ProductionContextError(f"正式子目标生产门禁未通过：{exc}") from exc
     stage_data["formal_production_goals"] = production_goals
     stage_data["selected_sub_goal"] = ready_sub_goal
 
