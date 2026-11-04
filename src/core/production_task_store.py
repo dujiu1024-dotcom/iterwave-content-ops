@@ -60,7 +60,9 @@ class ProductionTaskStore:
         if not strategy_step_id or len(str(strategy_step_id)) > 128:
             raise ProductionTaskError("策略步骤必须提供稳定标识")
         if not sub_plan_id or not platform:
-            raise ProductionTaskError("子计划和平台不能为空")
+            raise ProductionTaskError(
+                "独立内容轮次已停用；生产任务必须绑定有效的平台子计划"
+            )
         if int(task_ordinal) < 1 or int(max_attempts) < 1:
             raise ProductionTaskError("任务序号和最大尝试次数必须大于零")
         if not isinstance(input_snapshot or {}, dict):
@@ -132,6 +134,15 @@ class ProductionTaskStore:
                 or row.get("production_line_version_id") != production_line_version_id
             ):
                 raise ProductionTaskError("幂等键已被不同生产任务占用")
+            if self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='production_context_snapshots'"
+            ).fetchone():
+                frozen_context = self.conn.execute(
+                    "SELECT context_status FROM production_context_snapshots WHERE production_task_id=?",
+                    (row["id"],),
+                ).fetchone()
+                if frozen_context is None or frozen_context["context_status"] not in ("complete", "waived"):
+                    raise ProductionTaskError("历史任务缺少完整经营上下文快照，不允许通过幂等重放重新执行")
             return row
 
         snapshot = {
@@ -150,8 +161,11 @@ class ProductionTaskStore:
         task_id = "pt-" + uuid.uuid4().hex
         now = _stamp()
         owns_transaction = not self.conn.in_transaction
+        savepoint = "production_task_" + uuid.uuid4().hex
         if owns_transaction:
             self.conn.execute("BEGIN IMMEDIATE")
+        else:
+            self.conn.execute(f"SAVEPOINT {savepoint}")
         try:
             self.conn.execute(
                 """INSERT INTO production_tasks(
@@ -169,16 +183,44 @@ class ProductionTaskStore:
                     available_at or now, now, now,
                 ),
             )
+            # A new content task is not executable until its complete business context
+            # has been captured into an immutable snapshot. Legacy fixtures without the
+            # additive migration retain their existing behavior.
+            from .content_production_line_store import ContentProductionLineStore
+            if ContentProductionLineStore.available(self.conn):
+                from .production_context import build_production_context_snapshot
+                context_snapshot = build_production_context_snapshot(
+                    self.conn, task_id=task_id, idempotency_key=idempotency_key,
+                    round_id=int(round_id),
+                    master_plan_version_id=int(master_plan_version_id),
+                    sub_plan_id=str(sub_plan_id),
+                    sub_plan_version_id=int(sub_plan_version_id),
+                    strategy_step_id=str(strategy_step_id), platform=str(platform),
+                    task_input=input_snapshot or {},
+                )
+                ContentProductionLineStore(self.conn).attach_snapshot(task_id, context_snapshot)
             if owns_transaction:
                 self.conn.commit()
-        except sqlite3.IntegrityError:
+            else:
+                self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        except sqlite3.IntegrityError as exc:
             if owns_transaction:
                 self.conn.rollback()
+            else:
+                self.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
             existing = self.conn.execute(
                 "SELECT * FROM production_tasks WHERE idempotency_key=?",
                 (idempotency_key,),
             ).fetchone()
             if existing is None:
+                error_text = str(exc)
+                if "idx_content_production_line_single_active" in error_text:
+                    raise ProductionTaskError(
+                        "上一条内容生产线尚未审核/核验并关闭，暂不能启动下一条"
+                    ) from exc
+                if "one content task per production line" in error_text:
+                    raise ProductionTaskError("每次只能创建一条内容任务") from exc
                 raise
             row = dict(existing)
             if (
@@ -193,6 +235,13 @@ class ProductionTaskStore:
             ):
                 raise ProductionTaskError("幂等键已被不同生产任务占用")
             return row
+        except Exception:
+            if owns_transaction and self.conn.in_transaction:
+                self.conn.rollback()
+            elif self.conn.in_transaction:
+                self.conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            raise
         return self.get_task(task_id)
 
     def get_task(self, task_id: str) -> dict[str, Any]:
