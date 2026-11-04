@@ -4283,3 +4283,102 @@ def test_ai_master_plan_generation_api_preserves_existing_user_draft(client, mon
     assert json.loads(saved["plan_snapshot"])["topic_count_per_platform"] == 7
     assert saved["change_note"] == "用户正在编辑的草稿"
     assert conn.in_transaction is False
+
+
+def test_ai_master_plan_generation_api_serializes_two_independent_connections(client_cfg, conn, seed, test_auth, monkeypatch):
+    """Two API requests may call the model concurrently, but only one may persist a draft."""
+    from concurrent.futures import ThreadPoolExecutor
+    from contextvars import ContextVar
+    from fastapi.testclient import TestClient
+    from src.api import main as api_main
+    from src.core.db import Database
+    from src.core.metrics import Normalizer
+    from src.core.notify import Notifier
+    from src.core.plan_version import PlanVersionManager
+    from src.core.state_machine import DraftStateMachine, RoundStateMachine
+
+    cfg = client_cfg
+    _seed_confirmed_master_plan_diagnosis(conn)
+    monkeypatch.setattr(
+        "src.core.business_diagnosis.collect_business_context",
+        lambda *_: {"fingerprint": "stable-fingerprint", "context": {"business": "test"}},
+    )
+
+    conn2 = Database(cfg).connect()
+    context_var = ContextVar("t9a_api_test_context", default=None)
+
+    def make_context(db_conn):
+        return {
+            "cfg": cfg,
+            "conn": db_conn,
+            "sm_draft": DraftStateMachine(db_conn),
+            "sm_round": RoundStateMachine(db_conn),
+            "plan_version_manager": PlanVersionManager(cfg, db_conn),
+            "normalizer": Normalizer(db_conn, cfg),
+            "notifier": Notifier(cfg, db_conn),
+        }
+
+    first_context = make_context(conn)
+    second_context = make_context(conn2)
+    contexts = {"first": first_context, "second": second_context}
+
+    class ContextualGlobal(dict):
+        def get(self, key, default=None):
+            selected = context_var.get()
+            return selected.get(key, default) if selected is not None else super().get(key, default)
+
+        def __getitem__(self, key):
+            selected = context_var.get()
+            return selected[key] if selected is not None else super().__getitem__(key)
+
+    monkeypatch.setattr(api_main, "_g_ctx", ContextualGlobal(first_context))
+    app = api_main._build_app()
+
+    @app.middleware("http")
+    async def bind_connection(request, call_next):
+        selected = contexts[request.headers.get("x-test-db", "first")]
+        token = context_var.set(selected)
+        try:
+            return await call_next(request)
+        finally:
+            context_var.reset(token)
+
+    first_client = TestClient(app, base_url="http://127.0.0.1")
+    first_client.headers["X-Test-DB"] = "first"
+    first_client = test_auth(first_client)
+    second_client = TestClient(app, base_url="http://127.0.0.1")
+    second_client.headers["X-Test-DB"] = "second"
+    second_client = test_auth(second_client)
+
+    barrier = threading.Barrier(2)
+
+    async def synchronized_provider(*_args, **_kwargs):
+        barrier.wait(timeout=15)
+        return _valid_master_plan_generation_payload(), "test-model"
+
+    monkeypatch.setattr("src.core.master_plan_generation._call_model", synchronized_provider)
+    before_effective = conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective' ORDER BY version_no DESC LIMIT 1"
+    ).fetchone()
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(first_client.post, "/api/plans/ai-draft")
+            second = pool.submit(second_client.post, "/api/plans/ai-draft")
+            responses = [first.result(timeout=30), second.result(timeout=30)]
+
+        assert sorted(response.status_code for response in responses) == [201, 409]
+        assert conn.execute(
+            "SELECT COUNT(*) FROM master_plan_versions WHERE status='draft' AND deleted_at IS NULL"
+        ).fetchone()[0] == 1
+        assert conn2.execute(
+            "SELECT COUNT(*) FROM master_plan_versions WHERE status='draft' AND deleted_at IS NULL"
+        ).fetchone()[0] == 1
+        after_effective = conn.execute(
+            "SELECT id FROM master_plan_versions WHERE status='effective' ORDER BY version_no DESC LIMIT 1"
+        ).fetchone()
+        assert (after_effective["id"] if after_effective else None) == (
+            before_effective["id"] if before_effective else None
+        )
+    finally:
+        conn2.close()
