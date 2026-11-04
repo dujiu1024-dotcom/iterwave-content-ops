@@ -637,7 +637,7 @@ def test_ops_pause_roundtrip_persists(client):
     assert tc.get("/api/ops/pause").json()["paused"] is False
     assert tc.post("/api/ops/pause", json={"paused": True}).json()["paused"] is True
     pause_actor = conn.execute(
-        "SELECT updated_by FROM ops_pause_state ORDER BY rowid DESC LIMIT 1"
+        "SELECT updated_by FROM app_settings WHERE key='ops_paused'"
     ).fetchone()
     assert pause_actor is not None and pause_actor["updated_by"].startswith("session:")
     assert is_ops_paused(conn) is True
