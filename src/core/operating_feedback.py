@@ -243,6 +243,7 @@ def create_publish_verification(
         "content_url": content_url,
         "published_at": published_at,
         "verified_at": now,
+        "verified_by": str(actor or "system:publication-verifier")[:160],
         "content_snapshot": snapshot,
         "content_snapshot_sha256": snapshot_sha256,
         "idempotency_key": idem,
