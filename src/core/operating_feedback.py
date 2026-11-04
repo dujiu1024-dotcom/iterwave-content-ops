@@ -103,7 +103,7 @@ def create_publish_verification(
     content_url: str, published_at: str, evidence_source: str = "user_confirmed",
     evidence_note: str = "", production_line_id: str | None = None,
     scheduled_review_at: str | None = None, max_attempts: int = 3,
-    idempotency_key: str | None = None,
+    idempotency_key: str | None = None, actor: str = "system:publication-verifier",
 ) -> dict:
     platform_content_id = str(platform_content_id or "").strip()
     content_url = str(content_url or "").strip()
@@ -223,12 +223,12 @@ def create_publish_verification(
         """INSERT INTO content_publish_verifications
            (verification_id,tenant_id,draft_id,content_id,production_task_id,production_line_id,
             platform,platform_content_id,content_url,published_at,verified_at,
-            content_snapshot_json,content_snapshot_sha256,evidence_source,evidence_note,idempotency_key,created_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            content_snapshot_json,content_snapshot_sha256,evidence_source,evidence_note,idempotency_key,created_at,verified_by)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (verification_id, tenant_id, draft_id, row["content_id"], row["production_task_id"],
          production_line_id, row["platform"], platform_content_id, content_url,
          published_at, now, snapshot_json, snapshot_sha256, evidence_source,
-         str(evidence_note or "")[:1000], idem, now),
+         str(evidence_note or "")[:1000], idem, now, str(actor or "system:publication-verifier")[:160]),
     )
     event_payload = {
         "event_type": "content.publish_verified.v1",
@@ -267,10 +267,10 @@ def create_publish_verification(
     conn.execute(
         """INSERT INTO review_tasks
            (task_id,verification_id,tenant_id,draft_id,content_id,platform,status,
-            scheduled_at,max_attempts,created_at,updated_at,idempotency_key)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            scheduled_at,max_attempts,created_at,updated_at,idempotency_key,created_by)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (task_id, verification_id, tenant_id, draft_id, row["content_id"], row["platform"],
-         status, due_at, max(1, min(int(max_attempts), 10)), now, now, f"review:{verification_id}"),
+         status, due_at, max(1, min(int(max_attempts), 10)), now, now, f"review:{verification_id}", str(actor or "system:publication-verifier")[:160]),
     )
     result = conn.execute(
         "SELECT * FROM content_publish_verifications WHERE verification_id=?", (verification_id,)
@@ -520,6 +520,7 @@ def create_collection_run(
     window_start: str | None = None, window_end: str | None = None,
     timezone_name: str = "UTC", error_message: str = "",
     idempotency_key: str | None = None, measured_at: str | None = None,
+    actor: str = "system:review-worker",
 ) -> dict:
     task = conn.execute("SELECT * FROM review_tasks WHERE task_id=?", (task_id,)).fetchone()
     if task is None:
@@ -587,11 +588,11 @@ def create_collection_run(
     conn.execute(
         """INSERT INTO review_collection_runs
            (run_id,task_id,source,status,window_start,window_end,timezone_name,metrics_json,
-            error_message,idempotency_key,started_at,completed_at,created_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            error_message,idempotency_key,started_at,completed_at,created_at,recorded_by)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (run_id, task_id, source, status, window_start, window_end, timezone_name,
          _json(normalized), str(error_message or "")[:1000] if status in {"failed", "partial"} else None,
-         idem, now, now, now),
+         idem, now, now, now, str(actor or "system:review-worker")[:160]),
     )
     if status in {"succeeded", "partial"}:
         for key, value in normalized.items():
@@ -638,7 +639,7 @@ def retry_review_task(conn, task_id: str, *, scheduled_at: str | None = None) ->
 
 def save_review_conclusion(
     conn, *, task_id: str, conclusion: str, evidence: list | dict,
-    target_impact: dict, recommendations: list, gap_changes: list,
+    target_impact: dict, recommendations: list, gap_changes: list, actor: str = "system:review-worker",
 ) -> dict:
     task = conn.execute("SELECT * FROM review_tasks WHERE task_id=?", (task_id,)).fetchone()
     if task is None:
@@ -655,8 +656,8 @@ def save_review_conclusion(
     }
     now = utc_now()
     conn.execute(
-        "UPDATE review_tasks SET conclusion_json=?,updated_at=? WHERE task_id=?",
-        (_json(payload), now, task_id),
+        "UPDATE review_tasks SET conclusion_json=?,conclusion_by=?,updated_at=? WHERE task_id=?",
+        (_json(payload), str(actor or "system:review-worker")[:160], now, task_id),
     )
     changes = gap_changes if isinstance(gap_changes, list) else []
     for change in changes:
@@ -702,10 +703,10 @@ def save_review_conclusion(
         after = dict(conn.execute("SELECT * FROM business_gaps WHERE gap_id=?", (gap_id,)).fetchone())
         conn.execute(
             """INSERT INTO business_gap_events
-               (gap_id,review_task_id,event_type,reason,before_json,after_json,evidence_json,created_at)
-               VALUES(?,?,?,?,?,?,?,?)""",
+               (gap_id,review_task_id,event_type,reason,before_json,after_json,evidence_json,created_at,actor)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
             (gap_id, task_id, event_type, str(change.get("reason") or "")[:1000],
-             _json(before) if before else None, _json(after), evidence_json, now),
+             _json(before) if before else None, _json(after), evidence_json, now, str(actor or "system:review-worker")[:160]),
         )
     _close_production_line_after_review(
         conn, task, task_id=task_id, now=now, conclusion=payload
