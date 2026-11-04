@@ -7,7 +7,7 @@ import src.core.db as db_module
 from src.core.db import Database
 
 REPO_MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations"
-VISUAL_MIGRATIONS = {"121_visual_design_versions_jobs.sql", "122_visual_brand_profiles.sql", "126_visual_ai_image_renderer.sql", "130_visual_generation_lifecycle.sql", "151_publication_review_metric_feedback_visual.sql"}
+VISUAL_MIGRATIONS = {"121_visual_design_versions_jobs.sql", "122_visual_brand_profiles.sql", "126_visual_ai_image_renderer.sql", "130_visual_generation_lifecycle.sql", "151_publication_review_metric_feedback_visual.sql", "153_fix_metric_facts_legacy_view.sql"}
 
 
 def test_visual_migrations_apply_on_populated_116_database(cfg, tmp_path, monkeypatch):
