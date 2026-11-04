@@ -253,7 +253,7 @@ def test_missing_confirmed_diagnosis_blocks_task_unless_explicitly_waived(conn):
 
 
 def test_migration_maps_legacy_tasks_without_rewriting_them(conn):
-    """Re-apply migration 148 over a pre-148 copy and verify a lossless legacy map."""
+    """Re-apply migration 148 over a pre-new-production-line-migration baseline and verify a lossless legacy map."""
     ids = _setup(conn)
     round_id = _create_round(
         conn, key="round-legacy-map", master_id=ids["master_id"],
