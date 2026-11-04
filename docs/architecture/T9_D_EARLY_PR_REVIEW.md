@@ -17,7 +17,7 @@
 | #2 子目标树与依赖门禁 | 部分符合 | 新增 `migrations/149_subgoal_tree_dependency_gates.sql`、`src/core/subgoal_store.py`、`src/api/subgoals.py`、SubgoalManager 与测试；PR 描述明确说明当时未接入 ProductionTaskStore/RoundExecutor，任务 3 接入留待后续 | 依赖 #3 的 Migration 148；PR 描述建议 #1→#3→#2→#5→#4 | GitHub Actions run 41800220394，head `6e749834`，success；通过不代表生产任务端门禁已在当前 main 生效 | 目标树/依赖模型实现方向符合；与生产任务闭环需通过 #5/#4 集成证明 |
 | #3 北极星与资源基准治理 | 部分符合 | 新增北极星版本仓储、资源基准快照、母计划绑定、服务型业务模式兼容及相关测试；文件包括 `src/core/north_star_repository.py`、`resource_baseline_repository.py`、`migrations/148_account_group_north_star.sql` | Migration 148；为 #2/#5/#4 的前置迁移 | GitHub Actions run 41800318584，head `bde54f3596d4fbec7bd3eba669713de1fe600ee6`，success；PR head 未合并 | 设计符合；CI/分支状态证据需以 PR 当前 head 重新运行为准 |
 | #4 发布核验、独立复盘、经营数据回流和图片重生成 | 部分符合 | 包含发布凭证、内容哈希、Outbox、复盘调度、统一指标事实、经营缺口、图片重生成审核等；实际 diff 共 60 个文件，含 `migrations/151_publication_review_metric_feedback_visual.sql`、`migrations/153_fix_metric_facts_legacy_view.sql` 和大量 #2/#3/#5 依赖代码 | 明确依赖 Migration 148、149、150；PR 描述明确指出分支暂时携带 148–150 及上游必要代码，合并上游后重复差异应自然消失；明确不要单独执行 Migration 152；PR #6 已 superseded，不得与本 PR 并行迁入 | GitHub Actions run 41817904395，head `bfbc17a`，success；此前多个失败 run 后才有成功 run；仍需任务 3 Outbox 消费端端到端验收 | 功能范围与 #7 一致；累积分支/重复文件需按依赖顺序收敛，Draft 不可直接合并 |
-| #5 单内容生产线与经营上下文快照 | 部分符合 | 新增 `content_production_lines`、上下文快照组装器、单条生产规则、历史任务映射、任务创建事务回滚和相关 API/Worker/前端；包括 `src/core/content_production_line_store.py`、`src/core/production_context.py`、`migrations/150_content_production_lines_and_context.sql` | 依赖 Migration 148、149；PR 描述建议 #1→#3→#2→#5→#4 | 当前 GitHub Actions branch 查询无该 head 的 workflow run；PR 描述中的 GitLab Pipeline 因身份验证未创建 Job，不能作为测试通过证据 | 单内容生产和快照设计符合；需在依赖合并后重跑 GitHub CI 并验收 Worker 实际执行路径 |
+| #5 单内容生产线与经营上下文快照 | 部分符合 | 新增 `content_production_lines`、上下文快照组装器、单条生产规则、历史任务映射、任务创建事务回滚和相关 API/Worker/前端；包括 `src/core/content_production_line_store.py`、`src/core/production_context.py`、`migrations/150_content_production_lines_and_context.sql` | 依赖 Migration 148、149；PR 描述建议 #1→#3→#2→#5→#4 | GitHub Actions run 41806312443，head `81f492f86ba21c9349f0f413e38bb6f25dec7b05`，success；GitLab Pipeline 未创建 Job 不作为 CI 证据 | 单内容生产和快照设计符合；仍需在依赖合并后验收 Worker 实际执行路径 |
 
 > 注：PR #2 当前 head 为 `6e749834243a8b1cbbeecd4e0d58905bb52f4930`，PR #3 head 为 `bde54f3596d4fbec7bd3eba669713de1fe600ee6`，PR #4 head 为 `bfbc17abc0b857bab8aaedb2366094accae1891e`，PR #5 head 为 `81f492f86ba21c9349f0f413e38bb6f25dec7b05`。所有 PR 当前均未合并。
 
@@ -74,7 +74,7 @@
 1. **依赖顺序阻断**：未按 148→149→150→151/153 顺序收敛前，不得将 PR #2/#4/#5 分别独立合并。
 2. **PR #2 门禁集成阻断**：子目标门禁未被生产任务创建/领取端到端强制调用前，不得声称 T2 子目标闭环完成。
 3. **PR #4 Outbox 消费阻断**：Outbox 生产端通过不代表消费者已可靠关闭单内容生产线；必须有任务 3 消费端的端到端证据。
-4. **PR #3/#5 CI 证据阻断**：当前 PR head 缺少对应 GitHub Actions 成功 run；必须在最新 head 重新触发。
+4. **PR #3/#5 CI 证据已补齐**：PR #3 head `bde54f3596d4fbec7bd3eba669713de1fe600ee6` 的 run 41800318584 success；PR #5 head `81f492f86ba21c9349f0f413e38bb6f25dec7b05` 的 run 41806312443 success。CI 通过仍不替代依赖迁移集成和 Worker 端到端验收。
 5. **所有 PR 的合并门禁**：Draft/Open 状态、代码 review、迁移顺序、CI 和真实业务端到端验收均通过后才允许合并。
 
 上述属于早期 PR 合并/验收前置条件，当前已有 PR #1–#5 可以作为执行载体，不另建重复功能 Issue。若在后续 CI/集成中发现实际产品缺陷，再按 #22 约束另建 Issue。
@@ -97,3 +97,17 @@ pytest -q tests/test_north_star_migration.py tests/test_north_star_repository.py
 ```
 
 > 该命令是合并后复核建议；不能把当前各 PR 分支的不同 CI 结果拼接成一次完整闭环通过。
+
+
+## 8. 2026-11-04 最新 CI 核验补充
+
+本轮重新按各 PR 分支当前 head SHA 查询 GitHub Actions：
+
+- PR #1：`4ce72055418033c1396ea17e71b14e0db50b4218`，run `41795814408` success。
+- PR #2：`6e749834243a8b1cbbeecd4e0d58905bb52f4930`，run `41800220394` success。
+- PR #3：`bde54f3596d4fbec7bd3eba669713de1fe600ee6`，run `41800318584` success。
+- PR #4：`bfbc17abc0b857bab8aaedb2366094accae1891e`，run `41817904395` success。
+- PR #5：`81f492f86ba21c9349f0f413e38bb6f25dec7b05`，run `41806312443` success。
+- 本 T9-D 报告分支：`f2496eb759f93bf694f7d84587289d7b29731336`，run `41841879910` success。
+
+以上是各 PR 各自 head 的 CI 结果，不代表累积迁移分支已完成联合验证。合并顺序仍为 #1（规范审批）→ #3（148）→ #2（149）→ #5（150）→ #4（151/153）。PR #4 的 Outbox 消费端、PR #5 的真实 Worker 执行和子目标门禁实际接入仍是业务验收阻断。
