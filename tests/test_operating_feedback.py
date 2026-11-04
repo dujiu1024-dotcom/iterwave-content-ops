@@ -371,3 +371,43 @@ def test_operating_feedback_persists_explicit_audit_actors(conn, seed):
     assert retry_row["recorded_by"] == "session:collector"
     assert task_row["conclusion_by"] == "session:reviewer"
     assert gap_event["actor"] == "session:reviewer"
+
+
+def test_publish_verification_api_records_authenticated_session_actor(monkeypatch, conn, seed):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from src.api import operating_feedback
+
+    draft_id, published_at = _published_draft(conn, seed)
+    monkeypatch.setattr(
+        operating_feedback.auth, "audit_actor",
+        lambda request: "session:api-publisher",
+    )
+    app = FastAPI()
+    app.include_router(
+        operating_feedback.build_operating_feedback_router(
+            lambda: {"conn": conn, "cfg": None, "runtime_tenant_id": "tenant-test"}
+        )
+    )
+
+    response = TestClient(app).post(
+        f"/api/drafts/{draft_id}/publish-verification",
+        json={
+            "platform_content_id": "api-audit-note",
+            "content_url": "https://www.xiaohongshu.com/explore/api-audit-note",
+            "published_at": published_at,
+            "idempotency_key": "api-audit-publish",
+        },
+    )
+
+    assert response.status_code == 201
+    row = conn.execute(
+        "SELECT verified_by FROM content_publish_verifications WHERE draft_id=?",
+        (draft_id,),
+    ).fetchone()
+    task = conn.execute(
+        "SELECT created_by FROM review_tasks WHERE verification_id=?",
+        (response.json()["verification"]["verification_id"],),
+    ).fetchone()
+    assert row["verified_by"] == "session:api-publisher"
+    assert task["created_by"] == "session:api-publisher"
