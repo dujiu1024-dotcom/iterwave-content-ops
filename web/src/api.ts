@@ -57,6 +57,30 @@ export interface ProductionTaskDetail {
   content: { id: string; title?: string | null; platform?: Platform; round_id?: number } | null;
 }
 
+export interface ContentProductionLineRecord {
+  id: string; production_task_id: string; round_id: number; content_id: string | null;
+  status: string; task_status: string; attempt_count: number; max_attempts: number;
+  error_code: string | null; error_message: string | null; strategy_step_id: string;
+  platform: Platform; updated_at: string; created_at: string;
+  context_snapshot: null | {
+    id: string; context_status: "complete" | "waived" | "legacy_incomplete";
+    captured_at: string; fingerprint: string;
+    context: {
+      snapshot_id: string; captured_at: string; north_star?: { goal_text?: string; target_metric?: string; target_value?: number } | null;
+      plan_versions?: Record<string, unknown>; sub_goal?: Record<string, unknown>;
+      latest_review_ref?: string | null; business_diagnosis?: { version_no?: number; report?: unknown } | null;
+      recent_published_content?: { title?: string; metrics?: unknown[]; verification_status?: string } | null;
+      business_gaps?: unknown[];
+      account_performance?: { platform_insights?: unknown[]; account_snapshots?: unknown[] };
+      original_asset_versions?: unknown[]; original_asset_relationships?: unknown[];
+      available_original_assets?: unknown[]; internal_materials?: unknown[];
+      external_references?: unknown[]; resource_gaps?: unknown[]; task_decision_input?: Record<string, unknown>;
+      manual_waiver?: { reason: string; actor: string; waived_items: string[] } | null;
+    };
+  };
+  events: Array<{ id: number; event_type: string; from_status: string | null; to_status: string | null; reason: string; created_at: string }>;
+}
+
 export interface ProductionMonitorResponse {
   master_plan: { id: number; version_no: number; status: string; created_at: string; effective_at: string | null } | null;
   platforms: ProductionMonitorSubplan[];
@@ -2357,6 +2381,20 @@ export const api = {
       `/api/production-tasks/${encodeURIComponent(id)}/recover?confirmed_no_external_side_effect=${confirmedNoExternalSideEffects}`,
       { method: "POST" },
     ),
+  contentProductionLines: (status?: string, limit = 50) =>
+    fetchJson<{ items: ContentProductionLineRecord[] }>(
+      `/api/content-production-lines?limit=${limit}${status ? `&status=${encodeURIComponent(status)}` : ""}`,
+    ),
+  contentProductionLine: (id: string) =>
+    fetchJson<ContentProductionLineRecord>(`/api/content-production-lines/${encodeURIComponent(id)}`),
+  createProductionContextWaiver: (payload: { round_id: number; platform: Platform; waived_items: string[]; reason: string; evidence?: Record<string, unknown> }) =>
+    fetchJson<{ waiver: Record<string, unknown> }>("/api/production-context/waivers", {
+      method: "POST", body: JSON.stringify(payload),
+    }),
+  recordContentProductionLineEvent: (id: string, payload: { event_type: string; source?: string; actor?: string; reason?: string; evidence?: Record<string, unknown> }) =>
+    fetchJson<ContentProductionLineRecord>(`/api/content-production-lines/${encodeURIComponent(id)}/events`, {
+      method: "POST", body: JSON.stringify(payload),
+    }),
   globalOperationsSummary: (days = 30) => fetchJson<GlobalMonitorResponse>(`/api/global-monitor?days=${days}`),
   todos: (page = 1, pageSize = 20, tenantId?: string, source?: GlobalTodoItem["source"]) => {
     const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
