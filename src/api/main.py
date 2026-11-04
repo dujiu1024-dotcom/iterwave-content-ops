@@ -5826,8 +5826,11 @@ def _register_routes(app: FastAPI) -> None:
         except LookupError as exc:
             raise HTTPException(409, str(exc)) from exc
         except MasterPlanGenerationError as exc:
+            message = str(exc)
+            if message.startswith(("已有待审核母计划草稿", "母计划基准版本已变化")):
+                raise HTTPException(409, message) from exc
             raise HTTPException(
-                422, detail={"code": "invalid_ai_master_plan", "message": str(exc)}
+                422, detail={"code": "invalid_ai_master_plan", "message": message}
             ) from exc
         except RuntimeError as exc:
             raise HTTPException(502, str(exc)) from exc
