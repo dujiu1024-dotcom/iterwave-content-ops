@@ -1196,3 +1196,33 @@ def test_fail_round_open_respects_outer_transaction_boundary():
         "SELECT status FROM round_open_idempotency WHERE idempotency_key='key-a'"
     ).fetchone()[0] == "reserved"
     conn.close()
+
+
+def test_restore_legacy_master_does_not_attach_current_north_star():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    legacy = store.create_master_draft(_plan(5))
+    store.activate_master_version(legacy["id"], reviewer="reviewer")
+
+    conn.executescript("""
+        CREATE TABLE account_group_north_star_versions(
+            id INTEGER PRIMARY KEY, version_no INTEGER, snapshot_json TEXT,
+            status TEXT, change_reason TEXT, created_by TEXT, created_at TEXT,
+            effective_at TEXT, superseded_at TEXT
+        );
+        ALTER TABLE master_plan_versions ADD COLUMN north_star_version_id INTEGER;
+        ALTER TABLE master_plan_versions ADD COLUMN north_star_snapshot_json TEXT;
+        ALTER TABLE master_plan_versions ADD COLUMN north_star_attribution_status TEXT NOT NULL DEFAULT 'legacy_unattributed';
+        INSERT INTO account_group_north_star_versions(
+            id,version_no,snapshot_json,status,change_reason,created_by,created_at,effective_at
+        ) VALUES(1,1,'{"positioning":"当前定位"}','effective','initial','tester','now','now');
+    """)
+
+    restored = store.create_master_draft_from_version(legacy["id"])
+    assert restored["north_star_version_id"] is None
+    assert restored["north_star_snapshot_json"] is None
+    assert restored["north_star_attribution_status"] == "legacy_unattributed"
+
+    fresh = store.create_master_draft(_plan(6))
+    assert fresh["north_star_version_id"] == 1
+    assert fresh["north_star_attribution_status"] == "attributed"
