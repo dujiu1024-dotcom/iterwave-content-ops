@@ -156,7 +156,8 @@ def _generate_ai_card_set(
     *, title: str, subtitle: str, body: str, output_dir: Path, platform,
     cfg, settings: dict, allow_fallback: bool | None = None,
     brand_profile: dict | None = None, task_id: str | None = None,
-    account_group: str | None = None,
+    account_group: str | None = None, revision_instruction: str | None = None,
+    prompt_audit: list[str] | None = None,
 ) -> tuple[list[Path], list[str]]:
     """Generate validated AI pages with durable task checkpoints and atomic delivery."""
     from .visual_ocr import preflight_ocr, validate_rendered_pages
@@ -197,8 +198,17 @@ def _generate_ai_card_set(
             item for item in brand_rules if item
         )
         prefix = "\n\n".join(item for item in (prefix, brand_prefix) if item)
+    revision_instruction = str(revision_instruction or "").strip()
+    if revision_instruction:
+        revision_prefix = (
+            "本次整套图片重生成的用户修改要求（必须应用于每一页，同时保持整套视觉一致）：\n"
+            + revision_instruction
+        )
+        prefix = "\n\n".join(item for item in (prefix, revision_prefix) if item)
     if prefix:
         prompts = [f"{prefix}\n\n{prompt}" for prompt in prompts]
+    if prompt_audit is not None:
+        prompt_audit.extend(prompts)
 
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -406,7 +416,8 @@ def generate_ai_card_set(
     *, title: str, subtitle: str, body: str, output_dir: Path, platform,
     cfg, settings: dict, allow_fallback: bool | None = None,
     brand_profile: dict | None = None, task_id: str | None = None,
-    account_group: str | None = None,
+    account_group: str | None = None, revision_instruction: str | None = None,
+    prompt_audit: list[str] | None = None,
 ) -> tuple[list[Path], list[str]]:
     """Run durable article generation under the configured shared API budget."""
     policy = getattr(cfg, "media_generation", None)
@@ -424,4 +435,5 @@ def generate_ai_card_set(
                 platform=platform, cfg=cfg, settings=settings,
                 allow_fallback=allow_fallback, brand_profile=brand_profile,
                 task_id=task_id, account_group=account_group,
+                revision_instruction=revision_instruction, prompt_audit=prompt_audit,
             )
