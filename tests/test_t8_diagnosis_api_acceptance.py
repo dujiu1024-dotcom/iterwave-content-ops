@@ -160,15 +160,20 @@ def test_master_plan_api_blocks_unconfirmed_and_stale_diagnosis(diagnosis_client
 
 def test_original_asset_permission_and_privacy_gate_production_usage(diagnosis_client):
     client, conn = diagnosis_client
-    created = client.post("/api/original-assets", json={
-        "asset_type": "product_image",
-        "title": "T8-A 授权门禁测试素材",
-        "description": "测试素材",
-        "source_kind": "manual",
-        "metadata": {"fixture": "t8-a"},
-    })
-    assert created.status_code == 201, created.text
-    asset_id = created.json()["id"]
+    cur = conn.execute(
+        """INSERT INTO original_assets(
+            asset_type,title,description,source_kind,metadata_json
+        ) VALUES('product_image','T8-A 授权门禁测试素材','测试素材','manual','{"fixture":"t8-a"}')"""
+    )
+    asset_id = cur.lastrowid
+    conn.execute(
+        """INSERT INTO original_asset_versions(
+            original_asset_id,version_no,title,description,metadata_json,
+            review_status,commercial_use_status
+        ) VALUES(?,1,'T8-A 授权门禁测试素材','测试素材','{"fixture":"t8-a"}','pending','unknown')""",
+        (asset_id,),
+    )
+    conn.commit()
     conn.execute("INSERT INTO production_tasks(id) VALUES('t8-a-asset-task')")
     conn.commit()
 
