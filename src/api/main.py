@@ -6537,9 +6537,40 @@ def _register_routes(app: FastAPI) -> None:
         image_settings, settings_reason = image_generation_settings(conn)
         if image_settings is None:
             raise HTTPException(409, f"单页 AI 重做不可用：{settings_reason}")
-        instruction = str((req or {}).get("instruction") or "改善本页构图、色彩协调和视觉层次").strip()[:500]
+        reason = str((req or {}).get("reason") or "").strip()[:500]
+        instruction = str((req or {}).get("instruction") or "").strip()[:500]
+        if not reason:
+            raise HTTPException(422, "必须填写本次图片修改理由")
         if not instruction:
-            raise HTTPException(422, "重做说明不能为空")
+            raise HTTPException(422, "必须填写整理后的图片调整指令")
+        preserved_page_hashes = {}
+        for page in pages:
+            page_index_value = page.get("page_index")
+            if page_index_value == page_index:
+                continue
+            image_path = Path(str(page.get("image_path") or "")).resolve()
+            if output_root not in image_path.parents or not image_path.is_file():
+                raise HTTPException(409, f"第 {int(page_index_value or 0) + 1} 页缺少可核验的原图，无法保证单张重做不影响其他页面")
+            preserved_page_hashes[str(page_index_value)] = hashlib.sha256(image_path.read_bytes()).hexdigest()
+        revision_audit_id = uuid.uuid4().hex
+        render_options = design.get("render_options") if isinstance(design.get("render_options"), dict) else {}
+        brand_palette = render_options.get("brand_palette") if isinstance(render_options.get("brand_palette"), dict) else {}
+        style_reference = {
+            "visual_language": str(current["style_key"] or design.get("style_key") or ""),
+            "primary_colors": brand_palette.get("primary") or brand_palette.get("primary_color") or "",
+            "secondary_colors": brand_palette.get("secondary") or brand_palette.get("secondary_color") or "",
+            "background": brand_palette.get("background") or design.get("background") or "",
+            "typography": render_options.get("font_family") or "",
+            "layout": design.get("layout") or "沿用原版本布局",
+            "aspect_ratio": render_options.get("aspect_ratio") or "沿用原版本比例",
+            "whitespace": design.get("whitespace") or "沿用原版本留白",
+            "hierarchy": design.get("hierarchy") or "沿用原版本信息层级",
+            "rendering_style": design.get("rendering_style") or current["renderer"],
+            "neighboring_pages": [
+                {"page_index": item.get("page_index"), "title": item.get("title")}
+                for item in pages if isinstance(item, dict) and item.get("page_index") != page_index
+            ],
+        }
         guard = ctx.get("guard")
         if guard is None:
             raise HTTPException(503, "质量检查服务不可用，已阻止单页图片重做")
@@ -6603,7 +6634,7 @@ def _register_routes(app: FastAPI) -> None:
                     max_concurrency=getattr(cfg.media_generation, "max_concurrency", 2),
                 ) as budget:
                     generated = revise_visual_background(
-                        source_path=background, feedback=[instruction], output_dir=output_root,
+                        source_path=background, feedback=[f"修改理由：{reason}", f"整理后的调整指令：{instruction}"], output_dir=output_root,
                         settings=image_settings, cfg=cfg,
                     )
                 usage = budget.snapshot()
@@ -6696,6 +6727,26 @@ def _register_routes(app: FastAPI) -> None:
                         "elapsed_ms": result.get("elapsed_ms"),
                     },
                 )
+                conn.execute(
+                    """INSERT INTO visual_revision_audits
+                       (id,content_id,base_visual_version_id,generated_visual_version_id,scope,
+                        target_page_index,original_reason,normalized_instruction,final_prompt,
+                        style_reference_json,preserved_page_hashes_json,status,created_at,created_by)
+                       VALUES(?,?,?,?,'single_page',?,?,?,?,?,?,'generated',?,'user')""",
+                    (revision_audit_id,content_id,version_id,new_version_id,page_index,reason,
+                     instruction,str(result.get("final_prompt") or ""),
+                     json.dumps(style_reference,ensure_ascii=False,sort_keys=True),
+                     json.dumps(preserved_page_hashes,ensure_ascii=False,sort_keys=True),
+                     _storage_now().isoformat(timespec="seconds")),
+                )
+                for preserved_index, expected_hash in preserved_page_hashes.items():
+                    preserved_item = next((item for item in new_pages if str(item.get("page_index")) == preserved_index), None)
+                    preserved_path = Path(str((preserved_item or {}).get("image_path") or "")).resolve()
+                    if not preserved_item or output_root not in preserved_path.parents or not preserved_path.is_file():
+                        raise HTTPException(409, f"第 {int(preserved_index) + 1} 页在重生成后丢失")
+                    actual_hash = hashlib.sha256(preserved_path.read_bytes()).hexdigest()
+                    if actual_hash != expected_hash:
+                        raise HTTPException(409, f"第 {int(preserved_index) + 1} 页在单张重生成过程中发生变化，已拒绝提交新版本")
                 conn.execute(
                     "UPDATE contents SET image_paths=? WHERE id=?",
                     (json.dumps([item["image_path"] for item in new_pages], ensure_ascii=False), content_id),
@@ -7091,11 +7142,30 @@ def _register_routes(app: FastAPI) -> None:
 
     @app.post("/api/contents/{content_id}/cards")
     @manages_own_transaction
-    def regenerate_cards(content_id: str):
-        """按当前标题/正文重新出图（封面 + 正文分页），补上历史内容的「只有文没有图」。"""
+    def regenerate_cards(content_id: str, req: dict | None = None):
+        """按明确的修改理由与整理指令重新生成整套图片。"""
         conn = _g()["conn"]
         cfg = _g()["cfg"]
+        reason = str((req or {}).get("reason") or "").strip()[:500]
+        instruction = str((req or {}).get("instruction") or "").strip()[:500]
+        if not reason:
+            raise HTTPException(422, "必须填写整套图片重新生成理由")
+        if not instruction:
+            raise HTTPException(422, "必须填写整套图片调整指令")
         row = _content_row(conn, content_id)
+        _ensure_content_round_idle(row, "整套重新生成图片")
+        published = conn.execute(
+            "SELECT 1 FROM drafts WHERE content_id=? AND "
+            "(user_confirmed_at IS NOT NULL OR status IN ('user_published','data_fetching','published')) LIMIT 1",
+            (content_id,),
+        ).fetchone()
+        if published:
+            raise HTTPException(409, "已确认发布的内容不能重新生成图片")
+        base_visual_version = conn.execute(
+            "SELECT id FROM visual_design_versions WHERE content_id=? ORDER BY version DESC LIMIT 1",
+            (content_id,),
+        ).fetchone()
+        base_visual_version_id = int(base_visual_version["id"]) if base_visual_version else None
         try:
             title, body = row["title"] or "", row["body"] or ""
             platform = Platform(row["platform"])
@@ -7156,6 +7226,8 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(409, "已有图片生成任务正在执行，请稍后重试")
         budget = None
         job_id = None
+        prompt_audit: list[str] = []
+        revision_audit_id = uuid.uuid4().hex
         try:
             conn.execute("BEGIN IMMEDIATE")
             month_local = _now().replace(
@@ -7199,6 +7271,8 @@ def _register_routes(app: FastAPI) -> None:
                     allow_fallback=settings.get("fallback_enabled"),
                     brand_profile=profile,
                     task_id=f"manual-card-{job_id}",
+                    revision_instruction=f"修改理由：{reason}\n整理后的调整指令：{instruction}",
+                    prompt_audit=prompt_audit,
                 )
             usage = budget.snapshot()
             conn.execute(
@@ -7277,6 +7351,30 @@ def _register_routes(app: FastAPI) -> None:
                 conn.execute(
                     "UPDATE visual_design_versions SET status=? WHERE id=?",
                     ("rendered" if ocr_report.get("status") == "passed" else "review_required", version_id),
+                )
+                conn.execute(
+                    """INSERT INTO visual_revision_audits
+                       (id,content_id,base_visual_version_id,generated_visual_version_id,scope,
+                        target_page_index,original_reason,normalized_instruction,final_prompt,
+                        style_reference_json,preserved_page_hashes_json,status,created_at,created_by)
+                       VALUES(?,?,?,?,'whole_set',NULL,?,?,?,?,?,'generated',?,'user')""",
+                    (revision_audit_id,content_id,base_visual_version_id,version_id,reason,instruction,
+                     json.dumps(prompt_audit,ensure_ascii=False),
+                     json.dumps({
+                         "visual_language": profile.get("style_key") or "ai_complete_card",
+                         "primary_colors": profile.get("primary_color") or "",
+                         "secondary_colors": profile.get("secondary_color") or "",
+                         "background": profile.get("background_color") or "",
+                         "typography": profile.get("font_family") or "",
+                         "layout": "整套重新生成，统一分页布局",
+                         "aspect_ratio": "沿用平台比例",
+                         "whitespace": "由 AI 卡片生成规则统一控制",
+                         "hierarchy": "由 AI 卡片生成规则统一控制",
+                         "rendering_style": "ai_image_api",
+                         "neighboring_pages": [],
+                     },ensure_ascii=False,sort_keys=True),
+                     json.dumps({},ensure_ascii=False),
+                     _storage_now().isoformat(timespec="seconds")),
                 )
                 for index, path in enumerate(paths):
                     visual_page_job_id = create_visual_page_job(
