@@ -383,6 +383,7 @@ export interface Draft {
   review_status?: "pending" | "approved" | "rejected";
   saved_at: string | null;
   user_confirmed_at: string | null;
+  published_at?: string | null;
   error_msg: string | null;
   created_at: string;
   /** LEFT JOIN contents 带出，列表接口可能为空 */
@@ -403,6 +404,35 @@ export interface Draft {
   platform_content_sync?: "local_only" | "matched" | "stale" | "unknown" | null;
   /** 当前文案是否可按正常路径确认发布；质检/人工审核未放行时需要显式例外原因。 */
   guard_confirmation_allowed?: boolean;
+}
+
+export interface PublishVerificationItem {
+  verification_id: string; draft_id: string; content_id: string; production_task_id: string | null;
+  production_line_id: string | null; platform: Platform; platform_content_id: string;
+  content_url: string; published_at: string; verified_at: string; evidence_source: string;
+  content_snapshot_sha256: string; evidence_note: string; closure_status: "pending" | "processing" | "succeeded" | "failed" | "not_required";
+  closure_error: string | null; close_event_id?: string | null; close_event_status?: string | null; created_at: string;
+}
+export interface ReviewTaskItem {
+  task_id: string; verification_id: string; tenant_id: string; draft_id: string; content_id: string;
+  platform: Platform; status: "scheduled" | "pending" | "running" | "partial" | "failed" | "completed" | "cancelled";
+  scheduled_at: string; attempt_count: number; last_attempt_at: string | null;
+  last_success_at: string | null; last_window_start: string | null; last_window_end: string | null;
+  last_error?: string | null;
+  conclusion: Record<string, unknown>; created_at: string; updated_at: string;
+}
+export interface MetricFactItem {
+  fact_id: string; tenant_id: string; draft_id: string | null; content_id: string; platform: Platform;
+  metric_key: string; value: number; unit: "count" | "ratio"; source: string;
+  source_record_type: string; source_record_id: string; measured_at: string; recorded_at: string;
+  window_start: string | null; window_end: string | null; timezone_name: string;
+  collection_status: "succeeded" | "partial";
+}
+export interface BusinessGapItem {
+  gap_id: string; tenant_id: string; gap_key: string; title: string; description: string;
+  severity: "low" | "medium" | "high" | "critical"; status: "active" | "resolved";
+  source_review_task_id: string | null; evidence: Record<string, unknown> | unknown[];
+  created_at: string; updated_at: string;
 }
 
 export interface DraftPage {
@@ -1864,7 +1894,7 @@ export interface VisualUsageSummary {
 }
 export interface VisualVersionHistory {
   id: number; version: number; content_hash: string; renderer: string;
-  style_key: string; status: string; created_at: string;
+  style_key: string; status: string; created_at: string; approved_at?: string | null;
   design: { pages?: Array<{ page_index: number; image_url: string | null; can_revise?: boolean }> };
 }
 export interface OriginalAsset {
@@ -2697,9 +2727,9 @@ export const api = {
   recheckContent: (id: string) =>
     fetchJson<RecheckResult>(`/api/contents/${id}/recheck`, { method: "POST" }),
   /** 按当前标题/正文重新出图（封面 + 正文分页） */
-  regenerateContentCards: (id: string) =>
-    fetchJson<{ id: string; image_count: number; image_paths: string[] }>(
-      `/api/contents/${id}/cards`, { method: "POST" },
+  regenerateContentCards: (id: string, reason: string) =>
+    fetchJson<{ id: string; image_count: number; image_paths: string[]; request_id?: string }>(
+      `/api/contents/${id}/cards`, { method: "POST", body: JSON.stringify({ reason }) },
     ),
   visualGenerationTask: (id: string) =>
     fetchJson<VisualGenerationTask>(
@@ -2826,9 +2856,73 @@ export const api = {
     fetchJson<{ content_id: string; versions: VisualVersionHistory[]; jobs: Array<Record<string, unknown>> }>(
       `/api/contents/${encodeURIComponent(contentId)}/visual-versions`,
     ),
-  reviseVisualPage: (contentId: string, versionId: number, pageIndex: number, instruction: string) =>
-    fetchJson<{ content_id: string; job_id: string; version_id: number; page_index: number; image_url: string; status: string }>(
+  reviseVisualPage: (contentId: string, versionId: number, pageIndex: number, reason: string) =>
+    fetchJson<{ content_id: string; job_id: string; version_id: number; page_index: number; request_id?: string; image_url: string; status: string }>(
       `/api/contents/${encodeURIComponent(contentId)}/visual-versions/${versionId}/pages/${pageIndex}/revise`,
-      { method: "POST", body: JSON.stringify({ instruction }) },
+      { method: "POST", body: JSON.stringify({ reason }) },
     ),
+  publishVerifications: () =>
+    fetchJson<{ items: PublishVerificationItem[] }>("/api/publish-verifications"),
+  createPublishVerification: (draftId: string, payload: {
+    platform_content_id: string; content_url: string; published_at: string;
+    evidence_source?: string; evidence_note?: string; production_line_id?: string;
+    scheduled_review_at?: string; idempotency_key?: string;
+  }) =>
+    fetchJson<{ verification: PublishVerificationItem & { review_task_id?: string }; closure_event_pending: boolean }>(
+      `/api/drafts/${encodeURIComponent(draftId)}/publish-verification`,
+      { method: "POST", body: JSON.stringify(payload) },
+    ),
+  reviewTasks: (status?: string) =>
+    fetchJson<{ items: ReviewTaskItem[] }>(`/api/review-tasks${status ? `?status=${encodeURIComponent(status)}` : ""}`),
+  reviewTaskDetail: (taskId: string) =>
+    fetchJson<{ task: ReviewTaskItem & { collection_runs: Array<Record<string, unknown>> } }>(
+      `/api/review-tasks/${encodeURIComponent(taskId)}`,
+    ),
+  collectReviewTask: (taskId: string, payload: Record<string, unknown>) =>
+    fetchJson<{ run: Record<string, unknown> }>(
+      `/api/review-tasks/${encodeURIComponent(taskId)}/collect`,
+      { method: "POST", body: JSON.stringify(payload) },
+    ),
+  retryProductionLineClose: (eventId: string) =>
+    fetchJson<{ event_id: string; status: string }>(
+      `/api/production-line-close-events/${encodeURIComponent(eventId)}/retry`,
+      { method: "POST" },
+    ),
+  retryReviewTask: (taskId: string, scheduledAt?: string) =>
+    fetchJson<{ task: ReviewTaskItem }>(
+      `/api/review-tasks/${encodeURIComponent(taskId)}/retry`,
+      { method: "POST", body: JSON.stringify({ scheduled_at: scheduledAt }) },
+    ),
+  saveReviewConclusion: (taskId: string, payload: Record<string, unknown>) =>
+    fetchJson<{ task_id: string; conclusion: Record<string, unknown>; gap_changes_recorded: number }>(
+      `/api/review-tasks/${encodeURIComponent(taskId)}/conclusion`,
+      { method: "POST", body: JSON.stringify(payload) },
+    ),
+  metricFacts: (metricKey?: string, contentId?: string, limit = 100) => {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (metricKey) query.set("metric_key", metricKey);
+    if (contentId) query.set("content_id", contentId);
+    return fetchJson<{ items: MetricFactItem[] }>(`/api/metric-facts?${query.toString()}`);
+  },
+  businessGaps: (status: "active" | "resolved" | "all" = "active") =>
+    fetchJson<{ items: BusinessGapItem[] }>(`/api/business-gaps?status=${status}`),
+  businessGapHistory: (gapId: string) =>
+    fetchJson<{ items: Array<Record<string, unknown>> }>(
+      `/api/business-gaps/${encodeURIComponent(gapId)}/history`,
+    ),
+  rejectVisualVersion: (contentId: string, versionId: number, reason: string) =>
+    fetchJson<{ content_id: string; version_id: number; status: string; reason: string }>(
+      `/api/contents/${encodeURIComponent(contentId)}/visual-versions/${versionId}/reject`,
+      { method: "POST", body: JSON.stringify({ reason }) },
+    ),
+  approveVisualVersion: (contentId: string, versionId: number) =>
+    fetchJson<{ content_id: string; version_id: number; status: string; image_count: number; already_active?: boolean }>(
+      `/api/contents/${encodeURIComponent(contentId)}/visual-versions/${versionId}/approve`,
+      { method: "POST", body: JSON.stringify({ approved: true }) },
+    ),
+  visualRegenerationHistory: (contentId: string) =>
+    fetchJson<{ items: Array<Record<string, unknown>> }>(
+      `/api/contents/${encodeURIComponent(contentId)}/visual-regeneration/history`,
+    ),
+
 };
