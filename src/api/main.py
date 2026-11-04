@@ -5882,6 +5882,49 @@ def _register_routes(app: FastAPI) -> None:
                     "effective": False, "reason": reason}
         if action != "approve":
             raise HTTPException(422, "action 只能是 approve 或 reject")
+
+        # AI-generated master drafts are evidence-bound. Re-validate provenance at
+        # approval time; generation-time validation alone is not sufficient.
+        conn, cfg = _g()["conn"], _g()["cfg"]
+        draft_row = conn.execute(
+            "SELECT * FROM master_plan_versions WHERE id=?", (version_id,)
+        ).fetchone()
+        if draft_row is None:
+            raise HTTPException(404, "母计划版本不存在")
+        if str(draft_row["change_note"] or "").startswith("AI 母计划草稿："):
+            try:
+                metadata = json.loads(str(draft_row["change_note"])[len("AI 母计划草稿："):])
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(409, "AI 母计划生成元数据损坏，拒绝审核") from exc
+            diagnosis = conn.execute(
+                "SELECT id,version_no,status,source_fingerprint FROM business_diagnosis_reports WHERE id=?",
+                (metadata.get("diagnosis_report_id"),),
+            ).fetchone()
+            latest_diagnosis = conn.execute(
+                "SELECT id,version_no FROM business_diagnosis_reports ORDER BY version_no DESC LIMIT 1"
+            ).fetchone()
+            from src.core.business_diagnosis import collect_business_context
+            current_context = collect_business_context(conn, cfg)
+            active = conn.execute(
+                "SELECT id FROM master_plan_versions WHERE status='effective' AND deleted_at IS NULL"
+            ).fetchone()
+            active_id = int(active["id"]) if active else None
+            if (draft_row["status"] != "draft"
+                    or diagnosis is None
+                    or diagnosis["status"] != "confirmed"
+                    or latest_diagnosis is None
+                    or int(latest_diagnosis["id"]) != int(diagnosis["id"])
+                    or int(diagnosis["version_no"]) != int(metadata.get("diagnosis_version_no", -1))
+                    or diagnosis["source_fingerprint"] != metadata.get("source_fingerprint")
+                    or diagnosis["source_fingerprint"] != current_context["fingerprint"]
+                    or draft_row["based_on_version_id"] != active_id):
+                if diagnosis is not None and diagnosis["status"] == "confirmed" and diagnosis["source_fingerprint"] != current_context["fingerprint"]:
+                    conn.execute(
+                        "UPDATE business_diagnosis_reports SET status='stale' WHERE id=? AND status='confirmed'",
+                        (diagnosis["id"],),
+                    )
+                    conn.commit()
+                raise HTTPException(409, "AI 母计划草稿的诊断依据或母计划基准版本已变化，拒绝审核；请重新生成草稿")
         try:
             result = PlanVersionStore(_g()["conn"]).activate_master_version(
                 version_id, reviewer="user",
