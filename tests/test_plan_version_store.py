@@ -1233,7 +1233,7 @@ def test_ai_generation_guard_rejects_a_changed_master_plan_base():
     store.activate_master_version(second["id"], reviewer="reviewer-2")
 
     before_count = conn.execute("SELECT COUNT(*) FROM master_plan_versions").fetchone()[0]
-    with pytest.raises(PlanVersionError, match="基准主计划版本已变化"):
+    with pytest.raises(PlanVersionError, match="母计划基准版本已变化"):
         store.create_master_draft(
             _plan(9), based_on_version_id=first["id"], author="ai", source="system",
             enforce_generation_guard=True, expected_active_version_id=first["id"],
