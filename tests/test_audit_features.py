@@ -307,6 +307,12 @@ def test_http_plan_v2(client, conn, cfg):
                   CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,'test','test fixture')""",
         (source["fingerprint"],),
     )
+    conn.execute(
+        """INSERT INTO account_group_north_star_versions(
+            version_no,snapshot_json,change_reason,created_by,created_at,effective_at
+        ) VALUES(1,'{"positioning":"测试账号组定位","goal_text":"建立稳定的有效咨询"}',
+                 '测试基线','test',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"""
+    )
     conn.commit()
     r = client.post("/api/plans", json={
         "topic_count_per_platform": 4, "enabled_platforms": ["xhs"],
