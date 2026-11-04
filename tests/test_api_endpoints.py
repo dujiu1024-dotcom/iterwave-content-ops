@@ -435,6 +435,34 @@ def test_subplan_review_api_rejects_stale_concurrent_draft(client):
     assert approved.json()["version"]["id"] == latest["id"]
 
 
+def test_content_calendar_api_only_allows_schedule_field_changes(client):
+    tc, conn, _ = client
+    conn.execute(
+        """INSERT INTO content_plans(
+               id,title,topic,platforms_json,planned_count,scheduled_date,status,
+               notes,version,created_at,updated_at
+           ) VALUES(?,?,?,?,?,?,'planned',?,1,?,?)""",
+        ("legacy-calendar", "历史排期", "原主题", '["xhs"]', 2,
+         "2026-11-05", "只读说明", "2026-11-04T10:00:00", "2026-11-04T10:00:00"),
+    )
+    conn.commit()
+
+    forbidden = tc.patch("/api/content-plans/legacy-calendar", json={
+        "version": 1, "scheduled_date": "2026-11-06", "topic": "试图修改战略主题",
+    })
+    assert forbidden.status_code == 422
+    assert tuple(conn.execute(
+        "SELECT topic,scheduled_date,version FROM content_plans WHERE id='legacy-calendar'"
+    ).fetchone()) == ("原主题", "2026-11-05", 1)
+
+    allowed = tc.patch("/api/content-plans/legacy-calendar", json={
+        "version": 1, "scheduled_date": "2026-11-06",
+    })
+    assert allowed.status_code == 200
+    assert allowed.json()["scheduled_date"] == "2026-11-06"
+    assert allowed.json()["version"] == 2
+
+
 def test_create_round_without_saved_master_plan_succeeds_without_ghost_round(client):
     tc, conn, _ = client
     response = tc.post("/api/rounds", json={"topic_count": 5})
