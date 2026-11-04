@@ -4149,6 +4149,15 @@ def _valid_master_plan_generation_payload():
 def test_ai_master_plan_generation_api_failure_is_atomic_and_retryable(client, monkeypatch):
     tc, conn, _ = client
     _seed_confirmed_master_plan_diagnosis(conn)
+    from src.core.plan_version_store import PlanVersionStore
+    store = PlanVersionStore(conn)
+    existing_effective = conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective' ORDER BY version_no DESC LIMIT 1"
+    ).fetchone()
+    if existing_effective is None:
+        base_plan = _valid_master_plan_generation_payload()["plan"]
+        active_draft = store.create_master_draft(base_plan, author="test")
+        store.activate_master_version(active_draft["id"], reviewer="test")
     monkeypatch.setattr(
         "src.core.business_diagnosis.collect_business_context",
         lambda *_: {"fingerprint": "stable-fingerprint", "context": {"business": "test"}},
@@ -4187,6 +4196,73 @@ def test_ai_master_plan_generation_api_failure_is_atomic_and_retryable(client, m
         "SELECT COUNT(*) FROM master_plan_versions WHERE status='draft' AND deleted_at IS NULL"
     ).fetchone()[0] == 1
 
+
+
+def test_ai_master_plan_generation_api_maps_timeout_without_changing_effective_version(client, monkeypatch):
+    from src.core.plan_version_store import PlanVersionStore
+
+    tc, conn, _ = client
+    diagnosis_id = _seed_confirmed_master_plan_diagnosis(conn)
+    store = PlanVersionStore(conn)
+    base_plan = _valid_master_plan_generation_payload()["plan"]
+    active_draft = store.create_master_draft(base_plan, author="test")
+    active = store.activate_master_version(active_draft["id"], reviewer="test")
+    active_id = active["id"]
+    monkeypatch.setattr(
+        "src.core.business_diagnosis.collect_business_context",
+        lambda *_: {"fingerprint": "stable-fingerprint", "context": {"business": "test"}},
+    )
+
+    async def timeout_provider(*_args, **_kwargs):
+        raise RuntimeError("AI 母计划生成失败：primary:TimeoutException")
+
+    monkeypatch.setattr("src.core.master_plan_generation._call_model", timeout_provider)
+    response = tc.post("/api/plans/ai-draft")
+
+    assert response.status_code == 502, response.text
+    assert conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective' ORDER BY version_no DESC LIMIT 1"
+    ).fetchone()["id"] == active_id
+    assert conn.execute(
+        "SELECT COUNT(*) FROM master_plan_versions WHERE status='draft' AND deleted_at IS NULL"
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT status FROM business_diagnosis_reports WHERE id=?", (diagnosis_id,)
+    ).fetchone()["status"] == "confirmed"
+    assert conn.in_transaction is False
+
+
+def test_ai_master_plan_generation_api_maps_invalid_json_without_partial_draft(client, monkeypatch):
+    from src.core.master_plan_generation import MasterPlanGenerationError
+    from src.core.plan_version_store import PlanVersionStore
+
+    tc, conn, _ = client
+    _seed_confirmed_master_plan_diagnosis(conn)
+    store = PlanVersionStore(conn)
+    active_draft = store.create_master_draft(
+        _valid_master_plan_generation_payload()["plan"], author="test"
+    )
+    active = store.activate_master_version(active_draft["id"], reviewer="test")
+    monkeypatch.setattr(
+        "src.core.business_diagnosis.collect_business_context",
+        lambda *_: {"fingerprint": "stable-fingerprint", "context": {"business": "test"}},
+    )
+
+    async def invalid_json_provider(*_args, **_kwargs):
+        raise MasterPlanGenerationError("模型返回的 JSON 无法解析")
+
+    monkeypatch.setattr("src.core.master_plan_generation._call_model", invalid_json_provider)
+    response = tc.post("/api/plans/ai-draft")
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "invalid_ai_master_plan"
+    assert conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective' ORDER BY version_no DESC LIMIT 1"
+    ).fetchone()["id"] == active["id"]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM master_plan_versions WHERE status='draft' AND deleted_at IS NULL"
+    ).fetchone()[0] == 0
+    assert conn.in_transaction is False
 
 def test_ai_master_plan_generation_api_rejects_invalid_model_schema_without_partial_draft(client, monkeypatch):
     tc, conn, _ = client
