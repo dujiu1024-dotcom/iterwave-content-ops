@@ -290,7 +290,8 @@ def test_original_asset_permission_and_privacy_gate_production_usage(diagnosis_c
     denied = client.post(f"/api/production-tasks/{task_id}/assets", json=[asset_id])
     assert denied.status_code == 409
     assert conn.execute(
-        "SELECT COUNT(*) FROM production_task_asset_usages WHERE production_task_id=?"
+        "SELECT COUNT(*) FROM production_task_asset_usages WHERE production_task_id=?",
+        (task_id,),
     ).fetchone()[0] == 0
 
     reviewed = client.post(f"/api/original-assets/{asset_id}/review", json={
