@@ -218,7 +218,7 @@ export default function VisualBrandPane() {
                   {JSON.stringify({ final_prompts: item.final_prompts, style_baseline: item.style_baseline, reference_images: item.reference_images }, null, 2)}
                 </pre>
               </details>
-              {item.error_message && <div className="panel-sub" style={{ color: "var(--red)" }}>失败原因：{String(item.error_message)}</div>}
+              {Boolean(item.error_message) && <div className="panel-sub" style={{ color: "var(--red)" }}>失败原因：{String(item.error_message)}</div>}
             </div>
           ))}
         </>}
