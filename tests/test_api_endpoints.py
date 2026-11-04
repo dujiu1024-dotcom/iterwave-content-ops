@@ -4111,4 +4111,175 @@ def test_ai_master_plan_approval_rejects_stale_diagnosis_provenance(client, monk
     assert conn.execute(
         "SELECT status FROM business_diagnosis_reports WHERE id=?", (diagnosis_id,)
     ).fetchone()[0] == "stale"
+
+
+
+def _seed_confirmed_master_plan_diagnosis(conn, fingerprint="stable-fingerprint"):
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    conn.execute("DELETE FROM business_diagnosis_reports")
+    cur = conn.execute(
+        """INSERT INTO business_diagnosis_reports
+           (version_no,status,report_json,source_snapshot_json,source_fingerprint,
+            model_name,created_at,created_by,updated_at,confirmed_at,confirmed_by,change_note)
+           VALUES(1,'confirmed','{}','{}',?,'test-model',?,'test',?,?,'test','test')""",
+        (fingerprint, now, now, now),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def _valid_master_plan_generation_payload():
+    return {
+        "plan": {
+            "topic_count_per_platform": 4,
+            "dimension_allocation": {"产品体验": 2, "客户案例": 2},
+            "enabled_platforms": ["xhs"],
+            "content_format": "image_text",
+            "per_platform": {"xhs": {"topic_count": 4, "publish_slots": ["09:00"]}},
+            "cadence": {"round_interval_days": 7, "rounds_planned": 4},
+        },
+        "summary": "基于已确认经营诊断生成的待审核草稿",
+        "assumptions": [],
+        "risks": [],
+        "pending_confirmations": [],
+        "resource_basis": [],
+    }
+
+
+def test_ai_master_plan_generation_api_failure_is_atomic_and_retryable(client, monkeypatch):
+    tc, conn, _ = client
+    _seed_confirmed_master_plan_diagnosis(conn)
+    monkeypatch.setattr(
+        "src.core.business_diagnosis.collect_business_context",
+        lambda *_: {"fingerprint": "stable-fingerprint", "context": {"business": "test"}},
+    )
+    calls = {"count": 0}
+
+    async def provider(*_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("provider unavailable")
+        return _valid_master_plan_generation_payload(), "test-model"
+
+    monkeypatch.setattr("src.core.master_plan_generation._call_model", provider)
+    before_effective = conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective' ORDER BY version_no DESC LIMIT 1"
+    ).fetchone()
+
+    failed = tc.post("/api/plans/ai-draft")
+    assert failed.status_code == 502, failed.text
+    assert conn.execute(
+        "SELECT COUNT(*) FROM master_plan_versions WHERE status='draft' AND deleted_at IS NULL"
+    ).fetchone()[0] == 0
+    after_failure_effective = conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective' ORDER BY version_no DESC LIMIT 1"
+    ).fetchone()
+    assert (after_failure_effective["id"] if after_failure_effective else None) == (
+        before_effective["id"] if before_effective else None
+    )
+
+    retried = tc.post("/api/plans/ai-draft")
+    assert retried.status_code == 201, retried.text
+    assert retried.json()["requires_review"] is True
+    assert retried.json()["effective"] is False
+    assert retried.json()["draft"]["status"] == "draft"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM master_plan_versions WHERE status='draft' AND deleted_at IS NULL"
+    ).fetchone()[0] == 1
+
+
+def test_ai_master_plan_generation_api_rejects_invalid_model_schema_without_partial_draft(client, monkeypatch):
+    tc, conn, _ = client
+    _seed_confirmed_master_plan_diagnosis(conn)
+    monkeypatch.setattr(
+        "src.core.business_diagnosis.collect_business_context",
+        lambda *_: {"fingerprint": "stable-fingerprint", "context": {"business": "test"}},
+    )
+
+    async def invalid_provider(*_args, **_kwargs):
+        payload = _valid_master_plan_generation_payload()
+        payload["plan"]["content_format"] = "video"
+        return payload, "test-model"
+
+    monkeypatch.setattr("src.core.master_plan_generation._call_model", invalid_provider)
+    response = tc.post("/api/plans/ai-draft")
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "invalid_ai_master_plan"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM master_plan_versions WHERE status='draft' AND deleted_at IS NULL"
+    ).fetchone()[0] == 0
+    assert conn.in_transaction is False
+
+
+def test_ai_master_plan_generation_api_marks_diagnosis_stale_if_sources_change_during_model_call(client, monkeypatch):
+    tc, conn, _ = client
+    diagnosis_id = _seed_confirmed_master_plan_diagnosis(conn)
+    fingerprint = {"value": "stable-fingerprint"}
+    monkeypatch.setattr(
+        "src.core.business_diagnosis.collect_business_context",
+        lambda *_: {"fingerprint": fingerprint["value"], "context": {"business": "test"}},
+    )
+
+    async def provider(*_args, **_kwargs):
+        fingerprint["value"] = "changed-fingerprint"
+        return _valid_master_plan_generation_payload(), "test-model"
+
+    monkeypatch.setattr("src.core.master_plan_generation._call_model", provider)
+    response = tc.post("/api/plans/ai-draft")
+
+    assert response.status_code == 409, response.text
+    assert conn.execute(
+        "SELECT status FROM business_diagnosis_reports WHERE id=?", (diagnosis_id,)
+    ).fetchone()[0] == "stale"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM master_plan_versions WHERE status='draft' AND deleted_at IS NULL"
+    ).fetchone()[0] == 0
+    assert conn.in_transaction is False
+
+
+def test_ai_master_plan_generation_api_preserves_existing_user_draft(client, monkeypatch):
+    from src.core.plan_version_store import PlanVersionStore
+
+    tc, conn, _ = client
+    _seed_confirmed_master_plan_diagnosis(conn)
+    monkeypatch.setattr(
+        "src.core.business_diagnosis.collect_business_context",
+        lambda *_: {"fingerprint": "stable-fingerprint", "context": {"business": "test"}},
+    )
+    store = PlanVersionStore(conn)
+    active = conn.execute(
+        "SELECT id,plan_snapshot FROM master_plan_versions WHERE status='effective' ORDER BY version_no DESC LIMIT 1"
+    ).fetchone()
+    if active is None:
+        base = {"topic_count_per_platform": 4, "enabled_platforms": ["xhs"],
+                "dimension_allocation": {"产品体验": 4}, "content_format": "image_text"}
+        first = store.create_master_draft(base, author="test")
+        active_id = int(store.activate_master_version(first["id"], reviewer="test")["id"])
+    else:
+        active_id = int(active["id"])
+        base = json.loads(active["plan_snapshot"])
+    user_plan = dict(base)
+    user_plan["topic_count_per_platform"] = 7
+    user_draft = store.create_master_draft(
+        user_plan, based_on_version_id=active_id, author="user",
+        change_note="用户正在编辑的草稿",
+    )
+    before_count = conn.execute("SELECT COUNT(*) FROM master_plan_versions").fetchone()[0]
+
+    async def unexpected_provider(*_args, **_kwargs):
+        raise AssertionError("existing user draft must be rejected before model invocation")
+
+    monkeypatch.setattr("src.core.master_plan_generation._call_model", unexpected_provider)
+    response = tc.post("/api/plans/ai-draft")
+
+    assert response.status_code == 409, response.text
+    assert conn.execute("SELECT COUNT(*) FROM master_plan_versions").fetchone()[0] == before_count
+    saved = conn.execute(
+        "SELECT status,plan_snapshot,change_note FROM master_plan_versions WHERE id=?",
+        (user_draft["id"],),
+    ).fetchone()
+    assert saved["status"] == "draft"
+    assert json.loads(saved["plan_snapshot"])["topic_count_per_platform"] == 7
+    assert saved["change_note"] == "用户正在编辑的草稿"
     assert conn.in_transaction is False
