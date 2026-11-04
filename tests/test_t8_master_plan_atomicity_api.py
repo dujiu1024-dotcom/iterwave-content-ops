@@ -173,8 +173,10 @@ def test_ai_master_plan_api_failure_is_atomic_and_retryable(
     from src.core import master_plan_generation
 
     client, conn, _cfg = master_plan_client
-    _confirm_diagnosis(client, monkeypatch)
+    # Seed all business inputs before confirming the diagnosis: the source
+    # fingerprint intentionally invalidates when business context changes.
     previous_master_id = _seed_effective_plan_graph(conn) if existing_effective else None
+    _confirm_diagnosis(client, monkeypatch)
     before = _plan_graph_snapshot(conn)
 
     async def injected_failure(_cfg, _prompt):
