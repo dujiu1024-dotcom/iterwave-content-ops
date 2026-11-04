@@ -64,7 +64,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from src.core.config import load_config, get_config, DEFAULT_ENV_PATH
-from src.core.timezone import (business_now, business_zone, storage_now, parse_persisted_datetime, storage_window_cutoffs, timestamp_since_sql, timestamp_before_sql, business_date_cutoffs)
+from src.core.timezone import (business_now, business_zone, storage_now, parse_persisted_datetime, storage_window_cutoffs, timestamp_since_sql, timestamp_before_sql, timestamp_before_exclusive_sql, business_date_cutoffs)
 from src.core.config import PROJECT_ROOT
 from src.api.response_utils import (
     api_datetime as _api_datetime,
@@ -2477,29 +2477,46 @@ def _register_routes(app: FastAPI) -> None:
         draft = conn.execute("SELECT id FROM drafts WHERE id=?", (draft_id,)).fetchone()
         if draft is None:
             raise HTTPException(404, "草稿不存在")
-        total_manual = conn.execute(
-            "SELECT COUNT(*) FROM metric_snapshots WHERE tenant_id=? AND draft_id=?",
+        totals = conn.execute(
+            """SELECT COUNT(*) AS total,
+                      SUM(CASE WHEN source='manual' THEN 1 ELSE 0 END) AS manual,
+                      SUM(CASE WHEN source='platform_readback' THEN 1 ELSE 0 END) AS auto,
+                      SUM(CASE WHEN source NOT IN ('manual','platform_readback') THEN 1 ELSE 0 END) AS imported
+               FROM (
+                   SELECT source_record_type,source_record_id,MAX(source) AS source
+                   FROM metric_facts_effective
+                   WHERE tenant_id IN (?, 'legacy') AND draft_id=?
+                   GROUP BY source_record_type,source_record_id
+               )""",
             (tenant_id, draft_id),
-        ).fetchone()[0]
-        total_auto = conn.execute(
-            "SELECT COUNT(*) FROM metrics WHERE draft_id=? AND fetch_status IN ('success','partial')",
-            (draft_id,),
-        ).fetchone()[0]
+        ).fetchone()
         items = conn.execute(
-            "SELECT * FROM ("
-            "SELECT id, draft_id, content_id, platform, source, views, likes, collects, comments, shares, "
-            "measured_at, recorded_at, correction_of FROM metric_snapshots "
-            "WHERE tenant_id=? AND draft_id=? "
-            "UNION ALL "
-            "SELECT CAST(id AS TEXT) AS id, draft_id, content_id, platform, "
-            "'platform_readback' AS source, views, likes, collects, comments, shares, "
-            "fetched_at AS measured_at, fetched_at AS recorded_at, NULL AS correction_of "
-            "FROM metrics WHERE draft_id=? AND fetch_status IN ('success','partial')"
-            ") ORDER BY measured_at DESC, recorded_at DESC LIMIT ? OFFSET ?",
-            (tenant_id, draft_id, draft_id, limit, offset),
+            """SELECT source_record_type || ':' || source_record_id AS id,source_record_id,source_record_type,draft_id,content_id,platform,source,
+                      MAX(CASE WHEN metric_key='views' THEN value END) AS views,
+                      MAX(CASE WHEN metric_key='likes' THEN value END) AS likes,
+                      MAX(CASE WHEN metric_key='collects' THEN value END) AS collects,
+                      MAX(CASE WHEN metric_key='comments' THEN value END) AS comments,
+                      MAX(CASE WHEN metric_key='shares' THEN value END) AS shares,
+                      MAX(measured_at) AS measured_at,MAX(recorded_at) AS recorded_at,
+                      MAX(window_start) AS window_start,MAX(window_end) AS window_end,
+                      MAX(timezone_name) AS timezone_name,
+                      CASE WHEN SUM(CASE WHEN collection_status='partial' THEN 1 ELSE 0 END)>0
+                           THEN 'partial' ELSE 'succeeded' END AS collection_status,
+                      MAX(correction_of) AS correction_of
+               FROM metric_facts_effective
+               WHERE tenant_id IN (?, 'legacy') AND draft_id=?
+               GROUP BY source_record_type,source_record_id,draft_id,content_id,platform,source
+               ORDER BY MAX(measured_at) DESC,MAX(recorded_at) DESC LIMIT ? OFFSET ?""",
+            (tenant_id, draft_id, tenant_id, draft_id, limit, offset),
         ).fetchall()
-        return {"items": [dict(row) for row in items], "total": int(total_manual + total_auto),
-                "limit": limit, "offset": offset}
+        return {
+            "items": [dict(row) for row in items],
+            "total": int(totals["total"] or 0),
+            "total_manual": int(totals["manual"] or 0),
+            "total_auto": int(totals["auto"] or 0),
+            "total_imported": int(totals["imported"] or 0),
+            "limit": limit, "offset": offset,
+        }
 
     @app.get("/api/reports/weekly")
     def weekly_report(week_start: Optional[str] = Query(None), platform: Optional[str] = Query(None)):
@@ -2516,34 +2533,44 @@ def _register_routes(app: FastAPI) -> None:
         end = start + timedelta(days=7)
         conn = _g()["conn"]
         tenant_id = _tenant_id()
-        snapshots = conn.execute(
-            "SELECT ms.*, c.title, c.body, c.tags, d.user_confirmed_at "
-            "FROM metric_snapshots ms JOIN contents c ON c.id=ms.content_id "
-            "JOIN drafts d ON d.id=ms.draft_id "
-            "WHERE ms.tenant_id=? AND ms.measured_at>=? AND ms.measured_at<? "
-            + ("AND ms.platform=? " if platform else "")
-            + "ORDER BY ms.measured_at DESC",
-            (tenant_id, start.isoformat(sep=" "), end.isoformat(sep=" "),
-             *((platform,) if platform else ())),
-        ).fetchall()
-        # 自动读回沿用原 metrics 表；来源固定标记为 platform_readback，不改写原记录。
-        auto_rows = conn.execute(
-            "SELECT m.id, m.content_id, m.platform, m.views, m.likes, m.collects, m.comments, m.shares, "
-            "'platform_readback' AS source, m.fetched_at AS measured_at, m.fetched_at AS recorded_at, "
-            "c.title, c.body, c.tags "
-            "FROM metrics m JOIN contents c ON c.id=m.content_id "
-            "WHERE m.fetch_status IN ('success','partial') AND m.fetched_at>=? AND m.fetched_at<? "
-            + ("AND m.platform=? " if platform else ""),
-            (start.isoformat(sep=" "), end.isoformat(sep=" "), *((platform,) if platform else ())),
-        ).fetchall()
-        merged = []
-        superseded_snapshot_ids = {
-            str(row["correction_of"]) for row in snapshots if row["correction_of"]
-        }
-        for row in list(snapshots) + list(auto_rows):
-            if str(row["id"]) in superseded_snapshot_ids:
-                continue
-            merged.append(dict(row))
+        cfg = _g()["cfg"]
+        local_zone = business_zone(cfg)
+        start_local = start.replace(tzinfo=local_zone) if start.tzinfo is None else start
+        end_local = end.replace(tzinfo=local_zone) if end.tzinfo is None else end
+        start_utc, start_legacy = storage_window_cutoffs(start_local, cfg)
+        end_utc, end_legacy = storage_window_cutoffs(end_local, cfg)
+        platform_clause = " AND f.platform=? " if platform else ""
+        weekly_sql = (
+            """SELECT f.source_record_type || ':' || f.source_record_id AS id,f.source_record_id,f.source_record_type,f.draft_id,f.content_id,
+                      f.platform,f.source,
+                      MAX(CASE WHEN f.metric_key='views' THEN f.value END) AS views,
+                      MAX(CASE WHEN f.metric_key='likes' THEN f.value END) AS likes,
+                      MAX(CASE WHEN f.metric_key='collects' THEN f.value END) AS collects,
+                      MAX(CASE WHEN f.metric_key='comments' THEN f.value END) AS comments,
+                      MAX(CASE WHEN f.metric_key='shares' THEN f.value END) AS shares,
+                      MAX(f.measured_at) AS measured_at,MAX(f.recorded_at) AS recorded_at,
+                      MAX(f.window_start) AS window_start,MAX(f.window_end) AS window_end,
+                      MAX(f.timezone_name) AS timezone_name,
+                      CASE WHEN SUM(CASE WHEN f.collection_status='partial' THEN 1 ELSE 0 END)>0
+                           THEN 'partial' ELSE 'succeeded' END AS collection_status,
+                      MAX(f.correction_of) AS correction_of,c.title,c.body,c.tags,
+                      MAX(d.user_confirmed_at) AS user_confirmed_at
+               FROM metric_facts_effective f
+               JOIN contents c ON c.id=f.content_id
+               LEFT JOIN drafts d ON d.id=f.draft_id
+               WHERE f.tenant_id IN (?, 'legacy')
+                 AND """ + timestamp_since_sql("f.measured_at") + """
+                 AND """ + timestamp_before_exclusive_sql("f.measured_at") + """
+                 AND f.metric_key IN ('views','likes','collects','comments','shares')"""
+            + platform_clause +
+            """ GROUP BY f.source_record_type,f.source_record_id,f.draft_id,f.content_id,
+                       f.platform,f.source,c.title,c.body,c.tags
+               ORDER BY MAX(f.measured_at) DESC,MAX(f.recorded_at) DESC"""
+        )
+        weekly_params = [tenant_id, start_utc, start_legacy, end_utc, end_legacy]
+        if platform:
+            weekly_params.append(platform)
+        merged = [dict(row) for row in conn.execute(weekly_sql, weekly_params).fetchall()]
         if platform is None:
             platforms = sorted({r["platform"] for r in merged})
         else:
@@ -6442,12 +6469,19 @@ def _register_routes(app: FastAPI) -> None:
                     continue
                 output_root = Path(_g()["cfg"].resolve_path(_g()["cfg"].paths.output_dir)).resolve()
                 background_path = Path(str(page.get("background_path") or "")).resolve()
+                image_path = Path(str(page.get("image_path") or "")).resolve()
+                editable_source = background_path if background_path.is_file() else (
+                    image_path if (
+                        page.get("generation_mode") == "ai_complete_card"
+                        or design.get("generation_mode") == "ai_complete_card"
+                    ) else Path("")
+                )
                 ai_revision_ready = image_settings_ready
                 can_revise = bool(
                     ai_revision_ready
                     and isinstance(page.get("page_index"), int)
-                    and output_root in background_path.parents
-                    and background_path.is_file()
+                    and output_root in editable_source.parents
+                    and editable_source.is_file()
                 )
                 safe_pages.append({
                     "page_index": page.get("page_index"),
@@ -6458,8 +6492,13 @@ def _register_routes(app: FastAPI) -> None:
                     "can_revise": can_revise,
                 })
             design["pages"] = safe_pages
-            # 生图背景的本地绝对路径只留在服务端数据库，不向 API 暴露。
+            # 本地绝对路径只留在服务端数据库；历史面板仅显示参考图文件名。
             design.pop("background_path", None)
+            revision_meta = design.get("revision")
+            if isinstance(revision_meta, dict) and isinstance(revision_meta.get("reference_images"), list):
+                revision_meta["reference_images"] = [
+                    Path(str(item)).name for item in revision_meta["reference_images"]
+                ]
             if isinstance(design.get("generation"), list):
                 design["generation"] = [
                     {key: value for key, value in item.items() if key != "path"}
@@ -6502,6 +6541,113 @@ def _register_routes(app: FastAPI) -> None:
         return FileResponse(str(image_path), media_type="image/png")
 
 
+    @app.post("/api/contents/{content_id}/visual-versions/{version_id}/approve")
+    @manages_own_transaction
+    def approve_visual_version(content_id: str, version_id: int, req: dict):
+        """Only an explicit user approval may replace the active image set."""
+        conn = _g()["conn"]
+        cfg = _g()["cfg"]
+        if (req or {}).get("approved") is not True:
+            raise HTTPException(422, "必须明确确认采用该视觉版本")
+        row = _content_row(conn, content_id)
+        _ensure_content_round_idle(row, "采用视觉版本")
+        published = conn.execute(
+            "SELECT 1 FROM drafts WHERE content_id=? AND "
+            "(user_confirmed_at IS NOT NULL OR status IN ('user_published','data_fetching','published')) LIMIT 1",
+            (content_id,),
+        ).fetchone()
+        if published:
+            raise HTTPException(409, "已确认发布的内容不能替换图片版本")
+        version = conn.execute(
+            "SELECT * FROM visual_design_versions WHERE id=? AND content_id=?",
+            (version_id, content_id),
+        ).fetchone()
+        if not version:
+            raise HTTPException(404, "视觉版本不存在")
+        if version["status"] == "approved":
+            current_paths = json.loads(row["image_paths"] or "[]")
+            try:
+                existing_design = json.loads(version["design_json"] or "{}")
+                expected_paths = [
+                    str(page["image_path"]) for page in sorted(
+                        existing_design.get("pages") or [], key=lambda item: int(item.get("page_index", 0))
+                    )
+                ]
+            except (TypeError, ValueError, KeyError):
+                expected_paths = []
+            if current_paths == expected_paths:
+                return {"content_id": content_id, "version_id": version_id, "status": "approved", "already_active": True}
+        if version["status"] not in {"review_required", "rendered"}:
+            raise HTTPException(409, "只有待人工复核或已渲染的视觉版本可以采用")
+        from src.core.visual_persistence import compute_content_hash
+        if version["content_hash"] != compute_content_hash(str(row["title"]), str(row["body"])):
+            raise HTTPException(409, "内容文案已变化，该视觉版本已过期；请基于最新文案重新生成")
+        try:
+            design = json.loads(version["design_json"] or "{}")
+        except (TypeError, ValueError):
+            raise HTTPException(409, "视觉版本设计数据无效") from None
+        pages = design.get("pages") if isinstance(design.get("pages"), list) else []
+        pages = sorted(
+            [page for page in pages if isinstance(page, dict)],
+            key=lambda page: int(page.get("page_index", -1)),
+        )
+        if not pages or [int(page.get("page_index", -1)) for page in pages] != list(range(len(pages))):
+            raise HTTPException(409, "视觉版本页面不完整，不能采用")
+        output_root = Path(cfg.resolve_path(cfg.paths.output_dir)).resolve()
+        image_paths = []
+        for page in pages:
+            image_path = Path(str(page.get("image_path") or "")).resolve()
+            if output_root not in image_path.parents or not image_path.is_file():
+                raise HTTPException(409, "视觉版本存在缺失或越界图片，不能采用")
+            image_paths.append(str(image_path))
+        now = _storage_now().isoformat(timespec="seconds")
+        conn.execute(
+            "UPDATE visual_design_versions SET status='superseded' WHERE content_id=? AND status='approved' AND id<>?",
+            (content_id, version_id),
+        )
+        conn.execute(
+            "UPDATE visual_design_versions SET status='approved',approved_at=? WHERE id=? AND content_id=?",
+            (now, version_id, content_id),
+        )
+        conn.execute(
+            "UPDATE contents SET image_paths=?,visual_status='generated',visual_reason=? WHERE id=?",
+            (json.dumps(image_paths, ensure_ascii=False), f"用户确认采用视觉版本 v{version['version']}（{now}）", content_id),
+        )
+        return {
+            "content_id": content_id, "version_id": version_id,
+            "version": version["version"], "status": "approved",
+            "image_count": len(image_paths), "active_images_unchanged": False,
+        }
+
+    @app.post("/api/contents/{content_id}/visual-versions/{version_id}/reject")
+    @manages_own_transaction
+    def reject_visual_version(content_id: str, version_id: int, req: dict):
+        conn = _g()["conn"]
+        _content_row(conn, content_id)
+        reason = str((req or {}).get("reason") or "").strip()
+        if not reason:
+            raise HTTPException(422, "拒绝视觉版本必须填写原因")
+        version = conn.execute(
+            "SELECT status FROM visual_design_versions WHERE id=? AND content_id=?",
+            (version_id, content_id),
+        ).fetchone()
+        if not version:
+            raise HTTPException(404, "视觉版本不存在")
+        if version["status"] not in {"review_required", "rendered"}:
+            raise HTTPException(409, "只有待人工审核的视觉版本可以拒绝")
+        now = _storage_now().isoformat(timespec="seconds")
+        conn.execute(
+            "UPDATE visual_design_versions SET status='rejected' WHERE id=? AND content_id=?",
+            (version_id, content_id),
+        )
+        conn.execute(
+            """UPDATE visual_regeneration_requests
+               SET status='rejected',error_message=?,completed_at=?
+               WHERE content_id=? AND output_version_id=?""",
+            (reason[:1000], now, content_id, version_id),
+        )
+        return {"content_id": content_id, "version_id": version_id, "status": "rejected", "reason": reason[:1000]}
+
     @app.post("/api/contents/{content_id}/visual-versions/{version_id}/pages/{page_index}/revise")
     @manages_own_transaction
     def revise_visual_version_page(content_id: str, version_id: int, page_index: int, req: dict | None = None):
@@ -6523,23 +6669,33 @@ def _register_routes(app: FastAPI) -> None:
         ).fetchone()
         if not current:
             raise HTTPException(404, "视觉版本不存在")
+        if current["status"] != "approved":
+            raise HTTPException(409, "单张重做必须基于当前已采用的视觉版本；请先人工采用目标版本")
         try:
             design = json.loads(current["design_json"] or "{}")
             pages = design.get("pages") or []
             target_page = next(p for p in pages if p.get("page_index") == page_index)
-            background = Path(str(target_page.get("background_path") or design.get("background_path") or "")).resolve()
+            background_value = target_page.get("background_path") or design.get("background_path")
+            edit_scope = "background"
+            if not background_value and (
+                target_page.get("generation_mode") == "ai_complete_card"
+                or design.get("generation_mode") == "ai_complete_card"
+            ):
+                background_value = target_page.get("image_path")
+                edit_scope = "full_page"
+            background = Path(str(background_value or "")).resolve()
         except (TypeError, ValueError, StopIteration):
             raise HTTPException(409, "该历史版本缺少可编辑的页面设计数据") from None
         output_root = Path(cfg.resolve_path(cfg.paths.output_dir)).resolve()
         if output_root not in background.parents or not background.is_file():
-            raise HTTPException(409, "该页面没有可用的原始背景素材，无法进行单页重做")
+            raise HTTPException(409, "该页面没有可用的原始图片/背景素材，无法进行单页重做")
         from src.core.content_pipeline import image_generation_settings
         image_settings, settings_reason = image_generation_settings(conn)
         if image_settings is None:
             raise HTTPException(409, f"单页 AI 重做不可用：{settings_reason}")
-        instruction = str((req or {}).get("instruction") or "改善本页构图、色彩协调和视觉层次").strip()[:500]
+        instruction = str((req or {}).get("reason") or (req or {}).get("instruction") or "").strip()[:1000]
         if not instruction:
-            raise HTTPException(422, "重做说明不能为空")
+            raise HTTPException(422, "单张图片重新生成必须填写修改理由")
         guard = ctx.get("guard")
         if guard is None:
             raise HTTPException(503, "质量检查服务不可用，已阻止单页图片重做")
@@ -6560,6 +6716,52 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(
                 409, f"当前内容未通过 G2（{outcome.result.value}），禁止单页图片重做：{outcome.reason}",
             )
+
+        style_baseline = {
+            "style_key": current["style_key"],
+            "renderer": current["renderer"],
+            "platform": design.get("platform") or row["platform"],
+            "render_options": design.get("render_options") or {},
+            "brand_profile": design.get("brand_profile") or {},
+            "page_count": len(pages),
+            "canvas_ratio": design.get("canvas_ratio") or design.get("render_options", {}).get("canvas_ratio"),
+        }
+        reference_paths = []
+        neighbor_context = []
+        body_pages = design.get("body_pages") if isinstance(design.get("body_pages"), list) else []
+        for neighbor in pages:
+            neighbor_index = int(neighbor.get("page_index", -1))
+            if neighbor_index == page_index or abs(neighbor_index - page_index) > 1:
+                continue
+            candidate = Path(str(neighbor.get("image_path") or neighbor.get("background_path") or "")).resolve()
+            if output_root in candidate.parents and candidate.is_file():
+                reference_paths.append(str(candidate))
+            body_index = neighbor_index - 1
+            neighbor_context.append({
+                "page_index": neighbor_index,
+                "body_summary": str(body_pages[body_index] if 0 <= body_index < len(body_pages) else "")[:500],
+                "generation_mode": neighbor.get("generation_mode") or "",
+            })
+        preserve_items = [
+            "本页已确认的文字、数字、产品主体和品牌元素",
+            "本页尺寸、比例、文字安全区和内容信息层级",
+            "整套图片的主辅色、背景、字体、字号、留白与插画表现",
+        ]
+        forbidden_items = [
+            "不得修改本次指定页以外的任何页面文件",
+            "不得擅自改写正文、标题、数字、产品主体或品牌标识",
+            "不得添加水印、虚构信息或与整套风格冲突的装饰",
+        ]
+        revision_request_id = uuid.uuid4().hex
+        revision_prompt_audit = {}
+        unchanged_page_hashes = {}
+        for existing_page in pages:
+            existing_index = int(existing_page.get("page_index", -1))
+            if existing_index == page_index:
+                continue
+            existing_path = Path(str(existing_page.get("image_path") or "")).resolve()
+            if existing_path.is_file():
+                unchanged_page_hashes[existing_index] = __import__("hashlib").sha256(existing_path.read_bytes()).hexdigest()
 
         def _generate_revision_with_budget():
             if not _media_generation_lock.acquire(blocking=False):
@@ -6604,9 +6806,17 @@ def _register_routes(app: FastAPI) -> None:
                 ) as budget:
                     generated = revise_visual_background(
                         source_path=background, feedback=[instruction], output_dir=output_root,
-                        settings=image_settings, cfg=cfg,
+                        settings=image_settings, cfg=cfg, style_baseline=style_baseline,
+                        neighbor_context=neighbor_context, reference_paths=reference_paths,
+                        preserve_items=preserve_items, forbidden_items=forbidden_items,
+                        prompt_audit=revision_prompt_audit, edit_scope=edit_scope,
                     )
                 usage = budget.snapshot()
+                conn.execute(
+                    "UPDATE media_generation_jobs SET final_prompt=? WHERE id=?",
+                    (str(generated.get("final_prompt") or "")[:20000], manual_job_id),
+                )
+                conn.commit()
                 success = generated.get("status") == "revised" and bool(generated.get("path"))
                 conn.execute(
                     "UPDATE media_generation_jobs SET status=?, api_calls=?, failed_api_calls=?, "
@@ -6638,10 +6848,29 @@ def _register_routes(app: FastAPI) -> None:
         from src.core.visual_persistence import create_visual_page_job, create_visual_version, transition_visual_job
         # 任务登记单独提交：调用图像模型（数十秒）期间绝不持有 SQLite 写事务，避免 database is locked。
         with conn:
+            conn.execute(
+                """INSERT INTO visual_regeneration_requests
+                   (request_id,tenant_id,content_id,scope,page_index,original_reason,
+                    structured_instruction,preserve_json,forbidden_json,style_baseline_json,
+                    reference_images_json,source_version_id,status,created_at)
+                   VALUES(?,?,?,'page',?,?,?,?,?,?,?,?, 'running',?)""",
+                (revision_request_id, _tenant_id(), content_id, page_index, instruction,
+                 "单页修改：" + instruction, json.dumps(preserve_items, ensure_ascii=False),
+                 json.dumps(forbidden_items, ensure_ascii=False),
+                 json.dumps(style_baseline, ensure_ascii=False),
+                 json.dumps([str(background), *reference_paths], ensure_ascii=False),
+                 version_id, _storage_now().isoformat(timespec="seconds")),
+            )
             job_id = create_visual_page_job(
                 conn, content_id=content_id, visual_version_id=version_id,
                 page_index=page_index, job_type="revise",
-                input_data={"instruction": instruction, "source_version_id": version_id},
+                input_data={"instruction": instruction, "reason": instruction,
+                            "source_version_id": version_id, "request_id": revision_request_id,
+                            "style_baseline": style_baseline, "reference_images": reference_paths},
+            )
+            conn.execute(
+                "UPDATE visual_regeneration_requests SET visual_job_id=? WHERE request_id=?",
+                (job_id, revision_request_id),
             )
             transition_visual_job(conn, job_id=job_id, expected_status="queued", new_status="running")
         revised_path = None
@@ -6650,31 +6879,47 @@ def _register_routes(app: FastAPI) -> None:
             result = _generate_revision_with_budget()
             if result.get("status") != "revised" or not result.get("path"):
                 raise HTTPException(503, "AI 背景重做未成功，请检查图像模型配置")
-            revised_background = Path(result["path"]).resolve()
-            if output_root not in revised_background.parents or not revised_background.is_file():
-                raise HTTPException(500, "AI 返回的背景素材路径无效")
-            revised_path, _ = __import__("src.core.visual_renderer", fromlist=["render_single_page"]).render_single_page(
-                title=str(design.get("title") or row["title"]),
-                subtitle=str(design.get("subtitle") or ""),
-                body=str(design.get("body") or row["body"]),
-                page_index=page_index, total_pages=len(pages),
-                output_dir=output_root, platform=Platform(str(design.get("platform") or row["platform"])),
-                footer=str(design.get("footer") or ""),
-                theme=str(design.get("render_options", {}).get("theme") or current["style_key"]),
-                background_path=revised_background,
-                brand_palette=design.get("render_options", {}).get("brand_palette"),
-                font_family=str(design.get("render_options", {}).get("font_family")
-                                or __import__("src.core.visual_catalog", fromlist=["default_font"]).default_font()),
-            )
+            generated_path = Path(result["path"]).resolve()
+            if output_root not in generated_path.parents or not generated_path.is_file():
+                raise HTTPException(500, "AI 返回的图片素材路径无效")
+            if edit_scope == "background":
+                revised_background = generated_path
+                revised_path, _ = __import__("src.core.visual_renderer", fromlist=["render_single_page"]).render_single_page(
+                    title=str(design.get("title") or row["title"]),
+                    subtitle=str(design.get("subtitle") or ""),
+                    body=str(design.get("body") or row["body"]),
+                    page_index=page_index, total_pages=len(pages),
+                    output_dir=output_root, platform=Platform(str(design.get("platform") or row["platform"])),
+                    footer=str(design.get("footer") or ""),
+                    theme=str(design.get("render_options", {}).get("theme") or current["style_key"]),
+                    background_path=revised_background,
+                    brand_palette=design.get("render_options", {}).get("brand_palette"),
+                    font_family=str(design.get("render_options", {}).get("font_family")
+                                    or __import__("src.core.visual_catalog", fromlist=["default_font"]).default_font()),
+                )
+                revised_background_path = str(revised_background)
+            else:
+                revised_path = generated_path
+                revised_background_path = None
             new_pages = [dict(item) for item in pages]
             for item in new_pages:
                 if item.get("page_index") == page_index:
                     item["image_path"] = str(revised_path)
-                    item["background_path"] = str(revised_background)
+                    item["background_path"] = revised_background_path
+            for item in new_pages:
+                unchanged_index = int(item.get("page_index", -1))
+                expected_hash = unchanged_page_hashes.get(unchanged_index)
+                if expected_hash:
+                    unchanged_path = Path(str(item.get("image_path") or "")).resolve()
+                    actual_hash = __import__("hashlib").sha256(unchanged_path.read_bytes()).hexdigest() if unchanged_path.is_file() else None
+                    if actual_hash != expected_hash:
+                        raise HTTPException(409, "单页重做检测到非目标页文件发生变化，已拒绝保存新版本")
             new_design = {**design, "pages": new_pages}
             new_design["generation"] = list(new_design.get("generation") or []) + [{
                 "status": "revised", "model": result.get("model"),
                 "elapsed_ms": result.get("elapsed_ms"), "bytes": result.get("bytes"),
+                "request_id": revision_request_id, "reason": instruction,
+                "edit_scope": edit_scope, "final_prompt": result.get("final_prompt"),
             }]
             from src.core.visual_persistence import compute_content_hash
             content_hash = compute_content_hash(str(row["title"]), str(row["body"]))
@@ -6692,16 +6937,20 @@ def _register_routes(app: FastAPI) -> None:
                     conn, job_id=job_id, expected_status="running", new_status="succeeded",
                     output_data={
                         "new_version_id": new_version_id, "image_path": str(revised_path),
+                        "edit_scope": edit_scope,
                         "model": result.get("model"), "bytes": result.get("bytes"),
                         "elapsed_ms": result.get("elapsed_ms"),
                     },
                 )
                 conn.execute(
-                    "UPDATE contents SET image_paths=? WHERE id=?",
-                    (json.dumps([item["image_path"] for item in new_pages], ensure_ascii=False), content_id),
+                    """UPDATE visual_regeneration_requests
+                       SET output_version_id=?,final_prompt_json=?,status='succeeded',completed_at=?
+                       WHERE request_id=?""",
+                    (new_version_id, json.dumps({"final_prompt": result.get("final_prompt")}, ensure_ascii=False),
+                     _storage_now().isoformat(timespec="seconds"), revision_request_id),
                 )
             return {"content_id": content_id, "job_id": job_id, "version_id": new_version_id,
-                    "page_index": page_index, "image_url":
+                    "request_id": revision_request_id, "active_images_unchanged": True, "image_url":
                     f"/api/contents/{content_id}/visual-versions/{new_version_id}/pages/{page_index}",
                     "status": "review_required"}
         except HTTPException:
@@ -6710,6 +6959,11 @@ def _register_routes(app: FastAPI) -> None:
                     conn, job_id=job_id, expected_status="running", new_status="failed",
                     error_code="visual_revision_failed", error_message="单页重做失败",
                 )
+                conn.execute(
+                    "UPDATE visual_regeneration_requests SET status='failed',final_prompt_json=?,error_message='单页重做失败',completed_at=? WHERE request_id=?",
+                    (json.dumps(revision_prompt_audit, ensure_ascii=False),
+                     _storage_now().isoformat(timespec="seconds"), revision_request_id),
+                )
             raise
         except Exception as exc:
             logger.exception("单页视觉重做失败 content=%s page=%s", content_id, page_index)
@@ -6717,6 +6971,11 @@ def _register_routes(app: FastAPI) -> None:
                 transition_visual_job(
                     conn, job_id=job_id, expected_status="running", new_status="failed",
                     error_code="visual_revision_failed", error_message=type(exc).__name__,
+                )
+                conn.execute(
+                    "UPDATE visual_regeneration_requests SET status='failed',final_prompt_json=?,error_message=?,completed_at=? WHERE request_id=?",
+                    (json.dumps(revision_prompt_audit, ensure_ascii=False), type(exc).__name__,
+                     _storage_now().isoformat(timespec="seconds"), revision_request_id),
                 )
             raise HTTPException(500, "单页视觉重做失败，请查看服务端日志") from exc
 
@@ -7091,11 +7350,20 @@ def _register_routes(app: FastAPI) -> None:
 
     @app.post("/api/contents/{content_id}/cards")
     @manages_own_transaction
-    def regenerate_cards(content_id: str):
-        """按当前标题/正文重新出图（封面 + 正文分页），补上历史内容的「只有文没有图」。"""
+    def regenerate_cards(content_id: str, req: dict):
+        """整套重新生成；用户理由进入所有页面最终提示词，并保留原视觉版本。"""
         conn = _g()["conn"]
         cfg = _g()["cfg"]
         row = _content_row(conn, content_id)
+        revision_reason = str((req or {}).get("reason") or "").strip()[:1000]
+        if not revision_reason:
+            raise HTTPException(422, "整套图片重新生成必须填写修改理由")
+        if conn.execute(
+            "SELECT 1 FROM drafts WHERE content_id=? AND "
+            "(user_confirmed_at IS NOT NULL OR status IN ('user_published','data_fetching','published')) LIMIT 1",
+            (content_id,),
+        ).fetchone():
+            raise HTTPException(409, "已确认发布的内容不能重新生成图片")
         try:
             title, body = row["title"] or "", row["body"] or ""
             platform = Platform(row["platform"])
@@ -7152,11 +7420,62 @@ def _register_routes(app: FastAPI) -> None:
         settings, settings_reason = image_generation_settings(conn)
         if not settings:
             raise HTTPException(409, f"AI 图片生成未启用，拒绝模板降级：{settings_reason}")
+        latest_visual = conn.execute(
+            "SELECT * FROM visual_design_versions WHERE content_id=? ORDER BY version DESC LIMIT 1",
+            (content_id,),
+        ).fetchone()
+        previous_design = {}
+        if latest_visual:
+            try:
+                previous_design = json.loads(latest_visual["design_json"] or "{}")
+            except (TypeError, ValueError):
+                previous_design = {}
+        reference_image_paths = []
+        for old_page in (previous_design.get("pages") or []):
+            candidate = Path(str(old_page.get("image_path") or old_page.get("background_path") or "")).resolve()
+            if candidate.is_file() and Path(output_dir).resolve() in candidate.parents:
+                reference_image_paths.append(str(candidate))
+        style_baseline = {
+            "style_key": latest_visual["style_key"] if latest_visual else "ai_complete_card",
+            "renderer": latest_visual["renderer"] if latest_visual else "ai_image_api",
+            "brand_profile": profile,
+            "render_options": previous_design.get("render_options") or {},
+            "generation_mode": previous_design.get("generation_mode") or "ai_complete_card",
+            "platform": platform.value,
+            "page_count": len(previous_design.get("pages") or []),
+        }
+        preserve_items = [
+            "品牌识别元素、产品/服务主体、已确认的事实与文案内容",
+            "整套图片的画布比例、页面数量和内容顺序",
+            "主辅色、字体、字号、背景、留白、视觉层级与插画/摄影风格",
+        ]
+        forbidden_items = [
+            "不得擅自改写标题、正文、数字、品牌标识或产品主体",
+            "不得添加水印、虚构信息或未经确认的营销承诺",
+            "不得让不同页面出现风格、配色、字体或构图体系断裂",
+        ]
+        revision_request_id = uuid.uuid4().hex
         if not _media_generation_lock.acquire(blocking=False):
             raise HTTPException(409, "已有图片生成任务正在执行，请稍后重试")
         budget = None
         job_id = None
+        prompt_audit = {}
         try:
+            with conn:
+                conn.execute(
+                    """INSERT INTO visual_regeneration_requests
+                       (request_id,tenant_id,content_id,scope,page_index,original_reason,
+                        structured_instruction,preserve_json,forbidden_json,style_baseline_json,
+                        reference_images_json,source_version_id,status,created_at)
+                       VALUES(?,?,?,'full',NULL,?,?,?,?,?,?,?,'running',?)""",
+                    (revision_request_id, tenant_id, content_id, revision_reason,
+                     "整套修改：" + revision_reason, json.dumps(preserve_items, ensure_ascii=False),
+                     json.dumps(forbidden_items, ensure_ascii=False),
+                     json.dumps(style_baseline, ensure_ascii=False),
+                     json.dumps(reference_image_paths, ensure_ascii=False),
+                     latest_visual["id"] if latest_visual else None,
+                     _storage_now().isoformat(timespec="seconds")),
+                )
             conn.execute("BEGIN IMMEDIATE")
             month_local = _now().replace(
                 day=1, hour=0, minute=0, second=0, microsecond=0,
@@ -7199,14 +7518,35 @@ def _register_routes(app: FastAPI) -> None:
                     allow_fallback=settings.get("fallback_enabled"),
                     brand_profile=profile,
                     task_id=f"manual-card-{job_id}",
+                    revision_context={
+                        "reason": revision_reason,
+                        "instruction": revision_reason,
+                        "preserve_items": preserve_items,
+                        "forbidden_items": forbidden_items,
+                        "change_items": [revision_reason],
+                        "style_baseline": style_baseline,
+                    },
+                    reference_image_paths=reference_image_paths,
+                    prompt_audit=prompt_audit,
                 )
             usage = budget.snapshot()
             conn.execute(
-                "UPDATE media_generation_jobs SET api_calls=?, failed_api_calls=? WHERE id=?",
-                (usage["api_calls"], usage["failed_calls"], job_id),
+                "UPDATE media_generation_jobs SET api_calls=?, failed_api_calls=?, final_prompt=? WHERE id=?",
+                (usage["api_calls"], usage["failed_calls"],
+                 json.dumps(prompt_audit.get("final_prompts") or [], ensure_ascii=False), job_id),
+            )
+            conn.execute(
+                "UPDATE visual_regeneration_requests SET final_prompt_json=? WHERE request_id=?",
+                (json.dumps(prompt_audit, ensure_ascii=False), revision_request_id),
             )
             conn.commit()
         except HTTPException:
+            conn.execute(
+                "UPDATE visual_regeneration_requests SET status='failed',final_prompt_json=?,error_message='图片生成任务未完成',completed_at=? WHERE request_id=?",
+                (json.dumps(prompt_audit, ensure_ascii=False),
+                 _storage_now().isoformat(timespec="seconds"), revision_request_id),
+            )
+            conn.commit()
             if job_id is not None:
                 conn.execute(
                     "UPDATE media_generation_jobs SET status='failed', api_calls=?, failed_api_calls=?, "
@@ -7220,6 +7560,12 @@ def _register_routes(app: FastAPI) -> None:
                 conn.commit()
             raise
         except Exception as exc:
+            conn.execute(
+                "UPDATE visual_regeneration_requests SET status='failed',final_prompt_json=?,error_message=?,completed_at=? WHERE request_id=?",
+                (json.dumps(prompt_audit, ensure_ascii=False), type(exc).__name__,
+                 _storage_now().isoformat(timespec="seconds"), revision_request_id),
+            )
+            conn.commit()
             if job_id is not None:
                 usage = budget.snapshot() if budget is not None else {"api_calls": 0, "failed_calls": 0}
                 conn.execute(
@@ -7272,27 +7618,40 @@ def _register_routes(app: FastAPI) -> None:
                             for index, path in enumerate(paths)
                         ],
                         "ocr": ocr_report,
+                        "revision": {
+                            "request_id": revision_request_id,
+                            "reason": revision_reason,
+                            "style_baseline": style_baseline,
+                            "reference_images": reference_image_paths,
+                            "final_prompts": prompt_audit.get("final_prompts") or [],
+                        },
                     },
                 )
                 conn.execute(
-                    "UPDATE visual_design_versions SET status=? WHERE id=?",
-                    ("rendered" if ocr_report.get("status") == "passed" else "review_required", version_id),
+                    "UPDATE visual_design_versions SET status='review_required' WHERE id=?",
+                    (version_id,),
                 )
                 for index, path in enumerate(paths):
                     visual_page_job_id = create_visual_page_job(
                         conn, content_id=content_id, visual_version_id=version_id,
                         page_index=index, job_type="rerender",
-                        input_data={"source": "manual_full_regeneration"},
+                        input_data={"source": "manual_full_regeneration", "request_id": revision_request_id},
                     )
+                    if index == 0:
+                        conn.execute(
+                            "UPDATE visual_regeneration_requests SET visual_job_id=? WHERE request_id=?",
+                            (visual_page_job_id, revision_request_id),
+                        )
                     transition_visual_job(conn, job_id=visual_page_job_id, expected_status="queued", new_status="running")
                     transition_visual_job(
                         conn, job_id=visual_page_job_id, expected_status="running", new_status="succeeded",
                         output_data={"image_path": str(path)},
                     )
                 conn.execute(
-                    "UPDATE contents SET image_paths = ?, visual_status = ?, visual_reason = ? WHERE id = ?",
-                    (json.dumps([str(path) for path in paths], ensure_ascii=False),
-                     visual_status, visual_reason, content_id),
+                    """UPDATE visual_regeneration_requests
+                       SET output_version_id=?,status='succeeded',completed_at=?
+                       WHERE request_id=?""",
+                    (version_id, _storage_now().isoformat(timespec="seconds"), revision_request_id),
                 )
             # 历史版本图片保留，版本接口继续可读取；不做破坏性清理。
             usage = budget.snapshot()
@@ -7303,12 +7662,18 @@ def _register_routes(app: FastAPI) -> None:
             )
             conn.commit()
             return {"id": content_id, "image_count": len(paths),
-                    "image_paths": [p.name for p in paths]}
+                    "request_id": revision_request_id, "review_required": True,
+                    "active_images_unchanged": True, "image_paths": [p.name for p in paths]}
         except Exception as exc:
             logger.exception(
                 "图片生成最终文件持久化失败 content=%s job=%s",
                 content_id, job_id,
             )
+            conn.execute(
+                "UPDATE visual_regeneration_requests SET status='failed',error_message=?,completed_at=? WHERE request_id=?",
+                (type(exc).__name__, _storage_now().isoformat(timespec="seconds"), revision_request_id),
+            )
+            conn.commit()
             usage = budget.snapshot() if budget is not None else {"api_calls": 0, "failed_calls": 0}
             if job_id is not None:
                 conn.execute(
@@ -8426,34 +8791,39 @@ def _register_routes(app: FastAPI) -> None:
             (since_utc, since_legacy),
         ).fetchone()[0])
         confirmed_published = int(conn.execute(
-            "SELECT COUNT(*) FROM drafts WHERE " + timestamp_since_sql("user_confirmed_at")
-            + " AND user_confirmed_at IS NOT NULL",
-            (since_utc, since_legacy),
+            "SELECT COUNT(*) FROM content_publish_verifications WHERE tenant_id=? AND "
+            + timestamp_since_sql("published_at"),
+            (_tenant_id(), since_utc, since_legacy),
         ).fetchone()[0])
 
-        # 每篇草稿仅取窗口内最新一条成功/部分成功快照，避免重复采集被重复求和。
+        # 所有来源统一到 metric_facts_effective；先按内容/指标取窗口内最新事实，
+        # 避免重复平台回读、人工快照和复盘采集被重复求和。
         metric_row = conn.execute(
             """WITH ranked AS (
-                   SELECT draft_id, views, likes, collects, comments, shares, new_followers,
+                   SELECT tenant_id,content_id,metric_key,value,
                           ROW_NUMBER() OVER (
-                              PARTITION BY draft_id ORDER BY fetched_at DESC, id DESC
+                              PARTITION BY tenant_id,content_id,metric_key
+                              ORDER BY measured_at DESC,recorded_at DESC,fact_id DESC
                           ) AS rn
-                   FROM metrics
-                   WHERE draft_id IS NOT NULL
-                     AND """ + timestamp_since_sql("fetched_at") + """
-                     AND fetch_status IN ('success','partial')
+                   FROM metric_facts_effective
+                   WHERE tenant_id IN (?, 'legacy') AND draft_id IS NOT NULL
+                     AND """ + timestamp_since_sql("measured_at") + """
+                     AND collection_status IN ('succeeded','partial')
                )
-               SELECT COUNT(*) AS sample_count,
-                      SUM(views) AS views, SUM(likes) AS likes,
-                      SUM(collects) AS collects, SUM(comments) AS comments,
-                      SUM(shares) AS shares, SUM(new_followers) AS new_followers,
-                      SUM(CASE WHEN views IS NOT NULL THEN 1 ELSE 0 END) AS views_samples,
-                      SUM(CASE WHEN likes IS NOT NULL THEN 1 ELSE 0 END) AS likes_samples,
-                      SUM(CASE WHEN collects IS NOT NULL THEN 1 ELSE 0 END) AS collects_samples,
-                      SUM(CASE WHEN comments IS NOT NULL THEN 1 ELSE 0 END) AS comments_samples,
-                      SUM(CASE WHEN shares IS NOT NULL THEN 1 ELSE 0 END) AS shares_samples
-               FROM ranked WHERE rn = 1""",
-            (since_utc, since_legacy),
+               SELECT COUNT(DISTINCT content_id) AS sample_count,
+                      SUM(CASE WHEN metric_key='views' THEN value END) AS views,
+                      SUM(CASE WHEN metric_key='likes' THEN value END) AS likes,
+                      SUM(CASE WHEN metric_key='collects' THEN value END) AS collects,
+                      SUM(CASE WHEN metric_key='comments' THEN value END) AS comments,
+                      SUM(CASE WHEN metric_key='shares' THEN value END) AS shares,
+                      SUM(CASE WHEN metric_key='new_followers' THEN value END) AS new_followers,
+                      SUM(CASE WHEN metric_key='views' THEN 1 ELSE 0 END) AS views_samples,
+                      SUM(CASE WHEN metric_key='likes' THEN 1 ELSE 0 END) AS likes_samples,
+                      SUM(CASE WHEN metric_key='collects' THEN 1 ELSE 0 END) AS collects_samples,
+                      SUM(CASE WHEN metric_key='comments' THEN 1 ELSE 0 END) AS comments_samples,
+                      SUM(CASE WHEN metric_key='shares' THEN 1 ELSE 0 END) AS shares_samples
+               FROM ranked WHERE rn=1""",
+            (_tenant_id(), since_utc, since_legacy),
         ).fetchone()
 
         followers_growth: dict[str, dict | None] = {}
