@@ -263,20 +263,22 @@ async def generate_master_plan_draft(conn, cfg) -> dict[str, Any]:
             raise LookupError("生成期间诊断报告或业务资料发生变化，未创建母计划草稿；请重新分析")
 
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    metadata = {
-        "generation_source": "confirmed_business_diagnosis",
-        "diagnosis_report_id": int(diagnosis["id"]),
-        "diagnosis_version_no": int(diagnosis["version_no"]),
-        "source_fingerprint": str(diagnosis["source_fingerprint"]),
-        "model": model,
-        "generated_at": now,
-        "summary": summary.strip()[:4000],
-        "assumptions": generated["assumptions"],
-        "risks": generated["risks"],
-        "pending_confirmations": generated["pending_confirmations"],
-        "resource_basis": generated["resource_basis"],
-    }
-    change_note = "AI 母计划草稿：" + json.dumps(metadata, ensure_ascii=False, separators=(",", ":"), default=str)
+        metadata = {
+            "generation_source": "confirmed_business_diagnosis",
+            "diagnosis_report_id": int(diagnosis["id"]),
+            "diagnosis_version_no": int(diagnosis["version_no"]),
+            "source_fingerprint": str(diagnosis["source_fingerprint"]),
+            "model": model,
+            "generated_at": now,
+            "summary": summary.strip()[:4000],
+            "assumptions": generated["assumptions"],
+            "risks": generated["risks"],
+            "pending_confirmations": generated["pending_confirmations"],
+            "resource_basis": generated["resource_basis"],
+        }
+        change_note = "AI 母计划草稿：" + json.dumps(
+            metadata, ensure_ascii=False, separators=(",", ":"), default=str
+        )
         try:
             draft = PlanVersionStore(conn).create_master_draft(
                 plan, author="ai", source="system",
