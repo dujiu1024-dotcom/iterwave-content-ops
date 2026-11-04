@@ -31,11 +31,13 @@ export default function VisualBrandPane() {
     } catch (e) { showToast(`保存失败：${e instanceof Error ? e.message : String(e)}`, "error"); }
   });
   const revisePage = async (versionId: number, pageIndex: number) => {
-    const instruction = window.prompt("输入本页视觉调整要求", "改善本页构图、色彩协调和视觉层次");
-    if (instruction === null) return;
+    const reason = window.prompt("请填写本次图片修改理由（必填）", "");
+    if (reason === null || !reason.trim()) return;
+    const instruction = window.prompt("输入整理后的本页视觉调整指令（必填）", "改善本页构图、色彩协调和视觉层次，并保持整套图片风格一致");
+    if (instruction === null || !instruction.trim()) return;
     setRevising(`${versionId}:${pageIndex}`); setError("");
     try {
-      await api.reviseVisualPage(contentId.trim(), versionId, pageIndex, instruction);
+      await api.reviseVisualPage(contentId.trim(), versionId, pageIndex, reason.trim(), instruction.trim());
       showToast("单页已重新生成，新版本已建立，需人工审核", "success");
       await loadVersions();
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
