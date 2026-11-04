@@ -9,6 +9,7 @@ import {
 import DemoBadge from "../components/DemoBadge";
 import EmptyHint from "../components/EmptyHint";
 import TaskProgressPanel from "../components/TaskProgressPanel";
+import ContentProductionLinePanel from "../components/ContentProductionLinePanel";
 import { displayCodeLabel, displayStatusLabel, displayStepLabel, displayPlatformLabel, displaySourceLabel } from "../displayLabels";
 
 const ROUND_STATUSES = ["created", "producing", "awaiting_publish", "collecting_metrics", "analyzing", "completed", "partial_completed", "failed", "cancelled"];
@@ -43,6 +44,7 @@ const TABS = [
   { key: "plan", label: "总计划" },
   { key: "platforms", label: "平台分项计划" },
   { key: "pipeline", label: "生产线" },
+  { key: "content-line", label: "单内容任务" },
   { key: "review", label: "内容编辑与审核" },
   { key: "rounds", label: "轮次状态" },
 ] as const;
@@ -1518,6 +1520,9 @@ export default function Production() {
         </div>
         </>
       )}
+
+      {/* ============ 单内容生产线 ============ */}
+      {tab === "content-line" && <ContentProductionLinePanel />}
 
       {/* ============ ⑤ 轮次状态 ============ */}
       {tab === "rounds" && (
