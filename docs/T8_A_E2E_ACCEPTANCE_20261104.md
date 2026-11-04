@@ -18,6 +18,7 @@
 ```bash
 python -m pytest -vv \
   tests/test_business_diagnosis.py \
+  tests/test_t8_diagnosis_api_acceptance.py \
   tests/test_business_profile_repository.py \
   tests/test_original_asset_inventory_migration.py \
   tests/test_integration_reliability_subplan.py \
