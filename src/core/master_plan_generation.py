@@ -80,7 +80,7 @@ def validate_master_plan(plan: dict[str, Any], cfg) -> dict[str, Any]:
             raise MasterPlanGenerationError(f"{platform} 的 topic_count 必须在 1-{count} 之间")
         slots = conf.get("publish_slots", [])
         if not isinstance(slots, list) or any(
-            not isinstance(slot, str) or not re.fullmatch(r"(?:[01]\\d|2[0-3]):[0-5]\\d", slot)
+            not isinstance(slot, str) or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", slot)
             for slot in slots
         ):
             raise MasterPlanGenerationError(f"{platform} 的 publish_slots 必须为 HH:MM 数组")
