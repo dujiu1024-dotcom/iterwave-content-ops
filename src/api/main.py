@@ -5836,7 +5836,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(502, str(exc)) from exc
 
     @app.post("/api/plans")
-    def update_plan(req: UpdatePlanRequest):
+    def update_plan(req: UpdatePlanRequest, request: Request):
         """创建母计划草稿；只有显式审核通过后才切换生效版本。"""
         from src.core.plan_version_store import PlanVersionStore, PlanVersionError
         alloc_total = sum(req.dimension_allocation.values())
@@ -5875,7 +5875,7 @@ def _register_routes(app: FastAPI) -> None:
         base_version_id = int(active["id"]) if active else None
         try:
             draft = PlanVersionStore(_g()["conn"]).create_master_draft(
-                plan, author="web-ui", source="user",
+                plan, author=auth.audit_actor(request), source="user",
                 based_on_version_id=base_version_id,
                 change_note=req.change_note.strip() or "母计划人工编辑草稿",
             )
@@ -5887,14 +5887,14 @@ def _register_routes(app: FastAPI) -> None:
                 "requires_review": True, "effective": False}
 
     @app.post("/api/plans/{version_id}/review")
-    async def review_master_plan(version_id: int, req: dict):
+    async def review_master_plan(version_id: int, req: dict, request: Request):
         from src.core.plan_version_store import PlanVersionStore, PlanVersionError
         action = (req or {}).get("action", "approve")
         if action == "reject":
             reason = str((req or {}).get("reason") or "").strip()
             try:
                 rejected = PlanVersionStore(_g()["conn"]).reject_master_version(
-                    version_id, reviewer="user", reason=reason,
+                    version_id, reviewer=auth.audit_actor(request), reason=reason,
                 )
             except PlanVersionError as exc:
                 raise HTTPException(409, str(exc)) from exc
@@ -5950,7 +5950,7 @@ def _register_routes(app: FastAPI) -> None:
 
         try:
             result = PlanVersionStore(conn).activate_master_version(
-                version_id, reviewer="user", pre_activate=validate_ai_provenance,
+                version_id, reviewer=auth.audit_actor(request), pre_activate=validate_ai_provenance,
             )
         except PlanVersionError as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -5978,12 +5978,12 @@ def _register_routes(app: FastAPI) -> None:
                 "subplan_generation": child_generation}
 
     @app.delete("/api/plans/{version_id}")
-    def delete_master_plan(version_id: int):
+    def delete_master_plan(version_id: int, request: Request):
         """软删除最新生效母计划，并在同一事务中恢复上一份未删除版本。"""
         from src.core.plan_version_store import PlanVersionStore, PlanVersionError
         try:
             return PlanVersionStore(_g()["conn"]).delete_master_version(
-                version_id, actor="user",
+                version_id, actor=auth.audit_actor(request),
             )
         except PlanVersionError as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -6411,8 +6411,9 @@ def _register_routes(app: FastAPI) -> None:
         }
 
     @app.post("/api/contents/{content_id}/approve")
-    def approve_content_review(content_id: str, req: dict):
+    def approve_content_review(content_id: str, req: dict, request: Request):
         """记录明确的人工审核通过；不执行发布，也不覆盖 G2 质量门禁。"""
+        actor = auth.audit_actor(request)
         conn = _g()["conn"]
         row = _content_row(conn, content_id)
         _ensure_content_round_idle(row, "审核通过")
@@ -6450,7 +6451,7 @@ def _register_routes(app: FastAPI) -> None:
             (
                 row["round_id"], "review_approve",
                 json.dumps({"content_id": content_id, "title": row["title"]}, ensure_ascii=False)[:500],
-                "approved", reason, "web-ui", _storage_now().isoformat(timespec="seconds"),
+                "approved", reason, actor, _storage_now().isoformat(timespec="seconds"),
                 row["round_id"], content_id, content_id,
             ),
         )
@@ -6461,8 +6462,8 @@ def _register_routes(app: FastAPI) -> None:
         if inserted.rowcount == 1:
             conn.execute(
                 "INSERT INTO content_review_events(content_id,draft_id,round_id,event_type,actor,reason,after_json,created_at) "
-                "SELECT ?,id,?,'approved','web-ui',?,?,? FROM drafts WHERE content_id=? LIMIT 1",
-                (content_id,row["round_id"],reason,json.dumps({"review_status":"approved"}),
+                "SELECT ?,id,?,'approved',?,?,?,? FROM drafts WHERE content_id=? LIMIT 1",
+                (content_id,row["round_id"],actor,reason,json.dumps({"review_status":"approved"}),
                  _storage_now().isoformat(timespec="seconds"),content_id),
             )
         conn.commit()
