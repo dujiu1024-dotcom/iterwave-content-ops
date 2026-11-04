@@ -2697,13 +2697,31 @@ export const api = {
   recheckContent: (id: string) =>
     fetchJson<RecheckResult>(`/api/contents/${id}/recheck`, { method: "POST" }),
   /** 按当前标题/正文重新出图（封面 + 正文分页） */
-  regenerateContentCards: (id: string) =>
+  regenerateContentCards: (id: string, reason: string, instruction: string) =>
     fetchJson<{ id: string; image_count: number; image_paths: string[] }>(
-      `/api/contents/${id}/cards`, { method: "POST" },
+      `/api/contents/${id}/cards`, { method: "POST", body: JSON.stringify({ reason, instruction }) },
     ),
   visualGenerationTask: (id: string) =>
     fetchJson<VisualGenerationTask>(
       `/api/contents/${encodeURIComponent(id)}/visual-generation-task`,
+    ),
+  publishVerificationCandidates: () =>
+    fetchJson<{ items: Array<{ draft_id: string; platform: string; platform_note_url?: string | null; user_confirmed_at: string; title: string; content_id: string }> }>(
+      "/api/publish-verification/candidates",
+    ),
+  verifyDraftPublication: (draftId: string, payload: { platform_content_id: string; platform_url: string; published_at: string; content_snapshot: Record<string, unknown> }) =>
+    fetchJson<{ verification: Record<string, unknown> }>(
+      `/api/drafts/${encodeURIComponent(draftId)}/publish-verification`,
+      { method: "POST", body: JSON.stringify(payload) },
+    ),
+  closedLoopReviewTasks: (status?: string) =>
+    fetchJson<{ items: Array<{ id: string; draft_id: string; status: string; collection_source: string; collect_after: string; platform_content_id: string; collection_result_json: string; attempts: number; last_error?: string | null }> }>(
+      `/api/review-tasks${status ? `?status=${encodeURIComponent(status)}` : ""}`,
+    ),
+  collectClosedLoopReviewTask: (taskId: string, payload: { result: Record<string, unknown>; status: "partial" | "completed" | "failed"; source: "manual" | "platform_api" | "platform_readback"; error?: string }) =>
+    fetchJson<{ review_task: Record<string, unknown> }>(
+      `/api/review-tasks/${encodeURIComponent(taskId)}/collect`,
+      { method: "POST", body: JSON.stringify(payload) },
     ),
   reviewQueue: (filters: { status?: string; platform?: Platform | "all"; taskType?: string; from?: string; to?: string; page?: number; pageSize?: number } = {}) => {
     const p = new URLSearchParams({ page: String(filters.page ?? 1), page_size: String(filters.pageSize ?? 30) });
@@ -2826,9 +2844,9 @@ export const api = {
     fetchJson<{ content_id: string; versions: VisualVersionHistory[]; jobs: Array<Record<string, unknown>> }>(
       `/api/contents/${encodeURIComponent(contentId)}/visual-versions`,
     ),
-  reviseVisualPage: (contentId: string, versionId: number, pageIndex: number, instruction: string) =>
+  reviseVisualPage: (contentId: string, versionId: number, pageIndex: number, reason: string, instruction: string) =>
     fetchJson<{ content_id: string; job_id: string; version_id: number; page_index: number; image_url: string; status: string }>(
       `/api/contents/${encodeURIComponent(contentId)}/visual-versions/${versionId}/pages/${pageIndex}/revise`,
-      { method: "POST", body: JSON.stringify({ instruction }) },
+      { method: "POST", body: JSON.stringify({ reason, instruction }) },
     ),
 };
