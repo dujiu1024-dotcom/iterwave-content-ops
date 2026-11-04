@@ -94,7 +94,7 @@ def transition_visual_job(
 
 def get_visual_version_history(conn, content_id: str) -> list[dict[str, Any]]:
     rows = conn.execute(
-        "SELECT id, version, content_hash, renderer, style_key, design_json, status, created_at "
+        "SELECT id, version, content_hash, renderer, style_key, design_json, status, created_at, approved_at "
         "FROM visual_design_versions WHERE content_id=? ORDER BY version DESC",
         (content_id,),
     ).fetchall()
