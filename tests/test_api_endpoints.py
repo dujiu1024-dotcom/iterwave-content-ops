@@ -3966,7 +3966,7 @@ def test_duplicate_publish_confirmation_commits_user_supplied_time_without_note_
     assert conn.in_transaction is False
 
 
-def test_ai_master_plan_approval_rejects_stale_diagnosis_provenance(client):
+def test_ai_master_plan_approval_rejects_stale_diagnosis_provenance(client, monkeypatch):
     from src.core.plan_version_store import PlanVersionStore
 
     tc, conn, _ = client
@@ -4012,6 +4012,16 @@ def test_ai_master_plan_approval_rejects_stale_diagnosis_provenance(client):
         change_note="AI 母计划草稿：" + json.dumps(metadata, ensure_ascii=False),
     )
 
+    def context_read_must_hold_write_lock(active_conn, _cfg):
+        # Provenance must be checked after BEGIN IMMEDIATE, not before the
+        # activation transaction where another writer could invalidate it.
+        assert active_conn.in_transaction is True
+        return {"fingerprint": "current-fingerprint"}
+
+    monkeypatch.setattr(
+        "src.core.business_diagnosis.collect_business_context",
+        context_read_must_hold_write_lock,
+    )
     response = tc.post(f"/api/plans/{draft['id']}/review", json={"action": "approve"})
 
     assert response.status_code == 409, response.text
@@ -4024,3 +4034,4 @@ def test_ai_master_plan_approval_rejects_stale_diagnosis_provenance(client):
     assert conn.execute(
         "SELECT status FROM business_diagnosis_reports WHERE id=?", (diagnosis_id,)
     ).fetchone()[0] == "stale"
+    assert conn.in_transaction is False
