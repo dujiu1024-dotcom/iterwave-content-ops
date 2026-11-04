@@ -39,6 +39,27 @@ def _parse_json(value: str | None, fallback):
         return fallback
 
 
+def _normalize_datetime(
+    value: str, timezone_name: str = "UTC", label: str = "时间",
+    *, require_timezone: bool = False,
+) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        raise OperatingFeedbackError(f"{label}不能为空")
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise OperatingFeedbackError(f"{label}格式无效") from exc
+    if parsed.tzinfo is None:
+        if require_timezone:
+            raise OperatingFeedbackError(f"{label}必须包含时区")
+        try:
+            parsed = parsed.replace(tzinfo=ZoneInfo(str(timezone_name or "UTC")))
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise OperatingFeedbackError(f"{label}时区无效") from exc
+    return parsed.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
 def _valid_https_url(value: str) -> bool:
     from urllib.parse import urlsplit
     try:
