@@ -111,3 +111,17 @@ pytest -q tests/test_north_star_migration.py tests/test_north_star_repository.py
 - 本 T9-D 报告分支：`f2496eb759f93bf694f7d84587289d7b29731336`，run `41841879910` success。
 
 以上是各 PR 各自 head 的 CI 结果，不代表累积迁移分支已完成联合验证。合并顺序仍为 #1（规范审批）→ #3（148）→ #2（149）→ #5（150）→ #4（151/153）。PR #4 的 Outbox 消费端、PR #5 的真实 Worker 执行和子目标门禁实际接入仍是业务验收阻断。
+
+
+## 9. 跨任务迁移编号冲突：PR #3 与 PR #33（2026-11-04）
+
+本轮全仓收敛发现 PR #3 与 T8-E 修复 PR #33 曾同时声明 Migration 148：
+
+- PR #3：`148_account_group_north_star.sql`，账号组北极星与资源基准。
+- PR #33：`148_production_task_asset_privacy_snapshot.sql`，生产任务素材隐私快照。
+
+`Database._discover_migrations()` 按文件名前缀提取数字版本，并在同一版本号对应多个 SQL 文件时直接抛出 `RuntimeError`，拒绝启动。因此两份 Migration 148 不能同时存在；各自 PR CI 通过无法检测跨分支合并后的该冲突。
+
+已在 PR #33 将素材隐私快照迁移改为 `154_production_task_asset_privacy_snapshot.sql`，删除原 148 文件，并同步更新 T8-E 验收文档。Migration 154 位于本报告所列早期迁移 148/149/150/151/153 之后，且不修改任何已应用历史迁移。PR #33 新 head `b99645d7cebd7c22882e625078be6560734605f7` 的 T8-E 专项已 success；通用 Backend tests 仍在执行，最终以该 head 的全量 CI 结果为准。
+
+该案例说明：跨任务合并审查必须检查全仓迁移版本唯一性，而不能只检查每个 PR 自身迁移文件和独立 CI。
