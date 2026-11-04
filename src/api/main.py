@@ -5884,6 +5884,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(422, "action 只能是 approve 或 reject")
 
         conn, cfg = _g()["conn"], _g()["cfg"]
+        stale_diagnosis_id = []
 
         def validate_ai_provenance():
             draft_row = conn.execute(
@@ -5921,10 +5922,7 @@ def _register_routes(app: FastAPI) -> None:
                     or draft_row["based_on_version_id"] != active_id):
                 if (diagnosis is not None and diagnosis["status"] == "confirmed"
                         and diagnosis["source_fingerprint"] != current_context["fingerprint"]):
-                    conn.execute(
-                        "UPDATE business_diagnosis_reports SET status='stale' WHERE id=? AND status='confirmed'",
-                        (diagnosis["id"],),
-                    )
+                    stale_diagnosis_id.append(int(diagnosis["id"]))
                 raise HTTPException(
                     409,
                     "AI 母计划草稿的诊断依据或母计划基准版本已变化，拒绝审核；请重新生成草稿",
@@ -5937,6 +5935,12 @@ def _register_routes(app: FastAPI) -> None:
         except PlanVersionError as exc:
             raise HTTPException(409, str(exc)) from exc
         except HTTPException:
+            if stale_diagnosis_id:
+                conn.execute(
+                    "UPDATE business_diagnosis_reports SET status='stale' WHERE id=? AND status='confirmed'",
+                    (stale_diagnosis_id[0],),
+                )
+                conn.commit()
             raise
         # The mother plan is effective only after the atomic store transition.
         # AI decomposition creates draft-only child plans and cannot undo approval.
