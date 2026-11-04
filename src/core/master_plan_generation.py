@@ -189,6 +189,17 @@ async def generate_master_plan_draft(conn, cfg) -> dict[str, Any]:
         raise LookupError("经营诊断报告结构无效，无法生成母计划")
 
     previous_plan, _, _, _ = PlanVersionManager(cfg, conn).load_plan()
+    active_before = conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective' AND deleted_at IS NULL"
+    ).fetchone()
+    expected_active_version_id = int(active_before["id"]) if active_before else None
+    existing_draft = conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='draft' AND deleted_at IS NULL ORDER BY version_no DESC LIMIT 1"
+    ).fetchone()
+    if existing_draft is not None:
+        raise LookupError(
+            f"已有待审核母计划草稿（版本记录 {existing_draft['id']}），拒绝覆盖；请先审核、退回或处理该草稿"
+        )
     prompt_data = {
         "confirmed_diagnosis": report,
         "diagnosis_source_snapshot": source_snapshot,
@@ -231,21 +242,27 @@ async def generate_master_plan_draft(conn, cfg) -> dict[str, Any]:
         if not isinstance(generated[field], (list, dict)):
             raise MasterPlanGenerationError(f"{field} 必须是数组或对象")
 
-    # Prevent a long-running model response from being saved against changed evidence.
-    after = collect_business_context(conn, cfg)
-    latest_again = conn.execute(
-        "SELECT id,status,source_fingerprint FROM business_diagnosis_reports ORDER BY version_no DESC LIMIT 1"
-    ).fetchone()
-    if (after["fingerprint"] != current["fingerprint"] or latest_again is None
-            or int(latest_again["id"]) != int(diagnosis["id"])
-            or latest_again["status"] != "confirmed"
-            or latest_again["source_fingerprint"] != current["fingerprint"]):
-        if latest_again is not None and latest_again["status"] == "confirmed":
-            conn.execute("UPDATE business_diagnosis_reports SET status='stale' WHERE id=?", (latest_again["id"],))
+    # Serialize the final evidence check and draft insert with BEGIN IMMEDIATE. This
+    # closes the gap between re-checking diagnosis data and persisting the draft.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        after = collect_business_context(conn, cfg)
+        latest_again = conn.execute(
+            "SELECT id,status,source_fingerprint FROM business_diagnosis_reports ORDER BY version_no DESC LIMIT 1"
+        ).fetchone()
+        if (after["fingerprint"] != current["fingerprint"] or latest_again is None
+                or int(latest_again["id"]) != int(diagnosis["id"])
+                or latest_again["status"] != "confirmed"
+                or latest_again["source_fingerprint"] != current["fingerprint"]):
+            if latest_again is not None and latest_again["status"] == "confirmed":
+                conn.execute(
+                    "UPDATE business_diagnosis_reports SET status='stale' WHERE id=? AND status='confirmed'",
+                    (latest_again["id"],),
+                )
             conn.commit()
-        raise LookupError("生成期间诊断报告或业务资料发生变化，未创建母计划草稿；请重新分析")
+            raise LookupError("生成期间诊断报告或业务资料发生变化，未创建母计划草稿；请重新分析")
 
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     metadata = {
         "generation_source": "confirmed_business_diagnosis",
         "diagnosis_report_id": int(diagnosis["id"]),
@@ -260,15 +277,22 @@ async def generate_master_plan_draft(conn, cfg) -> dict[str, Any]:
         "resource_basis": generated["resource_basis"],
     }
     change_note = "AI 母计划草稿：" + json.dumps(metadata, ensure_ascii=False, separators=(",", ":"), default=str)
-    active = conn.execute("SELECT id FROM master_plan_versions WHERE status='effective'").fetchone()
-    base_version_id = int(active["id"]) if active else None
-    try:
-        draft = PlanVersionStore(conn).create_master_draft(
-            plan, author="ai", source="system", based_on_version_id=base_version_id,
-            change_note=change_note,
-        )
-    except PlanVersionError as exc:
-        raise MasterPlanGenerationError(str(exc)) from exc
+        try:
+            draft = PlanVersionStore(conn).create_master_draft(
+                plan, author="ai", source="system",
+                based_on_version_id=expected_active_version_id,
+                change_note=change_note,
+                enforce_generation_guard=True,
+                expected_active_version_id=expected_active_version_id,
+            )
+            conn.commit()
+        except PlanVersionError as exc:
+            conn.rollback()
+            raise MasterPlanGenerationError(str(exc)) from exc
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
     return {
         "draft": draft,
         "generation": metadata,
