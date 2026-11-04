@@ -57,14 +57,15 @@ class ContentProductionLineStore:
             """INSERT INTO production_context_snapshots(
                 id,content_production_line_id,production_task_id,round_id,
                 master_plan_version_id,sub_plan_id,sub_plan_version_id,strategy_step_id,
-                latest_review_ref,context_status,waiver_id,fingerprint,context_json,captured_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                sub_goal_id,latest_review_ref,context_status,waiver_id,fingerprint,context_json,captured_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 snapshot_id, line["id"], task_id, int(line["round_id"]),
                 context["plan_versions"].get("master_plan_version_id"),
                 context["plan_versions"].get("sub_plan_id"),
                 context["plan_versions"].get("sub_plan_version_id"),
                 context["plan_versions"].get("strategy_step_id"),
+                context["plan_versions"].get("sub_goal_id"),
                 context.get("latest_review_ref"),
                 snapshot.get("context_status", "complete"), waiver_id,
                 snapshot["fingerprint"],
