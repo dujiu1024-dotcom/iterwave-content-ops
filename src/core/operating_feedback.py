@@ -619,7 +619,7 @@ def create_collection_run(
     return item
 
 
-def retry_review_task(conn, task_id: str, *, scheduled_at: str | None = None) -> dict:
+def retry_review_task(conn, task_id: str, *, scheduled_at: str | None = None, actor: str = "system:review-worker") -> dict:
     row = conn.execute("SELECT * FROM review_tasks WHERE task_id=?", (task_id,)).fetchone()
     if row is None:
         raise OperatingFeedbackError("复盘任务不存在")
@@ -630,9 +630,9 @@ def retry_review_task(conn, task_id: str, *, scheduled_at: str | None = None) ->
     conn.execute(
         """UPDATE review_tasks SET status='pending',scheduled_at=?,attempt_count=0,
            collection_cycle_id=?,last_error=NULL,last_success_at=NULL,
-           last_window_start=NULL,last_window_end=NULL,conclusion_json='{}',updated_at=?
-           WHERE task_id=?""",
-        (due, uuid.uuid4().hex, now, task_id),
+           last_window_start=NULL,last_window_end=NULL,conclusion_json='{}',
+           last_retried_by=?,updated_at=? WHERE task_id=?""",
+        (due, uuid.uuid4().hex, str(actor or "system:review-worker")[:160], now, task_id),
     )
     return dict(conn.execute("SELECT * FROM review_tasks WHERE task_id=?", (task_id,)).fetchone())
 
