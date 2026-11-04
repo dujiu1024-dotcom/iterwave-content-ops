@@ -158,6 +158,114 @@ def test_master_plan_api_blocks_unconfirmed_and_stale_diagnosis(diagnosis_client
     ).fetchone()["status"] == "stale"
 
 
+def _create_provenance_valid_task(conn):
+    """Build a real, fully attributed plan -> line -> round -> task chain."""
+    import json
+    from datetime import datetime, timezone
+
+    from src.core.production_line_store import ProductionLineStore
+    from src.core.production_task_store import ProductionTaskStore
+
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    plan_version_no = int(conn.execute(
+        "SELECT COALESCE(MAX(version_no),0)+1 FROM master_plan_versions"
+    ).fetchone()[0])
+    plan_cursor = conn.execute(
+        """INSERT INTO master_plan_versions(
+            version_no,plan_signature,plan_snapshot,status,source,created_at,created_by
+        ) VALUES(?,?,?,'draft','system',?,'t8-a-test')""",
+        (plan_version_no, f"t8-a-{plan_version_no}", json.dumps({"fixture":"t8-a"}),
+         now),
+    )
+    master_version_id = int(plan_cursor.lastrowid)
+    conn.execute(
+        "UPDATE master_plan_versions SET status='effective',effective_at=? WHERE id=?",
+        (now, master_version_id),
+    )
+
+    sub_plan_id = f"t8-a-subplan-{master_version_id}"
+    sub_plan_cursor = conn.execute(
+        """INSERT INTO sub_plans(
+            id,master_plan_version_id,platform,title,status,created_at,updated_at,created_by
+        ) VALUES(?,?, 'xhs','T8-A 授权验收子计划','draft',?,?, 't8-a-test')""",
+        (sub_plan_id, master_version_id, now, now),
+    )
+    sub_version_cursor = conn.execute(
+        """INSERT INTO sub_plan_versions(
+            sub_plan_id,version_no,master_plan_version_id,snapshot_json,status,created_at,created_by
+        ) VALUES(?,1,?,?,'draft',?,'t8-a-test')""",
+        (sub_plan_id, master_version_id, json.dumps({"fixture":"t8-a"}), now),
+    )
+    sub_version_id = int(sub_version_cursor.lastrowid)
+    conn.execute(
+        "UPDATE sub_plan_versions SET status='effective',effective_at=? WHERE id=?",
+        (now, sub_version_id),
+    )
+    conn.execute(
+        "UPDATE sub_plans SET status='active',current_version_id=?,updated_at=? WHERE id=?",
+        (sub_version_id, now, sub_plan_id),
+    )
+    stage_cursor = conn.execute(
+        """INSERT INTO sub_plan_stages(
+            sub_plan_version_id,stage_order,title,target_count,status,created_at,updated_at,
+            stage_key,strategy_goal,execution_strategy
+        ) VALUES(?,1,'授权验收阶段',1,'pending',?,?, 't8-a-stage','验证素材授权门禁','测试')""",
+        (sub_version_id, now, now),
+    )
+    stage_id = int(stage_cursor.lastrowid)
+    conn.commit()
+
+    line_store = ProductionLineStore(conn)
+    line_draft = line_store.create_draft(
+        sub_plan_id, sub_version_id,
+        {
+            "title": "T8-A 验收生产线",
+            "description": "仅用于端到端授权门禁验收",
+            "stages": [{
+                "stage_key": "t8-a-stage",
+                "batch_size": 1,
+                "production_goal": "验证素材授权门禁",
+            }],
+        },
+        generation_source="system",
+        author="t8-a-test",
+    )
+    line_store.activate(int(line_draft["id"]), reviewer="t8-a-test")
+    line_version_id = int(line_draft["id"])
+
+    round_no = int(conn.execute(
+        "SELECT COALESCE(MAX(round_number),0)+1 FROM spiral_rounds"
+    ).fetchone()[0])
+    round_cursor = conn.execute(
+        """INSERT INTO spiral_rounds(
+            round_number,status,topic_ids,content_variants,master_plan_version_id,
+            sub_plan_id,sub_plan_version_id,sub_plan_stage_id,sub_plan_snapshot,
+            sub_plan_stage_snapshot,plan_attribution_status,production_line_version_id
+        ) VALUES(?,'created','[]','[]',?,?,?,?,?,?, 'resolved',?)""",
+        (
+            round_no, master_version_id, sub_plan_id, sub_version_id, stage_id,
+            json.dumps({"sub_plan_id":sub_plan_id,"version_id":sub_version_id}),
+            json.dumps({"stage_id":stage_id,"stage_key":"t8-a-stage"}),
+            line_version_id,
+        ),
+    )
+    round_id = int(round_cursor.lastrowid)
+    conn.commit()
+
+    task = ProductionTaskStore(conn).create_task(
+        round_id=round_id,
+        master_plan_version_id=master_version_id,
+        sub_plan_id=sub_plan_id,
+        sub_plan_version_id=sub_version_id,
+        strategy_step_id="t8-a-stage",
+        platform="xhs",
+        task_ordinal=1,
+        idempotency_key="t8-a-asset-permission-gate",
+        input_snapshot={"acceptance":"T8-A original asset permission gate"},
+    )
+    return str(task["id"])
+
+
 def test_original_asset_permission_and_privacy_gate_production_usage(diagnosis_client):
     client, conn = diagnosis_client
     cur = conn.execute(
@@ -174,19 +282,15 @@ def test_original_asset_permission_and_privacy_gate_production_usage(diagnosis_c
         (asset_id,),
     )
     conn.commit()
-    # The production-task table enforces provenance at the database boundary.
-    # This acceptance case only needs an existing task row; bind it to a fixture
-    # production-line version so the asset API can exercise its own permission gate.
-    conn.execute(
-        "INSERT INTO production_tasks(id,production_line_version_id) VALUES('t8-a-asset-task',1)"
-    )
-    conn.commit()
+    # Create the task through the production store with the complete immutable
+    # plan/subplan/stage/line/round provenance required by database triggers.
+    task_id = _create_provenance_valid_task(conn)
 
     # Pending/unknown permission and privacy must never enter a task snapshot.
-    denied = client.post("/api/production-tasks/t8-a-asset-task/assets", json=[asset_id])
+    denied = client.post(f"/api/production-tasks/{task_id}/assets", json=[asset_id])
     assert denied.status_code == 409
     assert conn.execute(
-        "SELECT COUNT(*) FROM production_task_asset_usages WHERE production_task_id='t8-a-asset-task'"
+        "SELECT COUNT(*) FROM production_task_asset_usages WHERE production_task_id=?"
     ).fetchone()[0] == 0
 
     reviewed = client.post(f"/api/original-assets/{asset_id}/review", json={
@@ -201,9 +305,9 @@ def test_original_asset_permission_and_privacy_gate_production_usage(diagnosis_c
         },
     })
     assert reviewed.status_code == 200
-    allowed = client.post("/api/production-tasks/t8-a-asset-task/assets", json=[asset_id])
+    allowed = client.post(f"/api/production-tasks/{task_id}/assets", json=[asset_id])
     assert allowed.status_code == 201
     assert allowed.json()["assets"][0]["permission_snapshot"] == "allowed"
-    snapshot = client.get("/api/production-tasks/t8-a-asset-task/assets")
+    snapshot = client.get(f"/api/production-tasks/{task_id}/assets")
     assert snapshot.status_code == 200
     assert snapshot.json()["items"][0]["asset_version_no"] == reviewed.json()["version_no"]
