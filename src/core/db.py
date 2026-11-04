@@ -562,10 +562,10 @@ class Database:
                 "business_diagnosis_reports", "production_tasks",
                 "production_task_attempts", "strategy_step_condition_reviews",
                 "plan_change_audit",
-                "content_production_lines", "production_context_waivers",
-                "production_context_snapshots", "content_production_line_events",
             }
-            result["missing_tables"] = sorted(expected_tables - existing)
+            result["missing_tables"]                "content_production_lines", "production_context_waivers",
+                "production_context_snapshots", "content_production_line_events",
+ = sorted(expected_tables - existing)
             result["existing_tables"] = sorted(existing & expected_tables)
 
             known_migration_versions = {
@@ -665,13 +665,13 @@ class Database:
                 "idx_master_plan_based_on_version", "idx_sub_plan_versions_based_on_version",
                 "idx_round_open_master_version", "idx_round_open_sub_plan_version",
                 "idx_round_open_sub_plan_stage",
-                "idx_content_production_line_content", "idx_content_production_line_single_active",
+            }
+            existing_indexes                "idx_content_production_line_content", "idx_content_production_line_single_active",
                 "idx_content_production_line_status", "idx_content_production_line_round",
                 "idx_production_context_waivers_pending", "idx_production_context_waivers_single_pending",
-                "idx_production_context_snapshots_plan",
-                "idx_production_context_snapshots_round", "idx_content_production_line_events_line",
-            }
-            existing_indexes = {
+                "idx_production_context_snapshots_plan", "idx_production_context_snapshots_round",
+                "idx_content_production_line_events_line",
+ = {
                 row[0] for row in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type = ? AND name NOT LIKE ?",
                     ("index", "sqlite_%"),
@@ -704,7 +704,8 @@ class Database:
                 "trg_sub_plan_stages_prevent_task_orphan",
                 "trg_sub_plan_stages_prevent_task_rekey",
                 "trg_production_line_versions_prevent_task_orphan",
-                "trg_content_production_line_after_task_insert",
+            }
+            existing_triggers                "trg_content_production_line_after_task_insert",
                 "trg_production_tasks_single_item_ordinal",
                 "trg_production_tasks_require_context_before_claim",
                 "trg_content_production_line_transition_guard",
@@ -719,8 +720,7 @@ class Database:
                 "trg_content_production_line_events_no_delete",
                 "trg_production_context_waivers_consume_once",
                 "trg_production_context_waivers_no_delete",
-            }
-            existing_triggers = {
+ = {
                 row[0] for row in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='trigger'"
                 ).fetchall()
@@ -794,7 +794,8 @@ class Database:
                 ("sub_plan_stage_outcomes", "stage_id", "sub_plan_stages", "id", "RESTRICT"),
                 ("production_task_attempts", "task_id", "production_tasks", "id", "CASCADE"),
                 ("strategy_step_condition_reviews", "stage_id", "sub_plan_stages", "id", "RESTRICT"),
-                ("content_production_lines", "production_task_id", "production_tasks", "id", "RESTRICT"),
+            }
+            actual_foreign_keys                ("content_production_lines", "production_task_id", "production_tasks", "id", "RESTRICT"),
                 ("content_production_lines", "round_id", "spiral_rounds", "id", "RESTRICT"),
                 ("content_production_lines", "content_id", "contents", "id", "RESTRICT"),
                 ("content_production_lines", "source_production_line_version_id", "production_line_versions", "id", "RESTRICT"),
@@ -806,10 +807,10 @@ class Database:
                 ("production_context_snapshots", "master_plan_version_id", "master_plan_versions", "id", "RESTRICT"),
                 ("production_context_snapshots", "sub_plan_id", "sub_plans", "id", "RESTRICT"),
                 ("production_context_snapshots", "sub_plan_version_id", "sub_plan_versions", "id", "RESTRICT"),
+                ("production_context_snapshots", "sub_goal_id", "sub_goals", "id", "RESTRICT"),
                 ("production_context_snapshots", "waiver_id", "production_context_waivers", "id", "RESTRICT"),
                 ("content_production_line_events", "content_production_line_id", "content_production_lines", "id", "RESTRICT"),
-            }
-            actual_foreign_keys = set()
+ = set()
             for table_name in existing:
                 escaped_table = table_name.replace('"', '""')
                 for fk in conn.execute(f'PRAGMA foreign_key_list("{escaped_table}")').fetchall():
@@ -962,7 +963,8 @@ class Database:
                     "decision": "TEXT", "reason": "TEXT", "evidence_json": "TEXT",
                     "reviewed_by": "TEXT", "created_at": "TEXT",
                 },
-                "content_production_lines": {
+            }
+            missing_columns                "content_production_lines": {
                     "id": "TEXT", "production_task_id": "TEXT", "round_id": "INTEGER",
                     "content_id": "TEXT", "status": "TEXT", "legacy_task_status": "TEXT",
                     "source_production_line_version_id": "INTEGER", "created_at": "TEXT",
@@ -978,18 +980,16 @@ class Database:
                     "production_task_id": "TEXT", "round_id": "INTEGER",
                     "master_plan_version_id": "INTEGER", "sub_plan_id": "TEXT",
                     "sub_plan_version_id": "INTEGER", "strategy_step_id": "TEXT",
-                    "latest_review_ref": "TEXT", "context_status": "TEXT",
+                    "sub_goal_id": "TEXT", "latest_review_ref": "TEXT", "context_status": "TEXT",
                     "waiver_id": "TEXT", "fingerprint": "TEXT", "context_json": "TEXT",
                     "captured_at": "TEXT",
                 },
                 "content_production_line_events": {
                     "id": "INTEGER", "content_production_line_id": "TEXT",
                     "event_type": "TEXT", "from_status": "TEXT", "to_status": "TEXT",
-                    "actor": "TEXT", "reason": "TEXT", "evidence_json": "TEXT",
-                    "created_at": "TEXT",
+                    "actor": "TEXT", "reason": "TEXT", "evidence_json": "TEXT", "created_at": "TEXT",
                 },
-            }
-            missing_columns = []
+ = []
             column_type_mismatches = []
             for table_name, required in expected_columns.items():
                 if table_name not in existing:
@@ -1287,9 +1287,8 @@ class Database:
                 "business_profile_versions", "master_plan_business_snapshots",
                 "original_assets", "original_asset_versions", "original_asset_links",
                 "original_asset_analyses", "original_asset_gaps",
-                "production_task_asset_usages", "plan_change_audit",
-                "content_production_lines", "production_context_waivers",
-                "production_context_snapshots", "content_production_line_events",
+                "production_task_asset_usages", "plan_change_audit", "master_plan_versions",
+                "account_group_north_star_versions", "master_plan_resource_baselines",
             }
             result["missing_governance_tables"] = sorted(governance_tables - existing)
 
@@ -1303,10 +1302,7 @@ class Database:
                 "idx_production_task_asset_usages_task",
                 "idx_production_task_asset_usages_asset",
                 "idx_plan_change_audit_entity", "idx_plan_change_audit_versions",
-                "idx_content_production_line_content", "idx_content_production_line_single_active",
-                "idx_content_production_line_status", "idx_content_production_line_round",
-                "idx_production_context_waivers_pending", "idx_production_context_snapshots_plan",
-                "idx_production_context_snapshots_round", "idx_content_production_line_events_line",
+                "idx_north_star_one_effective", "idx_north_star_history",
             }
             result["missing_governance_indexes"] = sorted(
                 governance_indexes - existing_indexes
@@ -1324,21 +1320,8 @@ class Database:
                 "trg_business_profile_versions_no_delete",
                 "trg_master_plan_business_snapshots_no_update",
                 "trg_master_plan_business_snapshots_no_delete",
-                "trg_content_production_line_after_task_insert",
-                "trg_production_tasks_single_item_ordinal",
-                "trg_production_tasks_require_context_before_claim",
-                "trg_content_production_line_transition_guard",
-                "trg_production_task_status_to_content_line",
-                "trg_content_production_line_event_after_status",
-                "trg_content_production_line_after_draft_insert",
-                "trg_content_production_line_after_draft_review",
-                "trg_content_production_line_prevent_unreviewed_publish",
-                "trg_content_production_context_snapshots_no_update",
-                "trg_content_production_context_snapshots_no_delete",
-                "trg_content_production_line_events_no_update",
-                "trg_content_production_line_events_no_delete",
-                "trg_production_context_waivers_consume_once",
-                "trg_production_context_waivers_no_delete",
+                "trg_north_star_version_snapshot_immutable", "trg_north_star_version_no_delete",
+                "trg_master_plan_resource_baselines_no_update", "trg_master_plan_resource_baselines_no_delete",
             }
             result["missing_governance_triggers"] = sorted(
                 governance_triggers - existing_triggers
@@ -1359,6 +1342,7 @@ class Database:
                 "master_plan_business_snapshots": {
                     "master_plan_version_id", "business_profile_version_no", "snapshot_json", "captured_at",
                 },
+                "master_plan_versions": {"id", "version_no", "plan_signature", "plan_snapshot", "status", "north_star_version_id", "north_star_snapshot_json", "north_star_attribution_status"},
                 "original_assets": {
                     "id", "asset_type", "title", "description", "source_kind",
                     "source_media_asset_id", "source_content_asset_id", "source_kb_id",
@@ -1393,7 +1377,15 @@ class Database:
                     "to_version_id", "change_reason", "before_snapshot_json",
                     "after_snapshot_json", "affected_tasks_json", "actor", "created_at",
                 },
-                "content_production_lines": {
+                "account_group_north_star_versions": {
+                    "id", "version_no", "snapshot_json", "status", "change_reason",
+                    "created_by", "created_at", "effective_at", "superseded_at",
+                },
+                "master_plan_resource_baselines": {
+                    "master_plan_version_id", "snapshot_json", "captured_at", "captured_by",
+                },
+            }
+            missing_governance_columns                "content_production_lines": {
                     "id", "production_task_id", "round_id", "content_id", "status",
                     "legacy_task_status", "source_production_line_version_id", "created_at",
                     "updated_at", "closed_at",
@@ -1405,15 +1397,14 @@ class Database:
                 "production_context_snapshots": {
                     "id", "content_production_line_id", "production_task_id", "round_id",
                     "master_plan_version_id", "sub_plan_id", "sub_plan_version_id",
-                    "strategy_step_id", "latest_review_ref", "context_status", "waiver_id",
-                    "fingerprint", "context_json", "captured_at",
+                    "strategy_step_id", "sub_goal_id", "latest_review_ref", "context_status",
+                    "waiver_id", "fingerprint", "context_json", "captured_at",
                 },
                 "content_production_line_events": {
-                    "id", "content_production_line_id", "event_type", "from_status",
-                    "to_status", "actor", "reason", "evidence_json", "created_at",
+                    "id", "content_production_line_id", "event_type", "from_status", "to_status",
+                    "actor", "reason", "evidence_json", "created_at",
                 },
-            }
-            missing_governance_columns = []
+ = []
             for table_name, required_columns in governance_columns.items():
                 if table_name not in existing:
                     continue
@@ -1429,6 +1420,8 @@ class Database:
 
             governance_foreign_keys = {
                 ("master_plan_business_snapshots", "master_plan_version_id", "master_plan_versions", "id", "RESTRICT"),
+                ("master_plan_versions", "north_star_version_id", "account_group_north_star_versions", "id", "RESTRICT"),
+                ("master_plan_resource_baselines", "master_plan_version_id", "master_plan_versions", "id", "RESTRICT"),
                 ("original_assets", "source_media_asset_id", "media_assets", "id", "RESTRICT"),
                 ("original_assets", "source_content_asset_id", "content_assets", "id", "RESTRICT"),
                 ("original_asset_versions", "original_asset_id", "original_assets", "id", "RESTRICT"),
@@ -1441,20 +1434,6 @@ class Database:
                 ("production_task_asset_usages", "original_asset_id", "original_assets", "id", "RESTRICT"),
                 ("production_task_asset_usages", "original_asset_id", "original_asset_versions", "original_asset_id", "RESTRICT"),
                 ("production_task_asset_usages", "asset_version_no", "original_asset_versions", "version_no", "RESTRICT"),
-                ("content_production_lines", "production_task_id", "production_tasks", "id", "RESTRICT"),
-                ("content_production_lines", "round_id", "spiral_rounds", "id", "RESTRICT"),
-                ("content_production_lines", "content_id", "contents", "id", "RESTRICT"),
-                ("content_production_lines", "source_production_line_version_id", "production_line_versions", "id", "RESTRICT"),
-                ("production_context_waivers", "round_id", "spiral_rounds", "id", "RESTRICT"),
-                ("production_context_waivers", "consumed_task_id", "production_tasks", "id", "RESTRICT"),
-                ("production_context_snapshots", "content_production_line_id", "content_production_lines", "id", "RESTRICT"),
-                ("production_context_snapshots", "production_task_id", "production_tasks", "id", "RESTRICT"),
-                ("production_context_snapshots", "round_id", "spiral_rounds", "id", "RESTRICT"),
-                ("production_context_snapshots", "master_plan_version_id", "master_plan_versions", "id", "RESTRICT"),
-                ("production_context_snapshots", "sub_plan_id", "sub_plans", "id", "RESTRICT"),
-                ("production_context_snapshots", "sub_plan_version_id", "sub_plan_versions", "id", "RESTRICT"),
-                ("production_context_snapshots", "waiver_id", "production_context_waivers", "id", "RESTRICT"),
-                ("content_production_line_events", "content_production_line_id", "content_production_lines", "id", "RESTRICT"),
             }
             actual_governance_foreign_keys = set()
             for table_name in governance_tables & existing:
@@ -1540,6 +1519,30 @@ class Database:
                        OR (before_snapshot_json IS NOT NULL AND json_valid(before_snapshot_json)=0)
                        OR json_valid(after_snapshot_json)=0
                 """,
+                "north_star_snapshot_json_invalid": """
+                    SELECT COUNT(*) FROM account_group_north_star_versions
+                    WHERE snapshot_json IS NULL OR json_valid(snapshot_json)=0
+                """,
+                "master_plan_north_star_snapshot_invalid": """
+                    SELECT COUNT(*) FROM master_plan_versions
+                    WHERE north_star_snapshot_json IS NOT NULL AND json_valid(north_star_snapshot_json)=0
+                """,
+                "master_plan_resource_baseline_json_invalid": """
+                    SELECT COUNT(*) FROM master_plan_resource_baselines
+                    WHERE snapshot_json IS NULL OR json_valid(snapshot_json)=0
+                """,
+                "master_plan_north_star_reference_missing": """
+                    SELECT COUNT(*) FROM master_plan_versions p
+                    WHERE p.north_star_version_id IS NOT NULL
+                      AND NOT EXISTS (SELECT 1 FROM account_group_north_star_versions n WHERE n.id=p.north_star_version_id)
+                """,
+                "master_plan_north_star_attribution_invalid": """
+                    SELECT COUNT(*) FROM master_plan_versions
+                    WHERE (north_star_attribution_status='attributed'
+                           AND (north_star_version_id IS NULL OR north_star_snapshot_json IS NULL))
+                       OR (north_star_attribution_status!='attributed'
+                           AND north_star_version_id IS NOT NULL)
+                """,
                 "production_context_snapshot_json_invalid": """
                     SELECT COUNT(*) FROM production_context_snapshots
                     WHERE context_json IS NULL OR json_valid(context_json)=0
@@ -1550,16 +1553,11 @@ class Database:
                 """,
                 "production_task_without_content_line": """
                     SELECT COUNT(*) FROM production_tasks t
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM content_production_lines l WHERE l.production_task_id=t.id
-                    )
+                    WHERE NOT EXISTS (SELECT 1 FROM content_production_lines l WHERE l.production_task_id=t.id)
                 """,
                 "content_production_line_without_snapshot": """
                     SELECT COUNT(*) FROM content_production_lines l
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM production_context_snapshots s
-                        WHERE s.content_production_line_id=l.id
-                    )
+                    WHERE NOT EXISTS (SELECT 1 FROM production_context_snapshots s WHERE s.content_production_line_id=l.id)
                 """,
                 "legacy_context_snapshot_status_mismatch": """
                     SELECT COUNT(*) FROM content_production_lines l
@@ -1588,17 +1586,49 @@ class Database:
                 "original_asset_analysis_json_invalid": {"original_asset_analyses"},
                 "production_task_asset_usage_version_mismatch": {"production_task_asset_usages", "original_asset_versions"},
                 "plan_change_audit_json_invalid": {"plan_change_audit"},
-                "production_context_snapshot_json_invalid": {"production_context_snapshots"},
+                "north_star_snapshot_json_invalid": {"account_group_north_star_versions"},
+                "master_plan_north_star_snapshot_invalid": {"master_plan_versions"},
+                "master_plan_resource_baseline_json_invalid": {"master_plan_resource_baselines"},
+                "master_plan_north_star_reference_missing": {"master_plan_versions", "account_group_north_star_versions"},
+                "master_plan_north_star_attribution_invalid": {"master_plan_versions"},
+            }
+            governance_data_check_columns                "production_context_snapshot_json_invalid": {"production_context_snapshots"},
                 "production_context_snapshot_fingerprint_missing": {"production_context_snapshots"},
                 "production_task_without_content_line": {"production_tasks", "content_production_lines"},
                 "content_production_line_without_snapshot": {"content_production_lines", "production_context_snapshots"},
                 "legacy_context_snapshot_status_mismatch": {"content_production_lines", "production_context_snapshots"},
                 "production_context_waiver_json_invalid": {"production_context_waivers"},
                 "content_production_line_event_json_invalid": {"content_production_line_events"},
+ = {
+                "master_plan_north_star_snapshot_invalid": {
+                    "master_plan_versions": {"north_star_snapshot_json"},
+                },
+                "master_plan_north_star_reference_missing": {
+                    "master_plan_versions": {"north_star_version_id"},
+                },
+                "master_plan_north_star_attribution_invalid": {
+                    "master_plan_versions": {
+                        "north_star_attribution_status", "north_star_version_id",
+                        "north_star_snapshot_json",
+                    },
+                },
             }
             governance_data_violations = {}
             for check_name, sql in governance_data_checks.items():
-                if available_data_checks[check_name].issubset(existing):
+                if not available_data_checks[check_name].issubset(existing):
+                    continue
+                required_columns = governance_data_check_columns.get(check_name, {})
+                columns_available = True
+                for table_name, names in required_columns.items():
+                    table_columns = {
+                        str(row["name"]) for row in conn.execute(
+                            f'PRAGMA table_info("{table_name}")'
+                        ).fetchall()
+                    }
+                    if not names.issubset(table_columns):
+                        columns_available = False
+                        break
+                if columns_available:
                     governance_data_violations[check_name] = int(
                         conn.execute(sql).fetchone()[0]
                     )
@@ -1627,6 +1657,9 @@ class Database:
                     "master_plan_version_id": "INTEGER", "business_profile_version_no": "INTEGER",
                     "snapshot_json": "TEXT", "captured_at": "TEXT",
                 },
+                "master_plan_versions": {
+                    "north_star_version_id": "INTEGER", "north_star_snapshot_json": "TEXT", "north_star_attribution_status": "TEXT",
+                },
                 "original_assets": {
                     "id": "INTEGER", "source_media_asset_id": "INTEGER",
                     "source_content_asset_id": "INTEGER", "current_version_no": "INTEGER",
@@ -1649,21 +1682,26 @@ class Database:
                 "plan_change_audit": {
                     "id": "INTEGER", "from_version_id": "INTEGER", "to_version_id": "INTEGER",
                 },
-                "content_production_lines": {
-                    "round_id": "INTEGER", "source_production_line_version_id": "INTEGER",
+                "account_group_north_star_versions": {
+                    "id": "INTEGER", "version_no": "INTEGER", "snapshot_json": "TEXT",
+                    "status": "TEXT", "change_reason": "TEXT", "created_by": "TEXT",
+                    "created_at": "TEXT", "effective_at": "TEXT", "superseded_at": "TEXT",
                 },
-                "production_context_waivers": {
-                    "round_id": "INTEGER",
-                },
-                "production_context_snapshots": {
-                    "round_id": "INTEGER", "master_plan_version_id": "INTEGER",
-                    "sub_plan_version_id": "INTEGER",
-                },
-                "content_production_line_events": {
-                    "id": "INTEGER",
+                "master_plan_resource_baselines": {
+                    "master_plan_version_id": "INTEGER", "snapshot_json": "TEXT",
+                    "captured_at": "TEXT", "captured_by": "TEXT",
                 },
             }
-            governance_type_mismatches = []
+            governance_type_mismatches                "content_production_lines": {
+                    "round_id": "INTEGER", "source_production_line_version_id": "INTEGER",
+                },
+                "production_context_waivers": {"round_id": "INTEGER"},
+                "production_context_snapshots": {
+                    "round_id": "INTEGER", "master_plan_version_id": "INTEGER",
+                    "sub_plan_version_id": "INTEGER", "sub_goal_id": "TEXT",
+                },
+                "content_production_line_events": {"id": "INTEGER"},
+ = []
             for table_name, required_types in governance_column_types.items():
                 if table_name not in existing:
                     continue
