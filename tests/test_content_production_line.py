@@ -53,10 +53,19 @@ def _setup(conn):
         "content_format": "image_text",
     })
     master_id = int(store.activate_master_version(master["id"], reviewer="task-3-test")["id"])
+    north_star_snapshot = {"goal_text": "建立稳定的有效咨询量", "target_metric": "qualified_leads", "target_value": 100}
+    north_star_cursor = conn.execute(
+        """INSERT INTO account_group_north_star_versions(
+            version_no,snapshot_json,change_reason,created_by,created_at,effective_at
+        ) VALUES(1,?,'测试北极星基线','task-3-test',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)""",
+        (json.dumps(north_star_snapshot, ensure_ascii=False),),
+    )
     conn.execute(
-        """INSERT INTO goals(
-            id,goal_type,goal_text,target_metric,target_value,status,goal_level
-        ) VALUES('t3-north-star','milestone','建立稳定的有效咨询量','qualified_leads',100,'active','north_star')"""
+        """UPDATE master_plan_versions
+           SET north_star_version_id=?,north_star_snapshot_json=?,
+               north_star_attribution_status='attributed'
+           WHERE id=?""",
+        (north_star_cursor.lastrowid, json.dumps(north_star_snapshot, ensure_ascii=False), master_id),
     )
     conn.execute(
         """INSERT INTO business_diagnosis_reports(
@@ -85,6 +94,23 @@ def _setup(conn):
         "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=?",
         (sub_version["id"],),
     ).fetchone()
+    conn.execute(
+        """INSERT INTO sub_goals(
+            id,sub_plan_version_id,stage_id,goal_type,goal_order,priority,title,
+            description,target_count,acceptance_criteria,requires_production,status,
+            created_at,updated_at
+        ) VALUES('t3-formal-subgoal',?,?,'quantity',1,3,'建立有效咨询内容触达',
+                 '为本轮生产提供正式业务目标',5,'完成对应内容生产并保留验收证据',
+                 1,'ready',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)""",
+        (int(sub_version["id"]), int(stage["id"])),
+    )
+    conn.execute(
+        """INSERT INTO sub_goal_production_plans(
+            goal_id,content_direction,suggested_count,resource_requirements_json,
+            priority,execution_conditions,acceptance_relation,enabled,created_at,updated_at
+        ) VALUES('t3-formal-subgoal','AI教育',1,'{}',3,'依赖通过后逐条生产',
+                 '发布复盘后回看目标',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"""
+    )
     line_store = ProductionLineStore(conn)
     line_draft = line_store.create_draft(
         sub_id, int(sub_version["id"]),
@@ -133,6 +159,8 @@ def test_new_task_has_complete_immutable_context_and_line_lifecycle(conn, seed):
     assert line["status"] == "pending"
     assert snapshot["context_status"] == "complete"
     assert snapshot["context"]["north_star"]["goal_text"] == "建立稳定的有效咨询量"
+    assert snapshot["context"]["plan_versions"]["sub_goal_id"] == "t3-formal-subgoal"
+    assert snapshot["context"]["sub_goal"]["selected_sub_goal"]["id"] == "t3-formal-subgoal"
     assert snapshot["context"]["business_diagnosis"]["version_no"] == 1
     assert snapshot["context"]["plan_versions"]["sub_plan_version_id"] == ids["sub_version_id"]
     assert snapshot["context"]["task_decision_input"]["previous_review_feedback"]["recommendations"] == ["增加真实案例"]
@@ -191,6 +219,29 @@ def test_new_task_has_complete_immutable_context_and_line_lifecycle(conn, seed):
             "UPDATE production_context_snapshots SET context_json='{}' WHERE production_task_id=?",
             (task["id"],),
         )
+
+
+
+def test_disabled_formal_subgoal_production_plan_blocks_task_creation(conn):
+    ids = _setup(conn)
+    conn.execute(
+        "UPDATE sub_goal_production_plans SET enabled=0 WHERE goal_id='t3-formal-subgoal'"
+    )
+    conn.commit()
+    round_id = _create_round(
+        conn, key="round-disabled-subgoal", master_id=ids["master_id"],
+        sub_id=ids["sub_id"], sub_version_id=ids["sub_version_id"],
+        stage_id=ids["stage_id"], line_version_id=ids["line_version_id"],
+    )
+    with pytest.raises(ProductionContextError, match="正式子目标生产门禁未通过"):
+        ProductionTaskStore(conn).create_task(
+            round_id=round_id, master_plan_version_id=ids["master_id"],
+            sub_plan_id=ids["sub_id"], sub_plan_version_id=ids["sub_version_id"],
+            strategy_step_id=ids["stage_key"], platform="xhs", task_ordinal=1,
+            idempotency_key="task-disabled-subgoal-plan",
+            input_snapshot={"topic": {"title": "blocked"}},
+        )
+    assert conn.execute("SELECT COUNT(*) FROM production_tasks").fetchone()[0] == 0
 
 
 def test_only_one_active_content_line_per_tenant_database(conn):
