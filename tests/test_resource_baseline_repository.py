@@ -15,7 +15,7 @@ def test_unreviewed_or_unlicensed_assets_are_not_reported_as_available():
  result=build_resource_baseline(c)
  statuses={item["source_id"]:item["status"] for item in result["resources"] if item["source_type"] in {"external","kb_source","manual"}}
  assert statuses=={"1":"pending","2":"pending","3":"rejected","4":"confirmed"}
-  c.execute("UPDATE original_assets SET privacy_status='contains_personal_data' WHERE id=4")
+ c.execute("UPDATE original_assets SET privacy_status='contains_personal_data' WHERE id=4")
  result=build_resource_baseline(c)
  restricted=next(item for item in result["resources"] if item["source_type"]=="external" and item["source_id"]=="4")
  assert restricted["status"]=="restricted"
