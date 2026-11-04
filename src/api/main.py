@@ -5815,6 +5815,23 @@ def _register_routes(app: FastAPI) -> None:
             items.append(item)
         return {"items": items, "total": len(items)}
 
+    @app.post("/api/plans/ai-draft", status_code=201)
+    async def generate_ai_master_plan_draft():
+        """根据最新已确认经营诊断生成母计划草稿；只创建草稿，不自动生效。"""
+        from src.core.master_plan_generation import (
+            MasterPlanGenerationError, generate_master_plan_draft,
+        )
+        try:
+            return await generate_master_plan_draft(_g()["conn"], _g()["cfg"])
+        except LookupError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except MasterPlanGenerationError as exc:
+            raise HTTPException(
+                422, detail={"code": "invalid_ai_master_plan", "message": str(exc)}
+            ) from exc
+        except RuntimeError as exc:
+            raise HTTPException(502, str(exc)) from exc
+
     @app.post("/api/plans")
     def update_plan(req: UpdatePlanRequest):
         """创建母计划草稿；只有显式审核通过后才切换生效版本。"""
