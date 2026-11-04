@@ -67,14 +67,18 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
     )
     assert asset.status_code == 201, asset.text
     asset_id = asset.json()["id"]
-    reviewed_asset = client.post(f"/api/original-assets/{asset_id}/review", json={
-        "decision": "confirmed", "review_note": "确认许可、隐私与质量",
-        "quality": {
-            "commercial_use_status": "allowed", "privacy_status": "clear",
-            "readability_status": "readable", "completeness_status": "complete",
-            "duplicate_status": "unique",
-        },
-    })
+    reviewed_asset = client.post(
+        f"/api/original-assets/{asset_id}/review",
+        content=json.dumps({
+            "decision": "confirmed", "review_note": "确认许可、隐私与质量",
+            "quality": {
+                "commercial_use_status": "allowed", "privacy_status": "clear",
+                "readability_status": "readable", "completeness_status": "complete",
+                "duplicate_status": "unique",
+            },
+        }, ensure_ascii=False),
+        headers={"content-type": "application/json"},
+    )
     assert reviewed_asset.status_code == 200, reviewed_asset.text
 
     analyzed = client.post("/api/business-diagnosis/analyze")
