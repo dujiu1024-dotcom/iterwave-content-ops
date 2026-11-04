@@ -327,14 +327,13 @@ def test_manual_retry_starts_a_new_cycle_and_clears_stale_error(conn, seed):
 
 
 def test_operating_feedback_persists_explicit_audit_actors(conn, seed):
-    draft_id, verification = _verification(conn, seed)
-    conn.execute(
-        "UPDATE content_publish_verifications SET verified_by=? WHERE verification_id=?",
-        ("session:publisher", verification["verification_id"]),
-    )
-    conn.execute(
-        "UPDATE review_tasks SET created_by=? WHERE task_id=?",
-        ("session:publisher", verification["review_task_id"]),
+    draft_id, published_at = _published_draft(conn, seed)
+    verification = create_publish_verification(
+        conn, tenant_id="tenant-test", draft_id=draft_id,
+        platform_content_id="audit-note-123",
+        content_url="https://www.xiaohongshu.com/explore/audit-note-123",
+        published_at=published_at, idempotency_key="audit-publish-123",
+        actor="session:publisher",
     )
     run = create_collection_run(
         conn, task_id=verification["review_task_id"], source="manual",
