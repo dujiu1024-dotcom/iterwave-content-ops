@@ -172,7 +172,7 @@ INSERT OR IGNORE INTO metric_facts(
     collection_status,correction_of,created_at
 )
 SELECT lower(hex(randomblob(16))),ms.tenant_id,ms.draft_id,ms.content_id,ms.platform,
-       metric.metric_key,metric.metric_value,'count',ms.source,'metric_snapshot',ms.id,
+       metric.metric_key,metric.metric_value,names.unit,'platform_readback','metrics',
        ms.measured_at,ms.recorded_at,'UTC','succeeded',ms.correction_of,ms.created_at
 FROM metric_snapshots ms
 JOIN (
