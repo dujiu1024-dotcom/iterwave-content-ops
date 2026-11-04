@@ -1225,7 +1225,8 @@ class Database:
                 "business_profile_versions", "master_plan_business_snapshots",
                 "original_assets", "original_asset_versions", "original_asset_links",
                 "original_asset_analyses", "original_asset_gaps",
-                "production_task_asset_usages", "plan_change_audit",
+                "production_task_asset_usages", "plan_change_audit", "master_plan_versions",
+                "account_group_north_star_versions", "master_plan_resource_baselines",
             }
             result["missing_governance_tables"] = sorted(governance_tables - existing)
 
@@ -1239,6 +1240,7 @@ class Database:
                 "idx_production_task_asset_usages_task",
                 "idx_production_task_asset_usages_asset",
                 "idx_plan_change_audit_entity", "idx_plan_change_audit_versions",
+                "idx_north_star_one_effective", "idx_north_star_history",
             }
             result["missing_governance_indexes"] = sorted(
                 governance_indexes - existing_indexes
@@ -1256,6 +1258,8 @@ class Database:
                 "trg_business_profile_versions_no_delete",
                 "trg_master_plan_business_snapshots_no_update",
                 "trg_master_plan_business_snapshots_no_delete",
+                "trg_north_star_version_snapshot_immutable", "trg_north_star_version_no_delete",
+                "trg_master_plan_resource_baselines_no_update", "trg_master_plan_resource_baselines_no_delete",
             }
             result["missing_governance_triggers"] = sorted(
                 governance_triggers - existing_triggers
@@ -1276,6 +1280,7 @@ class Database:
                 "master_plan_business_snapshots": {
                     "master_plan_version_id", "business_profile_version_no", "snapshot_json", "captured_at",
                 },
+                "master_plan_versions": {"id", "version_no", "plan_signature", "plan_snapshot", "status", "north_star_version_id", "north_star_snapshot_json", "north_star_attribution_status"},
                 "original_assets": {
                     "id", "asset_type", "title", "description", "source_kind",
                     "source_media_asset_id", "source_content_asset_id", "source_kb_id",
@@ -1310,6 +1315,13 @@ class Database:
                     "to_version_id", "change_reason", "before_snapshot_json",
                     "after_snapshot_json", "affected_tasks_json", "actor", "created_at",
                 },
+                "account_group_north_star_versions": {
+                    "id", "version_no", "snapshot_json", "status", "change_reason",
+                    "created_by", "created_at", "effective_at", "superseded_at",
+                },
+                "master_plan_resource_baselines": {
+                    "master_plan_version_id", "snapshot_json", "captured_at", "captured_by",
+                },
             }
             missing_governance_columns = []
             for table_name, required_columns in governance_columns.items():
@@ -1327,6 +1339,8 @@ class Database:
 
             governance_foreign_keys = {
                 ("master_plan_business_snapshots", "master_plan_version_id", "master_plan_versions", "id", "RESTRICT"),
+                ("master_plan_versions", "north_star_version_id", "account_group_north_star_versions", "id", "RESTRICT"),
+                ("master_plan_resource_baselines", "master_plan_version_id", "master_plan_versions", "id", "RESTRICT"),
                 ("original_assets", "source_media_asset_id", "media_assets", "id", "RESTRICT"),
                 ("original_assets", "source_content_asset_id", "content_assets", "id", "RESTRICT"),
                 ("original_asset_versions", "original_asset_id", "original_assets", "id", "RESTRICT"),
@@ -1424,6 +1438,30 @@ class Database:
                        OR (before_snapshot_json IS NOT NULL AND json_valid(before_snapshot_json)=0)
                        OR json_valid(after_snapshot_json)=0
                 """,
+                "north_star_snapshot_json_invalid": """
+                    SELECT COUNT(*) FROM account_group_north_star_versions
+                    WHERE snapshot_json IS NULL OR json_valid(snapshot_json)=0
+                """,
+                "master_plan_north_star_snapshot_invalid": """
+                    SELECT COUNT(*) FROM master_plan_versions
+                    WHERE north_star_snapshot_json IS NOT NULL AND json_valid(north_star_snapshot_json)=0
+                """,
+                "master_plan_resource_baseline_json_invalid": """
+                    SELECT COUNT(*) FROM master_plan_resource_baselines
+                    WHERE snapshot_json IS NULL OR json_valid(snapshot_json)=0
+                """,
+                "master_plan_north_star_reference_missing": """
+                    SELECT COUNT(*) FROM master_plan_versions p
+                    WHERE p.north_star_version_id IS NOT NULL
+                      AND NOT EXISTS (SELECT 1 FROM account_group_north_star_versions n WHERE n.id=p.north_star_version_id)
+                """,
+                "master_plan_north_star_attribution_invalid": """
+                    SELECT COUNT(*) FROM master_plan_versions
+                    WHERE (north_star_attribution_status='attributed'
+                           AND (north_star_version_id IS NULL OR north_star_snapshot_json IS NULL))
+                       OR (north_star_attribution_status!='attributed'
+                           AND north_star_version_id IS NOT NULL)
+                """,
             }
             available_data_checks = {
                 "business_profile_current_version_missing": {"business_profiles", "business_profile_versions"},
@@ -1438,6 +1476,11 @@ class Database:
                 "original_asset_analysis_json_invalid": {"original_asset_analyses"},
                 "production_task_asset_usage_version_mismatch": {"production_task_asset_usages", "original_asset_versions"},
                 "plan_change_audit_json_invalid": {"plan_change_audit"},
+                "north_star_snapshot_json_invalid": {"account_group_north_star_versions"},
+                "master_plan_north_star_snapshot_invalid": {"master_plan_versions"},
+                "master_plan_resource_baseline_json_invalid": {"master_plan_resource_baselines"},
+                "master_plan_north_star_reference_missing": {"master_plan_versions", "account_group_north_star_versions"},
+                "master_plan_north_star_attribution_invalid": {"master_plan_versions"},
             }
             governance_data_violations = {}
             for check_name, sql in governance_data_checks.items():
@@ -1470,6 +1513,9 @@ class Database:
                     "master_plan_version_id": "INTEGER", "business_profile_version_no": "INTEGER",
                     "snapshot_json": "TEXT", "captured_at": "TEXT",
                 },
+                "master_plan_versions": {
+                    "north_star_version_id": "INTEGER", "north_star_snapshot_json": "TEXT", "north_star_attribution_status": "TEXT",
+                },
                 "original_assets": {
                     "id": "INTEGER", "source_media_asset_id": "INTEGER",
                     "source_content_asset_id": "INTEGER", "current_version_no": "INTEGER",
@@ -1491,6 +1537,15 @@ class Database:
                 },
                 "plan_change_audit": {
                     "id": "INTEGER", "from_version_id": "INTEGER", "to_version_id": "INTEGER",
+                },
+                "account_group_north_star_versions": {
+                    "id": "INTEGER", "version_no": "INTEGER", "snapshot_json": "TEXT",
+                    "status": "TEXT", "change_reason": "TEXT", "created_by": "TEXT",
+                    "created_at": "TEXT", "effective_at": "TEXT", "superseded_at": "TEXT",
+                },
+                "master_plan_resource_baselines": {
+                    "master_plan_version_id": "INTEGER", "snapshot_json": "TEXT",
+                    "captured_at": "TEXT", "captured_by": "TEXT",
                 },
             }
             governance_type_mismatches = []
