@@ -60,6 +60,20 @@ def _normalize_datetime(
     return parsed.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
+def _file_sha256(path: str | Path) -> str:
+    candidate = Path(path)
+    if not candidate.is_file():
+        raise OperatingFeedbackError("发布图片文件不可读取，无法固化图片指纹")
+    digest = hashlib.sha256()
+    try:
+        with candidate.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise OperatingFeedbackError("发布图片文件读取失败，无法固化图片指纹") from exc
+    return digest.hexdigest()
+
+
 def _valid_https_url(value: str) -> bool:
     from urllib.parse import urlsplit
     try:
@@ -391,9 +405,16 @@ def create_collection_run(
     if status in {"succeeded", "partial"} and not normalized:
         raise OperatingFeedbackError("成功或部分成功必须至少包含一项真实采集值；真实零值请明确传入 0")
     try:
-        ZoneInfo(timezone_name)
+        business_zone = ZoneInfo(timezone_name)
     except (TypeError, ZoneInfoNotFoundError):
         raise OperatingFeedbackError("采集时区无效") from None
+    business_now = datetime.now(business_zone)
+    if window_start is None:
+        window_start = (business_now - timedelta(days=1)).isoformat(timespec="seconds")
+    if window_end is None:
+        window_end = business_now.isoformat(timespec="seconds")
+    if measured_at is None:
+        measured_at = window_end
     window_start = _normalize_datetime(window_start, timezone_name, "采集窗口开始时间")
     window_end = _normalize_datetime(window_end, timezone_name, "采集窗口结束时间")
     measured_at = _normalize_datetime(measured_at, timezone_name, "指标观测时间")
