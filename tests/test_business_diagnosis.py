@@ -87,3 +87,27 @@ def test_business_diagnosis_collects_t5_original_asset_inventory_and_gaps(conn, 
     assert context["inventory_summary"]["original_asset_open_gap_count"] == 1
     assert any(ref["source_type"] == "original_asset" for ref in context["source_references"])
     assert any(ref["source_type"] == "original_asset_gap" for ref in context["source_references"])
+
+
+
+def test_downstream_plan_history_does_not_invalidate_confirmed_diagnosis_sources(conn, cfg, monkeypatch):
+    import src.core.business_diagnosis as diagnosis
+
+    original_rows = diagnosis._rows
+    revision = {"value": 1}
+
+    def rows_with_changing_plan_history(connection, sql, params=()):
+        result = original_rows(connection, sql, params)
+        if "FROM master_plan_versions" in sql:
+            return [{"id": revision["value"], "status": "effective"}]
+        if "FROM spiral_rounds GROUP BY status" in sql:
+            return [{"status": "created", "count": revision["value"]}]
+        return result
+
+    monkeypatch.setattr(diagnosis, "_rows", rows_with_changing_plan_history)
+    before = diagnosis.collect_business_context(conn, cfg)
+    revision["value"] = 2
+    after = diagnosis.collect_business_context(conn, cfg)
+
+    assert before["context"]["plan_history"] != after["context"]["plan_history"]
+    assert before["fingerprint"] == after["fingerprint"]
