@@ -41,12 +41,12 @@ jobs:
               packages+=(tesseract-ocr-eng)
             fi
           fi
-          if ! dpkg-query -W -f='\${Status}' fonts-noto-cjk 2>/dev/null | grep -q 'install ok installed'; then
+          if ! dpkg-query -W -f='${Status}' fonts-noto-cjk 2>/dev/null | grep -q 'install ok installed'; then
             packages+=(fonts-noto-cjk)
           fi
-          if (\${#packages[@]} > 0); then
+          if (${#packages[@]} > 0); then
             sudo apt-get update
-            sudo apt-get install -y --no-install-recommends "\${packages[@]}"
+            sudo apt-get install -y --no-install-recommends "${packages[@]}"
           fi
       - name: Install Chromium for visual renderer tests
         run: python -m playwright install --with-deps chromium
