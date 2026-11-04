@@ -49,7 +49,8 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
 
     profile = client.put("/api/business-profile", json={
         "business_name": "T8-E API 验收业务", "industry": "测试行业",
-        "business_model": "图文内容运营", "target_customer": "测试用户",
+        "business_model": "图文内容运营", "business_stage": "测试阶段",
+        "operating_goal": "完成图文内容生产",
     })
     assert profile.status_code == 200, profile.text
 
