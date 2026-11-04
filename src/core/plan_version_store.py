@@ -490,13 +490,30 @@ class PlanVersionStore:
             ).fetchone()
             if identity is None:
                 raise PlanVersionError("子计划不存在")
-            # A subplan version is permanently bound to its originating master
-            # version. A master-plan switch pauses the child; it does not authorize
-            # rewriting that lineage. Historical rounds keep their original snapshots.
+            # Ordinary edits cannot move a subplan to another master. The sole
+            # exception is an explicit review_adoption master version that directly
+            # supersedes the subplan's originating master and paused this subplan.
+            # Each subplan version and historical round remains bound to its own
+            # immutable master/version snapshots; only the subplan's current pointer
+            # moves when the adoption draft is approved.
             existing_master_id = int(identity["master_plan_version_id"])
             target_master_id = int(master_plan_version_id)
             if existing_master_id != target_master_id:
-                raise PlanVersionError("子计划不能脱离创建时绑定的母计划版本")
+                target_master = self.conn.execute(
+                    """SELECT status,source,based_on_version_id
+                       FROM master_plan_versions WHERE id=?""",
+                    (target_master_id,),
+                ).fetchone()
+                can_rebase = (
+                    identity["status"] == "paused"
+                    and identity["pause_reason"] == "master_plan_switch"
+                    and identity["paused_by_master_version_id"] == target_master_id
+                    and target_master is not None
+                    and target_master["source"] == "review_adoption"
+                    and target_master["based_on_version_id"] == existing_master_id
+                )
+                if not can_rebase:
+                    raise PlanVersionError("子计划不能脱离创建时绑定的母计划版本")
             current_version_id = (
                 int(identity["current_version_id"])
                 if identity["current_version_id"] is not None else None
