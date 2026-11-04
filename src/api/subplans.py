@@ -1025,15 +1025,19 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
             raise HTTPException(409, "生产线未配置当前策略步骤的有效生产批量")
         if line_batch_size < 1:
             raise HTTPException(409, "生产线当前策略步骤的生产批量无效")
-        topic_count = min(requested_count, remaining, line_batch_size, 50)
-        now_slot = business_now(runtime["cfg"]).replace(minute=0, second=0, microsecond=0).isoformat()
+        # Ignore legacy batch-size preferences: this endpoint opens exactly one
+        # content task; later content requires a fresh decision after review.
+        topic_count = 1
         line_version_id = int(identity["production_line_version_id"])
-        key = f"round-open:{now_slot}:{line_version_id}"
+        # Manual invocations are independent decisions, not hourly batch slots.
+        # Clients may supply an idempotency key to make transport retries safe.
+        request_token = str(req.get("idempotency_key") or __import__("uuid").uuid4().hex)
+        key = f"manual-round:{line_version_id}:{request_token}"
         request_hash = __import__("hashlib").sha256(json.dumps(
             {"sub_plan_id": sub_plan_id,
              "sub_plan_version_id": identity["current_version_id"],
              "production_line_version_id": line_version_id,
-             "stage_id": stage["id"], "slot": now_slot,
+             "stage_id": stage["id"], "request_token": request_token,
              "topic_count": topic_count, "platforms": [identity["platform"]]},
             sort_keys=True, ensure_ascii=False,
         ).encode()).hexdigest()
