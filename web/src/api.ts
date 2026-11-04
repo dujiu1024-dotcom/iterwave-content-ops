@@ -1301,6 +1301,20 @@ export interface AutogrowStatus {
 export interface MasterPlanVersion {
   id: number; version_no: number; status: string; plan_snapshot: string;
   plan_signature: string; created_at: string; reviewed_at?: string | null;
+  change_note?: string;
+}
+export interface MasterPlanGenerationMetadata {
+  generation_source: string;
+  diagnosis_report_id: number;
+  diagnosis_version_no: number;
+  source_fingerprint: string;
+  model: string;
+  generated_at: string;
+  summary: string;
+  assumptions: unknown[] | Record<string, unknown>;
+  risks: unknown[] | Record<string, unknown>;
+  pending_confirmations: unknown[] | Record<string, unknown>;
+  resource_basis: unknown[] | Record<string, unknown>;
 }
 export interface SubPlanStageRecord {
   id: number; sub_plan_version_id: number; stage_key: string; stage_order: number; title: string;
@@ -2157,6 +2171,10 @@ export const api = {
     fetchJson<{ report: BusinessDiagnosisReport }>(`/api/business-diagnosis/${id}/ignore`, {
       method: "POST", body: JSON.stringify({ recommendation_key, reason }),
     }),
+  generateAIMasterPlanDraft: () =>
+    fetchJson<{ draft: MasterPlanVersion; generation: MasterPlanGenerationMetadata; requires_review: true; effective: false }>(
+      "/api/plans/ai-draft", { method: "POST" },
+    ),
   createPlanDraft: (plan: MasterPlan) =>
     fetchJson<{ draft: MasterPlanVersion; requires_review: true; effective: false }>("/api/plans", {
       method: "POST", body: JSON.stringify({
