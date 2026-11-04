@@ -3165,7 +3165,7 @@ def test_business_analytics_summary_uses_latest_metric_per_draft(client):
     body = response.json()
     assert body["contents_created"] == 1
     assert body["drafts_created"] == 1
-    assert body["confirmed_published"] == 2
+    # KPI now counts only explicit publication-verification records; legacy user_published\n    # status and confirmation timestamps alone are not authoritative publish evidence.\n    assert body["confirmed_published"] == 0
     assert body["interactions"]["sample_count"] == 1
     assert body["interactions"]["views"] == 120
     assert body["interactions"]["likes"] == 12
