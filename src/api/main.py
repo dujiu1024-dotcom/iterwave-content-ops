@@ -5260,7 +5260,7 @@ def _register_routes(app: FastAPI) -> None:
         }
 
     @app.post("/api/drafts/{draft_id}/verify_save")
-    def verify_draft_save(draft_id: str, payload: dict):
+    def verify_draft_save(draft_id: str, payload: dict, request: Request):
         """人工核实平台草稿保存结果；不确定结果不得直接终结为 failed。"""
         saved = payload.get("saved") if isinstance(payload, dict) else None
         note = str((payload or {}).get("note") or "").strip() if isinstance(payload, dict) else ""
@@ -5325,7 +5325,7 @@ def _register_routes(app: FastAPI) -> None:
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 row["round_id"], "draft_save_verify", "pending_verify", target,
-                note, "web-ui", _storage_now().isoformat(timespec="seconds"),
+                note, auth.audit_actor(request), _storage_now().isoformat(timespec="seconds"),
             ),
         )
         return {
@@ -5836,7 +5836,7 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(502, str(exc)) from exc
 
     @app.post("/api/plans")
-    def update_plan(req: UpdatePlanRequest):
+    def update_plan(req: UpdatePlanRequest, request: Request):
         """创建母计划草稿；只有显式审核通过后才切换生效版本。"""
         from src.core.plan_version_store import PlanVersionStore, PlanVersionError
         alloc_total = sum(req.dimension_allocation.values())
@@ -5875,7 +5875,7 @@ def _register_routes(app: FastAPI) -> None:
         base_version_id = int(active["id"]) if active else None
         try:
             draft = PlanVersionStore(_g()["conn"]).create_master_draft(
-                plan, author="web-ui", source="user",
+                plan, author=auth.audit_actor(request), source="user",
                 based_on_version_id=base_version_id,
                 change_note=req.change_note.strip() or "母计划人工编辑草稿",
             )
@@ -5887,14 +5887,14 @@ def _register_routes(app: FastAPI) -> None:
                 "requires_review": True, "effective": False}
 
     @app.post("/api/plans/{version_id}/review")
-    async def review_master_plan(version_id: int, req: dict):
+    async def review_master_plan(version_id: int, req: dict, request: Request):
         from src.core.plan_version_store import PlanVersionStore, PlanVersionError
         action = (req or {}).get("action", "approve")
         if action == "reject":
             reason = str((req or {}).get("reason") or "").strip()
             try:
                 rejected = PlanVersionStore(_g()["conn"]).reject_master_version(
-                    version_id, reviewer="user", reason=reason,
+                    version_id, reviewer=auth.audit_actor(request), reason=reason,
                 )
             except PlanVersionError as exc:
                 raise HTTPException(409, str(exc)) from exc
@@ -5950,7 +5950,7 @@ def _register_routes(app: FastAPI) -> None:
 
         try:
             result = PlanVersionStore(conn).activate_master_version(
-                version_id, reviewer="user", pre_activate=validate_ai_provenance,
+                version_id, reviewer=auth.audit_actor(request), pre_activate=validate_ai_provenance,
             )
         except PlanVersionError as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -5978,12 +5978,12 @@ def _register_routes(app: FastAPI) -> None:
                 "subplan_generation": child_generation}
 
     @app.delete("/api/plans/{version_id}")
-    def delete_master_plan(version_id: int):
+    def delete_master_plan(version_id: int, request: Request):
         """软删除最新生效母计划，并在同一事务中恢复上一份未删除版本。"""
         from src.core.plan_version_store import PlanVersionStore, PlanVersionError
         try:
             return PlanVersionStore(_g()["conn"]).delete_master_version(
-                version_id, actor="user",
+                version_id, actor=auth.audit_actor(request),
             )
         except PlanVersionError as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -6131,13 +6131,13 @@ def _register_routes(app: FastAPI) -> None:
         return orch.view(_g()["conn"])
 
     @app.put("/api/orchestration")
-    def put_orchestration(req: OrchestrationRequest):
+    def put_orchestration(req: OrchestrationRequest, request: Request):
         from src.core import orchestration as orch
         custom_errors = _custom_skill_reference_errors(_g()["conn"], req.steps)
         if custom_errors:
             raise HTTPException(422, "；".join(custom_errors))
         try:
-            orch.save_steps(_g()["conn"], req.steps)
+            orch.save_steps(_g()["conn"], req.steps, author=auth.audit_actor(request))
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         return orch.view(_g()["conn"])
@@ -6151,9 +6151,9 @@ def _register_routes(app: FastAPI) -> None:
         return {"valid": not errors, "errors": errors}
 
     @app.post("/api/orchestration/reset")
-    def reset_orchestration():
+    def reset_orchestration(request: Request):
         from src.core import orchestration as orch
-        orch.save_steps(_g()["conn"], orch.default_steps(), author="web-ui:reset")
+        orch.save_steps(_g()["conn"], orch.default_steps(), author=auth.audit_actor(request))
         return orch.view(_g()["conn"])
 
     @app.get("/api/orchestration/runs")
@@ -6411,8 +6411,9 @@ def _register_routes(app: FastAPI) -> None:
         }
 
     @app.post("/api/contents/{content_id}/approve")
-    def approve_content_review(content_id: str, req: dict):
+    def approve_content_review(content_id: str, req: dict, request: Request):
         """记录明确的人工审核通过；不执行发布，也不覆盖 G2 质量门禁。"""
+        actor = auth.audit_actor(request)
         conn = _g()["conn"]
         row = _content_row(conn, content_id)
         _ensure_content_round_idle(row, "审核通过")
@@ -6450,7 +6451,7 @@ def _register_routes(app: FastAPI) -> None:
             (
                 row["round_id"], "review_approve",
                 json.dumps({"content_id": content_id, "title": row["title"]}, ensure_ascii=False)[:500],
-                "approved", reason, "web-ui", _storage_now().isoformat(timespec="seconds"),
+                "approved", reason, actor, _storage_now().isoformat(timespec="seconds"),
                 row["round_id"], content_id, content_id,
             ),
         )
@@ -6461,8 +6462,8 @@ def _register_routes(app: FastAPI) -> None:
         if inserted.rowcount == 1:
             conn.execute(
                 "INSERT INTO content_review_events(content_id,draft_id,round_id,event_type,actor,reason,after_json,created_at) "
-                "SELECT ?,id,?,'approved','web-ui',?,?,? FROM drafts WHERE content_id=? LIMIT 1",
-                (content_id,row["round_id"],reason,json.dumps({"review_status":"approved"}),
+                "SELECT ?,id,?,'approved',?,?,?,? FROM drafts WHERE content_id=? LIMIT 1",
+                (content_id,row["round_id"],actor,reason,json.dumps({"review_status":"approved"}),
                  _storage_now().isoformat(timespec="seconds"),content_id),
             )
         conn.commit()
@@ -6924,7 +6925,7 @@ def _register_routes(app: FastAPI) -> None:
         return _visual_brand_profile(ctx["conn"], tenant_id)
 
     @app.patch("/api/contents/{content_id}")
-    def update_content(content_id: str, req: UpdateContentRequest):
+    def update_content(content_id: str, req: UpdateContentRequest, request: Request):
         """人工编辑未发布文案 → 写 user_override 留痕；已发布内容保持不可变。"""
         conn = _g()["conn"]
         with conn:
@@ -6982,8 +6983,8 @@ def _register_routes(app: FastAPI) -> None:
                     )
                 conn.execute(
                     "INSERT INTO content_review_events(content_id,round_id,event_type,actor,reason,before_json,after_json,created_at) "
-                    "VALUES(?,?,'edited','web-ui',?,?,?,?)",
-                    (content_id,row["round_id"],req.reason or "UI 编辑",
+                    "VALUES(?,?,'edited',?,?,?,?,?)",
+                    (content_id,row["round_id"],auth.audit_actor(request),req.reason or "UI 编辑",
                      json.dumps({"title":row["title"],"body":row["body"],"tags":row["tags"]},ensure_ascii=False),
                      json.dumps({"title":title,"body":body,"tags":json.loads(tags_json) if tags_json else []},ensure_ascii=False),
                      _storage_now().isoformat(timespec="seconds")),
@@ -6998,7 +6999,7 @@ def _register_routes(app: FastAPI) -> None:
                                    ensure_ascii=False)[:500],
                         json.dumps({"title": title, "body_len": len(body or "")},
                                    ensure_ascii=False)[:500],
-                        req.reason or "UI 编辑", "web-ui",
+                        req.reason or "UI 编辑", auth.audit_actor(request),
                         _storage_now().isoformat(timespec="seconds"),
                     ),
                 )
@@ -7428,7 +7429,7 @@ def _register_routes(app: FastAPI) -> None:
         }
 
     @app.post("/api/contents/{content_id}/reject")
-    def reject_content(content_id: str, req: RejectContentRequest):
+    def reject_content(content_id: str, req: RejectContentRequest, request: Request):
         """人工驳回与 G2 自动质检分开留痕；驳回后禁止正常存草稿/确认发布。"""
         conn = _g()["conn"]
         row = _content_row(conn, content_id)
@@ -7471,14 +7472,14 @@ def _register_routes(app: FastAPI) -> None:
             (
                 row["round_id"], "review_reject",
                 json.dumps({"content_id": content_id, "title": row["title"]}, ensure_ascii=False)[:500],
-                "rejected", reason, "web-ui",
+                "rejected", reason, auth.audit_actor(request),
                 _storage_now().isoformat(timespec="seconds"),
             ),
         )
         conn.execute(
             "INSERT INTO content_review_events(content_id,draft_id,round_id,event_type,actor,reason,after_json,created_at) "
-            "VALUES(?,?,?,'rejected','web-ui',?,?,?)",
-            (content_id,eligible[0]["id"],row["round_id"],reason,
+            "VALUES(?,?,?,'rejected',?,?,?,?)",
+            (content_id,eligible[0]["id"],row["round_id"],auth.audit_actor(request),reason,
              json.dumps({"review_status":"rejected","affected_drafts":cur.rowcount},ensure_ascii=False),
              _storage_now().isoformat(timespec="seconds")),
         )
@@ -7493,7 +7494,7 @@ def _register_routes(app: FastAPI) -> None:
         }
 
     @app.post("/api/contents/{content_id}/resubmit")
-    def resubmit_rejected_content(content_id: str, req: ResubmitContentRequest):
+    def resubmit_rejected_content(content_id: str, req: ResubmitContentRequest, request: Request):
         """人工驳回后的内容必须先重新过当前 G2，再显式提交审核解除拦截。"""
         conn = _g()["conn"]
         row = _content_row(conn, content_id)
@@ -7536,14 +7537,14 @@ def _register_routes(app: FastAPI) -> None:
             (
                 row["round_id"], "review_resubmit",
                 json.dumps({"content_id": content_id, "review_rejection_reason": row["review_rejection_reason"]}, ensure_ascii=False)[:500],
-                "resubmitted", reason, "web-ui",
+                "resubmitted", reason, auth.audit_actor(request),
                 _storage_now().isoformat(timespec="seconds"),
             ),
         )
         conn.execute(
             "INSERT INTO content_review_events(content_id,draft_id,round_id,event_type,actor,reason,after_json,created_at) "
-            "SELECT ?,id,?,'resubmitted','web-ui',?,?,? FROM drafts WHERE content_id=? LIMIT 1",
-            (content_id,row["round_id"],reason,json.dumps({"review_status":"pending","guard_outcome":outcome}),
+            "SELECT ?,id,?,'resubmitted',?,?,?,? FROM drafts WHERE content_id=? LIMIT 1",
+            (content_id,row["round_id"],auth.audit_actor(request),reason,json.dumps({"review_status":"pending","guard_outcome":outcome}),
              _storage_now().isoformat(timespec="seconds"),content_id),
         )
         conn.commit()
@@ -7602,7 +7603,7 @@ def _register_routes(app: FastAPI) -> None:
                 "reviews":[dict(x) for x in history]}
 
     @app.post("/api/subplans/stages/{stage_id}/effect-feedback",status_code=201)
-    def create_stage_effect_feedback(stage_id: int, req: dict):
+    def create_stage_effect_feedback(stage_id: int, req: dict, request: Request):
         """保存不可覆盖的策略效果评估，并冻结本次指标证据。"""
         assessment=str((req or {}).get("assessment") or "").strip()
         recommendation=str((req or {}).get("recommendation") or "").strip()
@@ -7620,7 +7621,7 @@ def _register_routes(app: FastAPI) -> None:
         cur=conn.execute(
             "INSERT INTO strategy_effect_reviews(stage_id,assessment,recommendation,evidence_note,confidence,evidence_json,created_by,created_at) "
             "VALUES(?,?,?,?,?,?,?,?)",
-            (stage_id,assessment,recommendation,evidence_note,confidence,json.dumps(evidence,ensure_ascii=False,sort_keys=True),"web-ui",now),
+            (stage_id,assessment,recommendation,evidence_note,confidence,json.dumps(evidence,ensure_ascii=False,sort_keys=True),auth.audit_actor(request),now),
         )
         conn.commit()
         return {"id":cur.lastrowid,"stage_id":stage_id,"assessment":assessment,
@@ -8830,9 +8831,9 @@ def _register_routes(app: FastAPI) -> None:
         return pause_state(_g()["conn"]) or {"paused": False, "updated_at": None, "updated_by": None}
 
     @app.post("/api/ops/pause")
-    def set_ops_pause(req: dict):
+    def set_ops_pause(req: dict, request: Request):
         paused = bool((req or {}).get("paused"))
-        return set_ops_paused(_g()["conn"], paused, by="web-ui")
+        return set_ops_paused(_g()["conn"], paused, by=auth.audit_actor(request))
 
     # --- 正式运营设置向导进度（按账号组存 app_settings，不依赖浏览器存储）---
     @app.get("/api/onboarding/progress")
@@ -8841,13 +8842,13 @@ def _register_routes(app: FastAPI) -> None:
         return get_onboarding_progress(_g()["conn"])
 
     @app.put("/api/onboarding/progress")
-    def put_onboarding_progress_api(req: dict):
+    def put_onboarding_progress_api(req: dict, request: Request):
         from src.core.onboarding_progress import set_onboarding_progress, validate_onboarding_progress
         try:
             step_key, step_index = validate_onboarding_progress(req)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
-        return set_onboarding_progress(_g()["conn"], step_key, step_index, by="web-ui", cfg=_g()["cfg"])
+        return set_onboarding_progress(_g()["conn"], step_key, step_index, by=auth.audit_actor(request), cfg=_g()["cfg"])
 
     # --- 通知通道自检（不落 notifications 表）---
     @app.post("/api/notify/test")

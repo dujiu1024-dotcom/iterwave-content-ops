@@ -636,7 +636,22 @@ def test_ops_pause_roundtrip_persists(client):
     tc, conn, _ = client
     assert tc.get("/api/ops/pause").json()["paused"] is False
     assert tc.post("/api/ops/pause", json={"paused": True}).json()["paused"] is True
+    pause_actor = conn.execute(
+        "SELECT updated_by FROM app_settings WHERE key='ops_paused'"
+    ).fetchone()
+    assert pause_actor is not None and pause_actor["updated_by"].startswith("session:")
     assert is_ops_paused(conn) is True
+
+    onboarding = tc.put(
+        "/api/onboarding/progress",
+        json={"step_key": "business_profile", "step_index": 2},
+    )
+    assert onboarding.status_code == 200, onboarding.text
+    onboarding_actor = conn.execute(
+        "SELECT updated_by FROM app_settings WHERE key='onboarding_progress'"
+    ).fetchone()
+    assert onboarding_actor is not None
+    assert onboarding_actor["updated_by"].startswith("session:")
     assert tc.get("/api/ops/pause").json()["paused"] is True
     assert tc.post("/api/ops/pause", json={"paused": False}).json()["paused"] is False
     assert is_ops_paused(conn) is False
@@ -688,6 +703,19 @@ def test_editing_content_invalidates_previous_guard_result(client):
     ).fetchone()
     assert row["guard_outcome"] is None
     assert row["guard_reason"] is None
+    edit_event = conn.execute(
+        "SELECT actor FROM content_review_events WHERE content_id=? AND event_type='edited' "
+        "ORDER BY id DESC LIMIT 1",
+        (content_id,),
+    ).fetchone()
+    content_override = conn.execute(
+        "SELECT overridden_by FROM user_override WHERE override_field='content' "
+        "AND round_id=? ORDER BY rowid DESC LIMIT 1",
+        (round_id,),
+    ).fetchone()
+    assert edit_event is not None and edit_event["actor"].startswith("session:")
+    assert content_override is not None
+    assert content_override["overridden_by"] == edit_event["actor"]
 
 
 def test_published_content_cannot_be_mutated_in_place(client):
@@ -4457,3 +4485,151 @@ def test_ai_master_plan_generation_api_serializes_two_independent_connections(cf
         )
     finally:
         conn2.close()
+
+
+def test_content_approval_audit_uses_authenticated_session_actor(client):
+    tc, conn, seed = client
+    round_id = seed.round(status="created")
+    draft_id = seed.draft(round_id, draft_status="draft_saved", fetch_status=None)
+    content_id = conn.execute(
+        "SELECT content_id FROM drafts WHERE id=?", (draft_id,)
+    ).fetchone()["content_id"]
+    conn.execute("UPDATE contents SET guard_outcome='pass' WHERE id=?", (content_id,))
+    conn.commit()
+
+    response = tc.post(
+        f"/api/contents/{content_id}/approve",
+        json={"reason": "actor attribution acceptance"},
+    )
+    assert response.status_code == 200, response.text
+
+    event = conn.execute(
+        "SELECT actor,reason FROM content_review_events "
+        "WHERE content_id=? AND event_type='approved' ORDER BY id DESC LIMIT 1",
+        (content_id,),
+    ).fetchone()
+    override = conn.execute(
+        "SELECT overridden_by FROM user_override "
+        "WHERE override_field='review_approve' "
+        "AND json_extract(original_value,'$.content_id')=? "
+        "ORDER BY rowid DESC LIMIT 1",
+        (content_id,),
+    ).fetchone()
+    assert event is not None and event["actor"].startswith("session:")
+    assert event["reason"] == "actor attribution acceptance"
+    assert override is not None and override["overridden_by"] == event["actor"]
+
+
+
+def test_content_reject_and_resubmit_audit_authenticated_session_actor(client):
+    tc, conn, seed = client
+    round_id = seed.round(status="awaiting_publish")
+    draft_id = seed.draft(round_id, platform="xhs", draft_status="draft_saved", fetch_status=None)
+    content_id = conn.execute(
+        "SELECT content_id FROM drafts WHERE id=?", (draft_id,)
+    ).fetchone()["content_id"]
+    conn.execute("UPDATE contents SET guard_outcome='pass' WHERE id=?", (content_id,))
+    conn.commit()
+
+    rejected = tc.post(
+        f"/api/contents/{content_id}/reject",
+        json={"reason": "actor rejection acceptance"},
+    )
+    assert rejected.status_code == 200, rejected.text
+    resubmitted = tc.post(
+        f"/api/contents/{content_id}/resubmit",
+        json={"reason": "actor resubmission acceptance"},
+    )
+    assert resubmitted.status_code == 200, resubmitted.text
+
+    events = conn.execute(
+        "SELECT event_type,actor,reason FROM content_review_events "
+        "WHERE content_id=? AND event_type IN ('rejected','resubmitted') ORDER BY id",
+        (content_id,),
+    ).fetchall()
+    assert [row["event_type"] for row in events] == ["rejected", "resubmitted"]
+    assert all(row["actor"].startswith("session:") for row in events)
+    assert {row["reason"] for row in events} == {
+        "actor rejection acceptance", "actor resubmission acceptance",
+    }
+    assert events[0]["actor"] == events[1]["actor"]
+
+    overrides = conn.execute(
+        "SELECT override_field,overridden_by FROM user_override "
+        "WHERE override_field IN ('review_reject','review_resubmit') "
+        "AND json_extract(original_value,'$.content_id')=? ORDER BY rowid",
+        (content_id,),
+    ).fetchall()
+    assert [row["override_field"] for row in overrides] == [
+        "review_reject", "review_resubmit",
+    ]
+    assert all(row["overridden_by"] == events[0]["actor"] for row in overrides)
+
+
+
+def test_orchestration_write_audit_uses_authenticated_session_actor(client):
+    tc, conn, _ = client
+    current = tc.get("/api/orchestration")
+    assert current.status_code == 200, current.text
+    updated = tc.put("/api/orchestration", json={"steps": current.json()["steps"]})
+    assert updated.status_code == 200, updated.text
+    row = conn.execute(
+        "SELECT updated_by FROM orchestration_settings WHERE id=1"
+    ).fetchone()
+    assert row is not None
+    assert row["updated_by"].startswith("session:")
+    assert row["updated_by"] != "web-ui"
+
+
+def test_master_plan_create_and_review_audit_authenticated_session_actor(client, monkeypatch):
+    tc, conn, _ = client
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    conn.execute("DELETE FROM business_diagnosis_reports")
+    conn.execute(
+        """INSERT INTO business_diagnosis_reports
+           (version_no,status,report_json,source_snapshot_json,source_fingerprint,
+            model_name,created_at,created_by,updated_at,confirmed_at,confirmed_by,change_note)
+           VALUES(1,'confirmed','{}','{}','actor-test-fingerprint','test-model',?,'test',?,?,'test','test')""",
+        (now, now, now),
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        "src.core.business_diagnosis.collect_business_context",
+        lambda *_: {"fingerprint": "actor-test-fingerprint", "context": {"business": "test"}},
+    )
+
+    async def no_child_generation(*_args, **_kwargs):
+        return {"status": "skipped", "items": []}
+
+    monkeypatch.setattr(
+        "src.core.master_plan_orchestrator.generate_subplan_drafts",
+        no_child_generation,
+    )
+    created = tc.post("/api/plans", json={
+        "topic_count_per_platform": 4,
+        "dimension_allocation": {"产品体验": 4},
+        "enabled_platforms": ["xhs"],
+        "content_format": "image_text",
+        "per_platform": {},
+        "cadence": {},
+        "change_note": "审计主体归因测试",
+    })
+    assert created.status_code == 200, created.text
+    version_id = created.json()["draft"]["id"]
+
+    reviewed = tc.post(f"/api/plans/{version_id}/review", json={"action": "approve"})
+    assert reviewed.status_code == 200, reviewed.text
+
+    events = conn.execute(
+        """SELECT event_type,actor FROM plan_change_audit
+           WHERE entity_type='master_plan' AND entity_id=?
+           ORDER BY id""",
+        (str(version_id),),
+    ).fetchall()
+    event_actors = {row["event_type"]: row["actor"] for row in events}
+    assert "draft_created" in event_actors
+    assert "version_approved" in event_actors
+    assert event_actors["draft_created"].startswith("session:")
+    assert event_actors["version_approved"] == event_actors["draft_created"]
+    assert event_actors["draft_created"] != "web-ui"
+    assert event_actors["version_approved"] != "user"
