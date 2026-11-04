@@ -641,6 +641,17 @@ def test_ops_pause_roundtrip_persists(client):
     ).fetchone()
     assert pause_actor is not None and pause_actor["updated_by"].startswith("session:")
     assert is_ops_paused(conn) is True
+
+    onboarding = tc.put(
+        "/api/onboarding/progress",
+        json={"step_key": "business_profile", "step_index": 2},
+    )
+    assert onboarding.status_code == 200, onboarding.text
+    onboarding_actor = conn.execute(
+        "SELECT updated_by FROM app_settings WHERE key='onboarding_progress'"
+    ).fetchone()
+    assert onboarding_actor is not None
+    assert onboarding_actor["updated_by"].startswith("session:")
     assert tc.get("/api/ops/pause").json()["paused"] is True
     assert tc.post("/api/ops/pause", json={"paused": False}).json()["paused"] is False
     assert is_ops_paused(conn) is False
