@@ -6,7 +6,9 @@ import logging
 import os
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
+
+from src.core import auth
 
 logger = logging.getLogger(__name__)
 
@@ -88,10 +90,10 @@ def register_business_profile_routes(app: FastAPI, get_runtime) -> None:
         return {"current": get_current(conn())}
 
     @app.put("/api/north-star")
-    def update_north_star(payload: dict):
+    def update_north_star(payload: dict, request: Request):
         from src.core.north_star_repository import create_version
         try:
-            return create_version(conn(), payload, actor="user")
+            return create_version(conn(), payload, actor=auth.audit_actor(request))
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
