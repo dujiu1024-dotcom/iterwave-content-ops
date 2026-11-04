@@ -4538,6 +4538,21 @@ def test_content_reject_and_resubmit_audit_authenticated_session_actor(client):
     assert all(row["overridden_by"] == events[0]["actor"] for row in overrides)
 
 
+
+def test_orchestration_write_audit_uses_authenticated_session_actor(client):
+    tc, conn, _ = client
+    current = tc.get("/api/orchestration")
+    assert current.status_code == 200, current.text
+    updated = tc.put("/api/orchestration", json={"steps": current.json()["steps"]})
+    assert updated.status_code == 200, updated.text
+    row = conn.execute(
+        "SELECT updated_by FROM orchestration_settings WHERE id=1"
+    ).fetchone()
+    assert row is not None
+    assert row["updated_by"].startswith("session:")
+    assert row["updated_by"] != "web-ui"
+
+
 def test_master_plan_create_and_review_audit_authenticated_session_actor(client, monkeypatch):
     tc, conn, _ = client
     now = datetime.now().astimezone().isoformat(timespec="seconds")
