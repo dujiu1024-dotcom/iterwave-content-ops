@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, ReviewQueueItem } from "../api";
 import { ALL_PLATFORMS, platformMeta, Platform } from "../platforms";
+import ClosedLoopReviewPanel from "../components/ClosedLoopReviewPanel";
 
 const PAGE_SIZE = 30;
 
@@ -177,6 +178,7 @@ export default function Review() {
 
   return (
     <div className="review-page">
+      <ClosedLoopReviewPanel />
       <div className="review-header">
         <div>
           <div className="review-eyebrow">CONTENT OPERATIONS</div>
