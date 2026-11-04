@@ -1482,9 +1482,36 @@ class Database:
                 "master_plan_north_star_reference_missing": {"master_plan_versions", "account_group_north_star_versions"},
                 "master_plan_north_star_attribution_invalid": {"master_plan_versions"},
             }
+            governance_data_check_columns = {
+                "master_plan_north_star_snapshot_invalid": {
+                    "master_plan_versions": {"north_star_snapshot_json"},
+                },
+                "master_plan_north_star_reference_missing": {
+                    "master_plan_versions": {"north_star_version_id"},
+                },
+                "master_plan_north_star_attribution_invalid": {
+                    "master_plan_versions": {
+                        "north_star_attribution_status", "north_star_version_id",
+                        "north_star_snapshot_json",
+                    },
+                },
+            }
             governance_data_violations = {}
             for check_name, sql in governance_data_checks.items():
-                if available_data_checks[check_name].issubset(existing):
+                if not available_data_checks[check_name].issubset(existing):
+                    continue
+                required_columns = governance_data_check_columns.get(check_name, {})
+                columns_available = True
+                for table_name, names in required_columns.items():
+                    table_columns = {
+                        str(row["name"]) for row in conn.execute(
+                            f'PRAGMA table_info("{table_name}")'
+                        ).fetchall()
+                    }
+                    if not names.issubset(table_columns):
+                        columns_available = False
+                        break
+                if columns_available:
                     governance_data_violations[check_name] = int(
                         conn.execute(sql).fetchone()[0]
                     )
