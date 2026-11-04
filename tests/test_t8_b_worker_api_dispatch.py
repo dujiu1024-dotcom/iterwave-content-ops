@@ -182,13 +182,17 @@ def test_round_run_api_worker_executes_real_round_executor(
 
     def build_tenant_context(tenant_id):
         assert tenant_id == "t8b-real-executor-tenant"
+        # Worker owns its connection; GlobalTaskWorker closes tenant contexts after execution.
+        # Reusing the pytest fixture connection would invalidate the test's post-run assertions.
+        from src.core.db import Database
+        worker_conn = Database(worker_cfg).connect()
         executor = RoundExecutor(
-            worker_cfg, conn, scoring=None, guard=PassingGuard(), adapters={},
-            sm_round=RoundStateMachine(conn, cfg=worker_cfg),
-            sm_draft=DraftStateMachine(conn, cfg=worker_cfg),
+            worker_cfg, worker_conn, scoring=None, guard=PassingGuard(), adapters={},
+            sm_round=RoundStateMachine(worker_conn, cfg=worker_cfg),
+            sm_draft=DraftStateMachine(worker_conn, cfg=worker_cfg),
         )
         return {
-            "cfg": worker_cfg, "conn": conn, "executor": executor,
+            "cfg": worker_cfg, "conn": worker_conn, "executor": executor,
             "scheduler": SimpleNamespace(shutdown=lambda: None),
             "notifier": None,
         }
