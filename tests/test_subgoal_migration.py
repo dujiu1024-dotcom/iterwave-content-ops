@@ -17,7 +17,7 @@ def test_subgoal_migration_creates_versioned_tables_and_append_only_evidence():
     migration = (
         Path(__file__).resolve().parents[1]
         / "migrations"
-        / "148_subgoal_tree_dependency_gates.sql"
+        / "149_subgoal_tree_dependency_gates.sql"
     )
     conn.executescript(migration.read_text(encoding="utf-8"))
 
