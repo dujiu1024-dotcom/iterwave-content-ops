@@ -94,7 +94,7 @@ def build_operating_feedback_router(get_runtime) -> APIRouter:
         rows = ctx["conn"].execute(
             """SELECT pv.verification_id,pv.draft_id,pv.content_id,pv.production_task_id,pv.production_line_id,
                       pv.platform,pv.platform_content_id,pv.content_url,pv.published_at,pv.verified_at,
-                      pv.content_snapshot_sha256,pv.evidence_source,pv.evidence_note,pv.closure_status,pv.closure_error,pv.created_at,
+                      pv.content_snapshot_sha256,pv.evidence_source,pv.evidence_note,pv.verified_by,pv.closure_status,pv.closure_error,pv.created_at,
                       o.event_id AS close_event_id,o.status AS close_event_status
                FROM content_publish_verifications pv
                LEFT JOIN production_line_close_outbox o ON o.verification_id=pv.verification_id
