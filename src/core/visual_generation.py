@@ -73,4 +73,5 @@ def revise_visual_background(
     target.write_bytes(raw)
     return {"status": "revised", "path": str(target), "model": model,
             "mime_type": out_mime, "width": width, "height": height,
-            "bytes": len(raw), "elapsed_ms": round((time.monotonic() - started) * 1000)}
+            "bytes": len(raw), "elapsed_ms": round((time.monotonic() - started) * 1000),
+            "final_prompt": prompt}
