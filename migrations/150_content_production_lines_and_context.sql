@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS production_context_snapshots (
     sub_plan_id TEXT REFERENCES sub_plans(id) ON DELETE RESTRICT,
     sub_plan_version_id INTEGER REFERENCES sub_plan_versions(id) ON DELETE RESTRICT,
     strategy_step_id TEXT,
+    sub_goal_id TEXT REFERENCES sub_goals(id) ON DELETE RESTRICT,
     latest_review_ref TEXT,
     context_status TEXT NOT NULL CHECK(context_status IN ('complete','waived','legacy_incomplete')),
     waiver_id TEXT REFERENCES production_context_waivers(id) ON DELETE RESTRICT,
