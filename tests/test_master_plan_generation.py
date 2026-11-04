@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from types import SimpleNamespace
 
@@ -52,8 +53,7 @@ def test_validate_master_plan_rejects_invalid_schema(plan):
         validate_master_plan(plan, SimpleNamespace())
 
 
-@pytest.mark.asyncio
-async def test_generation_rejects_missing_diagnosis_before_model_call(monkeypatch):
+def test_generation_rejects_missing_diagnosis_before_model_call(monkeypatch):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("CREATE TABLE business_diagnosis_reports (id INTEGER, version_no INTEGER, status TEXT)")
@@ -61,12 +61,11 @@ async def test_generation_rejects_missing_diagnosis_before_model_call(monkeypatc
         raise AssertionError("model must not be called without a confirmed diagnosis")
     monkeypatch.setattr("src.core.master_plan_generation._call_model", unexpected_model_call)
     with pytest.raises(LookupError, match="尚无经营诊断报告"):
-        await generate_master_plan_draft(conn, SimpleNamespace())
+        asyncio.run(generate_master_plan_draft(conn, SimpleNamespace()))
     conn.close()
 
 
-@pytest.mark.asyncio
-async def test_generation_rejects_unconfirmed_diagnosis_before_context_read(monkeypatch):
+def test_generation_rejects_unconfirmed_diagnosis_before_context_read(monkeypatch):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("CREATE TABLE business_diagnosis_reports (id INTEGER, version_no INTEGER, status TEXT)")
@@ -75,5 +74,53 @@ async def test_generation_rejects_unconfirmed_diagnosis_before_context_read(monk
         raise AssertionError("unconfirmed diagnosis must be rejected before context/model work")
     monkeypatch.setattr("src.core.business_diagnosis.collect_business_context", unexpected_context_read)
     with pytest.raises(LookupError, match="必须先确认报告"):
-        await generate_master_plan_draft(conn, SimpleNamespace())
+        asyncio.run(generate_master_plan_draft(conn, SimpleNamespace()))
+    conn.close()
+
+
+def test_generation_model_failure_does_not_create_a_draft(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("""CREATE TABLE business_diagnosis_reports (
+        id INTEGER, version_no INTEGER, status TEXT, source_fingerprint TEXT,
+        report_json TEXT, source_snapshot_json TEXT
+    )""")
+    conn.execute(
+        "INSERT INTO business_diagnosis_reports VALUES (1, 1, 'confirmed', 'fp', '{}', '{}')"
+    )
+    conn.execute("CREATE TABLE master_plan_versions (id INTEGER, status TEXT)")
+    monkeypatch.setattr(
+        "src.core.business_diagnosis.collect_business_context",
+        lambda *_: {"fingerprint": "fp", "context": {}},
+    )
+    monkeypatch.setattr(
+        "src.core.plan_version.PlanVersionManager.load_plan",
+        lambda *_: ({}, "", None, "derived"),
+    )
+    async def provider_failure(*args, **kwargs):
+        raise RuntimeError("provider unavailable")
+    monkeypatch.setattr("src.core.master_plan_generation._call_model", provider_failure)
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        asyncio.run(generate_master_plan_draft(conn, SimpleNamespace()))
+    assert conn.execute("SELECT COUNT(*) FROM master_plan_versions").fetchone()[0] == 0
+    conn.close()
+
+
+def test_generation_rejects_stale_source_before_model_call(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("""CREATE TABLE business_diagnosis_reports (
+        id INTEGER, version_no INTEGER, status TEXT, source_fingerprint TEXT
+    )""")
+    conn.execute("INSERT INTO business_diagnosis_reports VALUES (1, 1, 'confirmed', 'old')")
+    monkeypatch.setattr(
+        "src.core.business_diagnosis.collect_business_context",
+        lambda *_: {"fingerprint": "new"},
+    )
+    async def unexpected_model_call(*args, **kwargs):
+        raise AssertionError("stale diagnosis must be rejected before model invocation")
+    monkeypatch.setattr("src.core.master_plan_generation._call_model", unexpected_model_call)
+    with pytest.raises(LookupError, match="已过期"):
+        asyncio.run(generate_master_plan_draft(conn, SimpleNamespace()))
+    assert conn.execute("SELECT status FROM business_diagnosis_reports").fetchone()[0] == "stale"
     conn.close()
