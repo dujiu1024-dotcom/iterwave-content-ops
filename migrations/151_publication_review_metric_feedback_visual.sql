@@ -320,7 +320,7 @@ SELECT
     'legacy',m.draft_id,m.content_id,m.platform,metric.metric_key,metric.metric_value,
     metric.unit,'platform_readback','metrics',CAST(m.id AS TEXT),m.fetched_at,m.fetched_at,
     NULL,NULL,'UTC',CASE WHEN m.fetch_status='success' THEN 'succeeded' ELSE 'partial' END,
-    NULL,COALESCE(m.created_at,CURRENT_TIMESTAMP)
+    NULL,CURRENT_TIMESTAMP
 FROM metrics m
 JOIN (
     SELECT 'views' AS metric_key,'count' AS unit UNION ALL
