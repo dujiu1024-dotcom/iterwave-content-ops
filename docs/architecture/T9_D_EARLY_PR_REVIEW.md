@@ -66,7 +66,7 @@
 1. `ITERWAVE_DESIGN_BASELINE.md`：本仓库唯一业务设计和验收规范入口。
 2. Issue #7：记录原始总控约束、整改范围和执行状态；与基线冲突时必须先评审更新，不得由局部 PR 私自改规则。
 3. `PLAN_VERSION_DATA_CONTRACT.md`、`unified-plan-management.md` 等领域文档：只细化数据/API/回滚契约，不得另立业务流程。
-4. PR #1 的 `ITERWAVE_TARGET_OPERATING_MODEL.md`：来源草案；本基线合并后应标注“已被 ITERWAVE_DESIGN_BASELINE.md 取代”。
+4. PR #1 的 `ITERWAVE_TARGET_OPERATING_MODEL.md`：已由 PR #35 分支保留为历史来源文件，并在文首标记“已被 ITERWAVE_DESIGN_BASELINE.md 取代”；原始详细场景仍可追溯，但不再构成第二份规范入口。
 5. PR #2–#5 的设计文档：模块实现契约，不是同级产品基线。
 
 ## 6. 阻断项与执行要求
