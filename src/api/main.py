@@ -6131,13 +6131,13 @@ def _register_routes(app: FastAPI) -> None:
         return orch.view(_g()["conn"])
 
     @app.put("/api/orchestration")
-    def put_orchestration(req: OrchestrationRequest):
+    def put_orchestration(req: OrchestrationRequest, request: Request):
         from src.core import orchestration as orch
         custom_errors = _custom_skill_reference_errors(_g()["conn"], req.steps)
         if custom_errors:
             raise HTTPException(422, "；".join(custom_errors))
         try:
-            orch.save_steps(_g()["conn"], req.steps)
+            orch.save_steps(_g()["conn"], req.steps, author=auth.audit_actor(request))
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         return orch.view(_g()["conn"])
@@ -6151,9 +6151,9 @@ def _register_routes(app: FastAPI) -> None:
         return {"valid": not errors, "errors": errors}
 
     @app.post("/api/orchestration/reset")
-    def reset_orchestration():
+    def reset_orchestration(request: Request):
         from src.core import orchestration as orch
-        orch.save_steps(_g()["conn"], orch.default_steps(), author="web-ui:reset")
+        orch.save_steps(_g()["conn"], orch.default_steps(), author=auth.audit_actor(request))
         return orch.view(_g()["conn"])
 
     @app.get("/api/orchestration/runs")
@@ -8831,9 +8831,9 @@ def _register_routes(app: FastAPI) -> None:
         return pause_state(_g()["conn"]) or {"paused": False, "updated_at": None, "updated_by": None}
 
     @app.post("/api/ops/pause")
-    def set_ops_pause(req: dict):
+    def set_ops_pause(req: dict, request: Request):
         paused = bool((req or {}).get("paused"))
-        return set_ops_paused(_g()["conn"], paused, by="web-ui")
+        return set_ops_paused(_g()["conn"], paused, by=auth.audit_actor(request))
 
     # --- 正式运营设置向导进度（按账号组存 app_settings，不依赖浏览器存储）---
     @app.get("/api/onboarding/progress")
@@ -8842,13 +8842,13 @@ def _register_routes(app: FastAPI) -> None:
         return get_onboarding_progress(_g()["conn"])
 
     @app.put("/api/onboarding/progress")
-    def put_onboarding_progress_api(req: dict):
+    def put_onboarding_progress_api(req: dict, request: Request):
         from src.core.onboarding_progress import set_onboarding_progress, validate_onboarding_progress
         try:
             step_key, step_index = validate_onboarding_progress(req)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
-        return set_onboarding_progress(_g()["conn"], step_key, step_index, by="web-ui", cfg=_g()["cfg"])
+        return set_onboarding_progress(_g()["conn"], step_key, step_index, by=auth.audit_actor(request), cfg=_g()["cfg"])
 
     # --- 通知通道自检（不落 notifications 表）---
     @app.post("/api/notify/test")
