@@ -1256,3 +1256,74 @@ def test_fail_round_open_respects_outer_transaction_boundary():
         "SELECT status FROM round_open_idempotency WHERE idempotency_key='key-a'"
     ).fetchone()[0] == "reserved"
     conn.close()
+
+
+def test_ai_generation_guard_rejects_existing_draft_without_overwriting_it():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    active = _active_master(store)
+    existing = store.create_master_draft(
+        _plan(7), based_on_version_id=active["id"], author="user",
+        change_note="用户正在编辑的草稿",
+    )
+    before_count = conn.execute("SELECT COUNT(*) FROM master_plan_versions").fetchone()[0]
+
+    with pytest.raises(PlanVersionError, match="已有待审核母计划草稿"):
+        store.create_master_draft(
+            _plan(9), based_on_version_id=active["id"], author="ai", source="system",
+            enforce_generation_guard=True, expected_active_version_id=active["id"],
+        )
+
+    assert conn.execute("SELECT COUNT(*) FROM master_plan_versions").fetchone()[0] == before_count
+    saved = conn.execute(
+        "SELECT status,plan_snapshot,change_note FROM master_plan_versions WHERE id=?",
+        (existing["id"],),
+    ).fetchone()
+    assert saved["status"] == "draft"
+    assert json.loads(saved["plan_snapshot"])["topic_count_per_platform"] == 7
+    assert saved["change_note"] == "用户正在编辑的草稿"
+    conn.close()
+
+
+def test_ai_generation_guard_rejects_a_changed_master_plan_base():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    first = _active_master(store)
+    second = store.create_master_draft(_plan(6), based_on_version_id=first["id"])
+    store.activate_master_version(second["id"], reviewer="reviewer-2")
+
+    before_count = conn.execute("SELECT COUNT(*) FROM master_plan_versions").fetchone()[0]
+    with pytest.raises(PlanVersionError, match="母计划基准版本已变化"):
+        store.create_master_draft(
+            _plan(9), based_on_version_id=first["id"], author="ai", source="system",
+            enforce_generation_guard=True, expected_active_version_id=first["id"],
+        )
+
+    assert conn.execute("SELECT COUNT(*) FROM master_plan_versions").fetchone()[0] == before_count
+    assert conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective'"
+    ).fetchone()["id"] == second["id"]
+    conn.close()
+
+
+def test_ai_generation_guard_creates_only_a_draft_when_base_is_unchanged():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    active = _active_master(store)
+
+    draft = store.create_master_draft(
+        _plan(8), based_on_version_id=active["id"], author="ai", source="system",
+        enforce_generation_guard=True, expected_active_version_id=active["id"],
+    )
+
+    assert draft["status"] == "draft"
+    assert draft["based_on_version_id"] == active["id"]
+    assert conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective'"
+    ).fetchone()["id"] == active["id"]
+    assert conn.execute(
+        "SELECT active_version_id FROM plan_settings WHERE id=1"
+    ).fetchone()[0] == active["id"]
+    conn.close()
+
+
