@@ -305,7 +305,7 @@ def test_original_asset_permission_and_privacy_gate_production_usage(diagnosis_c
             "duplicate_status": "unique",
         },
     })
-    assert reviewed.status_code == 200
+    assert reviewed.status_code == 200, reviewed.text
     allowed = client.post(f"/api/production-tasks/{task_id}/assets", json=[asset_id])
     assert allowed.status_code == 201
     assert allowed.json()["assets"][0]["permission_snapshot"] == "allowed"
