@@ -43,7 +43,7 @@ def _stage_for_round(conn, round_id: int) -> int:
     master = conn.execute(
         """INSERT INTO master_plan_versions(
             version_no,plan_signature,plan_snapshot,status,source,created_at,created_by
-        ) VALUES(1,?,?, 'effective','system',?,'t8-b-test')""",
+        ) VALUES(1,?,?, 'draft','system',?,'t8-b-test')""",
         ("t8-b-master", json.dumps({"fixture": "t8-b"}), now),
     ).lastrowid
     subplan_id = "t8-b-subplan"
@@ -56,7 +56,7 @@ def _stage_for_round(conn, round_id: int) -> int:
     version = conn.execute(
         """INSERT INTO sub_plan_versions(
             sub_plan_id,version_no,master_plan_version_id,snapshot_json,status,created_at,created_by
-        ) VALUES(?,1,?,?,'effective',?,'t8-b-test')""",
+        ) VALUES(?,1,?,?,'draft',?,'t8-b-test')""",
         (subplan_id, master, json.dumps({"fixture": "t8-b"}), now),
     ).lastrowid
     conn.execute(
