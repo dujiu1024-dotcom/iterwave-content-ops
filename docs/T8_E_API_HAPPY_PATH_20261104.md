@@ -4,14 +4,14 @@
 
 补齐 T8-A 缺失的正向 API 主路径：经营资料与图文素材 → 经营分析确认 → 母计划审核生效 → 子计划审核生效 → 生产线审核激活 → 生产入口创建生产任务。
 
-本任务仅增加验收测试、专用 CI workflow 和证据报告。不通过 SQL 写入被测业务状态，不调用真实模型或外部平台。
+本任务仅增加验收测试、专用 CI workflow 和证据报告，不调用真实模型或外部平台。原始素材注册 API 对有效 JSON 当前返回 422（见 Issue #31），因此仅用 SQL 建立素材初始 fixture；素材审核、关联生产任务和授权/隐私快照均通过 API 完成。该缺口未解决前，T8-E 不得关闭。
 
 ## 自动化命令
 
     python -m pytest -vv tests/test_t8_diagnosis_api_acceptance.py tests/test_t8_full_api_happy_path.py
     python -m compileall -q src tests
 
-测试使用 conftest 的临时 SQLite 数据库与 FastAPI TestClient。经营分析模型使用可控替身；母计划审核时的 AI 子计划拆解由可控替身模拟不可用，随后经正式子计划 API 创建并审核，避免真实模型/网络依赖。
+测试使用 conftest 的临时 SQLite 数据库与 FastAPI TestClient。经营分析模型使用可控替身；母计划审核时的 AI 子计划拆解由可控替身模拟不可用，随后经正式子计划 API 创建并审核，避免真实模型/网络依赖。原始素材初始行暂作 fixture，不伪称已覆盖注册 API。
 
 ## 正向链路覆盖矩阵
 
@@ -34,8 +34,8 @@
 
 ## 验收边界
 
-- 所有被测业务状态变更均由公开 API 触发。
-- 不直接 SQL 写入母计划、子计划、生产线、轮次或生产任务；仅使用临时数据库 fixture。
+- 母计划、子计划、生产线、轮次、生产任务和素材审核/使用状态变更均由公开 API 触发；原始素材初始记录仅作为 fixture。
+- 不直接 SQL 写入母计划、子计划、生产线、轮次或生产任务；SQL 仅建立临时数据库 fixture。
 - 模型调用可控，测试可重复执行。
 - CI 结果以分支最新提交对应的 T8-E API happy path 检查为准。
 - 若产品 API 缺陷导致测试失败，拆分至对应实现任务；验收 PR 不混入业务重构。
