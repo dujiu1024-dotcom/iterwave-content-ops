@@ -317,9 +317,10 @@ def test_manual_retry_starts_a_new_cycle_and_clears_stale_error(conn, seed):
     )
     old = conn.execute("SELECT collection_cycle_id FROM review_tasks WHERE task_id=?", (task_id,)).fetchone()[0]
 
-    retried = retry_review_task(conn, task_id)
+    retried = retry_review_task(conn, task_id, actor="session:retry-operator")
 
     assert retried["status"] == "pending"
+    assert retried["last_retried_by"] == "session:retry-operator"
     assert retried["attempt_count"] == 0
     assert retried["collection_cycle_id"] != old
     assert retried["last_error"] is None
