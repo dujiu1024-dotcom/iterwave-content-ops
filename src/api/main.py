@@ -5856,6 +5856,12 @@ def _register_routes(app: FastAPI) -> None:
         ).fetchone()
         if latest_diagnosis is None or latest_diagnosis["status"] != "confirmed":
             raise HTTPException(409, "请先完成并确认 AI 经营分析报告，再制定母计划")
+        north_star = conn.execute(
+            """SELECT id FROM account_group_north_star_versions
+               WHERE status='effective' ORDER BY version_no DESC LIMIT 1"""
+        ).fetchone()
+        if north_star is None:
+            raise HTTPException(409, "请先在计划管理中建立并确认账号组北极星")
         current_sources = collect_business_context(conn, _g()["cfg"])
         if latest_diagnosis["source_fingerprint"] != current_sources["fingerprint"]:
             conn.execute("UPDATE business_diagnosis_reports SET status='stale' WHERE id=?",
@@ -10221,6 +10227,8 @@ def _register_routes(app: FastAPI) -> None:
     app.include_router(build_business_diagnosis_router(_g))
     from src.api.subplans import register_subplan_routes
     register_subplan_routes(app, _g)
+    from src.api.subgoals import register_subgoal_routes
+    register_subgoal_routes(app, _g)
     from src.api.production_lines import register_production_line_routes
     register_production_line_routes(app, _g)
     from src.api.business_profile import register_business_profile_routes
