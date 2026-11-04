@@ -236,7 +236,11 @@ def _enqueue_round_task(*, tenant_id: str, round_id: int, topic_count=None,
         task_type="round_run",
         tenant_id=tenant_id,
         aggregate_id=str(round_id),
-        payload={**parameters, "execution_snapshot": snapshot},
+        payload={
+            **parameters,
+            "initiating_actor": "system:automatic-round-scheduler",
+            "execution_snapshot": snapshot,
+        },
     )
 
 
