@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useApp } from "../AppContext";
 import { navigate } from "../nav";
-import { api, Goal, MasterPlan, PlanResponse, PlanSignatureHistory, SpiralAnalysis, SubPlanStageRecord } from "../api";
+import { api, BusinessDiagnosisReport, Goal, MasterPlan, MasterPlanGenerationMetadata, MasterPlanVersion, PlanResponse, PlanSignatureHistory, SpiralAnalysis, SubPlanStageRecord } from "../api";
 import { ALL_PLATFORMS, Platform, platformMeta } from "../platforms";
 import EmptyHint from "../components/EmptyHint";
 import ProductionLinePanel from "../components/ProductionLinePanel";
@@ -29,6 +29,18 @@ function snapshot(item: PlanSignatureHistory): MasterPlan | null {
   try { return (typeof item.plan_snapshot === "string" ? JSON.parse(item.plan_snapshot) : item.plan_snapshot) as MasterPlan; }
   catch { return null; }
 }
+function parseGenerationMetadata(item: MasterPlanVersion | undefined): MasterPlanGenerationMetadata | null {
+  const note = item?.change_note ?? "";
+  const prefix = "AI 母计划草稿：";
+  if (!note.startsWith(prefix)) return null;
+  try { return JSON.parse(note.slice(prefix.length)) as MasterPlanGenerationMetadata; }
+  catch { return null; }
+}
+function parseMasterPlan(value: string | MasterPlan | undefined): MasterPlan | null {
+  if (!value) return null;
+  try { return (typeof value === "string" ? JSON.parse(value) : value) as MasterPlan; }
+  catch { return null; }
+}
 
 export default function PlanCenter() {
   const { showToast } = useApp();
@@ -48,6 +60,10 @@ export default function PlanCenter() {
   const [selectedChildId, setSelectedChildId] = useState("");
   const [masterVersionId, setMasterVersionId] = useState<number | null>(null);
   const [masterDraftVersionId, setMasterDraftVersionId] = useState<number | null>(null);
+  const [diagnosis, setDiagnosis] = useState<BusinessDiagnosisReport | null>(null);
+  const [aiGeneration, setAiGeneration] = useState<MasterPlanGenerationMetadata | null>(null);
+  const [aiGenerating, setAiGenerating] = useState(false);
+  const [aiGenerationError, setAiGenerationError] = useState("");
   const [childForm, setChildForm] = useState(false);
   const [childPlatform, setChildPlatform] = useState<Platform>("xhs");
   const [childName, setChildName] = useState("");
@@ -77,13 +93,18 @@ export default function PlanCenter() {
   const load = async (preferredChildId?: string) => {
     setLoading(true);
     try {
-      const [planResult, goalResult, versionResult, subplanResult] = await Promise.all([
+      const [planResult, goalResult, versionResult, subplanResult, diagnosisResult] = await Promise.all([
         api.plans(), api.goals(), api.planVersions(), api.subplans({ page: 1, pageSize: 100 }),
+        api.businessDiagnosis(),
       ]);
       const effectiveMaster = versionResult.items.find((item) => item.status === "effective");
       const pendingMaster = versionResult.items.find((item) => item.status === "draft");
+      const pendingPlan = parseMasterPlan(pendingMaster?.plan_snapshot);
       setMasterDraftVersionId(pendingMaster?.id ?? null);
-      setData(planResult); setGoals(goalResult); setDraft({ ...structuredClone(planResult.plan), content_format: "image_text" });
+      setDiagnosis(diagnosisResult.report);
+      setAiGeneration(parseGenerationMetadata(pendingMaster) ?? null);
+      setData(planResult); setGoals(goalResult);
+      setDraft({ ...structuredClone(pendingPlan ?? planResult.plan), content_format: "image_text" });
       setMasterVersionId(effectiveMaster?.id ?? null);
       const details = await Promise.all(subplanResult.items.map((item) => api.subplan(item.id)));
       const mapped: Child[] = details.map((detail) => {
@@ -136,6 +157,28 @@ export default function PlanCenter() {
   useEffect(() => { void load(); }, []);
 
   const changeDraft = (value: MasterPlan) => { setDraft(value); setDirty(true); setSaved(false); };
+  const generateAIMasterPlan = async () => {
+    if (dirty && !window.confirm("当前母计划有未保存修改。继续生成会在成功后切换到新的 AI 草稿，是否继续？")) return;
+    setAiGenerating(true);
+    setAiGenerationError("");
+    try {
+      const result = await api.generateAIMasterPlanDraft();
+      const generatedPlan = parseMasterPlan(result.draft.plan_snapshot);
+      if (!generatedPlan) throw new Error("服务端返回的母计划草稿无法解析，未覆盖当前编辑内容");
+      setDraft({ ...generatedPlan, content_format: "image_text" });
+      setMasterDraftVersionId(result.draft.id);
+      setAiGeneration(result.generation);
+      setDirty(false);
+      setSaved(true);
+      showToast(`AI 已生成母计划草稿 v${result.draft.version_no}，尚未生效`, "success");
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setAiGenerationError(message);
+      showToast("AI 母计划生成失败：" + message, "error");
+    } finally {
+      setAiGenerating(false);
+    }
+  };
   const saveDraft = async () => {
     if (!draft) return;
     try {
@@ -350,6 +393,38 @@ export default function PlanCenter() {
     {tab === "assets" && <OriginalAssetInventoryPanel />}
 
     {!loading && !error && tab === "master" && data && draft && <>
+      <div className="panel">
+        <div className="panel-head">
+          <div><div className="panel-title">AI 制定母计划</div><div className="panel-sub">基于最新已确认且未过期的经营诊断生成不可直接生效的母计划草稿。</div></div>
+          <span className={"tag " + (diagnosis?.status === "confirmed" && diagnosis.source_is_current ? "green" : "orange")}>
+            {diagnosis?.status === "confirmed" && diagnosis.source_is_current ? "诊断已确认 · 依据有效" : diagnosis?.status === "stale" || (diagnosis?.status === "confirmed" && !diagnosis.source_is_current) ? "诊断已过期" : diagnosis ? "诊断待确认" : "尚无诊断报告"}
+          </span>
+        </div>
+        {diagnosis ? <div className="grid two">
+          <div className="plan-summary-card"><div className="tiny">当前经营诊断</div><b>报告 v{diagnosis.version_no}</b><div className="tiny">状态：{diagnosis.status === "confirmed" ? "已确认" : diagnosis.status === "stale" ? "已过期" : diagnosis.status === "superseded" ? "已被新版本替代" : "待确认"}</div><div className="tiny">确认时间：{diagnosis.confirmed_at ?? "尚未确认"}</div><div className="tiny">诊断模型：{diagnosis.model_name || "—"}</div></div>
+          <div className="plan-summary-card"><div className="tiny">依据完整性</div><b>{diagnosis.source_is_current ? "当前业务资料与诊断一致" : "业务资料已变化或报告已过期"}</b><div className="tiny">关联资料与素材：{diagnosis.source_snapshot?.source_references?.length ?? 0} 项</div><div className="tiny">依据摘要：{JSON.stringify(diagnosis.source_snapshot?.inventory_summary ?? {})}</div></div>
+        </div> : <div className="note">尚无经营诊断报告。请先完成 AI 经营分析并确认报告，再生成母计划。</div>}
+        {diagnosis && diagnosis.status !== "confirmed" && <div className="note" style={{ marginTop: 10, color: "var(--orange)" }}>最新诊断报告尚未确认。请返回 AI 经营分析页面完成确认，生成入口会在确认后开放。</div>}
+        {diagnosis?.status === "confirmed" && !diagnosis.source_is_current && <div className="note" style={{ marginTop: 10, color: "var(--orange)" }}>诊断报告所依据的业务资料或素材已变化。请重新分析并确认最新报告，不能使用过期依据生成母计划。</div>}
+        <div className="plan-form-actions">
+          <button className="btn" onClick={() => navigate("business-diagnosis")}>查看经营分析</button>
+          <button className="btn primary" onClick={() => void generateAIMasterPlan()} disabled={aiGenerating || diagnosis?.status !== "confirmed" || !diagnosis.source_is_current}>
+            {aiGenerating ? "正在生成母计划…" : "AI 生成母计划草稿"}
+          </button>
+        </div>
+        {aiGenerationError && <div className="note" role="alert" style={{ marginTop: 10, color: "var(--red)" }}>生成失败：{aiGenerationError}。当前编辑内容和已生效计划未被覆盖，可修复依据或配置后重试。</div>}
+        {aiGeneration && <div className="plan-version-detail" style={{ marginTop: 14 }}>
+          <div className="panel-head"><b>本次 AI 生成依据与待确认事项</b><span className="tag gray">仅草稿 · 待人工审核</span></div>
+          <div className="tiny">关联经营诊断：报告 v{aiGeneration.diagnosis_version_no}（记录 ID {aiGeneration.diagnosis_report_id}） · 模型：{aiGeneration.model} · 生成时间：{aiGeneration.generated_at}</div>
+          <div style={{ marginTop: 10 }}><b>制定摘要</b><p>{aiGeneration.summary}</p></div>
+          <div className="grid two">
+            <div><b>业务资料与素材依据</b><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.resource_basis, null, 2)}</pre></div>
+            <div><b>风险提示</b><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.risks, null, 2)}</pre></div>
+            <div><b>前提与假设</b><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.assumptions, null, 2)}</pre></div>
+            <div><b>待用户确认</b><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.pending_confirmations, null, 2)}</pre></div>
+          </div>
+        </div>}
+      </div>
       <div className="panel">
         <div className="panel-head"><div><div className="panel-title">当前主计划</div><div className="panel-sub">现有 API 只维护一份当前母计划；历史签名作为版本记录，不代表多个独立主计划。</div></div><span className={"tag " + (data.source === "plan_settings" ? "green" : "gray")}>{data.source === "plan_settings" ? "服务器已保存" : "由最近轮次推导"}</span></div>
         <div className="grid two"><div className="plan-summary-card"><div className="tiny">当前版本签名</div><div className="plan-signature">{data.signature}</div><div className="tiny">最后更新：{data.updated_at ?? "尚未保存"}</div></div><div className="plan-summary-card"><div className="tiny">目标与范围</div><b>{goals.find((g) => g.id === data.plan.cadence?.goal_id)?.goal_text ?? "尚未关联目标"}</b><div className="tiny">启用平台 {platforms.length} 个 · 每平台默认 {data.plan.topic_count_per_platform} 篇/轮</div></div></div>
