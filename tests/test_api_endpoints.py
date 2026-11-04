@@ -4492,6 +4492,52 @@ def test_content_approval_audit_uses_authenticated_session_actor(client):
     assert override is not None and override["overridden_by"] == event["actor"]
 
 
+
+def test_content_reject_and_resubmit_audit_authenticated_session_actor(client):
+    tc, conn, seed = client
+    round_id = seed.round(status="awaiting_publish")
+    draft_id = seed.draft(round_id, platform="xhs", draft_status="draft_saved", fetch_status=None)
+    content_id = conn.execute(
+        "SELECT content_id FROM drafts WHERE id=?", (draft_id,)
+    ).fetchone()["content_id"]
+    conn.execute("UPDATE contents SET guard_outcome='pass' WHERE id=?", (content_id,))
+    conn.commit()
+
+    rejected = tc.post(
+        f"/api/contents/{content_id}/reject",
+        json={"reason": "actor rejection acceptance"},
+    )
+    assert rejected.status_code == 200, rejected.text
+    resubmitted = tc.post(
+        f"/api/contents/{content_id}/resubmit",
+        json={"reason": "actor resubmission acceptance"},
+    )
+    assert resubmitted.status_code == 200, resubmitted.text
+
+    events = conn.execute(
+        "SELECT event_type,actor,reason FROM content_review_events "
+        "WHERE content_id=? AND event_type IN ('rejected','resubmitted') ORDER BY id",
+        (content_id,),
+    ).fetchall()
+    assert [row["event_type"] for row in events] == ["rejected", "resubmitted"]
+    assert all(row["actor"].startswith("session:") for row in events)
+    assert {row["reason"] for row in events} == {
+        "actor rejection acceptance", "actor resubmission acceptance",
+    }
+    assert events[0]["actor"] == events[1]["actor"]
+
+    overrides = conn.execute(
+        "SELECT override_field,overridden_by FROM user_override "
+        "WHERE override_field IN ('review_reject','review_resubmit') "
+        "AND json_extract(original_value,'$.content_id')=? ORDER BY rowid",
+        (content_id,),
+    ).fetchall()
+    assert [row["override_field"] for row in overrides] == [
+        "review_reject", "review_resubmit",
+    ]
+    assert all(row["overridden_by"] == events[0]["actor"] for row in overrides)
+
+
 def test_master_plan_create_and_review_audit_authenticated_session_actor(client, monkeypatch):
     tc, conn, _ = client
     now = datetime.now().astimezone().isoformat(timespec="seconds")
