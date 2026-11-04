@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import EmptyHint from "../components/EmptyHint";
+import OperatingFeedbackPane from "../components/OperatingFeedbackPane";
 import { api, MetricsResponse, MetricRow, Platform, SpiralAnalysis, Draft, WeeklyReport, ActivationStatus, GoalSummary, BusinessAnalyticsSummary } from "../api";
 import { displayMetricLabel, displaySourceLabel, displayPlatformLabel } from "../displayLabels";
 
@@ -203,6 +204,8 @@ export default function Analytics() {
           <button className="btn" onClick={() => { loadMetrics(platformFilter, detailView === "details" ? metricsPage : undefined); loadGaps(); }}>↻ 刷新数据</button>
         </div>
       </div>
+
+      <OperatingFeedbackPane />
 
       {detailView === "overview" && <>
       {/* 总览只放经营指标：生产量、互动、粉丝增长、目标完成率。增长漏斗类（TTV、激活率、首次发布率等）不在此展示。 */}
