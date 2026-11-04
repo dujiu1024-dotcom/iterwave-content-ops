@@ -157,6 +157,7 @@ export default function PlanCenter() {
   useEffect(() => { void load(); }, []);
 
   const changeDraft = (value: MasterPlan) => { setDraft(value); setDirty(true); setSaved(false); };
+  // Do not mutate the editor or saved-draft pointer until the server confirms persistence.
   const generateAIMasterPlan = async () => {
     if (dirty && !window.confirm("当前母计划有未保存修改。继续生成会在成功后切换到新的 AI 草稿，是否继续？")) return;
     setAiGenerating(true);
