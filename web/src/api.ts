@@ -416,7 +416,7 @@ export interface PublishVerificationItem {
 export interface ReviewTaskItem {
   task_id: string; verification_id: string; tenant_id: string; draft_id: string; content_id: string;
   platform: Platform; status: "scheduled" | "pending" | "running" | "partial" | "failed" | "completed" | "cancelled";
-  scheduled_at: string; attempt_count: number; last_attempt_at: string | null;
+  scheduled_at: string; attempt_count: number; max_attempts: number; last_attempt_at: string | null;
   last_success_at: string | null; last_window_start: string | null; last_window_end: string | null;
   last_error?: string | null;
   conclusion: Record<string, unknown>; created_at: string; updated_at: string;
