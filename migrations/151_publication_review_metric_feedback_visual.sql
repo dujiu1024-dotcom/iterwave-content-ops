@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS metric_facts (
     fact_id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
     draft_id TEXT,
-    content_id TEXT NOT NULL,
+    content_id TEXT,
     platform TEXT NOT NULL CHECK(platform IN ('xhs','douyin','kuaishou','wechat_channels')),
     metric_key TEXT NOT NULL,
     value REAL NOT NULL,
@@ -173,7 +173,7 @@ INSERT OR IGNORE INTO metric_facts(
 )
 SELECT lower(hex(randomblob(16))),ms.tenant_id,ms.draft_id,ms.content_id,ms.platform,
        metric.metric_key,metric.metric_value,'count',ms.source,'metric_snapshot',ms.id,
-       ms.measured_at,ms.recorded_at,'UTC','succeeded',ms.correction_of,ms.created_at
+       ms.measured_at,ms.recorded_at,'UTC','succeeded',ms.correction_of,COALESCE(ms.created_at,CURRENT_TIMESTAMP)
 FROM metric_snapshots ms
 JOIN (
     SELECT 'views' AS metric_key UNION ALL SELECT 'likes' UNION ALL SELECT 'collects'
@@ -231,7 +231,7 @@ BEGIN
     )
     SELECT lower(hex(randomblob(16))),NEW.tenant_id,NEW.draft_id,NEW.content_id,NEW.platform,
            metric.metric_key,metric.metric_value,'count',NEW.source,'metric_snapshot',NEW.id,
-           NEW.measured_at,NEW.recorded_at,'UTC','succeeded',NEW.correction_of,NEW.created_at
+           NEW.measured_at,NEW.recorded_at,'UTC','succeeded',NEW.correction_of,COALESCE(NEW.created_at,CURRENT_TIMESTAMP)
     FROM (
         SELECT 'views' AS metric_key,NEW.views AS metric_value UNION ALL
         SELECT 'likes',NEW.likes UNION ALL SELECT 'collects',NEW.collects
