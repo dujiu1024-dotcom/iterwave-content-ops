@@ -411,3 +411,8 @@ def test_publish_verification_api_records_authenticated_session_actor(monkeypatc
     ).fetchone()
     assert row["verified_by"] == "session:api-publisher"
     assert task["created_by"] == "session:api-publisher"
+    event = conn.execute(
+        "SELECT payload_json FROM production_line_close_outbox WHERE verification_id=?",
+        (response.json()["verification"]["verification_id"],),
+    ).fetchone()
+    assert json.loads(event["payload_json"])["verified_by"] == "session:api-publisher"
