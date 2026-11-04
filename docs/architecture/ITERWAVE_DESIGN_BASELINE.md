@@ -86,5 +86,5 @@
 1. 本文件是本仓库后续业务设计和验收的唯一规范入口。
 2. 总控 Issue #7 记录业务闭环、已确认的设计约束和整改任务状态；与本文件冲突时，必须先更新并评审本文件和 #7，不得由局部 PR 自行改变规则。
 3. `docs/architecture/PLAN_VERSION_DATA_CONTRACT.md`、`docs/unified-plan-management.md` 等属于具体领域数据/实现契约，只能细化本基线，不能另行定义冲突的业务闭环。
-4. PR #1 的 `ITERWAVE_TARGET_OPERATING_MODEL.md` 是本基线的来源草案；本文件合并后，该草案应标注为被本文件取代，避免两份同级规范并存。
+4. PR #1 的 `ITERWAVE_TARGET_OPERATING_MODEL.md` 已保留在仓库中作为历史来源草案，并在文首明确标记为已被本基线取代；仅用于追溯原始需求和实施场景，不再作为独立或同级业务规范。
 5. PR #2–#5 的任务设计文档是模块实现/接口契约，不是高于本基线的产品规范。
