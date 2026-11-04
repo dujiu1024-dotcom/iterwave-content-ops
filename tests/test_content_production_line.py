@@ -304,13 +304,14 @@ def test_missing_confirmed_diagnosis_blocks_task_unless_explicitly_waived(conn):
 
 
 def test_migration_maps_legacy_tasks_without_rewriting_them(conn):
-    """Re-apply migration 148 over a pre-new-production-line-migration baseline and verify a lossless legacy map."""
+    """Re-apply migration 150 over a pre-production-line baseline and verify a lossless legacy map."""
     ids = _setup(conn)
     round_id = _create_round(
         conn, key="round-legacy-map", master_id=ids["master_id"],
         sub_id=ids["sub_id"], sub_version_id=ids["sub_version_id"],
         stage_id=ids["stage_id"], line_version_id=ids["line_version_id"],
     )
+    conn.commit()
     legacy = sqlite3.connect(":memory:")
     legacy.row_factory = sqlite3.Row
     try:
