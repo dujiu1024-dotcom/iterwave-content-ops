@@ -174,7 +174,12 @@ def test_original_asset_permission_and_privacy_gate_production_usage(diagnosis_c
         (asset_id,),
     )
     conn.commit()
-    conn.execute("INSERT INTO production_tasks(id) VALUES('t8-a-asset-task')")
+    # The production-task table enforces provenance at the database boundary.
+    # This acceptance case only needs an existing task row; bind it to a fixture
+    # production-line version so the asset API can exercise its own permission gate.
+    conn.execute(
+        "INSERT INTO production_tasks(id,production_line_version_id) VALUES('t8-a-asset-task',1)"
+    )
     conn.commit()
 
     # Pending/unknown permission and privacy must never enter a task snapshot.
