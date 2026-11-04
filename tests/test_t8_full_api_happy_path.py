@@ -61,6 +61,8 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
         content=json.dumps({
             "asset_type": "product_image", "title": "T8-E 已授权图文素材",
             "description": "完整 API 主路径验收", "source_kind": "manual",
+            "source_media_asset_id": None, "source_content_asset_id": None,
+            "source_kb_id": None, "source_uri": None, "source_version": "fixture-v1",
             "metadata": {"fixture": "t8-e", "media_type": "image"},
         }, ensure_ascii=False),
         headers={"content-type": "application/json"},
