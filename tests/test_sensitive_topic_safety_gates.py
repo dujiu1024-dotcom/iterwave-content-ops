@@ -2,11 +2,20 @@ from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from src.api import main as api_main
 from src.core import hot_topic_service
 from src.core.hot_topics import _sensitive_topic_hits
 from src.core.guard.ultimate_goal_checker import CheckResult, UltimateGoalChecker
+
+
+def _post_request(path: str) -> Request:
+    return Request({
+        "type": "http", "method": "POST", "path": path,
+        "headers": [], "query_string": b"", "server": ("testserver", 80),
+        "client": ("testclient", 50000), "scheme": "http",
+    })
 
 
 @pytest.fixture()
@@ -105,7 +114,7 @@ def test_round_run_endpoint_enqueues_global_task(client, seed, monkeypatch, tmp_
         if getattr(route, "path", None) == "/api/rounds/{round_id}/run_status"
     )
 
-    started = asyncio.run(run_route.endpoint(round_id, api_main.RunRoundRequest()))
+    started = asyncio.run(run_route.endpoint(round_id, api_main.RunRoundRequest(), _post_request(f"/api/rounds/{round_id}/run")))
     assert started["started"] is True
     assert started["queued"] is True
     assert started["task_id"]
