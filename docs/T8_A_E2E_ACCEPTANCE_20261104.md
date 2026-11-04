@@ -37,12 +37,22 @@ python -m pytest -vv \
 | 生产任务排队、worker 执行和租户上下文 | `test_integration_reliability_subplan.py` | 已有跨模块覆盖 |
 | 旧轮次保留原计划版本快照 | `test_integration_reliability_subplan.py` | 已有跨模块覆盖 |
 | 依赖步骤/进入条件未满足时阻止开轮 | `test_integration_reliability_subplan.py` | 已有负向覆盖 |
-| 诊断未确认/诊断过期时禁止生成母计划 | 尚需新增 API 级场景 | 未覆盖，不能判通过 |
-| AI 母计划生成失败不改变当前有效版本 | 尚需新增故障注入场景 | 未覆盖，不能判通过 |
+| 诊断报告确认与来源过期门禁 | `test_t8_diagnosis_api_acceptance.py`：确认报告、业务资料变更后拒绝再次确认并标记 stale | 已覆盖诊断生命周期；母计划生成端到端门禁仍待补 |
+| AI 经营分析失败不覆盖既有确认报告 | `test_t8_diagnosis_api_acceptance.py`：模型故障注入，断言旧报告状态/版本不变 | 已覆盖诊断失败原子性；AI 母计划生成失败原子性仍待补 |
 | 素材授权/隐私不满足时拒绝生产使用 | 尚需新增生产任务 API 级场景 | 未覆盖，不能判通过 |
 | 内容生成、审核、发布/效果记录完整串联 | 尚需新增真实 API 流程场景 | 未覆盖，不能判通过 |
 | 策略效果反馈及后续调整建议 | 尚需新增效果闭环场景 | 未覆盖，不能判通过 |
 | 并发修改返回明确版本冲突 | 需确认覆盖范围并补充 API 并发测试 | 待核实 |
+
+## 本轮新增验收
+
+新增 `tests/test_t8_diagnosis_api_acceptance.py`，通过真实 FastAPI TestClient 和临时 SQLite 数据库验证：
+
+- 经营分析报告从 draft 到 confirmed 的 API 状态迁移。
+- 业务资料发生变化后，原报告不能继续确认，并被标记为 stale。
+- AI 分析模型失败返回 502，既有确认报告不被 superseded，也不产生半成品新版本。
+
+以上用例通过独立 T8-A CI job 执行；CI 结果以本 PR 最新提交对应的 Actions 检查为准。
 
 ## 缺陷处理规则
 
