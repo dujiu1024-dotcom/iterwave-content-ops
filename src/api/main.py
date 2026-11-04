@@ -5849,6 +5849,11 @@ def _register_routes(app: FastAPI) -> None:
         alloc_total = sum(req.dimension_allocation.values())
         if alloc_total > req.topic_count_per_platform:
             raise HTTPException(400, f"维度分配合计 {alloc_total} 条，超过每平台选题数 {req.topic_count_per_platform}")
+        north_star = _g()["conn"].execute(
+            "SELECT id FROM account_group_north_star_versions WHERE status='effective' ORDER BY version_no DESC LIMIT 1"
+        ).fetchone()
+        if north_star is None:
+            raise HTTPException(409, "请先在计划管理中建立并确认账号组北极星，再创建母计划")
         active = _g()["conn"].execute(
             "SELECT id FROM master_plan_versions WHERE status='effective'"
         ).fetchone()
