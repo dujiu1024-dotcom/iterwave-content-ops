@@ -94,7 +94,7 @@ def test_diagnosis_model_failure_does_not_supersede_existing_report(diagnosis_cl
     client, conn = diagnosis_client
     monkeypatch.setattr(
         business_diagnosis, "generate_diagnosis",
-        lambda _conn, _cfg: _fake_diagnosis(_conn, _cfg),
+        _async_fake_diagnosis,
     )
     first = client.post("/api/business-diagnosis/analyze")
     assert first.status_code == 201
@@ -138,7 +138,7 @@ def test_master_plan_api_blocks_unconfirmed_and_stale_diagnosis(diagnosis_client
 
     monkeypatch.setattr(
         business_diagnosis, "generate_diagnosis",
-        lambda _conn, _cfg: _fake_diagnosis(_conn, _cfg),
+        _async_fake_diagnosis,
     )
     analyzed = client.post("/api/business-diagnosis/analyze")
     report_id = analyzed.json()["report"]["id"]
