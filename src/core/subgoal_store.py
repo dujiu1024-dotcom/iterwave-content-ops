@@ -268,30 +268,33 @@ class SubGoalStore:
         self.conn.execute("BEGIN IMMEDIATE")
         try:
             old_order = int(goal["goal_order"])
-            new_order = fields["goal_order"]
+            new_order = int(fields["goal_order"])
+            if new_order < 1:
+                raise SubGoalError("目标顺序必须为正整数")
             if new_order != old_order:
-                if new_order < old_order:
+                ordered_ids = [
+                    str(row["id"]) for row in self.conn.execute(
+                        "SELECT id FROM sub_goals WHERE sub_plan_version_id=? ORDER BY goal_order,id",
+                        (version["id"],),
+                    ).fetchall()
+                ]
+                if goal_id not in ordered_ids:
+                    raise SubGoalError("子目标不属于指定子计划版本")
+                ordered_ids.remove(goal_id)
+                target_order = min(new_order, len(ordered_ids) + 1)
+                ordered_ids.insert(target_order - 1, goal_id)
+                # Move every row out of the live positive range first. Updating only
+                # the intervening rows can collide with SQLite's immediate UNIQUE check.
+                self.conn.execute(
+                    "UPDATE sub_goals SET goal_order=goal_order+1000000 WHERE sub_plan_version_id=?",
+                    (version["id"],),
+                )
+                for position, ordered_goal_id in enumerate(ordered_ids, start=1):
                     self.conn.execute(
-                        """UPDATE sub_goals SET goal_order=goal_order+1000000
-                           WHERE sub_plan_version_id=? AND goal_order>=? AND goal_order<?""",
-                        (version["id"], new_order, old_order)
+                        "UPDATE sub_goals SET goal_order=? WHERE id=?",
+                        (position, ordered_goal_id),
                     )
-                    self.conn.execute(
-                        """UPDATE sub_goals SET goal_order=goal_order-999999
-                           WHERE sub_plan_version_id=? AND goal_order>=1000000+? AND goal_order<1000000+?""",
-                        (version["id"], new_order, old_order)
-                    )
-                else:
-                    self.conn.execute(
-                        """UPDATE sub_goals SET goal_order=goal_order+1000000
-                           WHERE sub_plan_version_id=? AND goal_order>? AND goal_order<=?""",
-                        (version["id"], old_order, new_order)
-                    )
-                    self.conn.execute(
-                        """UPDATE sub_goals SET goal_order=goal_order-1000001
-                           WHERE sub_plan_version_id=? AND goal_order>1000000+? AND goal_order<=1000000+?""",
-                        (version["id"], old_order, new_order)
-                    )
+                fields["goal_order"] = target_order
             self.conn.execute(
                 """UPDATE sub_goals SET title=?,description=?,acceptance_criteria=?,goal_type=?,priority=?,
                    goal_order=?,target_count=?,stage_id=?,parent_goal_id=?,requires_production=?,
