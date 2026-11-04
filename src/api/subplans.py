@@ -11,11 +11,14 @@ import os
 import re
 import httpx
 import sqlite3
+from datetime import datetime
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 
-from src.core.plan_version_store import PlanVersionError, PlanVersionStore
+from src.core.plan_version_store import (
+    PlanVersionError, PlanVersionStore, normalize_stage_date,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -531,6 +534,9 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
             "不得生成循环依赖。前置阶段的实际结果将供后续阶段引用。"
             "每个子计划至少 1 个阶段；阶段顺序按数组顺序；target_count 是用户最终确认发布篇数，"
             "不是生成草稿数。不得输出审核状态或要求自动生效。"
+            "start_date 和 end_date 只能使用 YYYY-MM-DD 格式（如 2026-11-03），"
+            "不得带时间、中文、周次或斜杠；无法确定时可省略或置为 null。今天是 "
+            + datetime.now().strftime("%Y-%m-%d") + "。"
             "\n母计划："
             + json.dumps(master_snapshot, ensure_ascii=False)
             + "\n目标平台：" + json.dumps(platforms, ensure_ascii=False)
@@ -649,8 +655,9 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
                     "stage_order": index, "stage_key": str(stage.get("stage_key") or ("ai-stage-" + uuid.uuid4().hex)),
                     "title": str(stage["title"]).strip(),
                     "direction": str(stage.get("direction") or ""),
-                    "target_count": target, "start_date": stage.get("start_date"),
-                    "end_date": stage.get("end_date"),
+                    "target_count": target,
+                    "start_date": normalize_stage_date(stage.get("start_date")),
+                    "end_date": normalize_stage_date(stage.get("end_date")),
                     "completion_condition": str(stage.get("completion_condition") or stage.get("completion_criteria") or ""),
                     "completion_criteria": str(stage.get("completion_criteria") or stage.get("completion_condition") or ""),
                     "strategy_goal": str(stage.get("strategy_goal") or ""),

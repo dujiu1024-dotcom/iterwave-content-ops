@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 from .plan_version import PlanVersionManager
@@ -17,6 +18,34 @@ class PlanVersionError(ValueError):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def normalize_stage_date(value: Any) -> Optional[str]:
+    """把 AI/外部输入的阶段日期归一为 YYYY-MM-DD；无法识别时返回 None。
+
+    阶段起止日期是可选字段，模型可能返回 "2026/11/03"、"2026年11月3日"、
+    "2026-11-03T00:00:00"、"20261103" 等写法，不应因此拒绝整份子计划。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    text = str(value).strip()
+    if not text:
+        return None
+    text = re.split(r"[T\s]", text, maxsplit=1)[0]
+    text = (
+        text.replace("年", "-").replace("月", "-").replace("日", "")
+        .replace("/", "-").replace(".", "-").strip("-")
+    )
+    if re.fullmatch(r"\d{8}", text):
+        text = f"{text[:4]}-{text[4:6]}-{text[6:]}"
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        return None
 
 
 class PlanVersionStore:

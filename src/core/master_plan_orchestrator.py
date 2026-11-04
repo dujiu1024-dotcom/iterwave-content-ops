@@ -5,11 +5,12 @@ import json
 import logging
 import os
 import uuid
+from datetime import datetime
 from typing import Any
 
 import httpx
 
-from src.core.plan_version_store import PlanVersionStore
+from src.core.plan_version_store import PlanVersionStore, normalize_stage_date
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,9 @@ async def generate_subplan_drafts(conn, cfg, master_version_id: int) -> dict[str
         "必须完整覆盖每个平台，且每个平台仅一项；每个子计划至少一个阶段。"
         "阶段必须按执行顺序排列，stage_key 唯一，dependencies 只能引用同一子计划中更早的阶段，禁止循环依赖。"
         "target_count 表示用户最终确认发布篇数。子计划只能作为待审核草稿，不得自动生效。"
+        "start_date 和 end_date 只能使用 YYYY-MM-DD 格式（如 2026-11-03），"
+        "不得带时间、中文、周次或斜杠；无法确定时可省略或置为 null。今天是 "
+        + datetime.now().strftime("%Y-%m-%d") + "。"
         "\n母计划：" + json.dumps(snapshot, ensure_ascii=False)
         + "\n平台：" + json.dumps(platforms_to_generate, ensure_ascii=False)
     )
@@ -147,6 +151,13 @@ async def generate_subplan_drafts(conn, cfg, master_version_id: int) -> dict[str
             stages = item.get("stages")
             if not isinstance(sub_snapshot, dict) or not isinstance(stages, list) or not stages:
                 raise ValueError("AI 子计划快照或阶段列表无效")
+            stages = [
+                {**stage,
+                 "start_date": normalize_stage_date(stage.get("start_date")),
+                 "end_date": normalize_stage_date(stage.get("end_date"))}
+                if isinstance(stage, dict) else stage
+                for stage in stages
+            ]
             sub_snapshot.update({"title": title, "platform": platform})
             sub_id = "sub_" + uuid.uuid4().hex
             identity = store.create_subplan(

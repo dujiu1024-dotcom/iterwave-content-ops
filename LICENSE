@@ -1,0 +1,45 @@
+IterWave — 非商用个人研究许可证
+================================
+
+Copyright (c) 2025-2026 龍奕 (ghost-eye)
+
+保留所有权利。
+
+本项目代码仅供个人学习、研究和非商业用途使用。未经版权持有人书面同意，禁止用于任何商业目的，包括但不限于：
+  - 直接或间接的销售、订阅、授权使用
+  - 作为 SaaS 服务的一部分对外提供
+  - 嵌入或集成到商业产品中分发
+  - 以营利为目的的二次开发和分发
+
+对于个人研究用途，授予以下有限权利：
+  - 免费使用、复制、修改源代码
+  - 在个人设备上运行和测试
+  - 引用少量代码片段用于技术学习和交流
+
+本项目包含从 Easel (Apache License 2.0) 复制的第三方代码，位于 src/vendor/easel/ 目录下。该目录内的文件遵循其原始许可证条款（见 src/vendor/easel/LICENSE）。
+
+本软件按"现状"提供，不附带任何明示或暗示的担保。在任何情况下，版权持有人均不对因使用本软件或其执行而产生的任何索赔、损害或其他责任承担责任。
+
+---
+
+IterWave — Non-Commercial Personal Research License
+====================================================
+
+Copyright (c) 2025-2026 Long Yi (ghost-eye)
+
+All Rights Reserved.
+
+This project code is provided for personal learning, research, and non-commercial use only. Any commercial use is strictly prohibited without prior written consent from the copyright holder, including but not limited to:
+  - Direct or indirect sale, subscription, or licensed use
+  - Offering as part of a SaaS service to third parties
+  - Embedding or integrating into commercial products for distribution
+  - For-profit secondary development and distribution
+
+For personal research purposes, the following limited rights are granted:
+  - Free use, copying, and modification of source code
+  - Running and testing on personal devices
+  - Citing small code snippets for technical learning and discussion
+
+This project contains third-party code copied from Easel (Apache License 2.0), located under src/vendor/easel/. Files in that directory are governed by their original license terms (see src/vendor/easel/LICENSE).
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS THEREOF.
