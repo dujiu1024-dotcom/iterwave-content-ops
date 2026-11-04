@@ -734,6 +734,65 @@ class SchedulerEngine:
                         round_id=row["round_id"],
                     )
 
+        # Task 4：将既有平台读回结果同步到独立复盘任务；沿用 metrics 表作为事实源。
+        # NULL 指标保持 NULL；失败/重试状态只记录错误，不伪造零值快照。
+        review_task = self.conn.execute(
+            "SELECT id,status,attempts,collection_result_json FROM review_tasks WHERE draft_id=?",
+            (draft_id,),
+        ).fetchone()
+        if review_task and review_task["status"] not in ("completed", "cancelled"):
+            review_status = (
+                "completed" if snap.fetch_status == FetchStatus.SUCCESS
+                else "partial" if fetch_ok
+                else "collecting" if retry_scheduled
+                else "failed"
+            )
+            try:
+                prior_result = json.loads(review_task["collection_result_json"] or "{}")
+                if not isinstance(prior_result, dict):
+                    prior_result = {}
+            except (TypeError, ValueError):
+                prior_result = {}
+            if fetch_ok:
+                latest_metric = self.conn.execute(
+                    "SELECT id,fetched_at FROM metrics WHERE draft_id=? AND platform=? "
+                    "ORDER BY fetched_at DESC,id DESC LIMIT 1",
+                    (draft_id, platform.value),
+                ).fetchone()
+                prior_result["latest_platform_readback"] = {
+                    "metrics_row_id": latest_metric["id"] if latest_metric else None,
+                    "measured_at": latest_metric["fetched_at"] if latest_metric else None,
+                    "fetch_status": snap.fetch_status.value,
+                    "views": snap.views, "likes": snap.likes, "collects": snap.collects,
+                    "comments": snap.comments, "shares": snap.shares,
+                    "new_followers": snap.new_followers,
+                }
+            prior_result["last_attempt"] = {
+                "attempt": attempt, "fetch_status": snap.fetch_status.value,
+                "error": None if fetch_ok else snap.error_msg,
+                "retry_scheduled": retry_scheduled,
+            }
+            now_text = storage_now().isoformat(timespec="seconds")
+            with self.conn:
+                self.conn.execute(
+                    """UPDATE review_tasks SET status=?,collection_source='platform_readback',
+                       collection_result_json=?,attempts=attempts+1,last_error=?,updated_at=?,
+                       completed_at=CASE WHEN ?='completed' THEN ? ELSE NULL END
+                       WHERE id=? AND status NOT IN ('completed','cancelled')""",
+                    (review_status,json.dumps(prior_result,ensure_ascii=False,sort_keys=True),
+                     None if fetch_ok else str(snap.error_msg or "平台指标采集失败")[:1000],
+                     now_text,review_status,now_text,review_task["id"]),
+                )
+                self.conn.execute(
+                    """INSERT INTO review_task_events
+                       (review_task_id,event_type,from_status,to_status,detail_json,created_at,actor)
+                       VALUES(?,'platform_readback',?,?,?,?, 'scheduler')""",
+                    (review_task["id"],review_task["status"],review_status,
+                     json.dumps({"attempt":attempt,"fetch_status":snap.fetch_status.value,
+                                 "retry_scheduled":retry_scheduled},ensure_ascii=False),
+                     now_text),
+                )
+
         logger.info("[APS] data_fetch draft=%s → %s", draft_id, snap.fetch_status.value)
         return {
             "final_status": "success" if fetch_ok else "failed",
