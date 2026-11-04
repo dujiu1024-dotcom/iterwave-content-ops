@@ -1303,7 +1303,7 @@ class Database:
                 },
                 "production_task_asset_usages": {
                     "id", "production_task_id", "original_asset_id", "asset_version_no",
-                    "usage_role", "permission_snapshot", "created_at",
+                    "usage_role", "permission_snapshot", "privacy_snapshot", "created_at",
                 },
                 "plan_change_audit": {
                     "id", "entity_type", "entity_id", "event_type", "from_version_id",
