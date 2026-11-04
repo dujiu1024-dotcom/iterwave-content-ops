@@ -247,11 +247,17 @@ def create_publish_verification(
         "content_snapshot_sha256": snapshot_sha256,
         "idempotency_key": idem,
     }
+    event_id = uuid.uuid4().hex
     conn.execute(
         """INSERT INTO production_line_close_outbox
            (event_id,verification_id,event_type,payload_json,status,created_at,updated_at)
            VALUES(?,?, 'content.publish_verified.v1', ?, 'pending', ?, ?)""",
-        (uuid.uuid4().hex, verification_id, _json(event_payload), now, now),
+        (event_id, verification_id, _json(event_payload), now, now),
+    )
+    # The line state is in the same tenant database, so apply the verified
+    # publication transition atomically while retaining the outbox for downstream consumers.
+    _mark_production_line_published(
+        conn, event_payload, verification_id=verification_id, now=now
     )
     due_at = _normalize_datetime(scheduled_review_at, "UTC", "复盘计划时间") if scheduled_review_at else (
         published_dt + timedelta(hours=24)
