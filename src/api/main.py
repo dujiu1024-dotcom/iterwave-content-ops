@@ -4870,7 +4870,7 @@ def _register_routes(app: FastAPI) -> None:
         return result
 
     @app.post("/api/rounds/{round_id}/run", status_code=202)
-    async def run_round(round_id: int, req: RunRoundRequest):
+    async def run_round(round_id: int, req: RunRoundRequest, request: Request):
         """将生产轮次写入跨账号组全局 FIFO 队列；切换前台账号组不会影响任务。"""
         if _task_queue is None:
             raise HTTPException(503, "全局任务队列尚未初始化")
@@ -4964,6 +4964,7 @@ def _register_routes(app: FastAPI) -> None:
                 aggregate_id=str(round_id),
                 payload={
                     "round_id": round_id,
+                    "initiating_actor": auth.audit_actor(request),
                     "topic_count": effective_topic_count,
                     "platforms": effective_platforms,
                     "save_drafts": req.save_drafts,
@@ -5057,7 +5058,7 @@ def _register_routes(app: FastAPI) -> None:
         }
 
     @app.post("/api/rounds/{round_id}/save_pending", status_code=202)
-    async def save_pending_drafts(round_id: int):
+    async def save_pending_drafts(round_id: int, request: Request):
         """将待存平台草稿的操作加入全局 FIFO 队列；不重新生成内容，也不自动发布。"""
         if _task_queue is None:
             raise HTTPException(503, "全局任务队列尚未初始化")
@@ -5072,7 +5073,11 @@ def _register_routes(app: FastAPI) -> None:
                 task_type="round_run",
                 tenant_id=tenant_id,
                 aggregate_id=f"{round_id}:save_pending_drafts",
-                payload={"operation": "save_pending_drafts", "round_id": round_id},
+                payload={
+                    "operation": "save_pending_drafts",
+                    "round_id": round_id,
+                    "initiating_actor": auth.audit_actor(request),
+                },
             )
         except (ValueError, sqlite3.Error) as exc:
             logger.exception("待存草稿任务入队失败 tenant=%s round=%s", tenant_id, round_id)
