@@ -5,9 +5,18 @@ import sqlite3
 
 import pytest
 from fastapi import HTTPException
+from starlette.requests import Request
 
 import src.api.main as api_main
 from src.core.task_queue import GlobalTaskQueue
+
+
+def _post_request(path: str) -> Request:
+    return Request({
+        "type": "http", "method": "POST", "path": path,
+        "headers": [], "query_string": b"", "server": ("testserver", 80),
+        "client": ("testclient", 50000), "scheme": "http",
+    })
 
 
 def test_save_pending_drafts_queues_after_running_round_instead_of_deduping(tmp_path, monkeypatch):
@@ -32,7 +41,7 @@ def test_save_pending_drafts_queues_after_running_round_instead_of_deduping(tmp_
         if getattr(route, "path", None) == "/api/rounds/{round_id}/save_pending"
         and "POST" in (getattr(route, "methods", None) or set())
     )
-    response = asyncio.run(route.endpoint(7))
+    response = asyncio.run(route.endpoint(7, _post_request("/api/rounds/7/save_pending")))
 
     pending = queue.find_latest(
         tenant_id="tenant-a", task_type="round_run",
@@ -83,7 +92,7 @@ def test_run_rejects_round_not_in_created_state(tmp_path, monkeypatch):
         and "POST" in (getattr(route, "methods", None) or set())
     )
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(route.endpoint(7, api_main.RunRoundRequest()))
+        asyncio.run(route.endpoint(7, api_main.RunRoundRequest(), _post_request("/api/rounds/7/run")))
     assert exc.value.status_code == 409
     assert "awaiting_publish" in str(exc.value.detail)
     assert queue.find_latest(tenant_id="tenant-a", task_type="round_run", aggregate_id="7") is None
