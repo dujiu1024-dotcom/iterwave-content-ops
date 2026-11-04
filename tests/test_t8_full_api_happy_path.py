@@ -1,6 +1,8 @@
 """T8-E API acceptance: confirmed diagnosis to an attributed production task."""
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -54,11 +56,15 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
     })
     assert profile.status_code == 200, profile.text
 
-    asset = client.post("/api/original-assets", json={
-        "asset_type": "product_image", "title": "T8-E 已授权图文素材",
-        "description": "完整 API 主路径验收", "source_kind": "manual",
-        "metadata": {"fixture": "t8-e", "media_type": "image"},
-    })
+    asset = client.post(
+        "/api/original-assets",
+        content=json.dumps({
+            "asset_type": "product_image", "title": "T8-E 已授权图文素材",
+            "description": "完整 API 主路径验收", "source_kind": "manual",
+            "metadata": {"fixture": "t8-e", "media_type": "image"},
+        }, ensure_ascii=False),
+        headers={"content-type": "application/json"},
+    )
     assert asset.status_code == 201, asset.text
     asset_id = asset.json()["id"]
     reviewed_asset = client.post(f"/api/original-assets/{asset_id}/review", json={
