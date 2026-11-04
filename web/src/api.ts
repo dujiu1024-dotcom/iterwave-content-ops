@@ -1908,6 +1908,12 @@ export const api = {
 
   confirmBusinessAiProposal: (proposal: Record<string, unknown>) => fetchJson<Record<string, unknown>>("/api/business-profile/ai-proposals/confirm", { method: "POST", body: JSON.stringify({ proposal }) }),
   businessProfile: () => fetchJson<BusinessProfile>("/api/business-profile"),
+  northStar: () => fetchJson<{ current: { id:number; version_no:number; snapshot:Record<string,string>; change_reason:string; created_at:string; created_by:string } | null }>("/api/north-star"),
+  saveNorthStar: (data: Record<string,string>) => fetchJson<{ id:number; version_no:number; snapshot:Record<string,string> }>("/api/north-star", { method:"PUT", body:JSON.stringify(data) }),
+  northStarVersions: () => fetchJson<{ items:Array<{id:number;version_no:number;status:string;change_reason:string;created_at:string;created_by:string}> }>("/api/north-star/versions"),
+  northStarVersion: (versionId:number) => fetchJson<{id:number;version_no:number;snapshot:Record<string,string>;change_reason:string;created_by:string;created_at:string}>(`/api/north-star/versions/${versionId}`),
+  resourceBaseline: () => fetchJson<{ resources:Array<{category:string;title:string;source_type:string;source_id:string;status:string;updated_at:string|null}>; gaps:Array<Record<string,unknown>>; summary:Record<string,number> }>("/api/resource-baseline"),
+  masterPlanResourceBaseline: (versionId:number) => fetchJson<{snapshot:Record<string,unknown>;captured_at:string;captured_by:string}>(`/api/master-plans/${versionId}/resource-baseline`),
   saveBusinessProfile: (data: Partial<BusinessProfile> & { change_note?: string }) =>
     fetchJson<BusinessProfile>("/api/business-profile", { method: "PUT", body: JSON.stringify(data) }),
   businessItems: (entityType?: BusinessCatalogItem["entity_type"]) =>
