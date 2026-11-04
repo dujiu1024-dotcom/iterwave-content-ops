@@ -4285,7 +4285,7 @@ def test_ai_master_plan_generation_api_preserves_existing_user_draft(client, mon
     assert conn.in_transaction is False
 
 
-def test_ai_master_plan_generation_api_serializes_two_independent_connections(client_cfg, conn, seed, test_auth, monkeypatch):
+def test_ai_master_plan_generation_api_serializes_two_independent_connections(cfg, conn, seed, test_auth, monkeypatch):
     """Two API requests may call the model concurrently, but only one may persist a draft."""
     from concurrent.futures import ThreadPoolExecutor
     from contextvars import ContextVar
@@ -4297,7 +4297,6 @@ def test_ai_master_plan_generation_api_serializes_two_independent_connections(cl
     from src.core.plan_version import PlanVersionManager
     from src.core.state_machine import DraftStateMachine, RoundStateMachine
 
-    cfg = client_cfg
     _seed_confirmed_master_plan_diagnosis(conn)
     monkeypatch.setattr(
         "src.core.business_diagnosis.collect_business_context",
