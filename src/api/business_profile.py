@@ -82,6 +82,45 @@ def register_business_profile_routes(app: FastAPI, get_runtime) -> None:
             raise HTTPException(404, "该计划没有可用的业务资料快照")
         return row
 
+    @app.get("/api/north-star")
+    def read_north_star():
+        from src.core.north_star_repository import get_current
+        return {"current": get_current(conn())}
+
+    @app.put("/api/north-star")
+    def update_north_star(payload: dict):
+        from src.core.north_star_repository import create_version
+        try:
+            return create_version(conn(), payload, actor="user")
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/north-star/versions")
+    def read_north_star_versions(limit: int = Query(50, ge=1, le=200)):
+        from src.core.north_star_repository import list_versions
+        return {"items": list_versions(conn(), limit)}
+
+    @app.get("/api/north-star/versions/{version_id}")
+    def read_north_star_version(version_id: int):
+        from src.core.north_star_repository import get_version
+        row = get_version(conn(), version_id)
+        if row is None:
+            raise HTTPException(404, "北极星版本不存在")
+        return row
+
+    @app.get("/api/resource-baseline")
+    def read_resource_baseline():
+        from src.core.resource_baseline_repository import build_resource_baseline
+        return build_resource_baseline(conn())
+
+    @app.get("/api/master-plans/{version_id}/resource-baseline")
+    def read_plan_resource_baseline(version_id: int):
+        from src.core.resource_baseline_repository import get_plan_resource_baseline
+        row = get_plan_resource_baseline(conn(), version_id)
+        if row is None:
+            raise HTTPException(404, "该母计划没有已固化的资源基准")
+        return row
+
     @app.get("/api/business-profile/analysis")
     def analyze_profile():
         from src.core.business_profile_repository import get_snapshot
@@ -97,11 +136,15 @@ def register_business_profile_routes(app: FastAPI, get_runtime) -> None:
             if not str(profile.get(field) or "").strip():
                 missing.append({"field": field, "label": label, "status": "missing"})
         types = {item["entity_type"] for item in snapshot["items"]}
-        if not types.intersection({"product", "service"}):
-            missing.append({"field": "offerings", "label": "至少一项产品或服务", "status": "missing"})
+        # Product/service records are optional for personal-IP and service-only businesses.
+        # Require an offering only when the declared business model explicitly says so.
+        model = str(profile.get("business_model") or "").lower()
+        product_required = any(token in model for token in ("实体产品", "商品销售", "电商", "零售"))
+        if product_required and not types.intersection({"product", "service"}):
+            missing.append({"field": "offerings", "label": "当前经营模式需要产品或服务资料", "status": "missing"})
         if "audience" not in types:
             missing.append({"field": "audience", "label": "目标客户资料", "status": "missing"})
-        total_checks = len(required) + 2
+        total_checks = len(required) + (2 if product_required else 1)
         return {
             "missing": missing,
             "completeness": round((total_checks - len(missing)) / total_checks * 100),
