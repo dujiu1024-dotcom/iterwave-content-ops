@@ -144,7 +144,7 @@ class GlobalTaskWorker:
         context = self.build_tenant_context(task.tenant_id)
         from src.core import login_manager
         from src.core.notify import bind_context_notifier
-        from src.core.task_context import bind_config
+        from src.core.task_context import bind_config, bind_task_identity
 
         data_dir = Path(context["cfg"].resolve_path(context["cfg"].paths.data_dir))
         try:
@@ -161,6 +161,12 @@ class GlobalTaskWorker:
                 login_manager.tenant_login_dir(data_dir),
                 bind_context_notifier(context.get("notifier")),
                 bind_config(context["cfg"]),
+                bind_task_identity(
+                    initiating_actor=task.payload.get("initiating_actor"),
+                    executing_actor="service:global-task-worker",
+                    tenant_id=task.tenant_id,
+                    task_id=task.task_id,
+                ),
             ):
                 if task.task_type == "round_run":
                     from src.core.task_progress import bind_task_progress
