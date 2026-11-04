@@ -42,10 +42,10 @@ def test_business_diagnosis_collects_t4_business_profile_and_catalog(conn, cfg):
     conn.execute(
         """INSERT INTO metric_facts(
             fact_id,tenant_id,draft_id,content_id,platform,metric_key,value,unit,source,
-            source_record_type,source_record_id,measured_at,recorded_at,collection_status
+            source_record_type,source_record_id,measured_at,recorded_at,collection_status,created_at
         ) VALUES('fact-business-diagnosis','legacy','draft-1','content-1','xhs','views',0,
                  'count','platform_readback','review_collection_run','run-1',
-                 '2026-11-04T10:00:00+00:00','2026-11-04T10:00:00+00:00','succeeded')"""
+                 '2026-11-04T10:00:00+00:00','2026-11-04T10:00:00+00:00','succeeded',CURRENT_TIMESTAMP)"""
     )
     conn.execute(
         """INSERT INTO business_gaps(
