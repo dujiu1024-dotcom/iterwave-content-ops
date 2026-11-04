@@ -49,6 +49,60 @@ def register_production_line_routes(app: FastAPI, get_runtime) -> None:
             raise HTTPException(422, "生产线状态无效")
         return {"items": store().list_lines(status=status)}
 
+    @app.get("/api/content-production-lines")
+    def list_content_production_lines(status: str | None = Query(None), limit: int = Query(50, ge=1, le=200)):
+        from src.core.content_production_line_store import ContentProductionLineStore
+        conn = get_runtime()["conn"]
+        if not ContentProductionLineStore.available(conn):
+            raise HTTPException(503, "单内容生产线迁移尚未完成")
+        try:
+            return {"items": ContentProductionLineStore(conn).list_lines(status=status, limit=limit)}
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/api/content-production-lines/{line_id}")
+    def get_content_production_line(line_id: str):
+        from src.core.content_production_line_store import ContentProductionLineStore, ContentProductionLineError
+        conn = get_runtime()["conn"]
+        try:
+            return ContentProductionLineStore(conn).get_line(line_id)
+        except ContentProductionLineError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.post("/api/production-context/waivers", status_code=201)
+    def create_production_context_waiver(req: dict):
+        from src.core.content_production_line_store import ContentProductionLineStore, ContentProductionLineError
+        conn = get_runtime()["conn"]
+        try:
+            waiver = ContentProductionLineStore(conn).record_waiver(
+                round_id=int(req.get("round_id")),
+                platform=str(req.get("platform") or ""),
+                waived_items=req.get("waived_items") or [],
+                reason=str(req.get("reason") or ""),
+                actor="operator",
+                evidence=req.get("evidence") if isinstance(req.get("evidence"), dict) else {},
+            )
+            return {"waiver": waiver}
+        except (ContentProductionLineError, TypeError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/content-production-lines/{line_id}/events")
+    def record_content_production_line_event(line_id: str, req: dict):
+        from src.core.content_production_line_store import ContentProductionLineStore, ContentProductionLineError
+        conn = get_runtime()["conn"]
+        event_type = str(req.get("event_type") or "")
+        if event_type in {"publish_verified", "closed"} and req.get("source") != "work_item_4":
+            raise HTTPException(403, "真实发布核验与发布后关闭事件仅接受工作任务 4 的接口调用")
+        try:
+            return ContentProductionLineStore(conn).transition(
+                line_id, event_type=event_type,
+                actor=("work_item_4" if req.get("source") == "work_item_4" else "operator"),
+                reason=str(req.get("reason") or ""),
+                evidence=req.get("evidence") if isinstance(req.get("evidence"), dict) else {},
+            )
+        except ContentProductionLineError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     @app.post("/api/subplans/{sub_plan_id}/production-line/ai-draft", status_code=201)
     async def create_ai_production_line_draft(sub_plan_id: str, req: dict):
         runtime = get_runtime()
@@ -91,7 +145,7 @@ def register_production_line_routes(app: FastAPI, get_runtime) -> None:
             "{stage_key,batch_size,production_goal,instructions,cadence}]}}。"
             "必须完整、且仅覆盖输入中的全部 stage_key，每个 key 恰好一次；"
             "不得新增、删除、重命名策略步骤，不得改变策略依赖顺序。"
-            "batch_size 是每轮建议生产数量，必须为正整数且不得超过该步骤 target_count。"
+            "batch_size 仅为历史数据兼容字段，必须固定为 1，不得用于批量生产或预先排队。"
             "production_goal 和 instructions 必须落实该步骤的策略目标、当前问题、执行策略、输入信息、预期结果和完成标准。"
             "生产线只负责组织生产，不得替代用户审核发布；不得输出自动发布指令。"
             "\n母计划：" + json.dumps(master_snapshot, ensure_ascii=False)
