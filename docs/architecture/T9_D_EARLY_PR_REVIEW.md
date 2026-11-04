@@ -122,6 +122,6 @@ pytest -q tests/test_north_star_migration.py tests/test_north_star_repository.py
 
 `Database._discover_migrations()` 按文件名前缀提取数字版本，并在同一版本号对应多个 SQL 文件时直接抛出 `RuntimeError`，拒绝启动。因此两份 Migration 148 不能同时存在；各自 PR CI 通过无法检测跨分支合并后的该冲突。
 
-已在 PR #33 将素材隐私快照迁移改为 `154_production_task_asset_privacy_snapshot.sql`，删除原 148 文件，并同步更新 T8-E 验收文档。Migration 154 位于本报告所列早期迁移 148/149/150/151/153 之后，且不修改任何已应用历史迁移。PR #33 新 head `b99645d7cebd7c22882e625078be6560734605f7` 的 T8-E 专项已 success；通用 Backend tests 仍在执行，最终以该 head 的全量 CI 结果为准。
+已在 PR #33 将素材隐私快照迁移改为 `154_production_task_asset_privacy_snapshot.sql`，删除原 148 文件，并同步更新 T8-E 验收文档。Migration 154 位于本报告所列早期迁移 148/149/150/151/153 之后，且不修改任何已应用历史迁移。PR #33 新 head `b99645d7cebd7c22882e625078be6560734605f7` 的 T8-E 专项 run `41855080521` success；通用 CI run `41855080498` 的四项检查全部 success（Backend、Frontend、Visual browser 与 T8-E 专项）。因此本节不再将 PR #33 的通用 Backend tests 标记为执行中。
 
 该案例说明：跨任务合并审查必须检查全仓迁移版本唯一性，而不能只检查每个 PR 自身迁移文件和独立 CI。
