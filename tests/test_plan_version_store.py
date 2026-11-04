@@ -1074,6 +1074,66 @@ def test_master_plan_audit_preserves_snapshots_and_classifies_affected_tasks():
 
 
 
+def test_subplan_draft_must_be_based_on_current_version_and_parent_master():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    first_master = _active_master(store)
+    first, _stage_id = _active_subplan(store, first_master)
+
+    second_master = store.create_master_draft(_plan(6), based_on_version_id=first_master["id"])
+    store.activate_master_version(second_master["id"], reviewer="reviewer")
+
+    with pytest.raises(PlanVersionError, match="不能脱离创建时绑定"):
+        store.create_subplan_version(
+            "sub-xhs", {"title": "错误重绑"}, master_plan_version_id=second_master["id"],
+            stages=[{"title": "阶段"}], based_on_version_id=first["id"],
+        )
+    with pytest.raises(PlanVersionError, match="基准版本已过期"):
+        store.create_subplan_version(
+            "sub-xhs", {"title": "旧基准"}, master_plan_version_id=first_master["id"],
+            stages=[{"title": "阶段"}], based_on_version_id=None,
+        )
+    conn.close()
+
+
+def test_only_latest_subplan_draft_based_on_current_version_can_be_approved():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    master = _active_master(store)
+    first, _stage_id = _active_subplan(store, master)
+
+    stale = store.create_subplan_version(
+        "sub-xhs", {"title": "并发草稿 A"}, master_plan_version_id=master["id"],
+        stages=[{"title": "阶段 A"}], based_on_version_id=first["id"],
+    )
+    latest = store.create_subplan_version(
+        "sub-xhs", {"title": "并发草稿 B"}, master_plan_version_id=master["id"],
+        stages=[{"title": "阶段 B"}], based_on_version_id=first["id"],
+    )
+    with pytest.raises(PlanVersionError, match="只有最新的子计划草稿"):
+        store.activate_subplan_version(stale["id"], reviewer="reviewer")
+
+    approved = store.activate_subplan_version(latest["id"], reviewer="reviewer")
+    assert approved["id"] == latest["id"]
+    assert conn.execute(
+        "SELECT current_version_id FROM sub_plans WHERE id='sub-xhs'"
+    ).fetchone()[0] == latest["id"]
+
+    # A concurrently prepared draft cannot replace the newly effective version.
+    stale_again = store.create_subplan_version(
+        "sub-xhs", {"title": "修订草稿 C"}, master_plan_version_id=master["id"],
+        stages=[{"title": "阶段 C"}], based_on_version_id=latest["id"],
+    )
+    newer = store.create_subplan_version(
+        "sub-xhs", {"title": "修订草稿 D"}, master_plan_version_id=master["id"],
+        stages=[{"title": "阶段 D"}], based_on_version_id=latest["id"],
+    )
+    store.activate_subplan_version(newer["id"], reviewer="reviewer")
+    with pytest.raises(PlanVersionError, match="只有最新的子计划草稿"):
+        store.activate_subplan_version(stale_again["id"], reviewer="reviewer")
+    conn.close()
+
+
 def test_subplan_revision_audit_keeps_strategy_step_snapshots():
     conn = _db()
     store = PlanVersionStore(conn)

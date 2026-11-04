@@ -483,10 +483,63 @@ class PlanVersionStore:
         self._begin()
         try:
             identity = self.conn.execute(
-                "SELECT id FROM sub_plans WHERE id=?", (sub_plan_id,)
+                """SELECT id,master_plan_version_id,current_version_id,status,pause_reason,
+                          paused_by_master_version_id
+                   FROM sub_plans WHERE id=?""",
+                (sub_plan_id,),
             ).fetchone()
             if identity is None:
                 raise PlanVersionError("子计划不存在")
+            # Ordinary edits cannot move a subplan to another master. The sole
+            # exception is an explicit review_adoption master version that directly
+            # supersedes the subplan's originating master and paused this subplan.
+            # Each subplan version and historical round remains bound to its own
+            # immutable master/version snapshots; only the subplan's current pointer
+            # moves when the adoption draft is approved.
+            existing_master_id = int(identity["master_plan_version_id"])
+            target_master_id = int(master_plan_version_id)
+            if existing_master_id != target_master_id:
+                target_master = self.conn.execute(
+                    """SELECT status,source,based_on_version_id
+                       FROM master_plan_versions WHERE id=?""",
+                    (target_master_id,),
+                ).fetchone()
+                can_rebase = (
+                    identity["status"] == "paused"
+                    and identity["pause_reason"] == "master_plan_switch"
+                    and identity["paused_by_master_version_id"] == target_master_id
+                    and target_master is not None
+                    and target_master["source"] == "review_adoption"
+                    and target_master["based_on_version_id"] == existing_master_id
+                )
+                if not can_rebase:
+                    raise PlanVersionError("子计划不能脱离创建时绑定的母计划版本")
+            current_version_id = (
+                int(identity["current_version_id"])
+                if identity["current_version_id"] is not None else None
+            )
+            requested_base_id = int(based_on_version_id) if based_on_version_id is not None else None
+            # Validate ownership before freshness so a foreign version/stage is
+            # reported as an ownership violation rather than a stale-base conflict.
+            if based_on_version_id is not None:
+                base = self.conn.execute(
+                    "SELECT sub_plan_id FROM sub_plan_versions WHERE id=?", (based_on_version_id,)
+                ).fetchone()
+                if base is None or base["sub_plan_id"] != sub_plan_id:
+                    raise PlanVersionError("基准版本不属于当前子计划，阶段稳定标识必须继承自当前子计划")
+            if requested_base_id != current_version_id:
+                for raw_stage in stages:
+                    if not isinstance(raw_stage, dict) or not raw_stage.get("stage_key"):
+                        continue
+                    foreign_owner = self.conn.execute(
+                        """SELECT 1 FROM sub_plan_stages s
+                           JOIN sub_plan_versions v ON v.id=s.sub_plan_version_id
+                           WHERE s.stage_key=? AND v.sub_plan_id<>? LIMIT 1""",
+                        (str(raw_stage["stage_key"]).strip(), sub_plan_id),
+                    ).fetchone()
+                    if foreign_owner is not None:
+                        raise PlanVersionError("阶段稳定标识必须继承自当前子计划，不能引用其他子计划的阶段")
+                raise PlanVersionError("子计划基准版本已过期，请基于当前生效版本重新创建草稿")
             master = self.conn.execute(
                 "SELECT status FROM master_plan_versions WHERE id=?", (master_plan_version_id,)
             ).fetchone()
@@ -691,6 +744,22 @@ class PlanVersionStore:
             ).fetchone()
             if master is None or master["status"] != "effective":
                 raise PlanVersionError("子计划版本只能在其主计划版本生效期间审核")
+            latest = self.conn.execute(
+                "SELECT id FROM sub_plan_versions WHERE sub_plan_id=? ORDER BY version_no DESC LIMIT 1",
+                (row["sub_plan_id"],),
+            ).fetchone()
+            if latest is None or int(latest["id"]) != int(version_id):
+                raise PlanVersionError("只有最新的子计划草稿可以审核生效")
+            current_version_id = (
+                int(identity["current_version_id"])
+                if identity["current_version_id"] is not None else None
+            )
+            based_on_version_id = (
+                int(row["based_on_version_id"])
+                if row["based_on_version_id"] is not None else None
+            )
+            if based_on_version_id != current_version_id:
+                raise PlanVersionError("子计划基准版本已过期，当前草稿不能覆盖更新版本")
             self.conn.execute(
                 """UPDATE sub_plan_versions SET status='archived',superseded_at=?
                    WHERE sub_plan_id=? AND status='effective'""", (now, row["sub_plan_id"])
