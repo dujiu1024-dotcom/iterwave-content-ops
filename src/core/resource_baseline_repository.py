@@ -18,7 +18,15 @@ def build_resource_baseline(conn):
   if not p.get("version_no"): gaps.append({"category":"business_profile","title":"尚未建立业务资料档案","status":"open"})
   for item in profile["items"]:
    item_evidence=item.get("field_evidence") or {}
-   item_confirmed=bool(item.get("details")) and all(value.get("status") in ("user_confirmed","external_source") for value in item_evidence.values())
+   item_details=item.get("details") or {}
+   # Every declared detail field must have its own trusted evidence. Empty or
+   # partial evidence must never make a resource appear confirmed.
+   item_confirmed=bool(item_details) and all(
+       field in item_evidence
+       and isinstance(item_evidence[field],dict)
+       and item_evidence[field].get("status") in ("user_confirmed","external_source")
+       for field in item_details
+   )
    resources.append({"category":item["entity_type"],"title":item["name"],"source_type":"business_catalog_items","source_id":item["id"],"status":"confirmed" if item_confirmed else "pending","updated_at":item.get("updated_at"),"details":item.get("details") or {}})
  if "original_assets" in tables:
   rows=conn.execute("SELECT id,asset_type,title,description,source_kind,source_media_asset_id,source_content_asset_id,source_kb_id,source_uri,source_version,review_status,commercial_use_status,readability_status,completeness_status,duplicate_status,freshness_status,privacy_status,description_status,updated_at,archived_at FROM original_assets ORDER BY updated_at DESC,id DESC").fetchall()
