@@ -170,6 +170,12 @@ class PlanVersionStore:
         now = _now()
         self._begin()
         try:
+            # If the caller already owns a deferred transaction, acquire SQLite's
+            # write reservation before provenance reads so no competing writer can
+            # invalidate the checks before the state transition.
+            self.conn.execute(
+                "UPDATE master_plan_versions SET id=id WHERE id=?", (version_id,)
+            )
             if pre_activate is not None:
                 pre_activate()
             row = self.conn.execute(
