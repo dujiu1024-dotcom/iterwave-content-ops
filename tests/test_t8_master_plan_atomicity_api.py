@@ -303,11 +303,7 @@ def test_concurrent_master_plan_review_has_one_winner_and_stable_409(
     monkeypatch.setattr(PlanVersionStore, "activate_master_version", synchronized_activate)
 
     app = api_main._build_app()
-    clients = [
-        TestClient(app, base_url="http://127.0.0.1"),
-        TestClient(app, base_url="http://127.0.0.1"),
-    ]
-    clients = [client if index == 0 else clients[index] for index, client in enumerate(clients)]
+    clients = [client, TestClient(app, base_url="http://127.0.0.1")]
     # Reuse the fixture's authenticated headers without sharing its DB connection.
     for item in clients:
         item.headers.update({"X-Tenant-Id": "default"})
