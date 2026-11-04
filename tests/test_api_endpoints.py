@@ -386,6 +386,55 @@ def _seed_active_queue_round(tmp_path, monkeypatch, round_id: int):
     monkeypatch.setitem(api_main._g_ctx, "runtime_tenant_id", "default")
 
 
+def test_subplan_review_api_rejects_stale_concurrent_draft(client):
+    from src.core.plan_version_store import PlanVersionStore
+
+    tc, conn, _ = client
+    store = PlanVersionStore(conn)
+    master = store.create_master_draft({
+        "topic_count_per_platform": 5,
+        "dimension_allocation": {"AI教育": 5},
+        "enabled_platforms": ["xhs"],
+        "content_format": "image_text",
+    })
+    store.activate_master_version(master["id"], reviewer="test")
+    store.create_subplan(
+        "api-subplan-lock", master_plan_version_id=master["id"],
+        platform="xhs", title="API 权限边界测试",
+    )
+    first = store.create_subplan_version(
+        "api-subplan-lock", {"title": "初始版本", "platform": "xhs"},
+        master_plan_version_id=master["id"], stages=[{"title": "初始阶段"}],
+    )
+    store.activate_subplan_version(first["id"], reviewer="test")
+
+    stale = store.create_subplan_version(
+        "api-subplan-lock", {"title": "并发草稿 A", "platform": "xhs"},
+        master_plan_version_id=master["id"], stages=[{"title": "阶段 A"}],
+        based_on_version_id=first["id"],
+    )
+    latest = store.create_subplan_version(
+        "api-subplan-lock", {"title": "并发草稿 B", "platform": "xhs"},
+        master_plan_version_id=master["id"], stages=[{"title": "阶段 B"}],
+        based_on_version_id=first["id"],
+    )
+
+    rejected = tc.post("/api/subplans/api-subplan-lock/review", json={
+        "version_id": stale["id"], "action": "approve",
+    })
+    assert rejected.status_code == 409
+    assert "最新的子计划草稿" in rejected.json()["detail"]
+    assert conn.execute(
+        "SELECT current_version_id FROM sub_plans WHERE id='api-subplan-lock'"
+    ).fetchone()[0] == first["id"]
+
+    approved = tc.post("/api/subplans/api-subplan-lock/review", json={
+        "version_id": latest["id"], "action": "approve",
+    })
+    assert approved.status_code == 200
+    assert approved.json()["version"]["id"] == latest["id"]
+
+
 def test_create_round_without_saved_master_plan_succeeds_without_ghost_round(client):
     tc, conn, _ = client
     response = tc.post("/api/rounds", json={"topic_count": 5})
