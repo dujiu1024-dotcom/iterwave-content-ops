@@ -28,7 +28,26 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --upgrade pip && pip install -e ".[dev]"
       - name: Install OCR language data
-        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng fonts-noto-cjk
+        shell: bash
+        run: |
+          packages=()
+          if ! command -v tesseract >/dev/null 2>&1; then
+            packages+=(tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng)
+          else
+            if ! tesseract --list-langs 2>/dev/null | grep -qx chi_sim; then
+              packages+=(tesseract-ocr-chi-sim)
+            fi
+            if ! tesseract --list-langs 2>/dev/null | grep -qx eng; then
+              packages+=(tesseract-ocr-eng)
+            fi
+          fi
+          if ! dpkg-query -W -f='${Status}' fonts-noto-cjk 2>/dev/null | grep -q 'install ok installed'; then
+            packages+=(fonts-noto-cjk)
+          fi
+          if ((${#packages[@]} > 0)); then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends "${packages[@]}"
+          fi
       - name: Install Chromium for visual renderer tests
         run: python -m playwright install --with-deps chromium
       - name: Run transaction regression tests

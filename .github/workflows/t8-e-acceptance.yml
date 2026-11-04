@@ -1,0 +1,40 @@
+name: T8-E API happy-path acceptance
+
+on:
+  pull_request:
+    paths:
+      - "src/api/**"
+      - "src/core/**"
+      - "tests/**"
+      - ".github/workflows/t8-e-acceptance.yml"
+      - "docs/T8_E_API_HAPPY_PATH_20261104.md"
+  push:
+    branches: ["test/t8-e-full-api-happy-path"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: t8-e-acceptance-\${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  t8-e-api-happy-path:
+    name: T8-E API happy path
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -e ".[dev]"
+      - name: Run T8-A diagnosis gates and T8-E full API path
+        run: >-
+          python -m pytest -vv
+          tests/test_t8_diagnosis_api_acceptance.py
+          tests/test_t8_full_api_happy_path.py
+      - name: Compile Python sources
+        run: python -m compileall -q src tests
