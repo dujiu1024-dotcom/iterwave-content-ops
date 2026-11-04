@@ -1316,6 +1316,15 @@ export interface SubPlanVersionRecord {
   id: number; sub_plan_id: string; version_no: number; master_plan_version_id: number;
   status: string; snapshot: Record<string, unknown>; stages: SubPlanStageRecord[];
 }
+export interface SubGoalRecord {
+  id: string; sub_plan_version_id: number; stage_id: number | null; parent_goal_id: string | null;
+  goal_type: "quantity" | "business" | "effect" | "quality" | "capability";
+  goal_order: number; priority: number; title: string; description: string; target_count: number | null;
+  acceptance_criteria: string; requires_production: number; status: string; dependencies: string[];
+  production_plan: null | { content_direction: string; suggested_count: number; resource_requirements: Record<string, unknown>; priority: number; execution_conditions: string; acceptance_relation: string };
+  latest_evidence: null | { decision: string; reason: string; evidence: Record<string, unknown>; actual_count: number | null; created_at: string };
+  evidence_history?: Array<{ decision: string; reason: string; evidence: Record<string, unknown>; actual_count: number | null; reviewed_by: string; created_at: string }>;
+}
 export interface SubPlanRecord {
   id: string; master_plan_version_id: number; platform: Platform; title: string;
   status: string; current_version_id: number | null; current_version_no?: number | null;
@@ -2191,6 +2200,16 @@ export const api = {
     );
   },
   subplan: (id: string) => fetchJson<SubPlanDetail>(`/api/subplans/${encodeURIComponent(id)}`),
+  subplanGoals: (id: string, versionId: number) =>
+    fetchJson<{ items: SubGoalRecord[] }>(`/api/subplans/${encodeURIComponent(id)}/goals?version_id=${versionId}`),
+  createSubplanGoal: (id: string, data: Record<string, unknown>) =>
+    fetchJson<{ goal: SubGoalRecord }>(`/api/subplans/${encodeURIComponent(id)}/goals`, { method: "POST", body: JSON.stringify(data) }),
+  updateSubplanGoal: (id: string, goalId: string, data: Record<string, unknown>) =>
+    fetchJson<{ goal: SubGoalRecord }>(`/api/subplans/${encodeURIComponent(id)}/goals/${encodeURIComponent(goalId)}`, { method: "PATCH", body: JSON.stringify(data) }),
+  saveSubgoalProductionPlan: (id: string, goalId: string, data: Record<string, unknown>) =>
+    fetchJson<{ production_plan: Record<string, unknown> }>(`/api/subplans/${encodeURIComponent(id)}/goals/${encodeURIComponent(goalId)}/production-plan`, { method: "PUT", body: JSON.stringify(data) }),
+  acceptSubplanGoal: (id: string, goalId: string, data: Record<string, unknown>) =>
+    fetchJson<{ goal: SubGoalRecord }>(`/api/subplans/${encodeURIComponent(id)}/goals/${encodeURIComponent(goalId)}/acceptance`, { method: "POST", body: JSON.stringify(data) }),
   createSubplan: (data: { master_plan_version_id: number; platform: Platform; title: string; snapshot: Record<string, unknown>; stages: Array<Partial<SubPlanStageRecord> & { title: string; target_count: number }> }) =>
     fetchJson<{ subplan: SubPlanRecord; draft: SubPlanVersionRecord }>("/api/subplans", {
       method: "POST", body: JSON.stringify(data),
