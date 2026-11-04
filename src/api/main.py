@@ -5260,7 +5260,7 @@ def _register_routes(app: FastAPI) -> None:
         }
 
     @app.post("/api/drafts/{draft_id}/verify_save")
-    def verify_draft_save(draft_id: str, payload: dict):
+    def verify_draft_save(draft_id: str, payload: dict, request: Request):
         """人工核实平台草稿保存结果；不确定结果不得直接终结为 failed。"""
         saved = payload.get("saved") if isinstance(payload, dict) else None
         note = str((payload or {}).get("note") or "").strip() if isinstance(payload, dict) else ""
@@ -5325,7 +5325,7 @@ def _register_routes(app: FastAPI) -> None:
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 row["round_id"], "draft_save_verify", "pending_verify", target,
-                note, "web-ui", _storage_now().isoformat(timespec="seconds"),
+                note, auth.audit_actor(request), _storage_now().isoformat(timespec="seconds"),
             ),
         )
         return {
@@ -6925,7 +6925,7 @@ def _register_routes(app: FastAPI) -> None:
         return _visual_brand_profile(ctx["conn"], tenant_id)
 
     @app.patch("/api/contents/{content_id}")
-    def update_content(content_id: str, req: UpdateContentRequest):
+    def update_content(content_id: str, req: UpdateContentRequest, request: Request):
         """人工编辑未发布文案 → 写 user_override 留痕；已发布内容保持不可变。"""
         conn = _g()["conn"]
         with conn:
@@ -6983,8 +6983,8 @@ def _register_routes(app: FastAPI) -> None:
                     )
                 conn.execute(
                     "INSERT INTO content_review_events(content_id,round_id,event_type,actor,reason,before_json,after_json,created_at) "
-                    "VALUES(?,?,'edited','web-ui',?,?,?,?)",
-                    (content_id,row["round_id"],req.reason or "UI 编辑",
+                    "VALUES(?,?,'edited',?,?,?,?,?)",
+                    (content_id,row["round_id"],auth.audit_actor(request),req.reason or "UI 编辑",
                      json.dumps({"title":row["title"],"body":row["body"],"tags":row["tags"]},ensure_ascii=False),
                      json.dumps({"title":title,"body":body,"tags":json.loads(tags_json) if tags_json else []},ensure_ascii=False),
                      _storage_now().isoformat(timespec="seconds")),
@@ -6999,7 +6999,7 @@ def _register_routes(app: FastAPI) -> None:
                                    ensure_ascii=False)[:500],
                         json.dumps({"title": title, "body_len": len(body or "")},
                                    ensure_ascii=False)[:500],
-                        req.reason or "UI 编辑", "web-ui",
+                        req.reason or "UI 编辑", auth.audit_actor(request),
                         _storage_now().isoformat(timespec="seconds"),
                     ),
                 )
@@ -7429,7 +7429,7 @@ def _register_routes(app: FastAPI) -> None:
         }
 
     @app.post("/api/contents/{content_id}/reject")
-    def reject_content(content_id: str, req: RejectContentRequest):
+    def reject_content(content_id: str, req: RejectContentRequest, request: Request):
         """人工驳回与 G2 自动质检分开留痕；驳回后禁止正常存草稿/确认发布。"""
         conn = _g()["conn"]
         row = _content_row(conn, content_id)
@@ -7472,14 +7472,14 @@ def _register_routes(app: FastAPI) -> None:
             (
                 row["round_id"], "review_reject",
                 json.dumps({"content_id": content_id, "title": row["title"]}, ensure_ascii=False)[:500],
-                "rejected", reason, "web-ui",
+                "rejected", reason, auth.audit_actor(request),
                 _storage_now().isoformat(timespec="seconds"),
             ),
         )
         conn.execute(
             "INSERT INTO content_review_events(content_id,draft_id,round_id,event_type,actor,reason,after_json,created_at) "
-            "VALUES(?,?,?,'rejected','web-ui',?,?,?)",
-            (content_id,eligible[0]["id"],row["round_id"],reason,
+            "VALUES(?,?,?,'rejected',?,?,?,?)",
+            (content_id,eligible[0]["id"],row["round_id"],auth.audit_actor(request),reason,
              json.dumps({"review_status":"rejected","affected_drafts":cur.rowcount},ensure_ascii=False),
              _storage_now().isoformat(timespec="seconds")),
         )
@@ -7494,7 +7494,7 @@ def _register_routes(app: FastAPI) -> None:
         }
 
     @app.post("/api/contents/{content_id}/resubmit")
-    def resubmit_rejected_content(content_id: str, req: ResubmitContentRequest):
+    def resubmit_rejected_content(content_id: str, req: ResubmitContentRequest, request: Request):
         """人工驳回后的内容必须先重新过当前 G2，再显式提交审核解除拦截。"""
         conn = _g()["conn"]
         row = _content_row(conn, content_id)
@@ -7537,14 +7537,14 @@ def _register_routes(app: FastAPI) -> None:
             (
                 row["round_id"], "review_resubmit",
                 json.dumps({"content_id": content_id, "review_rejection_reason": row["review_rejection_reason"]}, ensure_ascii=False)[:500],
-                "resubmitted", reason, "web-ui",
+                "resubmitted", reason, auth.audit_actor(request),
                 _storage_now().isoformat(timespec="seconds"),
             ),
         )
         conn.execute(
             "INSERT INTO content_review_events(content_id,draft_id,round_id,event_type,actor,reason,after_json,created_at) "
-            "SELECT ?,id,?,'resubmitted','web-ui',?,?,? FROM drafts WHERE content_id=? LIMIT 1",
-            (content_id,row["round_id"],reason,json.dumps({"review_status":"pending","guard_outcome":outcome}),
+            "SELECT ?,id,?,'resubmitted',?,?,?,? FROM drafts WHERE content_id=? LIMIT 1",
+            (content_id,row["round_id"],auth.audit_actor(request),reason,json.dumps({"review_status":"pending","guard_outcome":outcome}),
              _storage_now().isoformat(timespec="seconds"),content_id),
         )
         conn.commit()
@@ -7603,7 +7603,7 @@ def _register_routes(app: FastAPI) -> None:
                 "reviews":[dict(x) for x in history]}
 
     @app.post("/api/subplans/stages/{stage_id}/effect-feedback",status_code=201)
-    def create_stage_effect_feedback(stage_id: int, req: dict):
+    def create_stage_effect_feedback(stage_id: int, req: dict, request: Request):
         """保存不可覆盖的策略效果评估，并冻结本次指标证据。"""
         assessment=str((req or {}).get("assessment") or "").strip()
         recommendation=str((req or {}).get("recommendation") or "").strip()
@@ -7621,7 +7621,7 @@ def _register_routes(app: FastAPI) -> None:
         cur=conn.execute(
             "INSERT INTO strategy_effect_reviews(stage_id,assessment,recommendation,evidence_note,confidence,evidence_json,created_by,created_at) "
             "VALUES(?,?,?,?,?,?,?,?)",
-            (stage_id,assessment,recommendation,evidence_note,confidence,json.dumps(evidence,ensure_ascii=False,sort_keys=True),"web-ui",now),
+            (stage_id,assessment,recommendation,evidence_note,confidence,json.dumps(evidence,ensure_ascii=False,sort_keys=True),auth.audit_actor(request),now),
         )
         conn.commit()
         return {"id":cur.lastrowid,"stage_id":stage_id,"assessment":assessment,
