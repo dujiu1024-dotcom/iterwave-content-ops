@@ -46,3 +46,8 @@
 - 模型调用可控，测试可重复执行。
 - CI 结果以分支最新提交对应的 T8-E API happy path 检查为准。
 - 若产品 API 缺陷导致测试失败，拆分至对应实现任务；验收 PR 不混入业务重构。
+
+
+## Final stacked validation after dependency consolidation
+
+PR #33 now targets PR #15 directly. The former PR #27 is superseded; its T8-E acceptance test changes are retained in this branch. The earlier T8-E and general CI runs on this head were recorded before the base-branch retarget and do not validate the final PR comparison. A fresh CI run on this updated branch is required before merge; passing this report's focused tests alone does not close Issues #21, #31 or #32.
