@@ -213,8 +213,12 @@ def test_goal_metric_period_includes_full_business_day_for_utc_and_legacy_rows(c
         ("2026-11-03 23:59:59", 60),        # legacy local end
         ("2026-11-04 00:00:00", 3),         # legacy next business day
     ]
-    for fetched_at, likes in samples:
-        values = {"platform": "xhs", "likes": likes, "fetch_status": "success", "fetched_at": fetched_at}
+    for index, (fetched_at, likes) in enumerate(samples):
+        values = {
+            "platform": "xhs", "likes": likes, "fetch_status": "success",
+            "fetched_at": fetched_at, "draft_id": f"draft-{index}",
+            "content_id": f"content-{index}",
+        }
         for column in required:
             values.setdefault(column[1], "x")
         selected = {key: value for key, value in values.items() if key in cols}
