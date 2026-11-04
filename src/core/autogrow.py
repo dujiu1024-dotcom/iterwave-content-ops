@@ -531,10 +531,9 @@ class AutogrowController:
         slot = now.replace(minute=0, second=0, microsecond=0).isoformat()
         line_version_id = int(stage["production_line_version_id"])
         idempotency_key = f"round-open:{slot}:{line_version_id}"
-        topic_count = max(1, min(
-            int(ag.topic_count), int(stage["remaining_count"]),
-            int(stage["production_line_batch_size"]),
-        ))
+        # Each scheduling decision creates one content task. The next item is
+        # selected from a fresh context after the prior item has been reviewed.
+        topic_count = 1
         request_payload = {
             "sub_plan_id": stage["sub_plan_id"], "sub_plan_version_id": stage["current_version_id"],
             "production_line_version_id": line_version_id,
