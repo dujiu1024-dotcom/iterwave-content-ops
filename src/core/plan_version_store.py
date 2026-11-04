@@ -517,6 +517,17 @@ class PlanVersionStore:
                 if base is None or base["sub_plan_id"] != sub_plan_id:
                     raise PlanVersionError("基准版本不属于当前子计划，阶段稳定标识必须继承自当前子计划")
             if requested_base_id != current_version_id:
+                for raw_stage in stages:
+                    if not isinstance(raw_stage, dict) or not raw_stage.get("stage_key"):
+                        continue
+                    foreign_owner = self.conn.execute(
+                        """SELECT 1 FROM sub_plan_stages s
+                           JOIN sub_plan_versions v ON v.id=s.sub_plan_version_id
+                           WHERE s.stage_key=? AND v.sub_plan_id<>? LIMIT 1""",
+                        (str(raw_stage["stage_key"]).strip(), sub_plan_id),
+                    ).fetchone()
+                    if foreign_owner is not None:
+                        raise PlanVersionError("阶段稳定标识必须继承自当前子计划，不能引用其他子计划的阶段")
                 raise PlanVersionError("子计划基准版本已过期，请基于当前生效版本重新创建草稿")
             master = self.conn.execute(
                 "SELECT status FROM master_plan_versions WHERE id=?", (master_plan_version_id,)
