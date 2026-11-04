@@ -133,8 +133,8 @@ def test_incremental_upgrade_from_previous_release_preserves_existing_rows(
             "SELECT id, payload FROM legacy_release_probe WHERE id='legacy-1'"
         ).fetchone()) == ("legacy-1", "keep-this-row")
         assert conn.execute(
-            "SELECT COUNT(*) FROM schema_version WHERE version IN (146, 147)"
-        ).fetchone()[0] == 2
+            "SELECT COUNT(*) FROM schema_version WHERE version IN (146, 147, 148)"
+        ).fetchone()[0] == 3
     finally:
         conn.close()
 
