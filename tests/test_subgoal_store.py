@@ -42,7 +42,7 @@ def test_subgoal_dependency_blocks_production_until_predecessor_accepted():
         "acceptance_criteria":"确认发布达到 2 篇","stage_id":10})
     b = store.create_goal("p",1,{"goal_type":"business","title":"验证转化","acceptance_criteria":"提供转化证据",
         "stage_id":10,"goal_order":2,"dependencies":[a["id"]]})
-    store.save_production_plan("p",b["id"],{"content_direction":"转化验证","suggested_count":1})
+    store.save_production_plan("p",b["id"],{"content_direction":"转化验证","suggested_count":1,"execution_conditions":"前置目标通过后执行","acceptance_relation":"以转化证据验收"})
     with pytest.raises(SubGoalError,match="当前状态为 blocked"):
         assert_stage_goals_ready(conn,1,10)
     conn.execute("UPDATE sub_plan_versions SET status='effective' WHERE id=1")
