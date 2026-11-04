@@ -4,14 +4,14 @@
 
 补齐 T8-A 缺失的正向 API 主路径：经营资料与图文素材 → 经营分析确认 → 母计划审核生效 → 子计划审核生效 → 生产线审核激活 → 生产入口创建生产任务。
 
-本任务仅增加验收测试、专用 CI workflow 和证据报告，不调用真实模型或外部平台。原始素材注册 API 对有效 JSON 当前返回 422（见 Issue #31），因此仅用 SQL 建立素材初始 fixture；素材审核、关联生产任务和授权/隐私快照均通过 API 完成。该缺口未解决前，T8-E 不得关闭。
+本任务仅增加验收测试、专用 CI workflow 和证据报告，不调用真实模型或外部平台。当前发现两个实现阻塞：原始素材注册 API 对有效 JSON 返回 422（Issue #31）；正式生产入口创建轮次后没有生成 production_tasks 记录（Issue #32）。因此素材初始记录暂用 SQL fixture，且任务创建断言按目标保留为失败门禁。两个缺口修复前，T8-E 不得关闭。
 
 ## 自动化命令
 
     python -m pytest -vv tests/test_t8_diagnosis_api_acceptance.py tests/test_t8_full_api_happy_path.py
     python -m compileall -q src tests
 
-测试使用 conftest 的临时 SQLite 数据库与 FastAPI TestClient。经营分析模型使用可控替身；母计划审核时的 AI 子计划拆解由可控替身模拟不可用，随后经正式子计划 API 创建并审核，避免真实模型/网络依赖。原始素材初始行暂作 fixture，不伪称已覆盖注册 API。
+测试使用 conftest 的临时 SQLite 数据库与 FastAPI TestClient。经营分析模型使用可控替身；母计划审核时的 AI 子计划拆解由可控替身模拟不可用，随后经正式子计划 API 创建并审核，避免真实模型/网络依赖。原始素材初始行暂作 fixture，不伪称已覆盖注册 API；当前生产入口只创建轮次，不创建可回读的生产任务，因此任务归属断言暴露 Issue #32。
 
 ## 正向链路覆盖矩阵
 
@@ -24,7 +24,7 @@
 | 5 | POST /api/subplans、subplan review | 子计划及策略步骤经 API 创建并审核生效 |
 | 6 | POST production-line draft/review | 生产线绑定精确子计划版本并审核激活 |
 | 7 | POST /api/subplans/{id}/rounds | 正式生产入口开轮并绑定子计划版本、策略步骤、生产线版本 |
-| 8 | GET /api/production-tasks?round_id=... | 生产任务存在，母/子计划版本、策略步骤、生产线版本归属一致 |
+| 8 | GET /api/production-tasks?round_id=... | 目标：生产任务存在并归属正确；当前失败：生产入口创建轮次后任务列表为空（Issue #32） |
 | 9 | POST/GET production-task assets | 任务保存素材版本、许可与隐私快照 |
 | 10 | GET diagnosis/subplan/production-line | 通过 API 回读链路关联关系 |
 
@@ -34,7 +34,7 @@
 
 ## 验收边界
 
-- 母计划、子计划、生产线、轮次、生产任务和素材审核/使用状态变更均由公开 API 触发；原始素材初始记录仅作为 fixture。
+- 母计划、子计划、生产线、轮次和素材审核/使用状态通过公开 API 变更；原始素材初始记录仅作为 fixture。生产任务 API 创建链路尚未成立（Issue #32）。
 - 不直接 SQL 写入母计划、子计划、生产线、轮次或生产任务；SQL 仅建立临时数据库 fixture。
 - 模型调用可控，测试可重复执行。
 - CI 结果以分支最新提交对应的 T8-E API happy path 检查为准。
