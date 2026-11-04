@@ -88,7 +88,7 @@ def test_generation_model_failure_does_not_create_a_draft(monkeypatch):
     conn.execute(
         "INSERT INTO business_diagnosis_reports VALUES (1, 1, 'confirmed', 'fp', '{}', '{}')"
     )
-    conn.execute("CREATE TABLE master_plan_versions (id INTEGER, status TEXT, deleted_at TEXT)")
+    conn.execute("CREATE TABLE master_plan_versions (id INTEGER, status TEXT, deleted_at TEXT, version_no INTEGER)")
     monkeypatch.setattr(
         "src.core.business_diagnosis.collect_business_context",
         lambda *_: {"fingerprint": "fp", "context": {}},
