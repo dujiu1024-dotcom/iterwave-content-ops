@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 
 from src.core.business_diagnosis import _normalize_report, collect_business_context, generate_diagnosis
+from src.api.closed_loop import build_closed_loop_router
 
 
 def build_business_diagnosis_router(get_runtime) -> APIRouter:
@@ -26,9 +27,7 @@ def build_business_diagnosis_router(get_runtime) -> APIRouter:
         return item
 
     def _latest(conn):
-        return conn.execute(
-            "SELECT * FROM business_diagnosis_reports ORDER BY version_no DESC LIMIT 1"
-        ).fetchone()
+        return conn.execute("SELECT * FROM business_diagnosis_reports ORDER BY version_no DESC LIMIT 1").fetchone()
 
     @router.get("/api/business-diagnosis")
     def latest_report():
@@ -55,28 +54,22 @@ def build_business_diagnosis_router(get_runtime) -> APIRouter:
         except RuntimeError as exc:
             raise HTTPException(502, str(exc)) from exc
         after = collect_business_context(conn, cfg)
-        # Reject a result if source data changed while the model was running.
         if before["fingerprint"] != after["fingerprint"]:
             raise HTTPException(409, "分析期间业务资料发生变化，请重新分析")
-        snapshot = before["context"]
         now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(timespec="seconds")
         row = _latest(conn)
         version = int(row["version_no"]) + 1 if row else 1
-        conn.execute(
-            "UPDATE business_diagnosis_reports SET status='superseded' WHERE status IN ('draft','confirmed','stale')"
-        )
+        conn.execute("UPDATE business_diagnosis_reports SET status='superseded' WHERE status IN ('draft','confirmed','stale')")
         cur = conn.execute(
             """INSERT INTO business_diagnosis_reports
                (version_no,status,report_json,source_snapshot_json,source_fingerprint,model_name,
                 created_at,created_by,updated_at,change_note)
                VALUES(?,'draft',?,?,?,?,?,'ai',?,'AI 重新分析')""",
-            (version, json.dumps(report, ensure_ascii=False), json.dumps(snapshot, ensure_ascii=False),
+            (version, json.dumps(report, ensure_ascii=False), json.dumps(before["context"], ensure_ascii=False),
              before["fingerprint"], model, now, now),
         )
         conn.commit()
-        return {"report": _decode(conn.execute(
-            "SELECT * FROM business_diagnosis_reports WHERE id=?", (cur.lastrowid,)
-        ).fetchone())}
+        return {"report": _decode(conn.execute("SELECT * FROM business_diagnosis_reports WHERE id=?", (cur.lastrowid,)).fetchone())}
 
     @router.patch("/api/business-diagnosis/{version_id}")
     def update_report(version_id: int, body: dict):
@@ -95,8 +88,7 @@ def build_business_diagnosis_router(get_runtime) -> APIRouter:
             conn.commit()
             raise HTTPException(409, "报告依据已变化，请重新分析后再修改")
         source_snapshot = json.loads(row["source_snapshot_json"])
-        source_refs = source_snapshot.get("source_references", [])
-        report = _normalize_report(report, source_refs)
+        report = _normalize_report(report, source_snapshot.get("source_references", []))
         previous = json.loads(row["report_json"])
         if previous.get("ignored_recommendations"):
             report["ignored_recommendations"] = previous["ignored_recommendations"]
@@ -124,10 +116,9 @@ def build_business_diagnosis_router(get_runtime) -> APIRouter:
         if row["source_fingerprint"] != current["fingerprint"]:
             conn.execute("UPDATE business_diagnosis_reports SET status='stale' WHERE id=?", (version_id,))
             conn.commit()
-            raise HTTPException(409, "报告依据已变化，请重新分析")
+            raise HTTPException(409, "业务资料或素材已变化，请重新分析")
         report = json.loads(row["report_json"])
-        ignored = report.setdefault("ignored_recommendations", [])
-        ignored.append({"key": key, "reason": reason})
+        report.setdefault("ignored_recommendations", []).append({"key": key, "reason": reason})
         conn.execute(
             "UPDATE business_diagnosis_reports SET report_json=?,status='draft',updated_at=?,change_note='用户忽略建议' WHERE id=?",
             (json.dumps(report, ensure_ascii=False), __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(timespec="seconds"), version_id),
@@ -156,4 +147,5 @@ def build_business_diagnosis_router(get_runtime) -> APIRouter:
         conn.commit()
         return {"report": _decode(conn.execute("SELECT * FROM business_diagnosis_reports WHERE id=?", (version_id,)).fetchone())}
 
+    router.include_router(build_closed_loop_router(get_runtime))
     return router
