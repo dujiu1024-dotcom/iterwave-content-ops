@@ -290,3 +290,43 @@ def test_manual_goal_not_overwritten(cfg, conn):
     conn.commit()
     GoalProgressUpdater(cfg, conn).update_all()
     assert conn.execute("SELECT current_value FROM goals WHERE id = 'g-m'").fetchone()[0] == 300
+
+def test_platform_readback_updates_independent_review_task_without_zero_filling(cfg, conn, seed):
+    round_id = seed.round(status="collecting_metrics")
+    draft_id = seed.draft(round_id, draft_status="user_published", fetch_status=None)
+    conn.execute(
+        "UPDATE drafts SET user_confirmed_at='2026-11-04T10:00:00' WHERE id=?", (draft_id,)
+    )
+    conn.execute(
+        """INSERT INTO publish_verifications
+           (id,draft_id,status,platform_content_id,platform_url,published_at,
+            content_snapshot_json,verified_at,verified_by,created_at)
+           VALUES('verify-1',?,'verified','platform-1','https://platform.example/1',
+                  '2026-11-04T10:00:00','{}','2026-11-04T10:00:00','user','2026-11-04T10:00:00')""",
+        (draft_id,),
+    )
+    conn.execute(
+        """INSERT INTO review_tasks
+           (id,draft_id,publish_verification_id,status,collection_source,collect_after,
+            window_start,platform_content_id,publish_snapshot_json,created_at,updated_at)
+           VALUES('review-1',?,'verify-1','scheduled','manual','2026-11-05T10:00:00',
+                  '2026-11-04T10:00:00','platform-1','{}','now','now')""",
+        (draft_id,),
+    )
+    conn.commit()
+
+    eng = _engine(cfg, conn, {Platform.XHS: _SeenAdapter(status=FetchStatus.SUCCESS)})
+    result = asyncio.run(eng._job_data_fetch(draft_id, attempt=1))
+
+    task = conn.execute("SELECT * FROM review_tasks WHERE id='review-1'").fetchone()
+    payload = json.loads(task["collection_result_json"])
+    latest = payload["latest_platform_readback"]
+    assert result["final_status"] == "success"
+    assert task["status"] == "completed"
+    assert task["collection_source"] == "platform_readback"
+    assert latest["views"] == 100
+    assert latest["likes"] == 5
+    assert latest["collects"] is None
+    assert latest["comments"] == 1
+    assert latest["shares"] is None
+    assert task["attempts"] == 1
