@@ -416,3 +416,102 @@ def test_publish_verification_api_records_authenticated_session_actor(monkeypatc
         (response.json()["verification"]["verification_id"],),
     ).fetchone()
     assert json.loads(event["payload_json"])["verified_by"] == "session:api-publisher"
+
+
+def test_manual_collection_and_retry_api_persist_session_actor(monkeypatch, conn, seed):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from src.api import operating_feedback
+
+    draft_id, published_at = _published_draft(conn, seed)
+    verification = create_publish_verification(
+        conn, tenant_id="tenant-test", draft_id=draft_id,
+        platform_content_id="api-retry-note",
+        content_url="https://www.xiaohongshu.com/explore/api-retry-note",
+        published_at=published_at, scheduled_review_at="2026-11-04T03:00:00+00:00",
+        actor="session:publisher",
+    )
+    task_id = verification["review_task_id"]
+    actors = iter(["session:collector-api", "session:retry-api"])
+    monkeypatch.setattr(
+        operating_feedback.auth, "audit_actor", lambda request: next(actors)
+    )
+    app = FastAPI()
+    app.include_router(
+        operating_feedback.build_operating_feedback_router(
+            lambda: {"conn": conn, "cfg": None, "runtime_tenant_id": "tenant-test"}
+        )
+    )
+    client = TestClient(app)
+
+    collected = client.post(
+        f"/api/review-tasks/{task_id}/collect",
+        json={"source": "manual", "status": "partial", "metrics": {"views": 0}},
+    )
+    assert collected.status_code == 201, collected.text
+    run = conn.execute(
+        "SELECT recorded_by FROM review_collection_runs WHERE task_id=?",
+        (task_id,),
+    ).fetchone()
+    assert run["recorded_by"] == "session:collector-api"
+
+    retried = client.post(f"/api/review-tasks/{task_id}/retry", json={})
+    assert retried.status_code == 200, retried.text
+    task = conn.execute(
+        "SELECT last_retried_by FROM review_tasks WHERE task_id=?", (task_id,)
+    ).fetchone()
+    assert task["last_retried_by"] == "session:retry-api"
+
+
+def test_review_conclusion_api_persists_session_actor(monkeypatch, conn, seed):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from src.api import operating_feedback
+
+    draft_id, published_at = _published_draft(conn, seed)
+    verification = create_publish_verification(
+        conn, tenant_id="tenant-test", draft_id=draft_id,
+        platform_content_id="api-conclusion-note",
+        content_url="https://www.xiaohongshu.com/explore/api-conclusion-note",
+        published_at=published_at, scheduled_review_at="2026-11-04T03:00:00+00:00",
+    )
+    task_id = verification["review_task_id"]
+    create_collection_run(
+        conn, task_id=task_id, source="manual", status="succeeded",
+        metrics={"views": 0}, idempotency_key="api-conclusion-collection",
+    )
+    monkeypatch.setattr(
+        operating_feedback.auth, "audit_actor",
+        lambda request: "session:conclusion-api",
+    )
+    app = FastAPI()
+    app.include_router(
+        operating_feedback.build_operating_feedback_router(
+            lambda: {"conn": conn, "cfg": None, "runtime_tenant_id": "tenant-test"}
+        )
+    )
+
+    response = TestClient(app).post(
+        f"/api/review-tasks/{task_id}/conclusion",
+        json={
+            "conclusion": "复盘结论 API 审计测试",
+            "evidence": {"views": 0},
+            "target_impact": {},
+            "recommendations": [],
+            "gap_changes": [{
+                "gap_key": "api-conclusion-audit-gap",
+                "title": "复盘结论 API 审计",
+                "severity": "low",
+                "status": "active",
+            }],
+        },
+    )
+    assert response.status_code == 200, response.text
+    task = conn.execute(
+        "SELECT conclusion_by FROM review_tasks WHERE task_id=?", (task_id,)
+    ).fetchone()
+    gap = conn.execute(
+        "SELECT actor FROM business_gap_events WHERE review_task_id=?", (task_id,)
+    ).fetchone()
+    assert task["conclusion_by"] == "session:conclusion-api"
+    assert gap["actor"] == "session:conclusion-api"
