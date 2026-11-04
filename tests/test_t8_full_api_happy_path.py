@@ -56,24 +56,18 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
     })
     assert profile.status_code == 200, profile.text
 
-    # Fixture-only base record: the registration endpoint currently returns
-    # a body-validation 422 for valid JSON (tracked separately in Issue #31).
-    # Lifecycle changes and production usage remain API-driven.
-    asset_cursor = conn.execute(
-        """INSERT INTO original_assets(
-            asset_type,title,description,source_kind,metadata_json
-        ) VALUES('product_image','T8-E 已授权图文素材','完整 API 主路径验收','manual',?)""",
-        ('{"fixture":"t8-e","media_type":"image"}',),
+    asset = client.post(
+        "/api/original-assets",
+        content=json.dumps({
+            "asset_type": "product_image", "title": "T8-E 已授权图文素材",
+            "description": "完整 API 主路径验收", "source_kind": "manual",
+            "source_version": "fixture-v1",
+            "metadata": {"fixture": "t8-e", "media_type": "image"},
+        }, ensure_ascii=False),
+        headers={"content-type": "application/json"},
     )
-    asset_id = int(asset_cursor.lastrowid)
-    conn.execute(
-        """INSERT INTO original_asset_versions(
-            original_asset_id,version_no,title,description,metadata_json,
-            review_status,commercial_use_status
-        ) VALUES(?,1,'T8-E 已授权图文素材','完整 API 主路径验收',?,'pending','unknown')""",
-        (asset_id, '{"fixture":"t8-e","media_type":"image"}'),
-    )
-    conn.commit()
+    assert asset.status_code == 201, asset.text
+    asset_id = asset.json()["id"]
     reviewed_asset = client.post(
         f"/api/original-assets/{asset_id}/review",
         content=json.dumps({
@@ -161,11 +155,14 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
     round_id = opened.json()["round_id"]
     assert opened.json()["bound_subplan_version_id"] == subplan_version_id
     assert opened.json()["bound_production_line_version_id"] == line_version_id
+    assert opened.json()["production_task_count"] == 1
+    assert len(opened.json()["production_task_ids"]) == 1
 
     tasks = client.get("/api/production-tasks", params={"round_id": round_id})
     assert tasks.status_code == 200, tasks.text
     items = tasks.json().get("items", [])
-    assert items, "生产入口已开轮，但没有创建对应生产任务"
+    assert tasks.json()["total"] == 1
+    assert len(items) == 1, "生产入口必须按 topic_count 创建且只创建一条任务"
     task = items[0]
     assert task["round_id"] == round_id
     assert task["master_plan_version_id"] == master_id
