@@ -202,6 +202,7 @@ def test_production_visual_task_survives_reload_and_resumes_from_checkpoints():
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch()
             page = browser.new_page()
+            page.on("dialog", lambda dialog: dialog.accept("恢复图片生成测试理由"))
             _mock_api(page, state)
             _attach_browser_diagnostics(page, state)
             page.goto(f"http://127.0.0.1:{port}/?page=production&tab=review&focusRound=1&focusContent=visual-1")
@@ -275,6 +276,7 @@ def test_production_visual_task_handles_cross_worker_lease_conflict():
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch()
             page = browser.new_page()
+            page.on("dialog", lambda dialog: dialog.accept("跨进程冲突测试理由"))
             _mock_api(page, state)
             _attach_browser_diagnostics(page, state)
             page.goto(f"http://127.0.0.1:{port}/?page=production&tab=review&focusRound=1&focusContent=visual-1")
