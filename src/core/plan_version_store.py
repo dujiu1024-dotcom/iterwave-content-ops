@@ -92,6 +92,8 @@ class PlanVersionStore:
         source: str = "user",
         based_on_version_id: Optional[int] = None,
         change_note: Optional[str] = None,
+        north_star_version_id: Optional[int] = None,
+        bind_current_north_star: bool = True,
     ) -> dict[str, Any]:
         if not isinstance(snapshot, dict):
             raise PlanVersionError("主计划快照必须是对象")
@@ -116,6 +118,18 @@ class PlanVersionStore:
                 (version_no, signature, json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
                  source, based_on_version_id, now, author, change_note),
             )
+            # Freeze the exact account-group North Star version at draft creation.
+            if self.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_group_north_star_versions'").fetchone():
+                if north_star_version_id is not None:
+                    north_star = self.conn.execute("SELECT id,snapshot_json FROM account_group_north_star_versions WHERE id=?", (north_star_version_id,)).fetchone()
+                    if north_star is None:
+                        raise PlanVersionError("指定的北极星版本不存在")
+                elif bind_current_north_star:
+                    north_star = self.conn.execute("SELECT id,snapshot_json FROM account_group_north_star_versions WHERE status='effective' ORDER BY version_no DESC LIMIT 1").fetchone()
+                else:
+                    north_star = None
+                if north_star is not None:
+                    self.conn.execute("UPDATE master_plan_versions SET north_star_version_id=?,north_star_snapshot_json=?,north_star_attribution_status='attributed' WHERE id=?", (north_star["id"],north_star["snapshot_json"],cur.lastrowid))
             row = dict(self.conn.execute(
                 "SELECT * FROM master_plan_versions WHERE id=?", (cur.lastrowid,)
             ).fetchone())
@@ -135,7 +149,7 @@ class PlanVersionStore:
         self, version_id: int, *, author: str = "user", change_note: str = "从历史版本恢复"
     ) -> dict[str, Any]:
         row = self.conn.execute(
-            "SELECT plan_snapshot FROM master_plan_versions WHERE id=?", (version_id,)
+            "SELECT * FROM master_plan_versions WHERE id=?", (version_id,)
         ).fetchone()
         if row is None:
             raise PlanVersionError("待恢复的历史版本不存在")
@@ -146,6 +160,8 @@ class PlanVersionStore:
         return self.create_master_draft(
             snapshot, author=author, source="user",
             based_on_version_id=version_id, change_note=change_note,
+            north_star_version_id=(row["north_star_version_id"] if "north_star_version_id" in row.keys() else None),
+            bind_current_north_star=False,
         )
 
     def activate_master_version(self, version_id: int, *, reviewer: str) -> dict[str, Any]:
@@ -226,6 +242,9 @@ class PlanVersionStore:
                    ) VALUES(?,?,NULL,?,?)""",
                 (signature, row["plan_snapshot"], now, reviewer),
             )
+            if self.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='master_plan_resource_baselines'").fetchone():
+                from src.core.resource_baseline_repository import capture_resource_baseline
+                capture_resource_baseline(self.conn, version_id, actor=reviewer)
             record_plan_change(
                 self.conn, entity_type="master_plan", entity_id=str(version_id),
                 event_type="version_approved", from_version_id=previous_version_id,
