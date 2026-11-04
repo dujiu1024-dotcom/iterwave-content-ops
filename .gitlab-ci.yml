@@ -1,0 +1,75 @@
+stages:
+  - test
+  - build
+  - browser
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - when: never
+
+default:
+  interruptible: true
+
+backend-tests:
+  stage: test
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  image: python:3.11-bookworm
+  timeout: 25m
+  before_script:
+    - apt-get update
+    - apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng fonts-noto-cjk
+    - python -m pip install --upgrade pip
+    - pip install -e ".[dev]"
+    - python -m playwright install --with-deps chromium
+  script:
+    - python -m pytest -vv tests/test_request_transaction_nesting.py --durations=20 -o faulthandler_timeout=240
+    - python -m pytest -vv --durations=20 -o faulthandler_timeout=240
+    - python -m compileall -q src tests
+    - ruff check --select F401,F821,F811 src/core/safe_http.py src/core/kb_sources.py src/core/hot_topics.py src/core/notify/__init__.py tests/test_access_and_sources.py
+
+frontend-build:
+  stage: build
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  image: node:20-bookworm
+  timeout: 20m
+  cache:
+    key:
+      files:
+        - web/package-lock.json
+    paths:
+      - web/node_modules/
+  script:
+    - cd web
+    - npm ci
+    - npm test
+    - npm run build
+    - |
+      if grep -R -n -E "installDemoApi|__iwDemoApi" dist/assets; then
+        echo "Demo mock API leaked into production assets"
+        exit 1
+      fi
+    - npm run build:demo
+    - test -s ../iterwave-prototype.html
+    - grep -q "静态原型演示" ../iterwave-prototype.html
+
+visual-ui-browser:
+  stage: browser
+  image: python:3.11-bookworm
+  timeout: 20m
+  before_script:
+    - python -m pip install --upgrade pip
+    - pip install -e ".[dev]"
+    - python -m playwright install --with-deps chromium
+  script:
+    - python -m pytest -vv --override-ini python_files=visual_generation_browser.py web/browser_tests/visual_generation_browser.py
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: on_success
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: on_success
