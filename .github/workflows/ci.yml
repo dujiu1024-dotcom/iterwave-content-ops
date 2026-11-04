@@ -34,6 +34,9 @@ jobs:
       - name: Run transaction regression tests
         timeout-minutes: 5
         run: python -m pytest -vv tests/test_request_transaction_nesting.py --durations=20 -o faulthandler_timeout=240
+      - name: Run T8-D master-plan API reliability acceptance
+        timeout-minutes: 5
+        run: python -m pytest -vv tests/test_t8_master_plan_atomicity_api.py --durations=20 -o faulthandler_timeout=240
       - name: Run tests
         timeout-minutes: 5
         run: python -m pytest -vv --durations=20 -o faulthandler_timeout=240
