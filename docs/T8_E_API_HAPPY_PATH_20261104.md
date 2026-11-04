@@ -4,7 +4,7 @@
 
 补齐 T8-A 缺失的正向 API 主路径：经营资料与图文素材 → 经营分析确认 → 母计划审核生效 → 子计划审核生效 → 生产线审核激活 → 生产入口创建生产任务。
 
-本任务仅增加验收测试、专用 CI workflow 和证据报告，不调用真实模型或外部平台。当前发现两个实现阻塞：原始素材注册 API 对有效 JSON 返回 422（Issue #31）；正式生产入口创建轮次后没有生成 production_tasks 记录（Issue #32）。因此素材初始记录暂用 SQL fixture，且任务创建断言按目标保留为失败门禁。两个缺口修复前，T8-E 不得关闭。
+本验收通过公开 API 建立经营资料、原始素材、诊断报告、母计划、子计划、生产线、生产轮次和生产任务；不调用真实模型或外部平台。素材注册 API 的请求模型命名空间问题和生产轮次未创建生产任务的问题已在本修复分支处理，最终以 CI 的完整 API happy-path 结果为准。
 
 ## 自动化命令
 
@@ -18,13 +18,13 @@
 | 步骤 | API 操作 | 关键断言 |
 |---|---|---|
 | 1 | PUT /api/business-profile | 经营资料保存成功 |
-| 2 | POST /api/original-assets、素材 review | 图文素材来源、许可、隐私、质量状态经 API 建立并确认 |
+| 2 | POST /api/original-assets、素材 review | 图文素材通过公开注册 API 创建，并通过审核 API 确认许可、隐私和质量状态 |
 | 3 | POST diagnosis analyze/confirm | 报告由 draft 变为 confirmed，来源指纹有效 |
 | 4 | POST /api/plans、plan review | 母计划由 draft 经审核变为 effective |
 | 5 | POST /api/subplans、subplan review | 子计划及策略步骤经 API 创建并审核生效 |
 | 6 | POST production-line draft/review | 生产线绑定精确子计划版本并审核激活 |
 | 7 | POST /api/subplans/{id}/rounds | 正式生产入口开轮并绑定子计划版本、策略步骤、生产线版本 |
-| 8 | GET /api/production-tasks?round_id=... | 目标：生产任务存在并归属正确；当前失败：生产入口创建轮次后任务列表为空（Issue #32） |
+| 8 | GET /api/production-tasks?round_id=... | 按 topic_count 创建对应数量的待处理任务，且母/子计划版本、策略步骤、生产线版本归属一致 |
 | 9 | POST/GET production-task assets | 任务保存素材版本、许可与隐私快照 |
 | 10 | GET diagnosis/subplan/production-line | 通过 API 回读链路关联关系 |
 
@@ -34,7 +34,7 @@
 
 ## 验收边界
 
-- 母计划、子计划、生产线、轮次和素材审核/使用状态通过公开 API 变更；原始素材初始记录仅作为 fixture。生产任务 API 创建链路尚未成立（Issue #32）。
+- 所有被测业务对象均通过公开 API 创建或变更；不通过 SQL 写入被测业务状态。
 - 不直接 SQL 写入母计划、子计划、生产线、轮次或生产任务；SQL 仅建立临时数据库 fixture。
 - 模型调用可控，测试可重复执行。
 - CI 结果以分支最新提交对应的 T8-E API happy path 检查为准。
