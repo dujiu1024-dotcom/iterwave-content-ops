@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -294,7 +296,7 @@ def test_original_asset_permission_and_privacy_gate_production_usage(diagnosis_c
         (task_id,),
     ).fetchone()[0] == 0
 
-    reviewed = client.post(f"/api/original-assets/{asset_id}/review", json={
+    review_payload = {
         "decision": "confirmed",
         "review_note": "人工确认许可与隐私状态",
         "quality": {
@@ -304,8 +306,15 @@ def test_original_asset_permission_and_privacy_gate_production_usage(diagnosis_c
             "completeness_status": "complete",
             "duplicate_status": "unique",
         },
-    })
-    assert reviewed.status_code == 200, reviewed.text
+    }
+    reviewed = client.post(
+        f"/api/original-assets/{asset_id}/review",
+        content=json.dumps(review_payload, ensure_ascii=False),
+        headers={"content-type": "application/json"},
+    )
+    assert reviewed.status_code == 200, (
+        f"{reviewed.text}; sent={reviewed.request.content!r}"
+    )
     allowed = client.post(f"/api/production-tasks/{task_id}/assets", json=[asset_id])
     assert allowed.status_code == 201
     assert allowed.json()["assets"][0]["permission_snapshot"] == "allowed"
