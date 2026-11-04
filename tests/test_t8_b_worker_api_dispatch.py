@@ -123,6 +123,8 @@ def test_round_run_api_worker_executes_real_round_executor(
         title="真实执行器图文生产验收",
         summary="通过真实 RoundExecutor 验证 Worker 写入内容与草稿",
         dimension="产品体验",
+        source="test",
+        date="2026-11-05",
     )
     scored = SimpleNamespace(
         topic=topic, total_score=90.0, score_breakdown={}, is_exploration=False,
@@ -162,7 +164,6 @@ def test_round_run_api_worker_executes_real_round_executor(
     monkeypatch.setattr(RoundExecutor, "_select_topics", lambda self, *_: [scored])
     monkeypatch.setattr(RoundExecutor, "_resolve_platforms", lambda self, *_: [Platform.XHS])
     monkeypatch.setattr(RoundExecutor, "_record_plan_signature", lambda *args, **kwargs: None)
-    monkeypatch.setattr(RoundExecutor, "_upsert_topic_index", lambda *args, **kwargs: None)
     monkeypatch.setattr(RoundExecutor, "_platform_broken", lambda *args, **kwargs: False)
     monkeypatch.setattr(RoundExecutor, "_image_settings", lambda self: (
         {"model": "deterministic-image", "fallback_enabled": False}, "",
