@@ -1280,6 +1280,7 @@ class Database:
                 "original_asset_analyses", "original_asset_gaps",
                 "production_task_asset_usages", "plan_change_audit", "master_plan_versions",
                 "account_group_north_star_versions", "master_plan_resource_baselines",
+                "content_publish_verifications", "review_tasks", "review_collection_runs", "business_gap_events",
             }
             result["missing_governance_tables"] = sorted(governance_tables - existing)
 
@@ -1294,6 +1295,8 @@ class Database:
                 "idx_production_task_asset_usages_asset",
                 "idx_plan_change_audit_entity", "idx_plan_change_audit_versions",
                 "idx_north_star_one_effective", "idx_north_star_history",
+                "idx_publish_verification_actor", "idx_review_tasks_creator",
+                "idx_review_runs_actor", "idx_business_gap_events_actor", "idx_review_tasks_retry_actor",
             }
             result["missing_governance_indexes"] = sorted(
                 governance_indexes - existing_indexes
@@ -1375,6 +1378,10 @@ class Database:
                 "master_plan_resource_baselines": {
                     "master_plan_version_id", "snapshot_json", "captured_at", "captured_by",
                 },
+                "content_publish_verifications": {"verification_id", "tenant_id", "verified_by", "verified_at"},
+                "review_tasks": {"task_id", "tenant_id", "created_by", "conclusion_by", "last_retried_by"},
+                "review_collection_runs": {"run_id", "task_id", "recorded_by", "created_at"},
+                "business_gap_events": {"event_id", "gap_id", "actor", "created_at"},
             }
             missing_governance_columns = []
             for table_name, required_columns in governance_columns.items():
