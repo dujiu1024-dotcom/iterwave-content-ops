@@ -8,7 +8,7 @@ from src.adapters.base import Platform
 from src.core import login_manager
 from src.core.task_queue import GlobalTaskQueue
 from src.core.task_worker import GlobalTaskWorker
-from src.core.task_context import current_config
+from src.core.task_context import current_config, current_task_identity
 
 
 def test_worker_uses_task_tenant_context_not_active_login_directory(tmp_path):
@@ -16,7 +16,10 @@ def test_worker_uses_task_tenant_context_not_active_login_directory(tmp_path):
     queue.initialize()
     task, _ = queue.enqueue(
         task_type="round_run", tenant_id="tenant-a", aggregate_id="17",
-        payload={"round_id": 17, "operation": "run"},
+        payload={
+            "round_id": 17, "operation": "run",
+            "initiating_actor": "session:0123456789abcdef0123",
+        },
     )
     stop = asyncio.Event()
     observed = {}
@@ -24,6 +27,7 @@ def test_worker_uses_task_tenant_context_not_active_login_directory(tmp_path):
     class FakeExecutor:
         async def run(self, round_id, **kwargs):
             observed["round_id"] = round_id
+            observed["identity"] = current_task_identity()
             observed["login_path"] = login_manager._platform_state_path(Platform.XHS)
             stop.set()
             return {"round_id": round_id, "final_status": "completed"}
@@ -47,6 +51,16 @@ def test_worker_uses_task_tenant_context_not_active_login_directory(tmp_path):
     asyncio.run(worker.run(stop))
 
     assert observed["round_id"] == 17
+    assert observed["identity"] == {
+        "initiating_actor": "session:0123456789abcdef0123",
+        "executing_actor": "service:global-task-worker",
+        "tenant_id": "tenant-a",
+        "task_id": task.task_id,
+    }
+    assert current_task_identity() == {
+        "initiating_actor": None, "executing_actor": None,
+        "tenant_id": None, "task_id": None,
+    }
     assert observed["login_path"] == tmp_path / "tenant-a" / "data" / "login_states" / "xhs.json"
     saved = queue.get(task.task_id)
     assert saved is not None and saved.status == "succeeded"
@@ -1188,3 +1202,67 @@ def test_multiple_workers_execute_different_tenants_concurrently(tmp_path):
         assert completed == {31, 32}
 
     asyncio.run(scenario())
+
+
+
+def test_worker_retry_preserves_initiating_actor_and_binds_new_task_correlation(tmp_path):
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    original_actor = "session:0123456789abcdef0123"
+    original, _ = queue.enqueue(
+        task_type="round_run", tenant_id="tenant-retry", aggregate_id="91",
+        payload={
+            "round_id": 91, "operation": "run",
+            "initiating_actor": original_actor,
+        },
+    )
+    claimed = queue.claim_next("worker-first")
+    assert claimed is not None and claimed.task_id == original.task_id
+    assert queue.fail(
+        original.task_id, "worker-first",
+        error_code="simulated_failure", error_message="simulated failure",
+    )
+
+    retry, created = queue.retry_after_manual_verification(
+        original.task_id,
+        confirmed_by="session:operator123456",
+        confirmation_note="已核实平台侧未执行，允许创建一次人工重试",
+        confirmed_not_executed=True,
+    )
+    assert created is True
+    assert retry.retry_of_task_id == original.task_id
+    assert retry.tenant_id == original.tenant_id
+    assert retry.payload["initiating_actor"] == original_actor
+
+    retry_claim = queue.claim_next("worker-retry")
+    assert retry_claim is not None and retry_claim.task_id == retry.task_id
+    observed = {}
+
+    class FakeExecutor:
+        async def run(self, round_id, **kwargs):
+            observed["identity"] = current_task_identity()
+            return {"round_id": round_id, "final_status": "completed"}
+
+    context = {
+        "cfg": SimpleNamespace(
+            paths=SimpleNamespace(data_dir=str(tmp_path / "tenant-retry" / "data")),
+            resolve_path=lambda value: value,
+        ),
+        "executor": FakeExecutor(),
+        "scheduler": SimpleNamespace(shutdown=lambda: None),
+        "conn": SimpleNamespace(close=lambda: None),
+    }
+    worker = GlobalTaskWorker(queue, lambda tenant_id: context)
+    result = asyncio.run(worker._run_task(retry_claim))
+
+    assert result == {"round_id": 91, "final_status": "completed"}
+    assert observed["identity"] == {
+        "initiating_actor": original_actor,
+        "executing_actor": "service:global-task-worker",
+        "tenant_id": "tenant-retry",
+        "task_id": retry.task_id,
+    }
+    assert current_task_identity() == {
+        "initiating_actor": None, "executing_actor": None,
+        "tenant_id": None, "task_id": None,
+    }

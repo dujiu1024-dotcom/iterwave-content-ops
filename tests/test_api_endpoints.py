@@ -4645,3 +4645,24 @@ def test_master_plan_create_and_review_audit_authenticated_session_actor(client,
     assert event_actors["version_approved"] == event_actors["draft_created"]
     assert event_actors["draft_created"] != "web-ui"
     assert event_actors["version_approved"] != "user"
+
+
+def test_round_run_queue_persists_authenticated_initiating_actor(client, tmp_path, monkeypatch):
+    tc, conn, seed = client
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    monkeypatch.setattr(api_main, "_task_queue", queue)
+    monkeypatch.setattr(api_main, "_build_task_execution_snapshot", lambda *args, **kwargs: {})
+    round_id = seed.round(status="created")
+
+    response = tc.post(
+        f"/api/rounds/{round_id}/run",
+        json={"topic_count": 1, "platforms": ["xhs"], "save_drafts": False},
+    )
+    assert response.status_code == 202, response.text
+    task = queue.get(response.json()["task_id"])
+    assert task is not None
+    assert task.tenant_id == "default"
+    assert task.payload["initiating_actor"].startswith("session:")
+    assert task.payload["initiating_actor"] != "user"
+    assert task.payload["initiating_actor"] != "web-ui"
