@@ -156,4 +156,7 @@ def build_business_diagnosis_router(get_runtime) -> APIRouter:
         conn.commit()
         return {"report": _decode(conn.execute("SELECT * FROM business_diagnosis_reports WHERE id=?", (version_id,)).fetchone())}
 
+    from src.api.operating_feedback import build_operating_feedback_router
+    router.include_router(build_operating_feedback_router(get_runtime))
+
     return router
