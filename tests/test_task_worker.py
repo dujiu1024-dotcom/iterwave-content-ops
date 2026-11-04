@@ -8,7 +8,7 @@ from src.adapters.base import Platform
 from src.core import login_manager
 from src.core.task_queue import GlobalTaskQueue
 from src.core.task_worker import GlobalTaskWorker
-from src.core.task_context import current_config
+from src.core.task_context import current_config, current_task_identity
 
 
 def test_worker_uses_task_tenant_context_not_active_login_directory(tmp_path):
@@ -16,7 +16,10 @@ def test_worker_uses_task_tenant_context_not_active_login_directory(tmp_path):
     queue.initialize()
     task, _ = queue.enqueue(
         task_type="round_run", tenant_id="tenant-a", aggregate_id="17",
-        payload={"round_id": 17, "operation": "run"},
+        payload={
+            "round_id": 17, "operation": "run",
+            "initiating_actor": "session:0123456789abcdef0123",
+        },
     )
     stop = asyncio.Event()
     observed = {}
@@ -24,6 +27,7 @@ def test_worker_uses_task_tenant_context_not_active_login_directory(tmp_path):
     class FakeExecutor:
         async def run(self, round_id, **kwargs):
             observed["round_id"] = round_id
+            observed["identity"] = current_task_identity()
             observed["login_path"] = login_manager._platform_state_path(Platform.XHS)
             stop.set()
             return {"round_id": round_id, "final_status": "completed"}
@@ -47,6 +51,16 @@ def test_worker_uses_task_tenant_context_not_active_login_directory(tmp_path):
     asyncio.run(worker.run(stop))
 
     assert observed["round_id"] == 17
+    assert observed["identity"] == {
+        "initiating_actor": "session:0123456789abcdef0123",
+        "executing_actor": "service:global-task-worker",
+        "tenant_id": "tenant-a",
+        "task_id": task.task_id,
+    }
+    assert current_task_identity() == {
+        "initiating_actor": None, "executing_actor": None,
+        "tenant_id": None, "task_id": None,
+    }
     assert observed["login_path"] == tmp_path / "tenant-a" / "data" / "login_states" / "xhs.json"
     saved = queue.get(task.task_id)
     assert saved is not None and saved.status == "succeeded"
