@@ -4041,3 +4041,74 @@ def test_duplicate_publish_confirmation_commits_user_supplied_time_without_note_
     assert row["publish_time_source"] == "user_supplied"
     assert row["platform_note_url"] is None
     assert conn.in_transaction is False
+
+
+def test_ai_master_plan_approval_rejects_stale_diagnosis_provenance(client, monkeypatch):
+    from src.core.plan_version_store import PlanVersionStore
+
+    tc, conn, _ = client
+    store = PlanVersionStore(conn)
+    active = conn.execute(
+        "SELECT id,plan_snapshot FROM master_plan_versions WHERE status='effective' ORDER BY version_no DESC LIMIT 1"
+    ).fetchone()
+    if active is None:
+        base = {"topic_count_per_platform": 4, "enabled_platforms": ["xhs"],
+                "dimension_allocation": {"AI教育": 4}, "content_format": "image_text"}
+        initial = store.create_master_draft(base, author="test")
+        active_id = int(store.activate_master_version(initial["id"], reviewer="test")["id"])
+        base_snapshot = base
+    else:
+        active_id = int(active["id"])
+        base_snapshot = json.loads(active["plan_snapshot"])
+
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    cur = conn.execute(
+        """INSERT INTO business_diagnosis_reports
+           (version_no,status,report_json,source_snapshot_json,source_fingerprint,
+            model_name,created_at,created_by,updated_at,confirmed_at,confirmed_by,change_note)
+           VALUES(1,'confirmed','{}','{}','stale-fingerprint','test-model',?,'test',?,?,'test','test')""",
+        (now, now, now),
+    )
+    diagnosis_id = int(cur.lastrowid)
+    metadata = {
+        "generation_source": "confirmed_business_diagnosis",
+        "diagnosis_report_id": diagnosis_id,
+        "diagnosis_version_no": 1,
+        "source_fingerprint": "stale-fingerprint",
+        "model": "test-model",
+        "generated_at": now,
+        "summary": "test",
+        "assumptions": [],
+        "risks": [],
+        "pending_confirmations": [],
+        "resource_basis": [],
+    }
+    draft = store.create_master_draft(
+        base_snapshot, author="ai", source="system",
+        based_on_version_id=active_id,
+        change_note="AI 母计划草稿：" + json.dumps(metadata, ensure_ascii=False),
+    )
+
+    def context_read_must_hold_write_lock(active_conn, _cfg):
+        # Provenance must be checked after BEGIN IMMEDIATE, not before the
+        # activation transaction where another writer could invalidate it.
+        assert active_conn.in_transaction is True
+        return {"fingerprint": "current-fingerprint"}
+
+    monkeypatch.setattr(
+        "src.core.business_diagnosis.collect_business_context",
+        context_read_must_hold_write_lock,
+    )
+    response = tc.post(f"/api/plans/{draft['id']}/review", json={"action": "approve"})
+
+    assert response.status_code == 409, response.text
+    assert conn.execute(
+        "SELECT status FROM master_plan_versions WHERE id=?", (draft["id"],)
+    ).fetchone()[0] == "draft"
+    assert conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective'"
+    ).fetchone()[0] == active_id
+    assert conn.execute(
+        "SELECT status FROM business_diagnosis_reports WHERE id=?", (diagnosis_id,)
+    ).fetchone()[0] == "stale"
+    assert conn.in_transaction is False

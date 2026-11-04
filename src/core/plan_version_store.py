@@ -92,6 +92,8 @@ class PlanVersionStore:
         source: str = "user",
         based_on_version_id: Optional[int] = None,
         change_note: Optional[str] = None,
+        enforce_generation_guard: bool = False,
+        expected_active_version_id: Optional[int] = None,
     ) -> dict[str, Any]:
         if not isinstance(snapshot, dict):
             raise PlanVersionError("主计划快照必须是对象")
@@ -101,6 +103,20 @@ class PlanVersionStore:
         now = _now()
         self._begin()
         try:
+            if enforce_generation_guard:
+                active = self.conn.execute(
+                    "SELECT id FROM master_plan_versions WHERE status='effective' AND deleted_at IS NULL"
+                ).fetchone()
+                actual_active_id = int(active["id"]) if active else None
+                if actual_active_id != expected_active_version_id:
+                    raise PlanVersionError("母计划基准版本已变化，生成结果已作废；请刷新后重试")
+                existing_draft = self.conn.execute(
+                    "SELECT id FROM master_plan_versions WHERE status='draft' AND deleted_at IS NULL ORDER BY version_no DESC LIMIT 1"
+                ).fetchone()
+                if existing_draft is not None:
+                    raise PlanVersionError(
+                        f"已有待审核母计划草稿（版本记录 {existing_draft['id']}），拒绝覆盖；请先审核、退回或处理该草稿"
+                    )
             if based_on_version_id is not None and self.conn.execute(
                 "SELECT 1 FROM master_plan_versions WHERE id=?", (based_on_version_id,)
             ).fetchone() is None:
@@ -148,10 +164,20 @@ class PlanVersionStore:
             based_on_version_id=version_id, change_note=change_note,
         )
 
-    def activate_master_version(self, version_id: int, *, reviewer: str) -> dict[str, Any]:
+    def activate_master_version(
+        self, version_id: int, *, reviewer: str, pre_activate=None,
+    ) -> dict[str, Any]:
         now = _now()
         self._begin()
         try:
+            # If the caller already owns a deferred transaction, acquire SQLite's
+            # write reservation before provenance reads so no competing writer can
+            # invalidate the checks before the state transition.
+            self.conn.execute(
+                "UPDATE master_plan_versions SET id=id WHERE id=?", (version_id,)
+            )
+            if pre_activate is not None:
+                pre_activate()
             row = self.conn.execute(
                 "SELECT * FROM master_plan_versions WHERE id=?", (version_id,)
             ).fetchone()
