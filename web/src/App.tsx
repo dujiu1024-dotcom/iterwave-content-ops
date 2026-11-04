@@ -12,6 +12,7 @@ import Production from "./pages/Production";
 import Review from "./pages/Review";
 import PlanCenter from "./pages/PlanCenter";
 import BusinessDiagnosis from "./pages/BusinessDiagnosis";
+import BusinessProfile from "./pages/BusinessProfile";
 import Operations from "./pages/Operations";
 import Calendar from "./pages/Calendar";
 import Analytics from "./pages/Analytics";
@@ -77,6 +78,7 @@ function Router() {
       case "review": return <Review />;
       case "plan-center": return <PlanCenter />;
       case "business-diagnosis": return <BusinessDiagnosis />;
+      case "business-profile": return <BusinessProfile />;
       case "operations": return <Operations />;
       case "calendar": return <Calendar />;
       case "analytics": return <Analytics />;
