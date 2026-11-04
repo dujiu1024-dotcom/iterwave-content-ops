@@ -172,7 +172,7 @@ INSERT OR IGNORE INTO metric_facts(
     collection_status,correction_of,created_at
 )
 SELECT lower(hex(randomblob(16))),ms.tenant_id,ms.draft_id,ms.content_id,ms.platform,
-       metric.metric_key,metric.metric_value,names.unit,'platform_readback','metrics',
+       metric.metric_key,metric.metric_value,'count',ms.source,'metric_snapshot',ms.id,
        ms.measured_at,ms.recorded_at,'UTC','succeeded',ms.correction_of,ms.created_at
 FROM metric_snapshots ms
 JOIN (
@@ -196,7 +196,7 @@ INSERT OR IGNORE INTO metric_facts(
     collection_status,created_at
 )
 SELECT lower(hex(randomblob(16))),'legacy',m.draft_id,m.content_id,m.platform,
-       metric.metric_key,metric.metric_value,'count',ms.source,'metric_snapshot',ms.id,
+       metric.metric_key,metric.metric_value,names.unit,'platform_readback','metrics',
        CAST(m.id AS TEXT),m.fetched_at,m.fetched_at,'UTC',CASE WHEN m.fetch_status='success' THEN 'succeeded' ELSE 'partial' END,CURRENT_TIMESTAMP
 FROM metrics m
 JOIN (
