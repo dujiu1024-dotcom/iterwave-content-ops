@@ -158,6 +158,35 @@ def create_publish_verification(
             review_task_id=task["task_id"] if task else None,
         )
 
+    # Bind publication verification to the exact T3 content line. A production task
+    # cannot be marked published without its line entering verification_pending.
+    line = None
+    if row["production_task_id"]:
+        line = conn.execute(
+            "SELECT id,status FROM content_production_lines WHERE production_task_id=?",
+            (row["production_task_id"],),
+        ).fetchone()
+        if line is None:
+            raise OperatingFeedbackError("该生产任务缺少单内容生产线，不能完成发布核验")
+    elif production_line_id:
+        line = conn.execute(
+            "SELECT id,status FROM content_production_lines WHERE id=?",
+            (production_line_id,),
+        ).fetchone()
+    if line is not None:
+        if production_line_id and str(production_line_id) != str(line["id"]):
+            raise OperatingFeedbackError("发布核验关联的生产线与内容任务不匹配")
+        production_line_id = str(line["id"])
+        if line["status"] == "awaiting_publish":
+            conn.execute(
+                "UPDATE content_production_lines SET status='verification_pending',updated_at=? WHERE id=?",
+                (utc_now(), production_line_id),
+            )
+        elif line["status"] != "verification_pending":
+            raise OperatingFeedbackError(
+                f"该内容生产线当前状态为 {line['status']}，不能登记发布核验"
+            )
+
     verification_id = uuid.uuid4().hex
     now = utc_now()
     image_paths = _parse_json(row["image_paths"], [])
@@ -311,6 +340,110 @@ def claim_close_events(conn, *, tenant_id: str, worker_id: str, limit: int = 10,
     return claimed
 
 
+def _mark_production_line_published(conn, payload: dict, *, verification_id: str, now: str) -> None:
+    line_id = payload.get("production_line_id")
+    if not line_id and payload.get("production_task_id"):
+        line = conn.execute(
+            "SELECT id FROM content_production_lines WHERE production_task_id=?",
+            (payload["production_task_id"],),
+        ).fetchone()
+        line_id = line["id"] if line else None
+    if not line_id:
+        return  # Legacy publications without a T3 production task remain readable.
+    line = conn.execute(
+        "SELECT id,status FROM content_production_lines WHERE id=?", (line_id,)
+    ).fetchone()
+    if line is None:
+        raise OperatingFeedbackError("发布核验关联的内容生产线不存在")
+    if line["status"] in {"legacy_mapped", "published", "closed"}:
+        return
+    if line["status"] == "awaiting_publish":
+        conn.execute(
+            "UPDATE content_production_lines SET status='verification_pending',updated_at=? WHERE id=?",
+            (now, line_id),
+        )
+        line_status = "verification_pending"
+    else:
+        line_status = line["status"]
+    if line_status != "verification_pending":
+        raise OperatingFeedbackError(
+            f"发布核验不能关闭状态为 {line_status} 的内容生产线"
+        )
+    conn.execute(
+        "UPDATE content_production_lines SET status='published',updated_at=? WHERE id=?",
+        (now, line_id),
+    )
+    evidence = {
+        "verification_id": verification_id,
+        "platform_content_id": payload.get("platform_content_id"),
+        "published_url": payload.get("content_url"),
+        "published_at": payload.get("published_at"),
+        "content_snapshot_sha256": payload.get("content_snapshot_sha256"),
+    }
+    conn.execute(
+        """INSERT INTO content_production_line_events(
+            content_production_line_id,event_type,from_status,to_status,
+            actor,reason,evidence_json,created_at
+        ) VALUES(?,?,?,?,?,?,?,?)""",
+        (line_id, "publish_verified", "verification_pending", "published",
+         "task4-publication-verification", "平台发布事实已核验",
+         _json(evidence), now),
+    )
+
+
+def _close_production_line_after_review(conn, task, *, task_id: str, now: str, conclusion: dict) -> None:
+    if task["status"] != "completed":
+        return  # Partial collection is not sufficient to release the next content decision.
+    verification = conn.execute(
+        """SELECT production_line_id,production_task_id
+           FROM content_publish_verifications WHERE verification_id=?""",
+        (task["verification_id"],),
+    ).fetchone()
+    if verification is None:
+        raise OperatingFeedbackError("复盘任务缺少对应发布核验记录")
+    line_id = verification["production_line_id"]
+    if not line_id and verification["production_task_id"]:
+        line = conn.execute(
+            "SELECT id FROM content_production_lines WHERE production_task_id=?",
+            (verification["production_task_id"],),
+        ).fetchone()
+        line_id = line["id"] if line else None
+    if not line_id:
+        return  # Historical publication with no production-line mapping.
+    line = conn.execute(
+        "SELECT status FROM content_production_lines WHERE id=?", (line_id,)
+    ).fetchone()
+    if line is None:
+        raise OperatingFeedbackError("复盘任务关联的内容生产线不存在")
+    if line["status"] in {"legacy_mapped", "closed"}:
+        return
+    if line["status"] != "published":
+        raise OperatingFeedbackError(
+            f"复盘结论不能关闭状态为 {line['status']} 的内容生产线"
+        )
+    evidence = {
+        "verification_id": task["verification_id"],
+        "review_ref": task_id,
+        "conclusion": conclusion.get("conclusion"),
+        "target_impact": conclusion.get("target_impact", {}),
+        "recommendations": conclusion.get("recommendations", []),
+    }
+    conn.execute(
+        """UPDATE content_production_lines
+           SET status='closed',closed_at=?,updated_at=? WHERE id=? AND status='published'""",
+        (now, now, line_id),
+    )
+    conn.execute(
+        """INSERT INTO content_production_line_events(
+            content_production_line_id,event_type,from_status,to_status,
+            actor,reason,evidence_json,created_at
+        ) VALUES(?,?,?,?,?,?,?,?)""",
+        (line_id, "review_completed", "published", "closed",
+         "task4-independent-review", "独立复盘已完成，生产线关闭",
+         _json(evidence), now),
+    )
+
+
 def acknowledge_close_event(
     conn, event_id: str, *, succeeded: bool, error: str = "", tenant_id: str | None = None,
 ) -> dict:
@@ -326,6 +459,9 @@ def acknowledge_close_event(
         return {"event_id": event_id, "status": "delivered", "already_acknowledged": True}
     now = utc_now()
     if succeeded:
+        _mark_production_line_published(
+            conn, payload, verification_id=str(row["verification_id"]), now=now
+        )
         conn.execute(
             "UPDATE production_line_close_outbox SET status='delivered',claimed_by=NULL,lease_expires_at=NULL,last_error=NULL,updated_at=? WHERE event_id=?",
             (now, event_id),
@@ -565,6 +701,9 @@ def save_review_conclusion(
             (gap_id, task_id, event_type, str(change.get("reason") or "")[:1000],
              _json(before) if before else None, _json(after), evidence_json, now),
         )
+    _close_production_line_after_review(
+        conn, task, task_id=task_id, now=now, conclusion=payload
+    )
     return {"task_id": task_id, "conclusion": payload, "gap_changes_recorded": len(changes)}
 
 
