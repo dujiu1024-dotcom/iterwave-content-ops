@@ -542,10 +542,14 @@ export default function Production() {
   /** 按当前标题/正文重新出图：封面 + 正文分页（历史内容也能补图） */
   const handleRegenerateCards = async () => {
     if (!selectedContentId || regenActive) return;
+    const reason = window.prompt("请填写整套图片重新生成理由（必填）", "");
+    if (reason === null || !reason.trim()) return;
+    const instruction = window.prompt("请填写整理后的整套图片调整指令（必填）", "统一整套图片的色彩、排版和视觉风格，并优化信息层级");
+    if (instruction === null || !instruction.trim()) return;
     setRegenActive(true);
     await withPending("regen-cards", async () => {
       try {
-        const res = await api.regenerateContentCards(selectedContentId);
+        const res = await api.regenerateContentCards(selectedContentId, reason.trim(), instruction.trim());
         showToast(`✓ 已生成 ${res.image_count} 张卡片`, "success");
         await loadRoundData(currentRoundId!);
         const task = await api.visualGenerationTask(selectedContentId);
