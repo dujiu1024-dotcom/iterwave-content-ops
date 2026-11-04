@@ -132,7 +132,12 @@ def collect_business_context(conn, cfg) -> dict[str, Any]:
             "原始素材仅以登记信息和审核状态作为证据，不读取或向模型发送原始文件二进制内容。",
         ],
     }
-    canonical = _json(context)
+    # Plan history is included in the report's evidence snapshot for analysis,
+    # but it is downstream output of this diagnosis workflow. New mother plans
+    # and production rounds created from a confirmed diagnosis must not invalidate
+    # that same diagnosis (a self-referential freshness loop).
+    fingerprint_context = {key: value for key, value in context.items() if key != "plan_history"}
+    canonical = _json(fingerprint_context)
     return {"context": context, "fingerprint": hashlib.sha256(canonical.encode("utf-8")).hexdigest()}
 
 
