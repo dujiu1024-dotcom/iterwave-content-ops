@@ -97,3 +97,26 @@ def test_run_rejects_round_not_in_created_state(tmp_path, monkeypatch):
     assert "awaiting_publish" in str(exc.value.detail)
     assert queue.find_latest(tenant_id="tenant-a", task_type="round_run", aggregate_id="7") is None
     conn.close()
+
+
+
+def test_automatic_round_enqueue_records_explicit_system_initiator(tmp_path, monkeypatch):
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    monkeypatch.setattr(api_main, "_task_queue", queue)
+    monkeypatch.setattr(
+        api_main, "_build_task_execution_snapshot",
+        lambda tenant_id, round_id, parameters: {"tenant_id": tenant_id, "round_id": round_id},
+    )
+
+    task, created = api_main._enqueue_round_task(
+        tenant_id="tenant-auto", round_id=91, topic_count=2,
+        platforms=["xhs"], save_drafts=True,
+    )
+
+    assert created is True
+    assert task.tenant_id == "tenant-auto"
+    assert task.payload["initiating_actor"] == "system:automatic-round-scheduler"
+    assert task.payload["execution_snapshot"] == {
+        "tenant_id": "tenant-auto", "round_id": 91,
+    }
