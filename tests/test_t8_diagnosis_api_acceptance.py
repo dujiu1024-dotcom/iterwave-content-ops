@@ -48,13 +48,17 @@ def _fake_diagnosis(conn, cfg):
     )
 
 
+async def _async_fake_diagnosis(conn, cfg):
+    return _fake_diagnosis(conn, cfg)
+
+
 def test_diagnosis_api_requires_fresh_report_confirmation(diagnosis_client, monkeypatch):
     from src.api import business_diagnosis
 
     client, conn = diagnosis_client
     monkeypatch.setattr(
         business_diagnosis, "generate_diagnosis",
-        lambda _conn, _cfg: _fake_diagnosis(_conn, _cfg),
+        _async_fake_diagnosis,
     )
 
     analyzed = client.post("/api/business-diagnosis/analyze")
@@ -100,9 +104,12 @@ def test_diagnosis_model_failure_does_not_supersede_existing_report(diagnosis_cl
     before = conn.execute(
         "SELECT id,version_no,status FROM business_diagnosis_reports ORDER BY version_no"
     ).fetchall()
+    async def _async_model_failure(_conn, _cfg):
+        raise RuntimeError("model unavailable")
+
     monkeypatch.setattr(
         business_diagnosis, "generate_diagnosis",
-        lambda _conn, _cfg: (_ for _ in ()).throw(RuntimeError("model unavailable")),
+        _async_model_failure,
     )
     failed = client.post("/api/business-diagnosis/analyze")
     assert failed.status_code == 502
@@ -160,7 +167,7 @@ def test_original_asset_permission_and_privacy_gate_production_usage(diagnosis_c
         "source_kind": "manual",
         "metadata": {"fixture": "t8-a"},
     })
-    assert created.status_code == 201
+    assert created.status_code == 201, created.text
     asset_id = created.json()["id"]
     conn.execute("INSERT INTO production_tasks(id) VALUES('t8-a-asset-task')")
     conn.commit()
