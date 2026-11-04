@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from datetime import timedelta
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
+
+from src.core import auth
 
 from src.core.operating_feedback import (
     OperatingFeedbackError, acknowledge_close_event, build_decision_context,
@@ -27,7 +29,7 @@ def build_operating_feedback_router(get_runtime) -> APIRouter:
         raise HTTPException(422, str(exc)) from exc
 
     @router.post("/api/drafts/{draft_id}/publish-verification", status_code=201)
-    def verify_publication(draft_id: str, body: dict):
+    def verify_publication(draft_id: str, body: dict, request: Request):
         ctx = runtime()
         conn, cfg = ctx["conn"], ctx.get("cfg")
         platform_content_id = str(body.get("platform_content_id") or "").strip()
@@ -62,6 +64,7 @@ def build_operating_feedback_router(get_runtime) -> APIRouter:
                     scheduled_review_at=scheduled_review_at,
                     max_attempts=int(getattr(getattr(cfg, "timeouts", None), "metrics_retry_attempts", 3) or 3),
                     idempotency_key=body.get("idempotency_key"),
+                    actor=auth.audit_actor(request),
                 )
             scheduler = ctx.get("scheduler")
             if scheduler and result.get("review_task_id"):
@@ -192,7 +195,7 @@ def build_operating_feedback_router(get_runtime) -> APIRouter:
         return {"task": item}
 
     @router.post("/api/review-tasks/{task_id}/collect", status_code=201)
-    def collect_review_metrics(task_id: str, body: dict):
+    def collect_review_metrics(task_id: str, body: dict, request: Request):
         ctx = runtime()
         conn = ctx["conn"]
         task = conn.execute(
@@ -233,13 +236,14 @@ def build_operating_feedback_router(get_runtime) -> APIRouter:
                     error_message=str(body.get("error") or ""),
                     idempotency_key=body.get("idempotency_key"),
                     measured_at=measured_dt.astimezone(__import__("datetime").timezone.utc).isoformat(timespec="seconds") if measured_dt else None,
+                    actor=auth.audit_actor(request),
                 )
             return {"run": result}
         except OperatingFeedbackError as exc:
             fail(exc)
 
     @router.post("/api/review-tasks/{task_id}/retry")
-    def retry_review(task_id: str, body: dict | None = None):
+    def retry_review(task_id: str, request: Request, body: dict | None = None):
         ctx = runtime()
         task = ctx["conn"].execute(
             "SELECT tenant_id FROM review_tasks WHERE task_id=?", (task_id,)
@@ -253,7 +257,7 @@ def build_operating_feedback_router(get_runtime) -> APIRouter:
         due_at = run_at.astimezone(__import__("datetime").timezone.utc).isoformat(timespec="seconds") if run_at else utc_now()
         try:
             with ctx["conn"]:
-                task_result = retry_review_task(ctx["conn"], task_id, scheduled_at=due_at)
+                task_result = retry_review_task(ctx["conn"], task_id, scheduled_at=due_at, actor=auth.audit_actor(request))
             scheduler = ctx.get("scheduler")
             if scheduler:
                 try:
@@ -266,7 +270,7 @@ def build_operating_feedback_router(get_runtime) -> APIRouter:
             fail(exc)
 
     @router.post("/api/review-tasks/{task_id}/conclusion")
-    def review_conclusion(task_id: str, body: dict):
+    def review_conclusion(task_id: str, body: dict, request: Request):
         ctx = runtime()
         task = ctx["conn"].execute(
             "SELECT tenant_id FROM review_tasks WHERE task_id=?", (task_id,)
@@ -279,6 +283,7 @@ def build_operating_feedback_router(get_runtime) -> APIRouter:
                     ctx["conn"], task_id=task_id, conclusion=body.get("conclusion", ""),
                     evidence=body.get("evidence", []), target_impact=body.get("target_impact", {}),
                     recommendations=body.get("recommendations", []), gap_changes=body.get("gap_changes", []),
+                    actor=auth.audit_actor(request),
                 )
             return result
         except OperatingFeedbackError as exc:
