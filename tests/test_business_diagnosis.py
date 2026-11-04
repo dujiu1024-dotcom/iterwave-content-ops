@@ -39,6 +39,20 @@ def test_business_diagnosis_collects_t4_business_profile_and_catalog(conn, cfg):
         ) VALUES('product-1','product','示例产品','{"selling_points":["可验证卖点"]}',
                  '{"selling_points":{"status":"user_confirmed"}}',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"""
     )
+    conn.execute(
+        """INSERT INTO metric_facts(
+            fact_id,tenant_id,draft_id,content_id,platform,metric_key,value,unit,source,
+            source_record_type,source_record_id,measured_at,recorded_at,collection_status
+        ) VALUES('fact-business-diagnosis','legacy','draft-1','content-1','xhs','views',0,
+                 'count','platform_readback','review_collection_run','run-1',
+                 '2026-11-04T10:00:00+00:00','2026-11-04T10:00:00+00:00','succeeded')"""
+    )
+    conn.execute(
+        """INSERT INTO business_gaps(
+            gap_id,tenant_id,gap_key,title,description,severity,status,evidence_json,created_at,updated_at
+        ) VALUES('gap-1','tenant-test','content-proof','内容证据不足','缺少案例素材',
+                 'high','active','{}',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"""
+    )
     conn.commit()
 
     context = collect_business_context(conn, cfg)["context"]
@@ -49,6 +63,10 @@ def test_business_diagnosis_collects_t4_business_profile_and_catalog(conn, cfg):
         ref["source_type"] == "business_catalog_item" and ref["source_id"] == "product-1"
         for ref in context["source_references"]
     )
+    assert context["unified_metric_facts"][0]["value"] == 0
+    assert context["active_business_gaps"][0]["gap_key"] == "content-proof"
+    assert any(ref["source_type"] == "metric_fact" for ref in context["source_references"])
+    assert any(ref["source_type"] == "business_gap" for ref in context["source_references"])
 
 
 def test_business_diagnosis_collects_t5_original_asset_inventory_and_gaps(conn, cfg):
