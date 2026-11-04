@@ -636,6 +636,10 @@ def test_ops_pause_roundtrip_persists(client):
     tc, conn, _ = client
     assert tc.get("/api/ops/pause").json()["paused"] is False
     assert tc.post("/api/ops/pause", json={"paused": True}).json()["paused"] is True
+    pause_actor = conn.execute(
+        "SELECT updated_by FROM ops_pause_state ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()
+    assert pause_actor is not None and pause_actor["updated_by"].startswith("session:")
     assert is_ops_paused(conn) is True
     assert tc.get("/api/ops/pause").json()["paused"] is True
     assert tc.post("/api/ops/pause", json={"paused": False}).json()["paused"] is False
@@ -688,6 +692,19 @@ def test_editing_content_invalidates_previous_guard_result(client):
     ).fetchone()
     assert row["guard_outcome"] is None
     assert row["guard_reason"] is None
+    edit_event = conn.execute(
+        "SELECT actor FROM content_review_events WHERE content_id=? AND event_type='edited' "
+        "ORDER BY id DESC LIMIT 1",
+        (content_id,),
+    ).fetchone()
+    content_override = conn.execute(
+        "SELECT overridden_by FROM user_override WHERE override_field='content' "
+        "AND round_id=? ORDER BY rowid DESC LIMIT 1",
+        (round_id,),
+    ).fetchone()
+    assert edit_event is not None and edit_event["actor"].startswith("session:")
+    assert content_override is not None
+    assert content_override["overridden_by"] == edit_event["actor"]
 
 
 def test_published_content_cannot_be_mutated_in_place(client):
