@@ -490,19 +490,13 @@ class PlanVersionStore:
             ).fetchone()
             if identity is None:
                 raise PlanVersionError("子计划不存在")
-            # A child paused by a master-plan switch may be explicitly rebased
-            # onto that newly effective master. The old version remains immutable
-            # and existing rounds keep their historical snapshots.
+            # A subplan version is permanently bound to its originating master
+            # version. A master-plan switch pauses the child; it does not authorize
+            # rewriting that lineage. Historical rounds keep their original snapshots.
             existing_master_id = int(identity["master_plan_version_id"])
             target_master_id = int(master_plan_version_id)
-            is_authorized_rebase = (
-                identity["status"] == "paused"
-                and identity["pause_reason"] == "master_plan_switch"
-                and identity["paused_by_master_version_id"] is not None
-                and int(identity["paused_by_master_version_id"]) == target_master_id
-            )
-            if existing_master_id != target_master_id and not is_authorized_rebase:
-                raise PlanVersionError("子计划不能脱离创建时绑定的母计划版本；仅允许在母计划切换暂停后重新绑定")
+            if existing_master_id != target_master_id:
+                raise PlanVersionError("子计划不能脱离创建时绑定的母计划版本")
             current_version_id = (
                 int(identity["current_version_id"])
                 if identity["current_version_id"] is not None else None
