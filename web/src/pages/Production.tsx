@@ -542,11 +542,14 @@ export default function Production() {
   /** 按当前标题/正文重新出图：封面 + 正文分页（历史内容也能补图） */
   const handleRegenerateCards = async () => {
     if (!selectedContentId || regenActive) return;
+    const reason = window.prompt("请填写本次整套图片重新生成的修改理由（必填）");
+    if (reason === null) return;
+    if (!reason.trim()) { showToast("必须填写整套图片修改理由", "error"); return; }
     setRegenActive(true);
     await withPending("regen-cards", async () => {
       try {
-        const res = await api.regenerateContentCards(selectedContentId);
-        showToast(`✓ 已生成 ${res.image_count} 张卡片`, "success");
+        const res = await api.regenerateContentCards(selectedContentId, reason.trim());
+        showToast(`已生成 ${res.image_count} 张卡片，待人工审核；当前原图未替换，请到视觉版本历史中审核采用。`, "success");
         await loadRoundData(currentRoundId!);
         const task = await api.visualGenerationTask(selectedContentId);
         setVisualTask(task);
