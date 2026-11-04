@@ -156,7 +156,9 @@ def _generate_ai_card_set(
     *, title: str, subtitle: str, body: str, output_dir: Path, platform,
     cfg, settings: dict, allow_fallback: bool | None = None,
     brand_profile: dict | None = None, task_id: str | None = None,
-    account_group: str | None = None,
+    account_group: str | None = None, revision_context: dict | None = None,
+    reference_image_paths: list[str | Path] | None = None,
+    prompt_audit: dict | None = None,
 ) -> tuple[list[Path], list[str]]:
     """Generate validated AI pages with durable task checkpoints and atomic delivery."""
     from .visual_ocr import preflight_ocr, validate_rendered_pages
@@ -200,8 +202,58 @@ def _generate_ai_card_set(
     if prefix:
         prompts = [f"{prefix}\n\n{prompt}" for prompt in prompts]
 
+    revision_context = revision_context if isinstance(revision_context, dict) else {}
+    revision_reason = str(revision_context.get("reason") or "").strip()
+    if revision_context and not revision_reason:
+        raise ValueError("整套图片重新生成必须提供用户修改理由")
+    reference_paths = [Path(item).resolve() for item in (reference_image_paths or [])]
+    reference_paths = [item for item in reference_paths if item.is_file()]
+    preserve_items = revision_context.get("preserve_items") or [
+        "品牌识别元素、产品/服务主体和已确认的事实信息",
+        "整套图片的主题、画布比例、核心内容与文字准确性",
+        "整套视觉语言、主辅色关系和基本排版秩序",
+    ]
+    forbidden_items = revision_context.get("forbidden_items") or [
+        "不得改变产品主体、品牌标识、已确认文字和数字",
+        "不得擅自增加不存在的卖点、数据、人物、商标或水印",
+        "不得改变画布比例、页面顺序或删减正文信息",
+    ]
+    if revision_context:
+        revision_block = (
+            "\n\n【整套图片重新生成修改指令】\n"
+            f"用户原始修改理由：{revision_reason}\n"
+            f"整理后的修改指令：{str(revision_context.get('instruction') or revision_reason)}\n"
+            "必须保留：\n- " + "\n- ".join(str(item) for item in preserve_items) +
+            "\n本次修改重点：\n- " + "\n- ".join(str(item) for item in (revision_context.get("change_items") or [revision_reason])) +
+            "\n禁止改变：\n- " + "\n- ".join(str(item) for item in forbidden_items) +
+            "\n必须继承同一套视觉基准，确保封面和全部正文页的颜色、背景、字体、字号、留白、视觉层级、插画/摄影表现和构图语言一致。"
+        )
+        if revision_context.get("style_baseline"):
+            revision_block += "\n整套视觉基准（必须遵守）：\n" + json.dumps(revision_context["style_baseline"], ensure_ascii=False, sort_keys=True)
+        prompts = [prompt + revision_block for prompt in prompts]
+    if isinstance(prompt_audit, dict):
+        prompt_audit["final_prompts"] = list(prompts)
+        prompt_audit["reference_images"] = [str(item) for item in reference_paths]
+
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    reference_montage = None
+    if reference_paths:
+        from PIL import Image
+        reference_montage = output_dir / f".visual-reference-{uuid.uuid4().hex}.png"
+        cell_w, cell_h = 640, 840
+        canvas = Image.new("RGB", (cell_w * 2, cell_h * 2), "white")
+        for ref_index, ref_path in enumerate(reference_paths[:4]):
+            try:
+                with Image.open(ref_path) as source:
+                    image = source.convert("RGB")
+                    image.thumbnail((cell_w - 24, cell_h - 24))
+                    cell = Image.new("RGB", (cell_w, cell_h), "white")
+                    cell.paste(image, ((cell_w - image.width) // 2, (cell_h - image.height) // 2))
+                    canvas.paste(cell, ((ref_index % 2) * cell_w, (ref_index // 2) * cell_h))
+            except (OSError, ValueError):
+                continue
+        canvas.save(reference_montage, format="PNG", optimize=True)
     media_root = output_dir / "media"
     staging_root = media_root / "staging"
     validated_root = media_root / "validated"
@@ -274,6 +326,8 @@ def _generate_ai_card_set(
                     raw, _mime, suffix, width, height = generate_image_bytes(
                         retry_prompt, model=settings["model"], size=settings["size"], cfg=cfg,
                         allow_fallback=allow_fallback,
+                        source_path=reference_montage,
+                        source_mime_type="image/png" if reference_montage else None,
                     )
                     check_deadline(page_deadline, "图片单页")
                     validate_target_image_spec(width, height, settings["size"], cfg=cfg)
@@ -400,13 +454,17 @@ def _generate_ai_card_set(
         raise
     finally:
         _safe_remove_tree(staging_dir, staging_root)
+        if reference_montage is not None:
+            reference_montage.unlink(missing_ok=True)
 
 
 def generate_ai_card_set(
     *, title: str, subtitle: str, body: str, output_dir: Path, platform,
     cfg, settings: dict, allow_fallback: bool | None = None,
     brand_profile: dict | None = None, task_id: str | None = None,
-    account_group: str | None = None,
+    account_group: str | None = None, revision_context: dict | None = None,
+    reference_image_paths: list[str | Path] | None = None,
+    prompt_audit: dict | None = None,
 ) -> tuple[list[Path], list[str]]:
     """Run durable article generation under the configured shared API budget."""
     policy = getattr(cfg, "media_generation", None)
@@ -424,4 +482,6 @@ def generate_ai_card_set(
                 platform=platform, cfg=cfg, settings=settings,
                 allow_fallback=allow_fallback, brand_profile=brand_profile,
                 task_id=task_id, account_group=account_group,
+                revision_context=revision_context, reference_image_paths=reference_image_paths,
+                prompt_audit=prompt_audit,
             )
