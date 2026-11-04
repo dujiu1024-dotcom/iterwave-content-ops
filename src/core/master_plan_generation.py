@@ -190,11 +190,11 @@ async def generate_master_plan_draft(conn, cfg) -> dict[str, Any]:
 
     previous_plan, _, _, _ = PlanVersionManager(cfg, conn).load_plan()
     active_before = conn.execute(
-        "SELECT id FROM master_plan_versions WHERE status='effective' AND deleted_at IS NULL"
+        "SELECT id FROM master_plan_versions WHERE status='effective'"
     ).fetchone()
     expected_active_version_id = int(active_before["id"]) if active_before else None
     existing_draft = conn.execute(
-        "SELECT id FROM master_plan_versions WHERE status='draft' AND deleted_at IS NULL ORDER BY version_no DESC LIMIT 1"
+        "SELECT id FROM master_plan_versions WHERE status='draft' ORDER BY version_no DESC LIMIT 1"
     ).fetchone()
     if existing_draft is not None:
         raise LookupError(
