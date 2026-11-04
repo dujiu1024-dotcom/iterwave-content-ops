@@ -156,4 +156,21 @@ def build_business_diagnosis_router(get_runtime) -> APIRouter:
         conn.commit()
         return {"report": _decode(conn.execute("SELECT * FROM business_diagnosis_reports WHERE id=?", (version_id,)).fetchone())}
 
+
+    @router.post("/api/plans/ai-draft", status_code=201)
+    async def generate_ai_master_plan_draft():
+        """Generate a draft from the latest confirmed, non-stale diagnosis only."""
+        from src.core.master_plan_generation import (
+            MasterPlanGenerationError, generate_master_plan_draft,
+        )
+        runtime = get_runtime()
+        try:
+            return await generate_master_plan_draft(runtime["conn"], runtime["cfg"])
+        except LookupError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except MasterPlanGenerationError as exc:
+            raise HTTPException(422, {"code": "invalid_ai_master_plan", "message": str(exc)}) from exc
+        except RuntimeError as exc:
+            raise HTTPException(502, {"code": "ai_provider_unavailable", "message": str(exc)}) from exc
+
     return router
