@@ -483,10 +483,13 @@ class PlanVersionStore:
         self._begin()
         try:
             identity = self.conn.execute(
-                "SELECT id FROM sub_plans WHERE id=?", (sub_plan_id,)
+                "SELECT id,master_plan_version_id,current_version_id FROM sub_plans WHERE id=?",
+                (sub_plan_id,),
             ).fetchone()
             if identity is None:
                 raise PlanVersionError("子计划不存在")
+            if int(identity["master_plan_version_id"]) != int(master_plan_version_id):
+                raise PlanVersionError("子计划不能脱离创建时绑定的母计划版本")
             master = self.conn.execute(
                 "SELECT status FROM master_plan_versions WHERE id=?", (master_plan_version_id,)
             ).fetchone()
@@ -494,6 +497,13 @@ class PlanVersionStore:
                 raise PlanVersionError("关联的主计划版本不存在")
             if master["status"] != "effective":
                 raise PlanVersionError("新子计划版本必须关联当前生效的主计划版本")
+            current_version_id = (
+                int(identity["current_version_id"])
+                if identity["current_version_id"] is not None else None
+            )
+            requested_base_id = int(based_on_version_id) if based_on_version_id is not None else None
+            if requested_base_id != current_version_id:
+                raise PlanVersionError("子计划基准版本已过期，请基于当前生效版本重新创建草稿")
             base_stage_keys: set[str] = set()
             if based_on_version_id is not None:
                 base = self.conn.execute(
@@ -691,6 +701,22 @@ class PlanVersionStore:
             ).fetchone()
             if master is None or master["status"] != "effective":
                 raise PlanVersionError("子计划版本只能在其主计划版本生效期间审核")
+            latest = self.conn.execute(
+                "SELECT id FROM sub_plan_versions WHERE sub_plan_id=? ORDER BY version_no DESC LIMIT 1",
+                (row["sub_plan_id"],),
+            ).fetchone()
+            if latest is None or int(latest["id"]) != int(version_id):
+                raise PlanVersionError("只有最新的子计划草稿可以审核生效")
+            current_version_id = (
+                int(identity["current_version_id"])
+                if identity["current_version_id"] is not None else None
+            )
+            based_on_version_id = (
+                int(row["based_on_version_id"])
+                if row["based_on_version_id"] is not None else None
+            )
+            if based_on_version_id != current_version_id:
+                raise PlanVersionError("子计划基准版本已过期，当前草稿不能覆盖更新版本")
             self.conn.execute(
                 """UPDATE sub_plan_versions SET status='archived',superseded_at=?
                    WHERE sub_plan_id=? AND status='effective'""", (now, row["sub_plan_id"])
