@@ -164,10 +164,14 @@ class PlanVersionStore:
             based_on_version_id=version_id, change_note=change_note,
         )
 
-    def activate_master_version(self, version_id: int, *, reviewer: str) -> dict[str, Any]:
+    def activate_master_version(
+        self, version_id: int, *, reviewer: str, pre_activate=None,
+    ) -> dict[str, Any]:
         now = _now()
         self._begin()
         try:
+            if pre_activate is not None:
+                pre_activate()
             row = self.conn.execute(
                 "SELECT * FROM master_plan_versions WHERE id=?", (version_id,)
             ).fetchone()
