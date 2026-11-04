@@ -304,7 +304,7 @@ def test_migration_maps_legacy_tasks_without_rewriting_them(conn):
             ),
         )
         legacy.commit()
-        migration = Path(__file__).resolve().parents[1] / "migrations" / "148_content_production_lines_and_context.sql"
+        migration = Path(__file__).resolve().parents[1] / "migrations" / "150_content_production_lines_and_context.sql"
         legacy.executescript(migration.read_text(encoding="utf-8"))
 
         line = legacy.execute(
