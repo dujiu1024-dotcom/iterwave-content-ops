@@ -756,7 +756,7 @@ def test_tracked_scheduler_job_rolls_back_implicit_write_on_exception(cfg, conn)
     assert completed.is_set(), "scheduler finalizer leaked the retained transaction lock"
 
 
-def _verified_review_task(conn, seed):
+def _verified_review_task(conn, seed, actor="session:review-creator"):
     from src.core.operating_feedback import create_publish_verification
 
     round_id = seed.round(status="completed")
@@ -770,7 +770,7 @@ def _verified_review_task(conn, seed):
         conn, tenant_id="tenant-test", draft_id=draft_id,
         platform_content_id=f"note-{draft_id}",
         content_url=f"https://www.xiaohongshu.com/explore/{draft_id}",
-        published_at=published_at,
+        published_at=published_at, actor=actor,
     )
     conn.commit()
     return draft_id, result["review_task_id"]
@@ -869,3 +869,28 @@ def test_stale_review_collection_job_is_ignored_after_manual_retry(cfg, conn, se
 
     assert result["final_status"] == "skipped"
     assert "周期已更新" in result["reason"]
+
+
+def test_review_collection_queue_preserves_initiating_actor(cfg, conn, seed):
+    from datetime import datetime, timezone
+
+    draft_id, task_id = _verified_review_task(conn, seed, actor="session:review-initiator")
+
+    class _Queue:
+        def __init__(self):
+            self.items = []
+
+        def enqueue(self, **kwargs):
+            self.items.append(kwargs)
+
+    queue = _Queue()
+    engine = SchedulerEngine(cfg, Path(cfg.paths.db_file))
+    engine.wire(conn=conn, adapters={}, task_queue=queue, tenant_id="tenant-test")
+    engine.schedule_review_collection(task_id, datetime(2026, 11, 5, 10, tzinfo=timezone.utc))
+
+    assert len(queue.items) == 1
+    assert queue.items[0]["payload"]["initiating_actor"] == "session:review-initiator"
+    assert queue.items[0]["payload"]["args"] == [task_id, 1, "initial"]
+    assert conn.execute(
+        "SELECT created_by FROM review_tasks WHERE task_id=?", (task_id,)
+    ).fetchone()["created_by"] == "session:review-initiator"
