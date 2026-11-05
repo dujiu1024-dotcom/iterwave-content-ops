@@ -142,10 +142,11 @@ def build_business_diagnosis_router(get_runtime) -> APIRouter:
         if row is None:
             raise HTTPException(404, "经营分析报告不存在")
         current = collect_business_context(conn, get_runtime()["cfg"])
-        if row["source_fingerprint"] != current["fingerprint"]:
-            conn.execute("UPDATE business_diagnosis_reports SET status='stale' WHERE id=?", (version_id,))
-            conn.commit()
-            raise HTTPException(409, "业务资料或素材已变化，请重新分析")
+        if row["status"] == "stale" or row["source_fingerprint"] != current["fingerprint"]:
+            if row["status"] != "stale":
+                conn.execute("UPDATE business_diagnosis_reports SET status='stale' WHERE id=?", (version_id,))
+                conn.commit()
+            raise HTTPException(409, "报告依据已变化（业务资料或素材已更新），请重新分析后再确认")
         if row["status"] != "draft":
             raise HTTPException(409, "只有草稿报告可以确认")
         now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(timespec="seconds")
