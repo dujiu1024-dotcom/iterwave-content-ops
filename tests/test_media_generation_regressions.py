@@ -12,7 +12,7 @@ def _client(test_auth):
     return test_auth(TestClient(api_main._build_app(), base_url="http://127.0.0.1"))
 
 
-def test_failed_image_generation_consumes_monthly_quota(
+def test_failed_image_generation_is_recorded_without_quota_block(
     conn, cfg, test_auth, monkeypatch, tmp_path
 ):
     registry = TenantRegistry(tmp_path / "workspace")
@@ -41,14 +41,14 @@ def test_failed_image_generation_consumes_monthly_quota(
         first = client.post("/api/media/generate", json={"prompt": "a detailed test image prompt"})
         second = client.post("/api/media/generate", json={"prompt": "a detailed test image prompt"})
         assert first.status_code == 502
-        assert second.status_code == 429
+        assert second.status_code == 502
         assert "sk-masked-secret-fragment" not in first.text
         assert "provider error" not in first.text
         settings = client.get("/api/media/generation-settings")
         assert settings.status_code == 200
-        assert settings.json()["used_this_month"] == 1
+        assert settings.json()["used_this_month"] == 2
         jobs = conn.execute("SELECT status FROM media_generation_jobs").fetchall()
-        assert len(jobs) == 1
+        assert len(jobs) == 2
         assert all(row["status"] == "failed" for row in jobs)
     finally:
         api_main._g_ctx.clear()
@@ -102,6 +102,8 @@ def test_media_generation_settings_do_not_expose_provider_url_or_key_variable(
         assert response.status_code == 200
         body = response.json()
         assert body["provider_configured"] is True
+        assert "monthly_quota" not in body
+        assert isinstance(body["used_this_month"], int)
         assert "api_base_url" not in body
         assert "api_key_env" not in body
         assert "internal-provider.example" not in response.text
@@ -195,10 +197,10 @@ def test_recommendation_limit_can_return_more_than_eight_items(conn, seed, test_
 
 
 
-def test_successful_image_generation_enforces_monthly_quota(
+def test_successful_image_generation_is_not_monthly_quota_blocked(
     conn, cfg, test_auth, monkeypatch, tmp_path
 ):
-    """月度配额按已启动的生成任务计数，成功或失败都不能重复绕过。"""
+    """Legacy quota values do not block generation; successful calls remain measurable."""
     from src.core import media_quality
 
     registry = TenantRegistry(tmp_path / "workspace")
@@ -229,11 +231,10 @@ def test_successful_image_generation_enforces_monthly_quota(
             client.post("/api/media/generate", json={"prompt": "a detailed test image prompt"}),
             client.post("/api/media/generate", json={"prompt": "another detailed test image prompt"}),
         ]
-        assert [response.status_code for response in responses] == [201, 429]
+        assert [response.status_code for response in responses] == [201, 201]
         assert conn.execute(
             "SELECT COUNT(*) FROM media_generation_jobs WHERE status='succeeded'"
-        ).fetchone()[0] == 1
-        assert conn.execute("SELECT monthly_quota FROM media_generation_settings WHERE id=1").fetchone()[0] == 1
+        ).fetchone()[0] == 2
     finally:
         api_main._g_ctx.clear()
         api_main._g_ctx.update(saved)

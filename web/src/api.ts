@@ -917,7 +917,6 @@ export interface TenantBackupItem {
 }
 export interface MediaGenerationSettings {
   enabled: boolean;
-  monthly_quota: number;
   prompt_prefix: string;
   model: string;
   size: "1024x1024" | "1024x1536" | "1536x1024";
@@ -2564,7 +2563,7 @@ export const api = {
       `/api/media/${asset_id}/use`, { method: "POST", body: JSON.stringify({ content_id, usage_role }) },
     ),
   mediaGenerationSettings: () => fetchJson<MediaGenerationSettings>("/api/media/generation-settings"),
-  saveMediaGenerationSettings: (data: Pick<MediaGenerationSettings, "enabled" | "monthly_quota" | "prompt_prefix" | "model" | "size" | "fallback_enabled">) =>
+  saveMediaGenerationSettings: (data: Pick<MediaGenerationSettings, "enabled" | "prompt_prefix" | "model" | "size" | "fallback_enabled">) =>
     fetchJson<MediaGenerationSettings>("/api/media/generation-settings", { method: "PUT", body: JSON.stringify(data) }),
   generateMediaAsset: (data: { prompt: string; title?: string; alt_text?: string; tags?: string[] }) =>
     fetchJson<MediaAsset>("/api/media/generate", { method: "POST", body: JSON.stringify(data) }),
