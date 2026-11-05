@@ -6,6 +6,7 @@ import asyncio
 import json
 import uuid
 from datetime import datetime, timedelta
+from src.core.timezone import business_date_cutoffs, business_today
 
 import pytest
 
@@ -234,12 +235,15 @@ def test_cooldown_and_force(cfg, conn, seed):
     assert _ctl(cfg, conn).evaluate(force=True)["can_start"]   # 立即执行跳过冷却
 
 
-def test_daily_cap(cfg, conn, seed):
+def test_daily_cap_uses_shanghai_business_date_across_utc_midnight(cfg, conn, seed):
     rid = seed.round(status="completed")
     conn.execute("UPDATE spiral_rounds SET trigger_source='auto' WHERE id = ?", (rid,))
-    conn.commit()
-    _age_round(conn, rid, 30)
-    conn.execute("UPDATE spiral_rounds SET created_at = datetime('now','localtime') WHERE id = ?", (rid,))
+    business_day = business_today(cfg).isoformat()
+    utc_start, _legacy_start = business_date_cutoffs(business_day, cfg)
+    # This UTC instant belongs to today's Asia/Shanghai business date.
+    utc_instant = datetime.fromisoformat(utc_start) + timedelta(minutes=30)
+    conn.execute("UPDATE spiral_rounds SET created_at = ? WHERE id = ?",
+                 (utc_instant.isoformat(sep=" "), rid))
     conn.commit()
     cfg.autogrow.cooldown_hours = 0
     v = _ctl(cfg, conn).evaluate()
