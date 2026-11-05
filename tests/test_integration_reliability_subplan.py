@@ -243,7 +243,7 @@ def test_round_is_pinned_to_effective_version_and_survives_new_draft(client, mon
     _seed_required_production_context(tc, monkeypatch, "T4 计划版本绑定测试业务")
     store, master, version, stage = _approved_subplan(conn)
 
-    created = tc.post("/api/subplans/integration-sub/rounds", json={"topic_count": 3})
+    created = tc.post("/api/subplans/integration-sub/rounds", json={"topic_count": 1})
     assert created.status_code == 201
     round_id = int(created.json()["round_id"])
 
