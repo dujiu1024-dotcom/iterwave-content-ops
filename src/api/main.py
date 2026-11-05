@@ -6236,30 +6236,58 @@ def _register_routes(app: FastAPI) -> None:
                 raise HTTPException(409, "目标母计划必须是已审核生效的 review_adoption 版本")
         else:
             target_master = None
-        rows = conn.execute(
+        # Inspect the complete relevant cohort before selecting eligible children.
+        # Ineligible children are reported explicitly instead of disappearing behind
+        # an INNER JOIN/status filter. Draft creation remains atomic for all eligible
+        # children; skipped children never create partial side effects.
+        cohort_rows = conn.execute(
             """SELECT p.id,p.platform,p.master_plan_version_id,p.current_version_id,
-                      p.paused_by_master_version_id,v.snapshot_json
-               FROM sub_plans p JOIN sub_plan_versions v ON v.id=p.current_version_id
-               WHERE v.status='effective'
-                 AND (? IS NULL OR p.id=?)
-                 AND (
-                    (? IS NULL AND p.status IN ('active','paused'))
-                    OR
-                    (? IS NOT NULL AND p.status='paused'
-                     AND p.paused_by_master_version_id=?
-                     AND p.master_plan_version_id=?)
-                 )
+                      p.status,p.pause_reason,p.paused_by_master_version_id,
+                      v.status AS current_version_status,v.snapshot_json
+               FROM sub_plans p
+               LEFT JOIN sub_plan_versions v ON v.id=p.current_version_id
+               WHERE (? IS NULL OR p.id=?)
+                 AND (? IS NULL OR p.master_plan_version_id=?)
                ORDER BY p.platform,p.id""",
             (
                 effect_source["sub_plan_id"] if effect_source is not None else None,
                 effect_source["sub_plan_id"] if effect_source is not None else None,
-                target_master_version_id, target_master_version_id,
-                target_master_version_id,
+                int(target_master["based_on_version_id"]) if target_master is not None else None,
                 int(target_master["based_on_version_id"]) if target_master is not None else None,
             ),
         ).fetchall()
-        if not rows:
-            raise HTTPException(409, "当前没有与反馈来源匹配的已审核平台子计划；请先确认子计划仍有生效版本")
+        if not cohort_rows:
+            raise HTTPException(409, "当前没有与反馈来源或目标母计划来源匹配的平台子计划")
+        rows = []
+        skipped = []
+        for child in cohort_rows:
+            reason = None
+            if child["current_version_id"] is None:
+                reason = "no_current_version"
+            elif child["current_version_status"] != "effective":
+                reason = "no_effective_version"
+            elif target_master_version_id is not None:
+                if not (
+                    child["status"] == "paused"
+                    and child["pause_reason"] == "master_plan_switch"
+                    and child["paused_by_master_version_id"] == target_master_version_id
+                ):
+                    reason = "not_paused_by_target"
+            elif child["status"] not in ("active", "paused"):
+                reason = "terminal_status"
+            if reason is None:
+                rows.append(child)
+            else:
+                detail = {
+                    "no_current_version": "子计划没有当前版本",
+                    "no_effective_version": "子计划当前版本不是生效版本",
+                    "not_paused_by_target": "子计划并非由本次目标母计划切换暂停",
+                    "terminal_status": "子计划状态不允许复盘采纳",
+                }[reason]
+                skipped.append({
+                    "sub_plan_id": child["id"], "platform": child["platform"],
+                    "status": child["status"], "reason": reason, "detail": detail,
+                })
         store = PlanVersionStore(conn)
         drafts = []
         # A batch adoption is all-or-nothing. Store methods use nested savepoints;
@@ -6374,9 +6402,15 @@ def _register_routes(app: FastAPI) -> None:
             conn.execute("RELEASE SAVEPOINT review_adoption_batch")
             raise
         return {
-            "drafts": drafts, "effective": False, "requires_human_review": True,
+            "drafts": drafts, "skipped": skipped,
+            "eligible_count": len(rows), "skipped_count": len(skipped),
+            "status": "partial" if skipped else "completed",
+            "effective": False, "requires_human_review": True,
             "adopted_dimensions": dims,
-            "message": "复盘建议已生成平台子计划草稿；修改并审核通过后才会生效",
+            "message": (
+                "复盘建议已为符合条件的子计划生成草稿；其余子计划已列明跳过原因"
+                if skipped else "复盘建议已生成平台子计划草稿；修改并审核通过后才会生效"
+            ),
         }
 
     @app.post("/api/plans/suggest_from_goal")
