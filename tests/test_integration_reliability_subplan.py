@@ -1125,3 +1125,116 @@ def test_subplan_round_worker_persists_task_content_and_frozen_plan_lineage(
             api_main._g_ctx.pop("runtime_tenant_id", None)
         else:
             api_main._g_ctx["runtime_tenant_id"] = saved_tenant
+
+
+
+def test_reviewed_feedback_adoption_drives_next_round_on_new_version(client):
+    tc, conn, _ = client
+    store = PlanVersionStore(conn)
+    master = store.create_master_draft(dict(PLAN_BASE), author="test", source="user")
+    master = store.activate_master_version(int(master["id"]), reviewer="test")
+    sub_id = "feedback-adoption-next-round"
+    store.create_subplan(
+        sub_id, master_plan_version_id=int(master["id"]), platform="xhs",
+        title="反馈采纳后续轮次验收", author="test",
+    )
+    original = store.create_subplan_version(
+        sub_id, {"title": "反馈采纳后续轮次验收", "platform": "xhs"},
+        master_plan_version_id=int(master["id"]), author="test",
+        stages=[{
+            "stage_key": "feedback-adoption-stage", "title": "采纳后执行阶段",
+            "target_count": 1, "effect_required": True,
+        }],
+    )
+    store.activate_subplan_version(int(original["id"]), reviewer="test")
+    original_stage = conn.execute(
+        "SELECT id,stage_key FROM sub_plan_stages WHERE sub_plan_version_id=?",
+        (int(original["id"]),),
+    ).fetchone()
+
+    line = tc.post(f"/api/subplans/{sub_id}/production-line/draft", json={
+        "definition": {
+            "title": "原始策略生产线",
+            "stages": [{
+                "stage_key": original_stage["stage_key"], "batch_size": 1,
+                "production_goal": "按原策略生产一条内容",
+            }],
+        },
+    })
+    assert line.status_code == 201, line.text
+    old_line = line.json()["draft"]
+    activated_line = tc.post(
+        f"/api/production-lines/{old_line['production_line_id']}/versions/{old_line['id']}/review",
+        json={"action": "approve"},
+    )
+    assert activated_line.status_code == 200, activated_line.text
+
+    feedback = tc.post(
+        f"/api/subplans/stages/{int(original_stage['id'])}/effect-feedback",
+        json={
+            "assessment": "effective",
+            "recommendation": "保持高表现策略并扩大样本。",
+            "evidence_note": "后续轮次版本绑定验收。",
+            "confidence": "high",
+        },
+    )
+    assert feedback.status_code == 201, feedback.text
+    reviewed = tc.post(
+        f"/api/subplans/{sub_id}/stages/{int(original_stage['id'])}/condition-review",
+        json={
+            "condition_type": "effect", "decision": "passed",
+            "reason": "人工确认效果反馈", "effect_review_id": feedback.json()["id"],
+        },
+    )
+    assert reviewed.status_code == 200, reviewed.text
+
+    adopted = tc.post("/api/plan_adjustments/adopt", json={
+        "dimensions": ["发布节奏"], "effect_review_id": feedback.json()["id"],
+    })
+    assert adopted.status_code == 200, adopted.text
+    new_version = adopted.json()["drafts"][0]["draft_version"]
+    assert new_version["status"] == "draft"
+    approved = tc.post(f"/api/subplans/{sub_id}/review", json={
+        "version_id": int(new_version["id"]), "action": "approve",
+    })
+    assert approved.status_code == 200, approved.text
+
+    new_stage = conn.execute(
+        "SELECT id,stage_key FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order LIMIT 1",
+        (int(new_version["id"]),),
+    ).fetchone()
+    assert new_stage["stage_key"] == original_stage["stage_key"]
+    revised_line = tc.post(f"/api/subplans/{sub_id}/production-line/draft", json={
+        "definition": {
+            "title": "采纳后策略生产线",
+            "stages": [{
+                "stage_key": new_stage["stage_key"], "batch_size": 1,
+                "production_goal": "按已审核采纳策略生产一条内容",
+            }],
+        },
+        "change_note": "同步已审核采纳的子计划版本",
+    })
+    assert revised_line.status_code == 201, revised_line.text
+    new_line = revised_line.json()["draft"]
+    line_review = tc.post(
+        f"/api/production-lines/{new_line['production_line_id']}/versions/{new_line['id']}/review",
+        json={"action": "approve"},
+    )
+    assert line_review.status_code == 200, line_review.text
+
+    conn.execute(
+        "UPDATE spiral_rounds SET status='completed' WHERE status IN "
+        "('created','producing','awaiting_publish','collecting_metrics','analyzing')"
+    )
+    conn.commit()
+    next_round = tc.post(f"/api/subplans/{sub_id}/rounds", json={"topic_count": 1})
+    assert next_round.status_code == 201, next_round.text
+    round_id = int(next_round.json()["round_id"])
+    binding = conn.execute(
+        "SELECT sub_plan_version_id,sub_plan_stage_id,production_line_version_id "
+        "FROM spiral_rounds WHERE id=?", (round_id,),
+    ).fetchone()
+    assert int(binding["sub_plan_version_id"]) == int(new_version["id"])
+    assert int(binding["sub_plan_stage_id"]) == int(new_stage["id"])
+    assert int(binding["production_line_version_id"]) == int(new_line["id"])
+    assert int(binding["sub_plan_version_id"]) != int(original["id"])
