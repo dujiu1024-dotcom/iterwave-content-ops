@@ -561,22 +561,20 @@ def test_condition_review_api_records_business_gate_decision(client):
         "UPDATE sub_plan_stages SET business_completion_required=1 WHERE id=?",
         (int(stage["id"]),),
     )
-    conn.execute(
-        "INSERT OR REPLACE INTO sub_plan_stage_publish_stats(stage_id,confirmed_published_count) VALUES(?,?)",
-        (int(stage["id"]), int(stage["target_count"])),
-    )
     conn.commit()
 
+    # needs_review is a valid human decision without pretending that the publish
+    # quantity target has already been met; the stats relation is a read-only view.
     response = tc.post(
         f"/api/subplans/condition-review-sub/stages/{int(stage['id'])}/condition-review",
         json={
-            "condition_type": "business", "decision": "passed",
-            "reason": "已达到阶段目标并核对发布记录",
-            "evidence": {"confirmed_published_count": int(stage["target_count"])},
+            "condition_type": "business", "decision": "needs_review",
+            "reason": "需要补充业务证据后再确认",
+            "evidence": {"source": "acceptance-test"},
         },
     )
     assert response.status_code == 200
-    assert response.json()["stage"]["business_completion_status"] == "passed"
+    assert response.json()["stage"]["business_completion_status"] == "needs_review"
     history = tc.get(
         f"/api/subplans/condition-review-sub/stages/{int(stage['id'])}/condition-reviews"
     )
