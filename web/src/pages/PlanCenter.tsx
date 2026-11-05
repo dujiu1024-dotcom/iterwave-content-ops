@@ -296,8 +296,16 @@ export default function PlanCenter() {
           showToast("母计划已生效；没有旧子计划需要 rebase", "success");
         } else try {
           const rebased = await api.adoptGaps(pendingAdoptionDimensions, reviewedVersionId);
-          setAdoption({ ...rebased, rebaseStatus: "drafts_created", targetMasterPlanVersionId: reviewedVersionId, expectedDraftCount: pendingRebase.expected });
-          showToast(`母计划已生效，已将 ${rebased.drafts.length} 个旧子计划 rebase 为新草稿；需逐项审核`, "success");
+          const expectedCount = rebased.expected_draft_count ?? pendingRebase.expected;
+          const partial = rebased.status === "partial" || rebased.drafts.length < expectedCount;
+          setAdoption({
+            ...rebased, rebaseStatus: partial ? "partial" : "drafts_created",
+            targetMasterPlanVersionId: reviewedVersionId, expectedDraftCount: expectedCount,
+            message: partial
+              ? `部分成功：已创建 ${rebased.drafts.length} / ${expectedCount} 个子计划草稿。剩余平台请在平台子计划页基于当前母计划重建。`
+              : rebased.message,
+          });
+          showToast(partial ? "母计划已生效，子计划 rebase 部分成功" : `母计划已生效，已将 ${rebased.drafts.length} 个旧子计划 rebase 为新草稿`, partial ? "error" : "success");
         } catch (rebaseError) {
           const errorMessage = rebaseError instanceof Error ? rebaseError.message : String(rebaseError);
           let observed: Awaited<ReturnType<typeof inspectRebaseDrafts>> | null = null;
@@ -390,8 +398,16 @@ export default function PlanCenter() {
     }
     try {
       const result = await api.adoptGaps(pendingAdoptionDimensions, masterVersionId);
-      setAdoption({ ...result, rebaseStatus: "drafts_created", targetMasterPlanVersionId: masterVersionId, expectedDraftCount: pendingRebase.expected });
-      showToast(`已生成 ${result.drafts.length} 个子计划 rebase 草稿，需逐项审核`, "success");
+      const expectedCount = result.expected_draft_count ?? pendingRebase.expected;
+      const partial = result.status === "partial" || result.drafts.length < expectedCount;
+      setAdoption({
+        ...result, rebaseStatus: partial ? "partial" : "drafts_created",
+        targetMasterPlanVersionId: masterVersionId, expectedDraftCount: expectedCount,
+        message: partial
+          ? `部分成功：已创建 ${result.drafts.length} / ${expectedCount} 个子计划草稿。未完成的平台请在平台子计划页基于当前母计划重建。`
+          : result.message,
+      });
+      showToast(partial ? "子计划 rebase 部分成功" : `已生成 ${result.drafts.length} 个子计划 rebase 草稿，需逐项审核`, partial ? "error" : "success");
       await load();
     } catch (e) {
       const errorMessage = e instanceof Error ? e.message : String(e);
