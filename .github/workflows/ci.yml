@@ -160,3 +160,31 @@ jobs:
         if: always()
         run: |
           echo "See docs/T8_A_E2E_ACCEPTANCE_20261104.md for coverage matrix and known gaps." >> "$GITHUB_STEP_SUMMARY"
+
+  content-lifecycle-e2e:
+    name: T8-B content review-publish-metrics acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -e ".[dev]"
+      - name: Run content lifecycle API acceptance
+        run: |
+          python -m pytest -vv \
+            tests/test_t8_b_worker_api_dispatch.py \
+            tests/test_t8_content_lifecycle_api_acceptance.py \
+            tests/test_t8_diagnosis_api_acceptance.py \
+            --durations=20 -o faulthandler_timeout=240
+      - name: Compile backend test sources
+        run: python -m compileall -q src tests
+      - name: Publish T8-B acceptance summary
+        if: always()
+        run: |
+          echo "See docs/T8_B_CONTENT_LIFECYCLE_ACCEPTANCE_20261104.md for the T8-B coverage matrix and known gaps." >> "$GITHUB_STEP_SUMMARY"
