@@ -1879,7 +1879,7 @@ export interface VisualUsageSummary {
 }
 export interface VisualVersionHistory {
   id: number; version: number; content_hash: string; renderer: string;
-  style_key: string; status: string; created_at: string;
+  style_key: string; status: string; created_at: string; approved_at?: string | null;
   design: { pages?: Array<{ page_index: number; image_url: string | null; can_revise?: boolean }> };
 }
 export interface OriginalAsset {
@@ -1898,10 +1898,79 @@ export interface OriginalAssetSummary {
   total: number; by_type: Record<string, number>; by_review_status: Record<string, number>;
   gaps: Record<string, number>; by_product?: Record<string, number>;
 }
-export type PublishVerificationItem = Record<string, any>;
-export type ReviewTaskItem = Record<string, any>;
-export type MetricFactItem = Record<string, any>;
-export type BusinessGapItem = Record<string, any>;
+export interface ContentProductionLineRecord {
+  id: string; production_task_id: string; round_id: number; content_id: string | null;
+  status: string; task_status: string; attempt_count: number; max_attempts: number;
+  error_code: string | null; error_message: string | null; strategy_step_id: string;
+  platform: Platform; updated_at: string; created_at: string;
+  context_snapshot: null | {
+    id: string; context_status: "complete" | "waived" | "legacy_incomplete";
+    captured_at: string; fingerprint: string;
+    context: {
+      snapshot_id: string; captured_at: string; north_star?: { goal_text?: string; target_metric?: string; target_value?: number } | null;
+      plan_versions?: Record<string, unknown>; sub_goal?: Record<string, unknown>;
+      latest_review_ref?: string | null; business_diagnosis?: { version_no?: number; report?: unknown } | null;
+      recent_published_content?: { title?: string; metrics?: unknown[]; verification_status?: string } | null;
+      business_gaps?: unknown[];
+      account_performance?: { platform_insights?: unknown[]; account_snapshots?: unknown[] };
+      original_asset_versions?: unknown[]; original_asset_relationships?: unknown[];
+      available_original_assets?: unknown[]; internal_materials?: unknown[];
+      external_references?: unknown[]; resource_gaps?: unknown[]; task_decision_input?: Record<string, unknown>;
+      manual_waiver?: { reason: string; actor: string; waived_items: string[] } | null;
+    };
+  };
+  events: Array<{ id: number; event_type: string; from_status: string | null; to_status: string | null; reason: string; created_at: string }>;
+}
+
+
+
+export interface PublishVerificationItem {
+  verification_id: string; draft_id: string; content_id: string; production_task_id: string | null;
+  production_line_id: string | null; platform: Platform; platform_content_id: string;
+  content_url: string; published_at: string; verified_at: string; evidence_source: string;
+  content_snapshot_sha256: string; evidence_note: string; closure_status: "pending" | "processing" | "succeeded" | "failed" | "not_required";
+  closure_error: string | null; close_event_id?: string | null; close_event_status?: string | null; created_at: string;
+}
+
+
+export interface ReviewTaskItem {
+  task_id: string; verification_id: string; tenant_id: string; draft_id: string; content_id: string;
+  platform: Platform; status: "scheduled" | "pending" | "running" | "partial" | "failed" | "completed" | "cancelled";
+  scheduled_at: string; attempt_count: number; max_attempts: number; last_attempt_at: string | null;
+  last_success_at: string | null; last_window_start: string | null; last_window_end: string | null;
+  last_error?: string | null;
+  conclusion: Record<string, unknown>; created_at: string; updated_at: string;
+}
+
+
+export interface MetricFactItem {
+  fact_id: string; tenant_id: string; draft_id: string | null; content_id: string; platform: Platform;
+  metric_key: string; value: number; unit: "count" | "ratio"; source: string;
+  source_record_type: string; source_record_id: string; measured_at: string; recorded_at: string;
+  window_start: string | null; window_end: string | null; timezone_name: string;
+  collection_status: "succeeded" | "partial";
+}
+
+
+export interface BusinessGapItem {
+  gap_id: string; tenant_id: string; gap_key: string; title: string; description: string;
+  severity: "low" | "medium" | "high" | "critical"; status: "active" | "resolved";
+  source_review_task_id: string | null; evidence: Record<string, unknown> | unknown[];
+  created_at: string; updated_at: string;
+}
+
+
+
+export interface SubGoalRecord {
+  id: string; sub_plan_version_id: number; stage_id: number | null; parent_goal_id: string | null;
+  goal_type: "quantity" | "business" | "effect" | "quality" | "capability";
+  goal_order: number; priority: number; title: string; description: string; target_count: number | null;
+  acceptance_criteria: string; requires_production: number; status: string; dependencies: string[];
+  production_plan: null | { content_direction: string; suggested_count: number; resource_requirements: Record<string, unknown>; priority: number; execution_conditions: string; acceptance_relation: string };
+  latest_evidence: null | { decision: string; reason: string; evidence: Record<string, unknown>; actual_count: number | null; created_at: string };
+  evidence_history?: Array<{ decision: string; reason: string; evidence: Record<string, unknown>; actual_count: number | null; reviewed_by: string; created_at: string }>;
+}
+
 
 export const api = {
 
@@ -2727,9 +2796,9 @@ export const api = {
   recheckContent: (id: string) =>
     fetchJson<RecheckResult>(`/api/contents/${id}/recheck`, { method: "POST" }),
   /** 按当前标题/正文重新出图（封面 + 正文分页） */
-  regenerateContentCards: (id: string) =>
-    fetchJson<{ id: string; image_count: number; image_paths: string[] }>(
-      `/api/contents/${id}/cards`, { method: "POST" },
+  regenerateContentCards: (id: string, reason: string) =>
+    fetchJson<{ id: string; image_count: number; image_paths: string[]; request_id?: string }>(
+      `/api/contents/${id}/cards`, { method: "POST", body: JSON.stringify({ reason }) },
     ),
   visualGenerationTask: (id: string) =>
     fetchJson<VisualGenerationTask>(
@@ -2856,40 +2925,119 @@ export const api = {
     fetchJson<{ content_id: string; versions: VisualVersionHistory[]; jobs: Array<Record<string, unknown>> }>(
       `/api/contents/${encodeURIComponent(contentId)}/visual-versions`,
     ),
-  reviseVisualPage: (contentId: string, versionId: number, pageIndex: number, instruction: string) =>
-    fetchJson<{ content_id: string; job_id: string; version_id: number; page_index: number; image_url: string; status: string }>(
+  reviseVisualPage: (contentId: string, versionId: number, pageIndex: number, reason: string) =>
+    fetchJson<{ content_id: string; job_id: string; version_id: number; page_index: number; image_url: string; status: string; request_id?: string }>(
       `/api/contents/${encodeURIComponent(contentId)}/visual-versions/${versionId}/pages/${pageIndex}/revise`,
-      { method: "POST", body: JSON.stringify({ instruction }) },
+      { method: "POST", body: JSON.stringify({ reason }) },
+    ),
+  subplanGoals: (id: string, versionId: number) =>
+    fetchJson<{ items: SubGoalRecord[] }>(`/api/subplans/${encodeURIComponent(id)}/goals?version_id=${versionId}`),
+
+  createSubplanGoal: (id: string, data: Record<string, unknown>) =>
+    fetchJson<{ goal: SubGoalRecord }>(`/api/subplans/${encodeURIComponent(id)}/goals`, { method: "POST", body: JSON.stringify(data) }),
+
+  updateSubplanGoal: (id: string, goalId: string, data: Record<string, unknown>) =>
+    fetchJson<{ goal: SubGoalRecord }>(`/api/subplans/${encodeURIComponent(id)}/goals/${encodeURIComponent(goalId)}`, { method: "PATCH", body: JSON.stringify(data) }),
+
+  saveSubgoalProductionPlan: (id: string, goalId: string, data: Record<string, unknown>) =>
+    fetchJson<{ production_plan: Record<string, unknown> }>(`/api/subplans/${encodeURIComponent(id)}/goals/${encodeURIComponent(goalId)}/production-plan`, { method: "PUT", body: JSON.stringify(data) }),
+
+  acceptSubplanGoal: (id: string, goalId: string, data: Record<string, unknown>) =>
+    fetchJson<{ goal: SubGoalRecord }>(`/api/subplans/${encodeURIComponent(id)}/goals/${encodeURIComponent(goalId)}/acceptance`, { method: "POST", body: JSON.stringify(data) }),
+
+  contentProductionLines: (status?: string, limit = 50) =>
+    fetchJson<{ items: ContentProductionLineRecord[] }>(
+      `/api/content-production-lines?limit=${limit}${status ? `&status=${encodeURIComponent(status)}` : ""}`,
     ),
 
-  publishVerifications: () => fetchJson<{ items: PublishVerificationItem[] }>("/api/publish-verifications"),
-  createPublishVerification: (draftId: string, payload: Record<string, unknown>) =>
-    fetchJson<{ verification: PublishVerificationItem; closure_event_pending: boolean }>(
+  contentProductionLine: (id: string) =>
+    fetchJson<ContentProductionLineRecord>(`/api/content-production-lines/${encodeURIComponent(id)}`),
+
+  createProductionContextWaiver: (payload: { round_id: number; platform: Platform; waived_items: string[]; reason: string; evidence?: Record<string, unknown> }) =>
+    fetchJson<{ waiver: Record<string, unknown> }>("/api/production-context/waivers", {
+      method: "POST", body: JSON.stringify(payload),
+    }),
+
+  recordContentProductionLineEvent: (id: string, payload: { event_type: string; source?: string; actor?: string; reason?: string; evidence?: Record<string, unknown> }) =>
+    fetchJson<ContentProductionLineRecord>(`/api/content-production-lines/${encodeURIComponent(id)}/events`, {
+      method: "POST", body: JSON.stringify(payload),
+    }),
+
+  publishVerifications: () =>
+    fetchJson<{ items: PublishVerificationItem[] }>("/api/publish-verifications"),
+
+  createPublishVerification: (draftId: string, payload: {
+    platform_content_id: string; content_url: string; published_at: string;
+    evidence_source?: string; evidence_note?: string; production_line_id?: string;
+    scheduled_review_at?: string; idempotency_key?: string;
+  }) =>
+    fetchJson<{ verification: PublishVerificationItem & { review_task_id?: string }; closure_event_pending: boolean }>(
       `/api/drafts/${encodeURIComponent(draftId)}/publish-verification`,
       { method: "POST", body: JSON.stringify(payload) },
     ),
+
   reviewTasks: (status?: string) =>
     fetchJson<{ items: ReviewTaskItem[] }>(`/api/review-tasks${status ? `?status=${encodeURIComponent(status)}` : ""}`),
+
   reviewTaskDetail: (taskId: string) =>
     fetchJson<{ task: ReviewTaskItem & { collection_runs: Array<Record<string, unknown>> } }>(
       `/api/review-tasks/${encodeURIComponent(taskId)}`,
     ),
+
   collectReviewTask: (taskId: string, payload: Record<string, unknown>) =>
-    fetchJson<{ run: Record<string, unknown> }>(`/api/review-tasks/${encodeURIComponent(taskId)}/collect`, { method: "POST", body: JSON.stringify(payload) }),
+    fetchJson<{ run: Record<string, unknown> }>(
+      `/api/review-tasks/${encodeURIComponent(taskId)}/collect`,
+      { method: "POST", body: JSON.stringify(payload) },
+    ),
+
   retryProductionLineClose: (eventId: string) =>
-    fetchJson<{ event_id: string; status: string }>(`/api/production-line-close-events/${encodeURIComponent(eventId)}/retry`, { method: "POST" }),
+    fetchJson<{ event_id: string; status: string }>(
+      `/api/production-line-close-events/${encodeURIComponent(eventId)}/retry`,
+      { method: "POST" },
+    ),
+
   retryReviewTask: (taskId: string, scheduledAt?: string) =>
-    fetchJson<{ task: ReviewTaskItem }>(`/api/review-tasks/${encodeURIComponent(taskId)}/retry`, { method: "POST", body: JSON.stringify({ scheduled_at: scheduledAt }) }),
+    fetchJson<{ task: ReviewTaskItem }>(
+      `/api/review-tasks/${encodeURIComponent(taskId)}/retry`,
+      { method: "POST", body: JSON.stringify({ scheduled_at: scheduledAt }) },
+    ),
+
   saveReviewConclusion: (taskId: string, payload: Record<string, unknown>) =>
-    fetchJson<{ task_id: string; conclusion: Record<string, unknown>; gap_changes_recorded: number }>(`/api/review-tasks/${encodeURIComponent(taskId)}/conclusion`, { method: "POST", body: JSON.stringify(payload) }),
+    fetchJson<{ task_id: string; conclusion: Record<string, unknown>; gap_changes_recorded: number }>(
+      `/api/review-tasks/${encodeURIComponent(taskId)}/conclusion`,
+      { method: "POST", body: JSON.stringify(payload) },
+    ),
+
   metricFacts: (metricKey?: string, contentId?: string, limit = 100) => {
     const query = new URLSearchParams({ limit: String(limit) });
     if (metricKey) query.set("metric_key", metricKey);
     if (contentId) query.set("content_id", contentId);
     return fetchJson<{ items: MetricFactItem[] }>(`/api/metric-facts?${query.toString()}`);
   },
+
   businessGaps: (status: "active" | "resolved" | "all" = "active") =>
     fetchJson<{ items: BusinessGapItem[] }>(`/api/business-gaps?status=${status}`),
+
   businessGapHistory: (gapId: string) =>
-    fetchJson<{ items: Array<Record<string, unknown>> }>(`/api/business-gaps/${encodeURIComponent(gapId)}/history`),
+    fetchJson<{ items: Array<Record<string, unknown>> }>(
+      `/api/business-gaps/${encodeURIComponent(gapId)}/history`,
+    ),
+
+  rejectVisualVersion: (contentId: string, versionId: number, reason: string) =>
+    fetchJson<{ content_id: string; version_id: number; status: string; reason: string }>(
+      `/api/contents/${encodeURIComponent(contentId)}/visual-versions/${versionId}/reject`,
+      { method: "POST", body: JSON.stringify({ reason }) },
+    ),
+
+  approveVisualVersion: (contentId: string, versionId: number) =>
+    fetchJson<{ content_id: string; version_id: number; status: string; image_count: number; already_active?: boolean }>(
+      `/api/contents/${encodeURIComponent(contentId)}/visual-versions/${versionId}/approve`,
+      { method: "POST", body: JSON.stringify({ approved: true }) },
+    ),
+
+  visualRegenerationHistory: (contentId: string) =>
+    fetchJson<{ items: Array<Record<string, unknown>> }>(
+      `/api/contents/${encodeURIComponent(contentId)}/visual-regeneration/history`,
+    ),
+
 };
