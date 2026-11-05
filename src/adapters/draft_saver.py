@@ -422,9 +422,9 @@ class DraftSaver:
 
         **永不点击发布按钮**（R1）。
 
-        成功判定（P0-3 修复）：
-          ✅ 成功证据出现（toast / 页面跳转 / URL 变 / 草稿列表）→ success=True
-          ⚠️ 按钮点了但无成功证据 → needs_human_verify=True（R17）
+        成功判定：
+          ✅ 平台草稿箱读回并匹配标题/平台 ID → success=True
+          ⚠️ 只有 toast / URL / 本地计数信号，或读回未完成 → needs_human_verify=True
           ❌ 明确失败（登录态 / 熔断 / 图片数量不符 / 按钮未找到）→ success=False
         """
         save_attempt_started = False
@@ -1251,10 +1251,10 @@ class DraftSaver:
         self, page: Page, timeout_ms: int = 8000,
         initial_draft_count: Optional[int] = None,
     ) -> Optional[str]:
-        """P0-3：轮询等待平台保存成功信号。
+        """轮询等待 UI 保存信号；该信号不是服务端持久化的最终证明。
 
         证据优先级：成功 toast → 草稿箱数量 +1 → URL 跳转。
-        超时返回 None。
+        非视频号平台仍须额外完成草稿箱读回，才能结算为成功。
         """
         import asyncio
         import re
