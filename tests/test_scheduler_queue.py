@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import asyncio
 from types import SimpleNamespace
 
@@ -151,3 +153,30 @@ def test_user_publish_confirmation_enqueues_naive_business_time_as_utc(tmp_path,
 
     stored_at = datetime.fromisoformat(stored)
     assert stored_at == datetime(2026, 11, 2, 2, 0, tzinfo=timezone.utc)
+
+
+def test_independent_review_job_uses_durable_global_queue(cfg, conn):
+    from datetime import datetime, timezone
+    from src.core.scheduler import SchedulerEngine
+
+    class Queue:
+        def __init__(self):
+            self.items = []
+
+        def enqueue(self, **kwargs):
+            self.items.append(kwargs)
+
+    queue = Queue()
+    engine = SchedulerEngine(cfg, Path(cfg.paths.db_file))
+    engine.wire(conn=conn, adapters={}, task_queue=queue, tenant_id="tenant-review")
+    engine.schedule_review_collection(
+        "review-task-1", datetime(2026, 11, 5, 10, tzinfo=timezone.utc), attempt=2,
+    )
+
+    assert len(queue.items) == 1
+    item = queue.items[0]
+    assert item["task_type"] == "scheduler_job"
+    assert item["tenant_id"] == "tenant-review"
+    assert item["aggregate_id"] == "_job_review_collection:review-task-1:initial:2"
+    assert item["payload"]["method"] == "_job_review_collection"
+    assert item["payload"]["args"] == ["review-task-1", 2, "initial"]
