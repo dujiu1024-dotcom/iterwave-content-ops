@@ -52,6 +52,7 @@ def store():
             id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, attempt_no INTEGER,
             status TEXT, worker_id TEXT, started_at TEXT, finished_at TEXT,
             error_code TEXT, error_message TEXT, output_content_id TEXT,
+            initiating_actor TEXT, executing_actor TEXT, tenant_id TEXT, queue_task_id TEXT,
             UNIQUE(task_id, attempt_no)
         );
     """)
@@ -297,3 +298,32 @@ def test_artifact_insert_rolls_back_when_task_completion_fails(store):
         "SELECT COUNT(*) FROM contents WHERE id='wrong-round-atomic'"
     ).fetchone()[0] == 0
     assert store.get_task(task["id"])["status"] == "running"
+
+
+def test_claimed_attempt_persists_trusted_worker_identity(store):
+    from src.core.task_context import bind_task_identity
+
+    task = make_task(store)
+    with bind_task_identity(
+        initiating_actor="session:initiator-fingerprint",
+        executing_actor="service:global-task-worker",
+        tenant_id="tenant-a",
+        task_id="queue-task-123",
+    ):
+        claimed = store.claim_task(
+            task["id"], worker_id="worker-instance-7", lease_seconds=60,
+        )
+
+    assert claimed["status"] == "running"
+    attempt = store.conn.execute(
+        """SELECT worker_id,initiating_actor,executing_actor,tenant_id,queue_task_id
+           FROM production_task_attempts WHERE task_id=? AND attempt_no=1""",
+        (task["id"],),
+    ).fetchone()
+    assert dict(attempt) == {
+        "worker_id": "worker-instance-7",
+        "initiating_actor": "session:initiator-fingerprint",
+        "executing_actor": "service:global-task-worker",
+        "tenant_id": "tenant-a",
+        "queue_task_id": "queue-task-123",
+    }

@@ -233,6 +233,8 @@ class ProductionTaskStore:
         now = _now()
         now_text = _stamp(now)
         expires = _stamp(now + timedelta(seconds=max(30, int(lease_seconds))))
+        from .task_context import current_task_identity
+        identity = current_task_identity()
         owns_transaction = not self.conn.in_transaction
         if owns_transaction:
             self.conn.execute("BEGIN IMMEDIATE")
@@ -265,9 +267,14 @@ class ProductionTaskStore:
             )
             self.conn.execute(
                 """INSERT INTO production_task_attempts(
-                    task_id,attempt_no,status,worker_id,started_at
-                ) VALUES(?,?,'running',?,?)""",
-                (task_id, attempt_no, worker_id, now_text),
+                    task_id,attempt_no,status,worker_id,started_at,
+                    initiating_actor,executing_actor,tenant_id,queue_task_id
+                ) VALUES(?,?,'running',?,?,?,?,?,?)""",
+                (
+                    task_id, attempt_no, worker_id, now_text,
+                    identity.get("initiating_actor"), identity.get("executing_actor"),
+                    identity.get("tenant_id"), identity.get("task_id"),
+                ),
             )
             if owns_transaction:
                 self.conn.commit()
