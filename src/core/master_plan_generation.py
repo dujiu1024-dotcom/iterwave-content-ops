@@ -167,19 +167,18 @@ async def generate_master_plan_draft(conn, cfg) -> dict[str, Any]:
     """Gate on a current confirmed diagnosis, generate, re-check, and persist draft only."""
     from src.core.business_diagnosis import collect_business_context
     from src.core.plan_version_store import PlanVersionStore, PlanVersionError
+    from src.core.strategy_governance import (
+        collect_strategy_governance, strategy_governance_fingerprint,
+        strategy_governance_from_diagnosis_snapshot,
+    )
 
     diagnosis = conn.execute(
         "SELECT * FROM business_diagnosis_reports ORDER BY version_no DESC LIMIT 1"
     ).fetchone()
     if diagnosis is None:
-        raise LookupError("尚无经营诊断报告，请先完成 AI 经营分析")
+        raise LookupError("尚无经营诊断报告，请先完成经营分析")
     if diagnosis["status"] != "confirmed":
         raise LookupError(f"最新经营诊断报告状态为 {diagnosis['status']}，必须先确认报告")
-    current = collect_business_context(conn, cfg)
-    if diagnosis["source_fingerprint"] != current["fingerprint"]:
-        conn.execute("UPDATE business_diagnosis_reports SET status='stale' WHERE id=? AND status='confirmed'", (diagnosis["id"],))
-        conn.commit()
-        raise LookupError("经营资料或素材已变化，诊断报告已过期；请重新分析并确认")
     try:
         report = json.loads(diagnosis["report_json"])
         source_snapshot = json.loads(diagnosis["source_snapshot_json"])
@@ -187,6 +186,20 @@ async def generate_master_plan_draft(conn, cfg) -> dict[str, Any]:
         raise LookupError("经营诊断报告数据损坏，无法生成母计划") from exc
     if not isinstance(report, dict) or not isinstance(source_snapshot, dict):
         raise LookupError("经营诊断报告结构无效，无法生成母计划")
+
+    current = collect_business_context(conn, cfg)
+    current_governance = collect_strategy_governance(conn)
+    diagnosed_governance = strategy_governance_from_diagnosis_snapshot(source_snapshot)
+    # New diagnosis snapshots carry a stable strategic-input projection. Legacy
+    # snapshots fall back to the old full-source comparison and must be refreshed.
+    if diagnosed_governance is not None:
+        if strategy_governance_fingerprint(diagnosed_governance) != strategy_governance_fingerprint(current_governance):
+            raise LookupError("账号组北极星或资源基线已变化，诊断依据不再匹配；请重新分析并确认")
+    elif diagnosis["source_fingerprint"] != current["fingerprint"]:
+        raise LookupError("旧版经营诊断缺少战略版本快照，请重新分析并确认后再创建母计划")
+
+    if not current_governance.get("north_star"):
+        raise LookupError("请先建立并确认账号组北极星，再创建母计划")
 
     previous_plan, _, _, _ = PlanVersionManager(cfg, conn).load_plan()
     active_before = conn.execute(
@@ -204,6 +217,7 @@ async def generate_master_plan_draft(conn, cfg) -> dict[str, Any]:
         "confirmed_diagnosis": report,
         "diagnosis_source_snapshot": source_snapshot,
         "current_business_context": current["context"],
+        "strategy_governance": current_governance,
         "previous_plan_reference": previous_plan,
         "supported_platforms": sorted(VALID_PLATFORMS),
         "current_schema": {
@@ -247,20 +261,17 @@ async def generate_master_plan_draft(conn, cfg) -> dict[str, Any]:
     conn.execute("BEGIN IMMEDIATE")
     try:
         after = collect_business_context(conn, cfg)
+        after_governance = collect_strategy_governance(conn)
         latest_again = conn.execute(
-            "SELECT id,status,source_fingerprint FROM business_diagnosis_reports ORDER BY version_no DESC LIMIT 1"
+            "SELECT id,status,version_no FROM business_diagnosis_reports ORDER BY version_no DESC LIMIT 1"
         ).fetchone()
-        if (after["fingerprint"] != current["fingerprint"] or latest_again is None
+        if (strategy_governance_fingerprint(after_governance) != strategy_governance_fingerprint(current_governance)
+                or latest_again is None
                 or int(latest_again["id"]) != int(diagnosis["id"])
-                or latest_again["status"] != "confirmed"
-                or latest_again["source_fingerprint"] != current["fingerprint"]):
-            if latest_again is not None and latest_again["status"] == "confirmed":
-                conn.execute(
-                    "UPDATE business_diagnosis_reports SET status='stale' WHERE id=? AND status='confirmed'",
-                    (latest_again["id"],),
-                )
-            conn.commit()
-            raise LookupError("生成期间诊断报告或业务资料发生变化，未创建母计划草稿；请重新分析")
+                or int(latest_again["version_no"]) != int(diagnosis["version_no"])
+                or latest_again["status"] != "confirmed"):
+            conn.rollback()
+            raise LookupError("生成期间北极星、资源基线或诊断版本发生变化，未创建母计划草稿；请刷新后重试")
 
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         metadata = {
@@ -268,6 +279,10 @@ async def generate_master_plan_draft(conn, cfg) -> dict[str, Any]:
             "diagnosis_report_id": int(diagnosis["id"]),
             "diagnosis_version_no": int(diagnosis["version_no"]),
             "source_fingerprint": str(diagnosis["source_fingerprint"]),
+            "strategy_fingerprint": strategy_governance_fingerprint(current_governance),
+            "north_star_version_id": current_governance["north_star"]["version_id"],
+            "north_star_version_no": current_governance["north_star"]["version_no"],
+            "resource_baseline": current_governance["resource_baseline"],
             "model": model,
             "generated_at": now,
             "summary": summary.strip()[:4000],
