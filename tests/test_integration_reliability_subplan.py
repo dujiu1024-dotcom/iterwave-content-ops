@@ -646,3 +646,182 @@ async def test_ai_subplan_description_does_not_enable_business_or_effect_gates_b
     ).fetchone()
     assert int(stage["business_completion_required"]) == 0
     assert int(stage["effect_required"]) == 0
+
+
+def test_subplan_round_worker_persists_task_content_and_frozen_plan_lineage(
+    client, cfg, tmp_path, monkeypatch,
+):
+    """A real sub-plan round must create its production task and attributable content in Worker."""
+    from pathlib import Path
+
+    from src.core import round_executor as executor_module
+    from src.core.round_executor import RoundExecutor
+    from src.core.production_task_store import ProductionTaskStore
+    from src.core.guard.ultimate_goal_checker import CheckOutcome, CheckResult
+
+    tc, conn, _seed = client
+    saved_tenant = api_main._g_ctx.get("runtime_tenant_id")
+    api_main._g_ctx["runtime_tenant_id"] = "default"
+    store, master, version, stage = _approved_subplan(conn, "worker-provenance-sub")
+    opened = tc.post(
+        "/api/subplans/worker-provenance-sub/rounds", json={"topic_count": 1},
+    )
+    assert opened.status_code == 201, opened.text
+    round_id = int(opened.json()["round_id"])
+    round_row = conn.execute(
+        """SELECT master_plan_version_id,sub_plan_id,sub_plan_version_id,
+                  sub_plan_stage_id,sub_plan_snapshot,sub_plan_stage_snapshot,
+                  production_line_version_id,plan_signature
+           FROM spiral_rounds WHERE id=?""",
+        (round_id,),
+    ).fetchone()
+    assert round_row is not None
+    assert int(round_row["master_plan_version_id"]) == int(master["id"])
+    assert int(round_row["sub_plan_version_id"]) == int(version["id"])
+    assert int(round_row["sub_plan_stage_id"]) == int(stage["id"])
+    assert round_row["production_line_version_id"] is not None
+
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    saved_queue = api_main._task_queue
+    api_main._task_queue = queue
+    monkeypatch.setattr(api_main, "_build_task_execution_snapshot", lambda *a, **k: {})
+    from src.core import task_snapshot
+    monkeypatch.setattr(task_snapshot, "validate_execution_snapshot", lambda *a, **k: None)
+
+    worker_cfg = cfg.model_copy(update={
+        "paths": cfg.paths.model_copy(update={
+            "data_dir": str(tmp_path / "tenant" / "data"),
+            "output_dir": str(tmp_path / "tenant" / "output"),
+        }),
+    })
+    topic = SimpleNamespace(
+        id="t8b-subplan-worker-topic", title="子计划真实 Worker 归属验收",
+        summary="验证真实执行器创建生产任务并固化版本归属",
+        dimension="AI教育", source="test", date="2026-11-05",
+    )
+    scored = SimpleNamespace(
+        topic=topic, total_score=91.0, score_breakdown={}, is_exploration=False,
+    )
+
+    class PassingGuard:
+        def check_content(self, *_args, **_kwargs):
+            return CheckOutcome(CheckResult.PASS, "deterministic test pass")
+
+    def fake_generate_card_set(*, output_dir, **_kwargs):
+        path = Path(output_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        image = path / "t8b-subplan-worker-card.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"deterministic-image")
+        return [str(image)], []
+
+    monkeypatch.setattr(executor_module, "load_pool", lambda *_: ([topic], {}))
+    monkeypatch.setattr(executor_module, "_llm_available", lambda _cfg: True)
+    monkeypatch.setattr(
+        executor_module, "generate_copy_content",
+        lambda *_args, **_kwargs: (
+            "子计划真实执行器标题", "用于验证生产任务与计划版本完整归属的图文正文。", ["AI教育"],
+        ),
+    )
+    monkeypatch.setattr(
+        executor_module.PlanVersionManager, "load_plan",
+        lambda _self: (
+            dict(PLAN_BASE), "fallback-signature", None, "plan_settings",
+        ),
+    )
+    monkeypatch.setattr(executor_module, "effective_persona", lambda *_: {"persona_keywords": ["AI教育"]})
+    monkeypatch.setattr(RoundExecutor, "_select_topics", lambda self, *_: [scored])
+    monkeypatch.setattr(RoundExecutor, "_resolve_platforms", lambda self, *_: [Platform.XHS])
+    monkeypatch.setattr(RoundExecutor, "_record_plan_signature", lambda *a, **k: None)
+    monkeypatch.setattr(RoundExecutor, "_platform_broken", lambda *a, **k: False)
+    monkeypatch.setattr(RoundExecutor, "_image_settings", lambda self: (
+        {"model": "deterministic-image", "fallback_enabled": False}, "",
+    ))
+    monkeypatch.setattr(
+        "src.core.ai_card_generation.generate_ai_card_set", fake_generate_card_set,
+    )
+    monkeypatch.setattr(
+        "src.core.visual_ocr.load_ocr_report",
+        lambda _paths: {"status": "passed", "gate": "passed", "reason": None},
+    )
+    monkeypatch.setattr(
+        "src.core.visual_review.assess_visual_pages",
+        lambda _paths: {"status": "not_evaluated", "reason": "deterministic test", "score": None},
+    )
+
+    def build_tenant_context(tenant_id):
+        assert tenant_id == "default"
+        from src.core.db import Database
+        worker_conn = Database(worker_cfg).connect()
+        executor = RoundExecutor(
+            worker_cfg, worker_conn, scoring=None, guard=PassingGuard(), adapters={},
+            sm_round=RoundStateMachine(worker_conn, cfg=worker_cfg),
+            sm_draft=DraftStateMachine(worker_conn, cfg=worker_cfg),
+        )
+        return {
+            "cfg": worker_cfg, "conn": worker_conn, "executor": executor,
+            "scheduler": SimpleNamespace(shutdown=lambda: None), "notifier": None,
+        }
+
+    try:
+        submitted = tc.post(
+            f"/api/rounds/{round_id}/run",
+            json={"topic_count": 1, "platforms": ["xhs"], "save_drafts": False},
+        )
+        assert submitted.status_code == 202, submitted.text
+        queue_task_id = submitted.json()["task_id"]
+        queued = queue.get(queue_task_id)
+        assert queued is not None and queued.status == "queued"
+        assert queued.tenant_id == "default"
+
+        stop = asyncio.Event()
+
+        class StopAfterOneWorker(GlobalTaskWorker):
+            async def _execute(self, task, **kwargs):
+                await super()._execute(task, **kwargs)
+                stop.set()
+
+        worker = StopAfterOneWorker(
+            queue, build_tenant_context, poll_interval_seconds=0.01,
+            lease_seconds=30, heartbeat_seconds=1, reconcile_terminal_rounds=False,
+        )
+        asyncio.run(worker.run(stop))
+
+        completed = queue.get(queue_task_id)
+        assert completed is not None and completed.status == "succeeded"
+        tasks = ProductionTaskStore(conn).list_tasks(round_id=round_id)
+        assert len(tasks) == 1
+        production_task = tasks[0]
+        assert production_task["status"] == "succeeded"
+        assert production_task["content_id"]
+        assert production_task["master_plan_version_id"] == int(master["id"])
+        assert production_task["sub_plan_id"] == "worker-provenance-sub"
+        assert production_task["sub_plan_version_id"] == int(version["id"])
+        assert production_task["strategy_step_id"] == stage["stage_key"]
+        assert production_task["production_line_version_id"] == round_row["production_line_version_id"]
+        frozen_round = production_task["input_snapshot"]["round"]
+        assert frozen_round["master_plan_version_id"] == int(master["id"])
+        assert frozen_round["sub_plan_id"] == "worker-provenance-sub"
+        assert frozen_round["sub_plan_version_id"] == int(version["id"])
+        assert frozen_round["sub_plan_stage_id"] == int(stage["id"])
+        assert frozen_round["production_line_version_id"] == round_row["production_line_version_id"]
+
+        content = conn.execute(
+            """SELECT id,production_task_id,round_id,title
+               FROM contents WHERE production_task_id=?""",
+            (production_task["id"],),
+        ).fetchone()
+        assert content is not None
+        assert content["id"] == production_task["content_id"]
+        assert int(content["round_id"]) == round_id
+        assert content["title"] == "子计划真实执行器标题"
+        draft = conn.execute(
+            "SELECT id,status FROM drafts WHERE content_id=?", (content["id"],),
+        ).fetchone()
+        assert draft is not None and draft["status"] == "draft_pending"
+    finally:
+        api_main._task_queue = saved_queue
+        if saved_tenant is None:
+            api_main._g_ctx.pop("runtime_tenant_id", None)
+        else:
+            api_main._g_ctx["runtime_tenant_id"] = saved_tenant
