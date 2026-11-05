@@ -309,6 +309,7 @@ def test_content_review_publish_metrics_and_effect_feedback_api_chain(content_cl
 def test_effect_feedback_isolated_between_subplans_with_same_stage_key(content_client):
     client, conn, seed = content_client
     own_round = seed.round(status="awaiting_publish")
+    seed.draft(own_round, platform="xhs", draft_status="draft_pending", fetch_status=None)
     own_content = conn.execute(
         "SELECT id FROM contents WHERE round_id=?", (own_round,),
     ).fetchone()["id"]
@@ -316,6 +317,7 @@ def test_effect_feedback_isolated_between_subplans_with_same_stage_key(content_c
 
     # A different sub-plan deliberately reuses the same stable stage key.
     other_round = seed.round(status="awaiting_publish")
+    seed.draft(other_round, platform="xhs", draft_status="draft_pending", fetch_status=None)
     other_content = conn.execute(
         "SELECT id FROM contents WHERE round_id=?", (other_round,),
     ).fetchone()["id"]
