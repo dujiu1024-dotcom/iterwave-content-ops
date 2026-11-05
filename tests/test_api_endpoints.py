@@ -4947,3 +4947,56 @@ def test_manual_draft_save_verification_fingerprints_all_images(client):
     assert row["saved_content_hash"] != content_version_hash(
         row["title"], row["body"], json.loads(row["tags"] or "[]"), images[:1],
     )
+
+
+def test_review_adoption_batch_rolls_back_all_drafts_when_later_child_fails(client, monkeypatch):
+    from src.core.plan_version_store import PlanVersionStore, PlanVersionError
+
+    tc, conn, _ = client
+    store = PlanVersionStore(conn)
+    active = conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective' ORDER BY version_no DESC LIMIT 1"
+    ).fetchone()
+    if active is None:
+        base = {
+            "topic_count_per_platform": 2, "dimension_allocation": {"测试": 2},
+            "enabled_platforms": ["xhs", "douyin"], "content_format": "image_text",
+        }
+        master = store.create_master_draft(base, author="test")
+        active_id = int(store.activate_master_version(master["id"], reviewer="test")["id"])
+    else:
+        active_id = int(active["id"])
+
+    for sub_id, platform in (("adopt-batch-xhs", "xhs"), ("adopt-batch-douyin", "douyin")):
+        store.create_subplan(
+            sub_id, master_plan_version_id=active_id, platform=platform,
+            title="批量采纳原子性验收", author="test",
+        )
+        version = store.create_subplan_version(
+            sub_id, {"title": "批量采纳原子性验收", "platform": platform},
+            master_plan_version_id=active_id, author="test",
+            stages=[{"title": "验证阶段", "target_count": 1}],
+        )
+        store.activate_subplan_version(version["id"], reviewer="test")
+
+    before = int(conn.execute(
+        "SELECT COUNT(*) FROM sub_plan_versions WHERE status='draft'"
+    ).fetchone()[0])
+    original = PlanVersionStore.create_subplan_version
+    calls = {"count": 0}
+
+    def fail_second(self, *args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise PlanVersionError("模拟第二个子计划创建失败")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(PlanVersionStore, "create_subplan_version", fail_second)
+    response = tc.post("/api/plan_adjustments/adopt", json={"dimensions": ["内容结构"]})
+
+    assert response.status_code == 409, response.text
+    assert calls["count"] == 2
+    after = int(conn.execute(
+        "SELECT COUNT(*) FROM sub_plan_versions WHERE status='draft'"
+    ).fetchone()[0])
+    assert after == before
