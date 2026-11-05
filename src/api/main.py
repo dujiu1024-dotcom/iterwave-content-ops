@@ -2410,7 +2410,7 @@ def _register_routes(app: FastAPI) -> None:
         return {"draft_id": draft_id, "note_url": note_url, "updated": True}
 
     @app.post("/api/drafts/{draft_id}/metrics/manual")
-    def submit_manual_metrics(draft_id: str, req: dict):
+    def submit_manual_metrics(draft_id: str, req: dict, request: Request):
         conn = _g()["conn"]
         tenant_id = _tenant_id()
         row = conn.execute(
@@ -2459,20 +2459,65 @@ def _register_routes(app: FastAPI) -> None:
         if measured_dt > now_dt + timedelta(minutes=5):
             raise HTTPException(422, "统计时间不能晚于当前时间（允许 5 分钟设备时钟误差）")
         measured_at = measured_dt.isoformat(timespec="seconds")
+        idempotency_key = request.headers.get("Idempotency-Key")
+        payload_hash = None
+        if idempotency_key is not None:
+            idempotency_key = idempotency_key.strip()
+            if not idempotency_key or len(idempotency_key) > 200:
+                raise HTTPException(422, "Idempotency-Key 必须为 1 到 200 个字符")
+            normalized_payload = json.dumps(
+                {"values": values, "measured_at": measured_at,
+                 "correction_of": str(correction_of) if correction_of else None},
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            )
+            payload_hash = hashlib.sha256(normalized_payload.encode("utf-8")).hexdigest()
+            existing = conn.execute(
+                "SELECT id, payload_hash, source, recorded_at, views, likes, collects, comments, shares "
+                "FROM metric_snapshots WHERE tenant_id=? AND draft_id=? AND idempotency_key=?",
+                (tenant_id, draft_id, idempotency_key),
+            ).fetchone()
+            if existing is not None:
+                if existing["payload_hash"] != payload_hash:
+                    raise HTTPException(409, "Idempotency-Key 已用于不同的指标数据")
+                return {
+                    "snapshot_id": existing["id"], "source": existing["source"],
+                    "recorded_at": existing["recorded_at"], "idempotent_replay": True,
+                    **{field: existing[field] for field in known_fields},
+                }
+
         snapshot_id = uuid.uuid4().hex
-        conn.execute(
-            "INSERT INTO metric_snapshots "
-            "(id, tenant_id, draft_id, content_id, platform, source, views, likes, collects, comments, shares, "
-            "measured_at, recorded_at, correction_of, created_at) "
-            "VALUES (?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (snapshot_id, tenant_id, draft_id, row["content_id"], row["platform"],
-             values["views"], values["likes"], values["collects"], values["comments"],
-             values["shares"], measured_at, now, correction_of, now),
-        )
-        conn.commit()
+        try:
+            conn.execute(
+                "INSERT INTO metric_snapshots "
+                "(id, tenant_id, draft_id, content_id, platform, source, views, likes, collects, comments, shares, "
+                "measured_at, recorded_at, correction_of, created_at, idempotency_key, payload_hash) "
+                "VALUES (?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (snapshot_id, tenant_id, draft_id, row["content_id"], row["platform"],
+                 values["views"], values["likes"], values["collects"], values["comments"],
+                 values["shares"], measured_at, now, correction_of, now, idempotency_key, payload_hash),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError:
+            if not idempotency_key:
+                raise
+            existing = conn.execute(
+                "SELECT id, payload_hash, source, recorded_at, views, likes, collects, comments, shares "
+                "FROM metric_snapshots WHERE tenant_id=? AND draft_id=? AND idempotency_key=?",
+                (tenant_id, draft_id, idempotency_key),
+            ).fetchone()
+            if existing is None:
+                raise
+            if existing["payload_hash"] != payload_hash:
+                raise HTTPException(409, "Idempotency-Key 已用于不同的指标数据")
+            return {
+                "snapshot_id": existing["id"], "source": existing["source"],
+                "recorded_at": existing["recorded_at"], "idempotent_replay": True,
+                **{field: existing[field] for field in known_fields},
+            }
         _record_content_event("metrics_submitted", content_id=row["content_id"],
                               metadata={"source": "manual", "snapshot_id": snapshot_id})
-        return {"snapshot_id": snapshot_id, "source": "manual", "recorded_at": now, **values}
+        return {"snapshot_id": snapshot_id, "source": "manual", "recorded_at": now,
+                "idempotent_replay": False, **values}
 
     @app.get("/api/metrics/snapshots")
     def list_metric_snapshots(
