@@ -579,3 +579,46 @@ def test_operating_feedback_api_actor_defaults_to_explicit_service_when_no_task_
     ).fetchone()
     assert tuple(row) == ("session:api-principal", "service:api", None)
 
+
+
+def test_publication_outbox_claim_ack_and_retry_keep_actor_execution_context(conn, seed):
+    from src.core.operating_feedback import claim_close_events, retry_close_event
+
+    _, verification = _verification(conn, seed)
+    event_id = conn.execute(
+        "SELECT event_id FROM production_line_close_outbox WHERE verification_id=?",
+        (verification["verification_id"],),
+    ).fetchone()[0]
+    created = conn.execute(
+        "SELECT created_by,created_executing_actor FROM production_line_close_outbox WHERE event_id=?",
+        (event_id,),
+    ).fetchone()
+    assert tuple(created) == ("system:publication-verifier", "service:operating-feedback")
+
+    claimed = claim_close_events(
+        conn, tenant_id="tenant-test", worker_id="close-worker-1", actor="session:claim-principal",
+    )
+    assert [item["event_id"] for item in claimed] == [event_id]
+    claim_audit = conn.execute(
+        "SELECT claimed_initiating_actor,claimed_executing_actor FROM production_line_close_outbox WHERE event_id=?",
+        (event_id,),
+    ).fetchone()
+    assert tuple(claim_audit) == ("session:claim-principal", "service:api")
+
+    acknowledge_close_event(
+        conn, event_id, succeeded=False, error="temporary close failure",
+        tenant_id="tenant-test", actor="session:ack-principal",
+    )
+    ack_audit = conn.execute(
+        "SELECT acknowledged_by,acknowledged_executing_actor FROM production_line_close_outbox WHERE event_id=?",
+        (event_id,),
+    ).fetchone()
+    assert tuple(ack_audit) == ("session:ack-principal", "service:api")
+
+    retry_close_event(conn, event_id, tenant_id="tenant-test", actor="session:retry-principal")
+    retry_audit = conn.execute(
+        "SELECT last_retried_by,last_retry_executing_actor FROM production_line_close_outbox WHERE event_id=?",
+        (event_id,),
+    ).fetchone()
+    assert tuple(retry_audit) == ("session:retry-principal", "service:api")
+
