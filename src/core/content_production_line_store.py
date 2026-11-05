@@ -25,8 +25,23 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
 class ContentProductionLineStore:
     """One task/content has one line; tenant DB isolation supplies account-group scope."""
 
-    def __init__(self, conn: sqlite3.Connection):
+    def __init__(self, conn: sqlite3.Connection, *, tenant_id: str = "default"):
         self.conn = conn
+        self.tenant_id = str(tenant_id or "default")
+
+    def _audit_identity(self, actor: str) -> tuple[str, str, str, str, str, str | None]:
+        from src.core.task_context import current_task_identity
+
+        context = current_task_identity()
+        initiating = str(context.get("initiating_actor") or actor or "system:legacy-unattributed")
+        executing = str(context.get("executing_actor") or "service:api")
+        actor_type, separator, actor_id = initiating.partition(":")
+        if not separator:
+            actor_type, actor_id = "unknown", initiating
+        return (
+            actor_type, actor_id, str(context.get("tenant_id") or self.tenant_id),
+            initiating, executing, context.get("task_id"),
+        )
 
     @staticmethod
     def available(conn: sqlite3.Connection) -> bool:
@@ -84,12 +99,13 @@ class ContentProductionLineStore:
         self.conn.execute(
             """INSERT INTO content_production_line_events(
                 content_production_line_id,event_type,from_status,to_status,actor,reason,
-                evidence_json,created_at
+                evidence_json,created_at,actor_type,actor_id,tenant_id,initiating_actor,
+                executing_actor,task_id
             ) VALUES(?, 'context_snapshot_created', 'pending', 'pending',
-                     'system', '生产前经营上下文已固化',
-                     ?, ?)""",
-            (line["id"], json.dumps({"snapshot_id": snapshot_id, "fingerprint": snapshot["fingerprint"]}),
-             snapshot["captured_at"]),
+                     ?, '生产前经营上下文已固化', ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (line["id"], self._audit_identity("system:worker")[4],
+             json.dumps({"snapshot_id": snapshot_id, "fingerprint": snapshot["fingerprint"]}),
+             snapshot["captured_at"], *self._audit_identity("system:worker")),
         )
         return self.get_for_task(task_id)
 
@@ -189,11 +205,13 @@ class ContentProductionLineStore:
             self.conn.execute(
                 """INSERT INTO content_production_line_events(
                     content_production_line_id,event_type,from_status,to_status,
-                    actor,reason,evidence_json,created_at
-                ) VALUES(?,?,?,?,?,?,?,?)""",
+                    actor,reason,evidence_json,created_at,actor_type,actor_id,tenant_id,
+                    initiating_actor,executing_actor,task_id
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (line_id, event_type, line["status"], target,
-                 str(actor or "system")[:120], str(reason or "")[:2000],
-                 json.dumps(evidence or {}, ensure_ascii=False, sort_keys=True), now),
+                 str(actor or "system:unknown")[:120], str(reason or "")[:2000],
+                 json.dumps(evidence or {}, ensure_ascii=False, sort_keys=True), now,
+                 *self._audit_identity(actor)),
             )
             self.conn.commit()
         except sqlite3.IntegrityError as exc:
