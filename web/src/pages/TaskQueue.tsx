@@ -76,61 +76,56 @@ function TaskRow({
 }) {
   const active = task.status === "queued" || task.status === "running";
   return (
-    <div className="panel-row" style={{ display: "grid", gridTemplateColumns: "minmax(180px, 1.5fr) minmax(100px, .8fr) minmax(100px, .8fr) minmax(150px, 1fr) auto", gap: 14, alignItems: "center", padding: "14px 16px" }}>
+    <div className="panel-row" style={{ display: "grid", gridTemplateColumns: "minmax(180px, 1.6fr) 90px 140px minmax(180px, 1.4fr) auto", gap: 10, alignItems: "center", padding: "9px 14px", borderBottom: "1px solid var(--border-subtle)" }}>
       <div style={{ minWidth: 0 }}>
-        <div style={{ fontWeight: 650 }}>{TASK_LABEL[task.task_type] || displayTaskTypeLabel(task.task_type)}</div>
-        <div className="muted" style={{ fontSize: 12, marginTop: 4, overflowWrap: "anywhere" }}>
+        <div style={{ fontWeight: 620, display: "flex", alignItems: "center", gap: 8 }}>
+          <span>{TASK_LABEL[task.task_type] || displayTaskTypeLabel(task.task_type)}</span>
+          <button className="btn sm ghost" type="button" style={{ padding: "1px 7px", fontSize: 11, lineHeight: 1.4 }} onClick={() => onDetails(task)}>详情</button>
+        </div>
+        <div className="muted" style={{ fontSize: 11, overflowWrap: "anywhere" }}>
           {task.tenant_name} · {aggregateLabel(task)}
         </div>
-        <button className="btn sm ghost" type="button" style={{ marginTop: 6 }} onClick={() => onDetails(task)}>查看详情</button>
       </div>
       <div>
         <span className={`status-pill ${task.status === "failed" || task.status === "interrupted" ? "failed" : task.status === "running" ? "producing" : task.status === "succeeded" ? "completed" : task.status === "cancelled" ? "cancelled" : "creating"}`}>
           {STATUS_LABEL[task.status]}
         </span>
       </div>
-      <div className="muted" style={{ fontSize: 12 }}>{timeLabel(task.created_at)}</div>
-      <div className="muted" style={{ fontSize: 12 }}>
+      <div className="muted" style={{ fontSize: 11, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{timeLabel(task.created_at)}</div>
+      <div className="muted" style={{ fontSize: 11, lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
         {task.error_message || (
-          task.status === "queued" && new Date(task.available_at).getTime() > Date.now()
-            ? `计划执行：${timeLabel(task.available_at)}`
+          task.status === "queued" && task.available_at && new Date(task.available_at).getTime() > Date.now()
+            ? `计划：${timeLabel(task.available_at)}`
             : task.started_at ? `开始：${timeLabel(task.started_at)}` : "尚未开始"
         )}
-        {task.finished_at && <div style={{ marginTop: 4 }}>结束：{timeLabel(task.finished_at)}</div>}
-        {task.started_at && task.finished_at && <div>耗时：{Math.max(0, (new Date(task.finished_at).getTime() - new Date(task.started_at).getTime()) / 1000).toFixed(1)} 秒</div>}
-        {task.status === "running" && task.started_at && <div>已运行：{Math.max(0, (Date.now() - new Date(task.started_at).getTime()) / 1000).toFixed(1)} 秒</div>}
+        {task.started_at && task.finished_at && <span style={{ opacity: 0.75, marginLeft: 6 }}>· {Math.max(0, (new Date(task.finished_at).getTime() - new Date(task.started_at).getTime()) / 1000).toFixed(1)}s</span>}
       </div>
-      <div>
+      <div style={{ whiteSpace: "nowrap" }}>
         {task.status === "queued" && (
           <button className="btn sm soft" type="button" disabled={cancelling} onClick={() => onCancel(task)}>
-            {cancelling ? "取消中…" : "取消"}
+            {cancelling ? "取消中" : "取消"}
           </button>
         )}
         {(task.status === "failed" || task.status === "interrupted") && (
           task.resolution_action ? (
-            <div className="muted" style={{ fontSize: 12, maxWidth: 260 }}>
-              <div>
-                {task.resolution_action === "handled" ? "已处理" : "已忽略"}
-                {task.resolution_actor ? " · " + task.resolution_actor : ""}
-              </div>
-              {task.resolution_at && <div style={{ marginTop: 3 }}>{timeLabel(task.resolution_at)}</div>}
-              {task.resolution_note && <div style={{ marginTop: 3, overflowWrap: "anywhere" }}>{task.resolution_note}</div>}
-            </div>
+            <span className="muted" style={{ fontSize: 11 }}>
+              {task.resolution_action === "handled" ? "已处理" : "已忽略"}
+            </span>
           ) : (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-              <button className="btn sm soft" type="button" disabled={resolving} onClick={() => onResolve(task, "handled")}>
-                {resolving ? "提交中…" : "已处理"}
+            <div style={{ display: "inline-flex", gap: 4 }}>
+              <button className="btn sm soft" type="button" disabled={resolving} onClick={() => onResolve(task, "handled")} title="标记为已解决">
+                {resolving ? "…" : "已处理"}
               </button>
-              <button className="btn sm ghost" type="button" disabled={resolving} onClick={() => onResolve(task, "ignored")}>
+              <button className="btn sm ghost" type="button" disabled={resolving} onClick={() => onResolve(task, "ignored")} title="忽略此失败">
                 忽略
               </button>
-              <button className="btn sm soft" type="button" disabled={retrying || resolving} onClick={() => onRetry(task)}>
-                {retrying ? "恢复中…" : "人工核验后恢复"}
+              <button className="btn sm soft" type="button" disabled={retrying || resolving} onClick={() => onRetry(task)} title="人工核验后重新执行">
+                {retrying ? "恢复中" : "恢复"}
               </button>
             </div>
           )
         )}
-        {active && task.status === "running" && <span className="muted" style={{ fontSize: 12 }}>按队列顺序执行</span>}
+        {active && task.status === "running" && <span className="muted" style={{ fontSize: 11 }}>运行中</span>}
       </div>
     </div>
   );
@@ -147,7 +142,7 @@ export default function TaskQueue() {
   const [historyTotal, setHistoryTotal] = useState(0);
   const [historyPages, setHistoryPages] = useState(1);
   const [historyPage, setHistoryPage] = useState(1);
-  const [historyType, setHistoryType] = useState<"all" | "round_run" | "scheduler_job">("round_run");
+  const [historyType, setHistoryType] = useState<"all" | "round_run" | "scheduler_job">("all");
   const [historyStatus, setHistoryStatus] = useState<"all" | "failed">("all");
   const [historyTenantId, setHistoryTenantId] = useState("");
   const [historyErrorKeyword, setHistoryErrorKeyword] = useState("");

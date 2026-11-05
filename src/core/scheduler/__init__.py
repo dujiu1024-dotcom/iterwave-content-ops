@@ -1334,18 +1334,26 @@ class SchedulerEngine:
         if state.get("error"):
             errors.append("热点采集执行失败")
         source_report = state.get("report") if isinstance(state.get("report"), dict) else {}
-        failed_sources = [key for key, value in source_report.items() if value == "failed"]
+        failed_sources = [
+            key for key, value in source_report.items()
+            if isinstance(value, str) and value == "failed"
+        ]
         if failed_sources:
             errors.append(f"有 {len(failed_sources)} 个热点来源采集失败")
         match = state.get("match") if isinstance(state.get("match"), dict) else {}
-        if match.get("status") in {"failed", "partial"}:
+        match_status = match.get("status")
+        if match_status in {"failed", "partial"}:
             errors.append("热点标签匹配未完整完成")
+        VALID_SOURCE_STATUSES = {"collected", "failed"}
         return {
             "final_status": "failed" if errors else "success",
             "errors": errors,
-            "sources_total": sum(1 for value in source_report.values() if value in {"collected", "failed"}),
+            "sources_total": sum(
+                1 for v in source_report.values()
+                if isinstance(v, str) and v in VALID_SOURCE_STATUSES
+            ),
             "sources_failed": len(failed_sources),
-            "match_status": match.get("status"),
+            "match_status": match_status,
             "remaining_pending": match.get("remaining_pending"),
         }
 

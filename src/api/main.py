@@ -713,6 +713,11 @@ def _persist_activation_sample_results(
 def _build_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # pytest fixture 会预先把 tmp_path cfg/conn/依赖注入 _g_ctx；
+        # 检测到已注入时直接跳过 lifespan 全量初始化，避免覆盖 fixture 的隔离连接。
+        if os.environ.get("PYTEST_CURRENT_TEST") and "cfg" in _g_ctx and "conn" in _g_ctx:
+            yield
+            return
         # 先取得单实例锁，再初始化队列/恢复 running 任务；避免第二个 worker 抢先回收首个实例的任务。
         process_lock = None
         if not os.environ.get("PYTEST_CURRENT_TEST"):
@@ -7056,9 +7061,13 @@ def _register_routes(app: FastAPI) -> None:
         if task is None:
             if job["status"] == "running":
                 try:
+                    from src.core.timezone import business_zone
                     created_at = datetime.fromisoformat(str(job["created_at"]))
                     if created_at.tzinfo is None:
-                        created_at = created_at.replace(tzinfo=_storage_now().tzinfo)
+                        # 历史 naive 时间按 business_zone 本地时区解释，再统一转 UTC 比较
+                        created_at = created_at.replace(
+                            tzinfo=business_zone(_g().get("cfg"))
+                        ).astimezone(_storage_now().tzinfo)
                     startup_stale = (_storage_now() - created_at).total_seconds() > 60
                 except (TypeError, ValueError):
                     startup_stale = False

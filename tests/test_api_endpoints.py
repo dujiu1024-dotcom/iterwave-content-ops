@@ -4145,7 +4145,12 @@ def test_duplicate_publish_confirmation_commits_user_supplied_time_without_note_
         "SELECT published_at,publish_time_source,platform_note_url FROM drafts WHERE id=?",
         (draft_id,),
     ).fetchone()
-    assert row["published_at"] == published_at
+    # API 层统一把发布时间归一化为 UTC 存储；语义上必须与用户传入值等价，而非字符串相等
+    from src.core.timezone import parse_persisted_datetime, storage_now
+    db_instant = parse_persisted_datetime(row["published_at"])
+    expected_instant = parse_persisted_datetime(published_at)
+    assert db_instant is not None and expected_instant is not None
+    assert (db_instant - expected_instant).total_seconds() < 1, "publish_confirm 应保持绝对时刻不变"
     assert row["publish_time_source"] == "user_supplied"
     assert row["platform_note_url"] is None
     assert conn.in_transaction is False

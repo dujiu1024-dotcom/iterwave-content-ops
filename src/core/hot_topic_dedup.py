@@ -130,19 +130,19 @@ def mark_cross_platform(
 
 
 def prune(conn, *, retention_days: int, max_rows: int, cfg=None) -> int:
-    """规则 3：按 UTC 时间点、保留天数与总量上限原子清理；兼容历史 naive-UTC 行。"""
-    from .timezone import storage_now, timestamp_before_sql
+    """规则 3：按 UTC 时间点、保留天数与总量上限原子清理；兼容历史 naive 行。"""
+    from .timezone import storage_now, timestamp_before_sql, storage_window_cutoffs
 
     cutoff = storage_now() - timedelta(days=retention_days)
-    # Keep the historical hot_topics naive-UTC interpretation during the transition.
-    cutoff_utc = cutoff.isoformat(sep=" ", timespec="seconds")
-    cutoff_legacy_utc = cutoff.replace(tzinfo=None).isoformat(sep=" ", timespec="seconds")
+    # 对 aware 列用 UTC cutoff，对 legacy naive 列用 business_zone 本地时区 cutoff —
+    # 这样 SQLite datetime() 在两种格式下语义一致。
+    cutoff_utc, cutoff_legacy = storage_window_cutoffs(cutoff, cfg)
     with conn:
         conn.execute("BEGIN IMMEDIATE")
         deleted = conn.execute(
             "DELETE FROM hot_topics WHERE "
             + timestamp_before_sql("COALESCE(last_seen_at, discovered_at)"),
-            (cutoff_utc, cutoff_legacy_utc),
+            (cutoff_utc, cutoff_legacy),
         ).rowcount
         total = conn.execute("SELECT COUNT(*) FROM hot_topics").fetchone()[0]
         if total > max_rows:
