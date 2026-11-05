@@ -4287,13 +4287,15 @@ def _seed_confirmed_master_plan_diagnosis(conn, fingerprint="stable-fingerprint"
                 "platform_relationships": "", "long_term_goals": "测试长期目标",
             }, ensure_ascii=False), now, now),
         )
+    from src.core.strategy_governance import collect_strategy_governance
+    strategy_snapshot = {"strategy_governance": collect_strategy_governance(conn)}
     conn.execute("DELETE FROM business_diagnosis_reports")
     cur = conn.execute(
         """INSERT INTO business_diagnosis_reports
            (version_no,status,report_json,source_snapshot_json,source_fingerprint,
             model_name,created_at,created_by,updated_at,confirmed_at,confirmed_by,change_note)
-           VALUES(1,'confirmed','{}','{}',?,'test-model',?,'test',?,?,'test','test')""",
-        (fingerprint, now, now, now),
+           VALUES(1,'confirmed','{}',?,?,'test-model',?,'test',?,?,'test','test')""",
+        (json.dumps(strategy_snapshot, ensure_ascii=False), fingerprint, now, now, now),
     )
     conn.commit()
     return int(cur.lastrowid)
@@ -4493,26 +4495,39 @@ def test_ai_master_plan_generation_api_rejects_invalid_model_schema_without_part
     assert conn.in_transaction is False
 
 
-def test_ai_master_plan_generation_api_marks_diagnosis_stale_if_sources_change_during_model_call(client, monkeypatch):
+def test_ai_master_plan_generation_api_rejects_strategic_changes_during_model_call(client, monkeypatch):
     tc, conn, _ = client
-    diagnosis_id = _seed_confirmed_master_plan_diagnosis(conn)
-    fingerprint = {"value": "stable-fingerprint"}
+    _seed_confirmed_master_plan_diagnosis(conn)
     monkeypatch.setattr(
         "src.core.business_diagnosis.collect_business_context",
-        lambda *_: {"fingerprint": fingerprint["value"], "context": {"business": "test"}},
+        lambda *_: {"fingerprint": "stable-fingerprint", "context": {"business": "test"}},
     )
 
     async def provider(*_args, **_kwargs):
-        fingerprint["value"] = "changed-fingerprint"
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        conn.execute("UPDATE account_group_north_star_versions SET status='archived' WHERE status='effective'")
+        conn.execute(
+            """INSERT INTO account_group_north_star_versions(
+                version_no,snapshot_json,status,change_reason,created_by,created_at,effective_at
+            ) VALUES(2,?,'effective','changed during generation','test',?,?)""",
+            (json.dumps({
+                "positioning": "变更后的定位", "business_direction": "测试业务方向",
+                "target_users": "测试用户", "core_value": "测试价值",
+                "long_term_content_direction": "测试内容方向", "business_model": "测试模式",
+                "platform_relationships": "", "long_term_goals": "测试目标",
+            }, ensure_ascii=False), now, now),
+        )
+        conn.commit()
         return _valid_master_plan_generation_payload(), "test-model"
 
     monkeypatch.setattr("src.core.master_plan_generation._call_model", provider)
     response = tc.post("/api/plans/ai-draft")
 
     assert response.status_code == 409, response.text
+    assert "北极星或资源基线已变化" in response.json()["detail"]
     assert conn.execute(
-        "SELECT status FROM business_diagnosis_reports WHERE id=?", (diagnosis_id,)
-    ).fetchone()[0] == "stale"
+        "SELECT status FROM business_diagnosis_reports"
+    ).fetchone()[0] == "confirmed"
     assert conn.execute(
         "SELECT COUNT(*) FROM master_plan_versions WHERE status='draft' AND deleted_at IS NULL"
     ).fetchone()[0] == 0
