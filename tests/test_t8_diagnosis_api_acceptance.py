@@ -167,6 +167,7 @@ def _create_provenance_valid_task(conn):
 
     from src.core.production_line_store import ProductionLineStore
     from src.core.production_task_store import ProductionTaskStore
+    from src.core.subgoal_store import SubGoalStore
 
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     plan_version_no = int(conn.execute(
@@ -199,14 +200,6 @@ def _create_provenance_valid_task(conn):
         (sub_plan_id, master_version_id, json.dumps({"fixture":"t8-a"}), now),
     )
     sub_version_id = int(sub_version_cursor.lastrowid)
-    conn.execute(
-        "UPDATE sub_plan_versions SET status='effective',effective_at=? WHERE id=?",
-        (now, sub_version_id),
-    )
-    conn.execute(
-        "UPDATE sub_plans SET status='active',current_version_id=?,updated_at=? WHERE id=?",
-        (sub_version_id, now, sub_plan_id),
-    )
     stage_cursor = conn.execute(
         """INSERT INTO sub_plan_stages(
             sub_plan_version_id,stage_order,title,target_count,status,created_at,updated_at,
@@ -215,6 +208,31 @@ def _create_provenance_valid_task(conn):
         (sub_version_id, now, now),
     )
     stage_id = int(stage_cursor.lastrowid)
+    conn.commit()
+
+    subgoals = SubGoalStore(conn)
+    goal = subgoals.create_goal(sub_plan_id, sub_version_id, {
+        "goal_type": "quantity",
+        "title": "授权素材图文生产",
+        "target_count": 1,
+        "acceptance_criteria": "生成一条具备素材授权快照的生产任务",
+        "stage_id": stage_id,
+        "requires_production": True,
+    })
+    subgoals.save_production_plan(sub_plan_id, goal["id"], {
+        "content_direction": "使用已确认授权的素材生成图文内容",
+        "suggested_count": 1,
+        "execution_conditions": "素材权限与隐私状态均通过校验",
+        "acceptance_relation": "生产任务必须绑定本子目标和策略阶段",
+    })
+    conn.execute(
+        "UPDATE sub_plan_versions SET status='effective',effective_at=? WHERE id=?",
+        (now, sub_version_id),
+    )
+    conn.execute(
+        "UPDATE sub_plans SET status='active',current_version_id=?,updated_at=? WHERE id=?",
+        (sub_version_id, now, sub_plan_id),
+    )
     conn.commit()
 
     line_store = ProductionLineStore(conn)
