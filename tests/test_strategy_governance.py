@@ -23,6 +23,7 @@ def test_strategy_fingerprint_ignores_production_history_but_tracks_resource_evi
     monkeypatch.setattr("src.core.north_star_repository.get_current", lambda _conn: north_star)
     monkeypatch.setattr("src.core.resource_baseline_repository.build_resource_baseline", lambda _conn: baseline)
     conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE account_group_north_star_versions (id INTEGER)")
     first = strategy_governance.collect_strategy_governance(conn)
 
     baseline["resources"][1]["details"]["content_count"] = 101
