@@ -460,9 +460,17 @@ class SchedulerEngine:
         if run_at.tzinfo is None:
             run_at = run_at.replace(tzinfo=configured_business_zone(self.cfg))
         cycle_row = self.conn.execute(
-            "SELECT collection_cycle_id FROM review_tasks WHERE task_id=?", (task_id,),
+            "SELECT collection_cycle_id,created_by FROM review_tasks WHERE task_id=?", (task_id,),
         ).fetchone() if self.conn is not None else None
         cycle_id = str(cycle_row["collection_cycle_id"] or "initial") if cycle_row else "initial"
+        from ...core.task_context import current_task_identity
+        active_identity = current_task_identity()
+        stored_initiator = str(cycle_row["created_by"] or "") if cycle_row else ""
+        initiating_actor = (
+            stored_initiator
+            if stored_initiator and stored_initiator != "legacy:unattributed"
+            else active_identity.get("initiating_actor") or "system:legacy-unattributed"
+        )
         active_engine = _ENGINES.get(self.engine_key)
         if active_engine is not None and active_engine is not self:
             active_engine.schedule_review_collection(task_id, run_at, attempt)
@@ -475,6 +483,7 @@ class SchedulerEngine:
                 payload={
                     "method": "_job_review_collection",
                     "args": [task_id, attempt, cycle_id],
+                    "initiating_actor": initiating_actor,
                 },
                 available_at=run_at,
             )
@@ -814,6 +823,7 @@ class SchedulerEngine:
         """独立复盘任务到期后重新读取平台指标；失败/部分成功按配置重试。"""
         from ...adapters.base import Platform
         from ...core.operating_feedback import create_collection_run
+        from ...core.task_context import current_task_identity
 
         if self.conn is None:
             return {"final_status": "failed", "errors": ["复盘采集数据库连接未注入"]}
@@ -911,10 +921,12 @@ class SchedulerEngine:
             metrics = {}
 
         now = storage_now().isoformat(timespec="seconds")
+        task_identity = current_task_identity()
         with self.conn:
             run = create_collection_run(
                 self.conn, task_id=task_id, source="platform_readback",
                 status=collection_status, metrics=metrics,
+                actor=task_identity.get("executing_actor") or "system:review-worker",
                 window_start=row["published_at"], window_end=now,
                 timezone_name=self.cfg.business_timezone,
                 error_message=error,
