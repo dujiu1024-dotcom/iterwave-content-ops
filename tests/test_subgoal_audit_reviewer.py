@@ -65,9 +65,8 @@ def test_subgoal_mutations_use_authenticated_actor(monkeypatch):
         json={"content_direction": "x"},
     )
 
-    assert created.status_code == updated.status_code == planned.status_code == 200 or (
-        created.status_code == 201 and updated.status_code == planned.status_code == 200
-    )
+    assert created.status_code == 201
+    assert updated.status_code == planned.status_code == 200
     assert captured == [
         ("create", actor), ("update", actor), ("production_plan", actor)
     ]
