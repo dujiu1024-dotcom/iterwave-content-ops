@@ -601,14 +601,16 @@ def build_original_assets_router(get_context, *, route_class=None):
             row = by_id[asset_id]
             conn.execute(
                 """INSERT OR IGNORE INTO production_task_asset_usages(
-                    production_task_id,original_asset_id,asset_version_no,permission_snapshot
-                ) VALUES(?,?,?,'allowed')""",
-                (task_id, asset_id, row["current_version_no"]),
+                    production_task_id,original_asset_id,asset_version_no,permission_snapshot,
+                    privacy_snapshot
+                ) VALUES(?,?,?,'allowed',?)""",
+                (task_id, asset_id, row["current_version_no"], row["privacy_status"]),
             )
         conn.commit()
         return {"task_id": task_id, "assets": [
             {"asset_id": asset_id, "version_no": by_id[asset_id]["current_version_no"],
-             "permission_snapshot": "allowed"}
+             "permission_snapshot": "allowed",
+             "privacy_snapshot": by_id[asset_id]["privacy_status"]}
             for asset_id in dict.fromkeys(asset_ids)
         ]}
 
@@ -619,7 +621,7 @@ def build_original_assets_router(get_context, *, route_class=None):
             raise HTTPException(404, "生产任务不存在")
         rows = conn.execute(
             """SELECT u.original_asset_id,u.asset_version_no,u.usage_role,u.permission_snapshot,
-                      v.title,v.description,v.metadata_json
+                      u.privacy_snapshot,v.title,v.description,v.metadata_json
                FROM production_task_asset_usages u
                JOIN original_asset_versions v
                  ON v.original_asset_id=u.original_asset_id AND v.version_no=u.asset_version_no
