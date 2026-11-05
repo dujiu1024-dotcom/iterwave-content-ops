@@ -27,6 +27,7 @@ def test_strategy_fingerprint_ignores_production_history_but_tracks_resource_evi
     conn.execute("CREATE TABLE account_group_north_star_versions (id INTEGER)")
     first = strategy_governance.collect_strategy_governance(conn)
 
+    baseline["resources"][0]["updated_at"] = "2026-11-05T12:00:00+00:00"
     baseline["resources"][1]["details"]["content_count"] = 101
     baseline["resources"][2]["details"]["metric_rows"] = 21
     baseline["resources"][3]["details"]["content_asset_count"] = 51
