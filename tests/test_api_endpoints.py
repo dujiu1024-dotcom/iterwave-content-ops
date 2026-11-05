@@ -4885,6 +4885,8 @@ def test_review_adoption_master_draft_is_review_gated_and_rebase_path_is_reachab
     draft = rebased.json()["drafts"][0]["draft_version"]
     assert int(draft["master_plan_version_id"]) == new_master_id
     assert draft["status"] == "draft"
+    draft_snapshot = json.loads(draft["snapshot_json"])
+    assert draft_snapshot["review_adoptions"][-1]["target_master_plan_version_id"] == new_master_id
     assert conn.execute(
         "SELECT master_plan_version_id FROM sub_plans WHERE id=?", (sub_id,)
     ).fetchone()[0] == active_id
