@@ -4849,11 +4849,32 @@ def test_review_adoption_master_draft_is_review_gated_and_rebase_path_is_reachab
     )
     store.activate_subplan_version(child["id"], reviewer="test")
 
+    stage = conn.execute(
+        "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order LIMIT 1",
+        (child["id"],),
+    ).fetchone()
+    feedback = tc.post(f"/api/subplans/stages/{int(stage['id'])}/effect-feedback", json={
+        "assessment": "effective",
+        "recommendation": "保持高表现策略并扩大样本。",
+        "evidence_note": "复盘采纳来源证据集成验收。",
+        "confidence": "high",
+    })
+    assert feedback.status_code == 201, feedback.text
+
     created = tc.post("/api/plan_adjustments/adopt_master", json={
         "dimensions": ["内容结构", "目标用户"],
+        "effect_review_id": feedback.json()["id"],
     })
     assert created.status_code == 200, created.text
     mother_draft = created.json()["draft"]
+    mother_snapshot = json.loads(mother_draft["plan_snapshot"])
+    source_feedback = mother_snapshot["review_adoptions"][-1]["effect_feedback"]
+    assert source_feedback["id"] == feedback.json()["id"]
+    assert source_feedback["stage_id"] == int(stage["id"])
+    assert source_feedback["source_sub_plan_version_id"] == int(child["id"])
+    assert source_feedback["assessment"] == "effective"
+    assert source_feedback["recommendation"] == "保持高表现策略并扩大样本。"
+    assert source_feedback["evidence"]["content_count"] == 0
     new_master_id = int(mother_draft["id"])
     assert mother_draft["source"] == "review_adoption"
     assert int(mother_draft["based_on_version_id"]) == active_id
