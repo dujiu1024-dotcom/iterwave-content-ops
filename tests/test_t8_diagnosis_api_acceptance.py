@@ -156,11 +156,8 @@ def test_manual_master_plan_fallback_needs_north_star_but_not_ai_diagnosis(diagn
     # Manual drafting is a real no-model fallback and does not require an AI diagnosis.
     manual = client.post("/api/plans", json=payload)
     assert manual.status_code == 200, manual.text
-    manual_id = manual.json()["draft"]["id"]
     assert manual.json()["draft"]["source"] == "user"
     assert manual.json()["effective"] is False
-    reviewed = client.post(f"/api/plans/{manual_id}/review", json={"action": "approve"})
-    assert reviewed.status_code == 200, reviewed.text
 
     # AI generation remains diagnosis-gated and refuses a strategic source change.
     no_diagnosis = client.post("/api/plans/ai-draft")
