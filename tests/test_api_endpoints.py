@@ -4258,6 +4258,18 @@ def test_ai_master_plan_approval_rejects_stale_diagnosis_provenance(client, monk
 
 def _seed_confirmed_master_plan_diagnosis(conn, fingerprint="stable-fingerprint"):
     now = datetime.now().astimezone().isoformat(timespec="seconds")
+    if conn.execute("SELECT 1 FROM account_group_north_star_versions WHERE status='effective' LIMIT 1").fetchone() is None:
+        conn.execute(
+            """INSERT INTO account_group_north_star_versions(
+                version_no,snapshot_json,status,change_reason,created_by,created_at,effective_at
+            ) VALUES(1,?,'effective','generation test fixture','test',?,?)""",
+            (json.dumps({
+                "positioning": "测试定位", "business_direction": "测试业务方向",
+                "target_users": "测试用户", "core_value": "测试核心价值",
+                "long_term_content_direction": "测试内容方向", "business_model": "测试商业模式",
+                "platform_relationships": "", "long_term_goals": "测试长期目标",
+            }, ensure_ascii=False), now, now),
+        )
     conn.execute("DELETE FROM business_diagnosis_reports")
     cur = conn.execute(
         """INSERT INTO business_diagnosis_reports
