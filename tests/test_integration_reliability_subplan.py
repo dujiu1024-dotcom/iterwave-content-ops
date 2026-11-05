@@ -1334,6 +1334,22 @@ def test_feedback_adoption_is_scoped_to_its_exact_source_subplan(client):
     drafts = adopted.json()["drafts"]
     assert len(drafts) == 1
     assert drafts[0]["sub_plan_id"] == "feedback-source-xhs"
+    first_draft_id = int(drafts[0]["draft_version"]["id"])
+
+    # A retry after a lost response must reuse the same pending draft, not
+    # increment the sub-plan version number or create another review item.
+    replay = tc.post("/api/plan_adjustments/adopt", json={
+        "dimensions": ["内容结构"], "effect_review_id": feedback.json()["id"],
+    })
+    assert replay.status_code == 200, replay.text
+    assert len(replay.json()["drafts"]) == 1
+    assert int(replay.json()["drafts"][0]["draft_version"]["id"]) == first_draft_id
+    assert replay.json()["drafts"][0]["reused"] is True
+    assert int(conn.execute(
+        "SELECT COUNT(*) FROM sub_plan_versions WHERE sub_plan_id=? AND status='draft'",
+        ("feedback-source-xhs",),
+    ).fetchone()[0]) == 1
+
     unrelated = conn.execute(
         "SELECT current_version_id,status FROM sub_plans WHERE id='feedback-unrelated-douyin'"
     ).fetchone()
