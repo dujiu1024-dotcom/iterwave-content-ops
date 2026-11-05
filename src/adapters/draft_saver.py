@@ -577,6 +577,27 @@ class DraftSaver:
                     uploaded_image_count=len(content.image_paths),
                 )
 
+            # UI toast / local URL is not durable platform-side readback.
+            # Until a platform-specific draft-box verifier exists, keep the save
+            # attempt pending for human reconciliation rather than reporting success.
+            if self.platform != Platform.WECHAT_CHANNELS:
+                logger.warning(
+                    "平台 %s 仅返回 UI 保存信号，缺少草稿箱读回核验 content_id=%s",
+                    self.platform, content.content_id,
+                )
+                return DraftResult(
+                    success=False,
+                    needs_human_verify=True,
+                    error_msg=(
+                        "平台界面显示保存信号，但当前适配器尚未实现草稿箱服务端读回核验；"
+                        "已保留待核实状态，禁止按成功结算或自动重复提交。"
+                    ),
+                    platform_draft_id=draft_id,
+                    platform_draft_id_missing=(draft_id is None),
+                    save_evidence=f"ui_only:{evidence}",
+                    uploaded_image_count=len(content.image_paths),
+                )
+
             # —— 成功证据出现 ✅ ——
             logger.info(
                 "✅ 平台 %s 存草稿成功 content_id=%s draft_id=%s evidence=%s",
