@@ -38,7 +38,7 @@ def test_subgoal_mutations_use_authenticated_actor(monkeypatch):
     monkeypatch.setattr(subgoals.auth, "audit_actor", lambda request: actor)
 
     class FakeStore:
-        def __init__(self, conn):
+        def __init__(self, conn, *, tenant_id="default"):
             pass
 
         def create_goal(self, sub_plan_id, version_id, payload, *, actor="system:unknown"):
