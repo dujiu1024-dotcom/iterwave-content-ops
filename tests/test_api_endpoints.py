@@ -4807,3 +4807,109 @@ def test_tenant_context_missing_rejects_write_before_database_mutation(client):
     assert response.status_code == 409
     assert response.json()["code"] == "TENANT_CONTEXT_REQUIRED"
     assert int(conn.execute("SELECT COUNT(*) FROM master_plan_versions").fetchone()[0]) == before
+
+
+
+def test_review_adoption_master_draft_is_review_gated_and_rebase_path_is_reachable(client, monkeypatch):
+    from src.core.plan_version_store import PlanVersionStore
+
+    tc, conn, _ = client
+    store = PlanVersionStore(conn)
+    active = conn.execute(
+        "SELECT id,plan_snapshot FROM master_plan_versions WHERE status='effective' ORDER BY version_no DESC LIMIT 1"
+    ).fetchone()
+    if active is None:
+        base = {
+            "topic_count_per_platform": 3, "dimension_allocation": {"测试": 3},
+            "enabled_platforms": ["xhs"], "content_format": "image_text",
+        }
+        first = store.create_master_draft(base, author="test")
+        active_id = int(store.activate_master_version(first["id"], reviewer="test")["id"])
+    else:
+        active_id = int(active["id"])
+    active_snapshot = json.loads(conn.execute(
+        "SELECT plan_snapshot FROM master_plan_versions WHERE id=?", (active_id,)
+    ).fetchone()[0])
+    if "xhs" not in (active_snapshot.get("enabled_platforms") or []):
+        active_snapshot["enabled_platforms"] = [*(active_snapshot.get("enabled_platforms") or []), "xhs"]
+        replacement = store.create_master_draft(
+            active_snapshot, author="test", based_on_version_id=active_id,
+        )
+        active_id = int(store.activate_master_version(replacement["id"], reviewer="test")["id"])
+
+    sub_id = "review-adoption-rebase-api"
+    store.create_subplan(
+        sub_id, master_plan_version_id=active_id, platform="xhs",
+        title="复盘采纳 rebase 验收", author="test",
+    )
+    child = store.create_subplan_version(
+        sub_id, {"title": "复盘采纳 rebase 验收", "platform": "xhs"},
+        master_plan_version_id=active_id, author="test",
+        stages=[{"title": "验证阶段", "direction": "验证", "target_count": 1}],
+    )
+    store.activate_subplan_version(child["id"], reviewer="test")
+
+    created = tc.post("/api/plan_adjustments/adopt_master", json={
+        "dimensions": ["内容结构", "目标用户"],
+    })
+    assert created.status_code == 200, created.text
+    mother_draft = created.json()["draft"]
+    new_master_id = int(mother_draft["id"])
+    assert mother_draft["source"] == "review_adoption"
+    assert int(mother_draft["based_on_version_id"]) == active_id
+    assert mother_draft["status"] == "draft"
+    assert conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective'"
+    ).fetchone()[0] == active_id
+    assert conn.execute(
+        "SELECT status FROM sub_plans WHERE id=?", (sub_id,)
+    ).fetchone()[0] == "active"
+
+    reviewed = tc.post(f"/api/plans/{new_master_id}/review", json={"action": "approve"})
+    assert reviewed.status_code == 200, reviewed.text
+    assert reviewed.json()["subplan_generation"]["status"] == "rebase_required"
+    assert reviewed.json()["subplan_generation"]["target_master_plan_version_id"] == new_master_id
+    paused = conn.execute(
+        "SELECT status,pause_reason,paused_by_master_version_id FROM sub_plans WHERE id=?",
+        (sub_id,),
+    ).fetchone()
+    assert paused["status"] == "paused"
+    assert paused["pause_reason"] == "master_plan_switch"
+    assert int(paused["paused_by_master_version_id"]) == new_master_id
+
+    rebased = tc.post("/api/plan_adjustments/adopt", json={
+        "dimensions": ["内容结构"],
+        "target_master_plan_version_id": new_master_id,
+    })
+    assert rebased.status_code == 200, rebased.text
+    draft = rebased.json()["drafts"][0]["draft_version"]
+    assert int(draft["master_plan_version_id"]) == new_master_id
+    assert draft["status"] == "draft"
+    draft_snapshot = json.loads(draft["snapshot_json"])
+    assert draft_snapshot["review_adoptions"][-1]["target_master_plan_version_id"] == new_master_id
+    assert conn.execute(
+        "SELECT master_plan_version_id FROM sub_plans WHERE id=?", (sub_id,)
+    ).fetchone()[0] == active_id
+
+    approved_child = tc.post(f"/api/subplans/{sub_id}/review", json={
+        "version_id": int(draft["id"]), "action": "approve",
+    })
+    assert approved_child.status_code == 200, approved_child.text
+    final = conn.execute(
+        "SELECT status,master_plan_version_id,current_version_id FROM sub_plans WHERE id=?",
+        (sub_id,),
+    ).fetchone()
+    assert final["status"] == "active"
+    assert int(final["master_plan_version_id"]) == new_master_id
+    assert int(final["current_version_id"]) == int(draft["id"])
+
+
+def test_review_adoption_master_draft_rejects_effect_feedback_from_superseded_master(client):
+    tc, conn, _ = client
+    response = tc.post("/api/plan_adjustments/adopt_master", json={
+        "dimensions": ["内容结构"], "effect_review_id": 999999,
+    })
+    assert response.status_code in {404, 409}
+    assert conn.execute(
+        "SELECT COUNT(*) FROM master_plan_versions WHERE source='review_adoption' AND status='draft'"
+    ).fetchone()[0] == 0
