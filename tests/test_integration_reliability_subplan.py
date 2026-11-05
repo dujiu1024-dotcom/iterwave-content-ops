@@ -1344,3 +1344,47 @@ def test_feedback_adoption_is_scoped_to_its_exact_source_subplan(client):
     ).fetchone()
     assert int(source["current_version_id"]) == versions["feedback-source-xhs"]
     assert source["status"] == "active"
+
+
+
+def test_master_adoption_rejects_effect_feedback_from_superseded_master_version(client):
+    tc, conn, _ = client
+    store = PlanVersionStore(conn)
+    first_master = store.create_master_draft(dict(PLAN_BASE), author="test", source="user")
+    store.activate_master_version(int(first_master["id"]), reviewer="test")
+    store.create_subplan(
+        "superseded-feedback-source", master_plan_version_id=int(first_master["id"]),
+        platform="xhs", title="跨母计划版本反馈验收", author="test",
+    )
+    child = store.create_subplan_version(
+        "superseded-feedback-source", {"title": "跨母计划版本反馈验收", "platform": "xhs"},
+        master_plan_version_id=int(first_master["id"]), author="test",
+        stages=[{"stage_key": "old-master-stage", "title": "旧母计划阶段", "target_count": 1}],
+    )
+    store.activate_subplan_version(int(child["id"]), reviewer="test")
+    stage = conn.execute(
+        "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=?", (int(child["id"]),)
+    ).fetchone()
+    feedback = tc.post(
+        f"/api/subplans/stages/{int(stage['id'])}/effect-feedback",
+        json={
+            "assessment": "effective",
+            "recommendation": "旧母计划反馈不得跨版本写入新母计划。",
+            "evidence_note": "跨版本负向验收。",
+            "confidence": "high",
+        },
+    )
+    assert feedback.status_code == 201, feedback.text
+
+    second_master = store.create_master_draft(dict(PLAN_BASE), author="test", source="user")
+    store.activate_master_version(int(second_master["id"]), reviewer="test")
+    drafts_before = int(conn.execute(
+        "SELECT COUNT(*) FROM master_plan_versions WHERE status='draft'"
+    ).fetchone()[0])
+    rejected = tc.post("/api/plan_adjustments/adopt_master", json={
+        "dimensions": ["内容结构"], "effect_review_id": feedback.json()["id"],
+    })
+    assert rejected.status_code == 409, rejected.text
+    assert int(conn.execute(
+        "SELECT COUNT(*) FROM master_plan_versions WHERE status='draft'"
+    ).fetchone()[0]) == drafts_before
