@@ -324,13 +324,15 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
 
     def build_tenant_context(tenant_id):
         assert tenant_id == "default"
+        from src.core.db import Database
+        worker_conn = Database(worker_cfg).connect()
         executor = RoundExecutor(
-            worker_cfg, conn, scoring=None, guard=PassingGuard(), adapters={},
-            sm_round=RoundStateMachine(conn, cfg=worker_cfg),
-            sm_draft=DraftStateMachine(conn, cfg=worker_cfg),
+            worker_cfg, worker_conn, scoring=None, guard=PassingGuard(), adapters={},
+            sm_round=RoundStateMachine(worker_conn, cfg=worker_cfg),
+            sm_draft=DraftStateMachine(worker_conn, cfg=worker_cfg),
         )
         return {
-            "cfg": worker_cfg, "conn": conn, "executor": executor,
+            "cfg": worker_cfg, "conn": worker_conn, "executor": executor,
             "scheduler": SimpleNamespace(shutdown=lambda: None), "notifier": None,
         }
 
