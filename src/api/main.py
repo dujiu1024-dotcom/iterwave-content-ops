@@ -2918,11 +2918,11 @@ def _register_routes(app: FastAPI) -> None:
         if registry is None:
             raise HTTPException(503, "账号组注册表尚未初始化")
         settings_row = conn.execute(
-            "SELECT enabled, monthly_quota, prompt_prefix, model, size, fallback_enabled "
+            "SELECT enabled, prompt_prefix, model, size, fallback_enabled "
             "FROM media_generation_settings WHERE id = 1"
         ).fetchone()
         settings = dict(settings_row) if settings_row else {
-            "enabled": 0, "monthly_quota": 20, "prompt_prefix": "",
+            "enabled": 0, "prompt_prefix": "",
             "model": os.getenv("ITERWAVE_IMAGE_MODEL", "gpt-image-1"),
             "size": "1024x1024", "fallback_enabled": 1,
         }
