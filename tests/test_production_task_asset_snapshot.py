@@ -71,3 +71,26 @@ def test_privacy_enum_and_quality_json_snapshots_have_separate_storage():
         pass
     else:
         raise AssertionError("privacy_snapshot must remain constrained to the approved enum")
+
+
+def test_authorized_task_asset_quality_snapshot_is_complete_and_stable():
+    import json
+
+    from src.api.original_assets import _asset_quality_snapshot
+
+    snapshot = json.loads(_asset_quality_snapshot({
+        "readability_status": "readable",
+        "completeness_status": "complete",
+        "duplicate_status": "unique",
+        "commercial_use_status": "allowed",
+        "asset_version_no": 7,
+        "title": "must not be copied into the classification snapshot",
+        "privacy_status": "clear",
+    }))
+    assert snapshot == {
+        "asset_version_no": 7,
+        "commercial_use_status": "allowed",
+        "completeness_status": "complete",
+        "duplicate_status": "unique",
+        "readability_status": "readable",
+    }
