@@ -790,9 +790,20 @@ def test_independent_review_collection_records_platform_facts_and_retries_partia
 
     eng = SchedulerEngine(cfg, Path(cfg.paths.db_file))
     eng.wire(conn=conn, adapters={Platform.XHS: _Adapter()}, tenant_id="tenant-test")
-    report = asyncio.run(eng._job_review_collection(task_id, attempt=1))
+    from src.core.task_context import bind_task_identity
+    with bind_task_identity(
+        initiating_actor="session:review-creator",
+        executing_actor="service:global-task-worker",
+        tenant_id="tenant-test",
+        task_id="queue-review-run-1",
+    ):
+        report = asyncio.run(eng._job_review_collection(task_id, attempt=1))
 
     assert report["final_status"] == "partial"
+    run_actor = conn.execute(
+        "SELECT recorded_by FROM review_collection_runs WHERE task_id=?", (task_id,)
+    ).fetchone()["recorded_by"]
+    assert run_actor == "service:global-task-worker"
     assert report["retry_scheduled"] is True
     assert f"review_collect_{task_id}_initial_a2" in {job.id for job in eng.scheduler.get_jobs()}
     assert conn.execute("SELECT status FROM drafts WHERE id=?", (draft_id,)).fetchone()[0] == "user_published"
