@@ -213,6 +213,13 @@ class ProductionTaskStore:
             self.conn.execute("RELEASE SAVEPOINT production_task_create")
             raise
 
+        created = self.conn.execute(
+            "SELECT * FROM production_tasks WHERE id=?", (task_id,)
+        ).fetchone()
+        if created is None:
+            raise ProductionTaskError("生产任务创建后未能读取到任务记录")
+        return dict(created)
+
     def get_task(self, task_id: str) -> dict[str, Any]:
         row = self.conn.execute(
             "SELECT * FROM production_tasks WHERE id=?", (task_id,)
