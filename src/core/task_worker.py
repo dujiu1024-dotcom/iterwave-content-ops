@@ -132,6 +132,25 @@ class GlobalTaskWorker:
                 loop.call_soon_threadsafe(lease_lost.set)
                 return
 
+    @staticmethod
+    def _validate_tenant_runtime(task: QueuedTask, context: dict[str, Any]) -> None:
+        """Fail closed when a production runtime is not the queued task's tenant.
+
+        Test/injected contexts without a registry remain supported. The real API
+        runtime always supplies both fields, so this check protects the trusted
+        queue-to-database boundary rather than trusting a payload/header tenant ID.
+        """
+        registry = context.get("tenant_registry")
+        if registry is None:
+            return
+        runtime_tenant_id = context.get("runtime_tenant_id")
+        if not runtime_tenant_id or str(runtime_tenant_id) != str(task.tenant_id):
+            raise PermissionError("Worker runtime tenant does not match the queued task tenant")
+        try:
+            registry.get(task.tenant_id)
+        except Exception as exc:
+            raise PermissionError("Queued task tenant is not registered or authorized") from exc
+
     async def _run_task(self, task: QueuedTask) -> dict[str, Any]:
         allowed_scheduler_methods = {
             "_job_publish_polling", "_job_data_fetch", "_job_daily_ops",
@@ -146,8 +165,9 @@ class GlobalTaskWorker:
         from src.core.notify import bind_context_notifier
         from src.core.task_context import bind_config, bind_task_identity
 
-        data_dir = Path(context["cfg"].resolve_path(context["cfg"].paths.data_dir))
         try:
+            self._validate_tenant_runtime(task, context)
+            data_dir = Path(context["cfg"].resolve_path(context["cfg"].paths.data_dir))
             # 生产任务只允许在入队时配置与母计划版本仍一致时执行，防止排队期间配置热更新改变任务含义。
             snapshot = task.payload.get("execution_snapshot")
             if "execution_snapshot" in task.payload:
@@ -330,6 +350,7 @@ class GlobalTaskWorker:
             return False
         reconciled = False
         try:
+            self._validate_tenant_runtime(task, context)
             from src.core.task_context import bind_config, bind_task_identity
 
             conn = context.get("conn")
