@@ -4834,7 +4834,7 @@ def _register_routes(app: FastAPI) -> None:
                 params,
             ).fetchall()
             return [
-                {**dict(row), "created_at": _api_business_datetime(row["created_at"])}
+                {**dict(row), "created_at": _api_datetime(row["created_at"])}
                 for row in rows
             ]
         total = conn.execute("SELECT COUNT(*) FROM spiral_rounds" + where, params).fetchone()[0]
@@ -4919,7 +4919,12 @@ def _register_routes(app: FastAPI) -> None:
         result = dict(row)
         for timestamp_field in ("created_at", "producing_started_at", "collecting_metrics_started_at"):
             if result.get(timestamp_field):
-                result[timestamp_field] = _api_business_datetime(result[timestamp_field])
+                # spiral_rounds.created_at uses SQLite CURRENT_TIMESTAMP (legacy naive UTC).
+                # The two state-machine fields retain their historical business-wall-time policy.
+                result[timestamp_field] = (
+                    _api_datetime(result[timestamp_field]) if timestamp_field == "created_at"
+                    else _api_business_datetime(result[timestamp_field])
+                )
         round_drafts = []
         for draft in drafts:
             item = dict(draft)
