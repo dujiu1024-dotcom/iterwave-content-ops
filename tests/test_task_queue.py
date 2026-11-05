@@ -973,3 +973,63 @@ def test_failed_task_persists_structured_execution_report(tmp_path):
     assert saved.status == "failed"
     assert saved.result == report
 
+
+
+def test_global_task_admin_actions_persist_authenticated_executor_and_tenant_context(tmp_path):
+    from src.core.task_context import bind_task_identity
+
+    queue = make_queue(tmp_path)
+    task, _ = queue.enqueue(task_type="scheduler_job", tenant_id="tenant-a", payload={"job": "daily"})
+    claimed = queue.claim_next("worker-1")
+    assert claimed is not None and claimed.task_id == task.task_id
+    assert queue.fail(task.task_id, "worker-1", error_code="job_failed", error_message="采集失败")
+
+    with bind_task_identity(
+        initiating_actor="session:operator-1",
+        executing_actor="service:api",
+        tenant_id="tenant-a",
+        task_id=None,
+    ):
+        resolution, created = queue.resolve_failed_task(
+            task.task_id, action="handled", actor="session:operator-1",
+            note="已检查失败原因并完成线下补录",
+        )
+    assert created is True
+    assert resolution["executing_actor"] == "service:api"
+    assert resolution["tenant_id"] == "tenant-a"
+    assert resolution["queue_task_id"] is None
+
+    audit = queue.list_admin_audit(task.task_id)
+    assert audit[0]["actor"] == "session:operator-1"
+    assert audit[0]["executing_actor"] == "service:api"
+    assert audit[0]["tenant_id"] == "tenant-a"
+    assert audit[0]["queue_task_id"] is None
+
+
+def test_global_task_manual_retry_persists_confirmation_executor_and_queue_context(tmp_path):
+    from src.core.task_context import bind_task_identity
+
+    queue = make_queue(tmp_path)
+    original, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-b", payload={"round_id": 2})
+    claimed = queue.claim_next("worker-1")
+    assert claimed is not None and claimed.task_id == original.task_id
+    assert queue.fail(original.task_id, "worker-1", error_code="failed", error_message="needs review")
+
+    with bind_task_identity(
+        initiating_actor="session:reviewer-2",
+        executing_actor="service:api",
+        tenant_id="tenant-b",
+        task_id=None,
+    ):
+        retry, created = queue.retry_after_manual_verification(
+            original.task_id, confirmed_by="session:reviewer-2",
+            confirmation_note="已核验平台侧没有创建或发布记录",
+            confirmed_not_executed=True,
+        )
+    assert created is True
+    assert retry.retry_confirmed_by == "session:reviewer-2"
+    assert retry.retry_confirmation_executing_actor == "service:api"
+    assert retry.retry_confirmation_queue_task_id is None
+    audit = queue.list_admin_audit(original.task_id)
+    assert audit[0]["executing_actor"] == "service:api"
+    assert audit[0]["tenant_id"] == "tenant-b"
