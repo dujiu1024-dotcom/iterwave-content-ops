@@ -1,4 +1,4 @@
--- 157: retain the authenticated principal responsible for subgoal authoring and production-plan edits.
+-- 159: retain the authenticated principal responsible for subgoal authoring and production-plan edits.
 -- Historical rows remain explicitly unattributed; do not infer a human actor retroactively.
 ALTER TABLE sub_goals ADD COLUMN created_by TEXT NOT NULL DEFAULT 'legacy:unattributed';
 ALTER TABLE sub_goals ADD COLUMN updated_by TEXT NOT NULL DEFAULT 'legacy:unattributed';

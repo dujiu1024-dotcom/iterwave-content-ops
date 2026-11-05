@@ -60,7 +60,7 @@ def test_subgoal_actor_migration_marks_history_and_adds_author_columns():
         INSERT INTO sub_goals(id,sub_plan_version_id,goal_type,title,acceptance_criteria,created_at,updated_at)
         VALUES('legacy-goal',1,'business','legacy','legacy criteria','now','now');
     """)
-    conn.executescript((root / "157_subgoal_author_audit.sql").read_text(encoding="utf-8"))
+    conn.executescript((root / "159_subgoal_author_audit.sql").read_text(encoding="utf-8"))
     goal = conn.execute(
         "SELECT created_by,updated_by FROM sub_goals WHERE id='legacy-goal'"
     ).fetchone()
@@ -95,7 +95,7 @@ def test_subgoal_store_writes_append_only_actor_context():
     """)
     root = Path(__file__).resolve().parents[1] / "migrations"
     conn.executescript((root / "149_subgoal_tree_dependency_gates.sql").read_text(encoding="utf-8"))
-    conn.executescript((root / "157_subgoal_author_audit.sql").read_text(encoding="utf-8"))
+    conn.executescript((root / "159_subgoal_author_audit.sql").read_text(encoding="utf-8"))
 
     store = SubGoalStore(conn, tenant_id="tenant-a")
     goal = store.create_goal(
