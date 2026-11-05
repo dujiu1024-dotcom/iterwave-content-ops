@@ -332,6 +332,14 @@ def test_original_asset_permission_and_privacy_gate_production_usage(diagnosis_c
         "change_reason": "T8-A 生产上下文验收测试",
     })
     assert north_star.status_code == 200, north_star.text
+    # Assert the North Star is durably visible to the same tenant/runtime before
+    # allowing master-plan creation; a successful PUT response alone is insufficient.
+    current_north_star = client.get("/api/north-star")
+    assert current_north_star.status_code == 200, current_north_star.text
+    assert current_north_star.json()["current"]["status"] == "effective"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM account_group_north_star_versions WHERE status='effective'"
+    ).fetchone()[0] == 1
 
     monkeypatch.setattr(
         business_diagnosis, "generate_diagnosis", _async_fake_diagnosis,
