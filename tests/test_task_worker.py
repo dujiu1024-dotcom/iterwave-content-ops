@@ -1290,21 +1290,37 @@ def test_multiple_workers_write_only_to_task_tenant_database(tmp_path):
         completed = set()
 
         class TenantExecutor:
-            def __init__(self, tenant_id, conn):
+            def __init__(self, tenant_id, conn, output_dir):
                 self.tenant_id = tenant_id
                 self.conn = conn
+                self.output_dir = output_dir
 
             async def run(self, round_id, **_kwargs):
+                from pathlib import Path
+
                 identity = current_task_identity()
                 assert identity["tenant_id"] == self.tenant_id
                 assert identity["initiating_actor"] == f"session:{self.tenant_id}"
                 assert identity["executing_actor"] == "service:global-task-worker"
                 assert identity["task_id"]
+                own_round = self.conn.execute(
+                    "SELECT tenant_id FROM tenant_rounds WHERE id=?", (round_id,),
+                ).fetchone()
+                assert own_round == (self.tenant_id,)
+                foreign_round = 42 if self.tenant_id == "tenant-a" else 41
+                assert self.conn.execute(
+                    "SELECT 1 FROM tenant_rounds WHERE id=?", (foreign_round,),
+                ).fetchone() is None
                 self.conn.execute(
                     "INSERT INTO worker_outputs(tenant_id,round_id,queue_task_id) VALUES(?,?,?)",
                     (identity["tenant_id"], round_id, identity["task_id"]),
                 )
                 self.conn.commit()
+                output = Path(self.output_dir)
+                output.mkdir(parents=True, exist_ok=True)
+                (output / f"round-{round_id}.txt").write_text(
+                    f"{self.tenant_id}:{round_id}", encoding="utf-8",
+                )
                 started.add(round_id)
                 if len(started) == 2:
                     both_started.set()
@@ -1315,13 +1331,24 @@ def test_multiple_workers_write_only_to_task_tenant_database(tmp_path):
                 return {"round_id": round_id, "final_status": "completed"}
 
         database_paths = {}
+        output_paths = {}
 
         def build_context(tenant_id):
             data_dir = tmp_path / "tenants" / tenant_id / "data"
+            output_dir = tmp_path / "tenants" / tenant_id / "output"
             data_dir.mkdir(parents=True, exist_ok=True)
             database_path = data_dir / "tenant.sqlite3"
             database_paths[tenant_id] = database_path
+            output_paths[tenant_id] = output_dir
             conn = sqlite3.connect(database_path)
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS tenant_rounds(id INTEGER PRIMARY KEY,tenant_id TEXT NOT NULL)"
+            )
+            own_round = 41 if tenant_id == "tenant-a" else 42
+            conn.execute(
+                "INSERT OR IGNORE INTO tenant_rounds(id,tenant_id) VALUES(?,?)",
+                (own_round, tenant_id),
+            )
             conn.execute(
                 """CREATE TABLE IF NOT EXISTS worker_outputs(
                        tenant_id TEXT NOT NULL,round_id INTEGER NOT NULL,queue_task_id TEXT NOT NULL
@@ -1329,13 +1356,13 @@ def test_multiple_workers_write_only_to_task_tenant_database(tmp_path):
             )
             conn.commit()
             cfg = SimpleNamespace(
-                paths=SimpleNamespace(data_dir=str(data_dir)),
+                paths=SimpleNamespace(data_dir=str(data_dir), output_dir=str(output_dir)),
                 resolve_path=lambda value: value,
             )
             return {
                 "cfg": cfg,
                 "conn": conn,
-                "executor": TenantExecutor(tenant_id, conn),
+                "executor": TenantExecutor(tenant_id, conn, output_dir),
                 "scheduler": SimpleNamespace(shutdown=lambda: None),
             }
 
@@ -1358,5 +1385,10 @@ def test_multiple_workers_write_only_to_task_tenant_database(tmp_path):
                     "SELECT tenant_id,round_id FROM worker_outputs ORDER BY round_id"
                 ).fetchall()
             assert rows == [(tenant_id, expected_round)]
+            own_output = output_paths[tenant_id] / f"round-{expected_round}.txt"
+            foreign_round = 42 if tenant_id == "tenant-a" else 41
+            foreign_output = output_paths[tenant_id] / f"round-{foreign_round}.txt"
+            assert own_output.read_text(encoding="utf-8") == f"{tenant_id}:{expected_round}"
+            assert not foreign_output.exists()
 
     asyncio.run(scenario())
