@@ -46,3 +46,12 @@ ALTER TABLE content_production_line_events ADD COLUMN tenant_id TEXT NOT NULL DE
 ALTER TABLE content_production_line_events ADD COLUMN initiating_actor TEXT NOT NULL DEFAULT 'legacy:unattributed';
 ALTER TABLE content_production_line_events ADD COLUMN executing_actor TEXT NOT NULL DEFAULT 'legacy:unattributed';
 ALTER TABLE content_production_line_events ADD COLUMN task_id TEXT;
+
+ALTER TABLE production_context_waivers ADD COLUMN actor_type TEXT NOT NULL DEFAULT 'legacy';
+ALTER TABLE production_context_waivers ADD COLUMN actor_id TEXT NOT NULL DEFAULT 'legacy:unattributed';
+ALTER TABLE production_context_waivers ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'legacy';
+ALTER TABLE production_context_waivers ADD COLUMN initiating_actor TEXT NOT NULL DEFAULT 'legacy:unattributed';
+ALTER TABLE production_context_waivers ADD COLUMN executing_actor TEXT NOT NULL DEFAULT 'legacy:unattributed';
+ALTER TABLE production_context_waivers ADD COLUMN task_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_production_context_waiver_actor
+    ON production_context_waivers(tenant_id,actor_type,actor_id,created_at DESC);
