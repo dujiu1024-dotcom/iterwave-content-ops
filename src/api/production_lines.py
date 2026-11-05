@@ -73,9 +73,10 @@ def register_production_line_routes(app: FastAPI, get_runtime) -> None:
     @app.post("/api/production-context/waivers", status_code=201)
     def create_production_context_waiver(req: dict, request: Request):
         from src.core.content_production_line_store import ContentProductionLineStore, ContentProductionLineError
-        conn = get_runtime()["conn"]
+        runtime = get_runtime()
+        conn = runtime["conn"]
         try:
-            waiver = ContentProductionLineStore(conn).record_waiver(
+            waiver = ContentProductionLineStore(conn, tenant_id=runtime.get("runtime_tenant_id") or "default").record_waiver(
                 round_id=int(req.get("round_id")), platform=str(req.get("platform") or ""),
                 waived_items=req.get("waived_items") or [], reason=str(req.get("reason") or ""),
                 actor=auth.audit_actor(request), evidence=req.get("evidence") if isinstance(req.get("evidence"), dict) else {},
@@ -87,14 +88,15 @@ def register_production_line_routes(app: FastAPI, get_runtime) -> None:
     @app.post("/api/content-production-lines/{line_id}/events")
     def record_content_production_line_event(line_id: str, req: dict, request: Request):
         from src.core.content_production_line_store import ContentProductionLineStore, ContentProductionLineError
-        conn = get_runtime()["conn"]
+        runtime = get_runtime()
+        conn = runtime["conn"]
         event_type = str(req.get("event_type") or "")
         if event_type in {"publish_verified", "closed"}:
             # A caller-controlled source label is not a service credential. These
             # transitions are owned by the publication-verification/outbox workflow.
             raise HTTPException(403, "真实发布核验与生产线关闭只能由受控发布核验及 Outbox 流程执行")
         try:
-            return ContentProductionLineStore(conn).transition(
+            return ContentProductionLineStore(conn, tenant_id=runtime.get("runtime_tenant_id") or "default").transition(
                 line_id, event_type=event_type,
                 actor=auth.audit_actor(request),
                 reason=str(req.get("reason") or ""),
