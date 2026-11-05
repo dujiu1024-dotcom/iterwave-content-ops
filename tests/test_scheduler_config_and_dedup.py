@@ -52,6 +52,21 @@ def test_register_jobs_respects_enabled_and_trigger(cfg, tmp_path):
     assert "cron" in str(eng.scheduler.get_job("hot_topics_refresh").trigger)
 
 
+def test_unchanged_startup_schedule_preserves_persisted_job_and_next_run_time(cfg, tmp_path):
+    eng = SchedulerEngine(cfg, tmp_path / "persistent-jobs.db")
+    eng._register_all_jobs()
+    before = eng.scheduler.get_job("daily_ops")
+    assert before is not None
+    before_next_run = before.next_run_time
+
+    result = eng.apply_job_config("daily_ops")
+    after = eng.scheduler.get_job("daily_ops")
+
+    assert result["preserved"] is True
+    assert after is before
+    assert after.next_run_time == before_next_run
+
+
 def test_patch_switches_trigger_and_persists(cfg, conn, tmp_path, monkeypatch):
     r = patch_config(cfg, conn, {"scheduler.jobs.daily_ops.interval_minutes": 720})
     job = cfg.scheduler.job("daily_ops")
