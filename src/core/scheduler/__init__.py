@@ -37,7 +37,7 @@ from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.date import DateTrigger
-from zoneinfo import ZoneInfo
+from src.core.timezone import business_zone
 from ..timezone import (business_now, storage_now, parse_persisted_datetime, business_zone as configured_business_zone, storage_window_cutoffs, timestamp_since_sql, timestamp_before_sql, business_date_predicate)
 from ..task_context import bind_task_context, business_timestamp, business_zone
 
@@ -285,7 +285,7 @@ class SchedulerEngine:
     def _trigger_for(self, job_id: str):
         sched = self.cfg.scheduler.job(job_id)
         if sched.cron:
-            return CronTrigger.from_crontab(sched.cron, timezone=ZoneInfo(self.cfg.business_timezone))
+            return CronTrigger.from_crontab(sched.cron, timezone=business_zone(self.cfg))
         return IntervalTrigger(minutes=int(sched.interval_minutes))
 
     def apply_job_config(self, job_id: str) -> dict:
