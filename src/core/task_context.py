@@ -9,13 +9,13 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 
-def business_zone(cfg):
-    """Resolve the configured business timezone for scheduler timestamps."""
-    return ZoneInfo(cfg.business_timezone)
+def business_zone(cfg=None):
+    """Resolve the fixed product business timezone for scheduler timestamps."""
+    return ZoneInfo("Asia/Shanghai")
 
 
 def business_timestamp(cfg) -> float:
-    """Return the current Unix timestamp using the configured business timezone."""
+    """Return the current Unix timestamp using Asia/Shanghai business time."""
     return datetime.now(business_zone(cfg)).timestamp()
 
 
