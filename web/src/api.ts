@@ -1324,6 +1324,8 @@ export interface SubPlanStageRecord {
   strategy_goal?: string; current_problem?: string; execution_strategy?: string;
   prerequisites?: string; input_info?: string; expected_result?: string;
   effect_evaluation?: string; entry_condition?: string; entry_condition_met?: boolean;
+  business_completion_required?: boolean; business_completion_status?: string;
+  effect_required?: boolean; effect_status?: string;
   dependencies?: string[]; latest_outcome?: { result: Record<string, unknown>; evaluation: string; recorded_at: string } | null;
 }
 export interface SubPlanVersionRecord {
@@ -2242,6 +2244,20 @@ export const api = {
   recordSubplanStageOutcome: (id: string, stageId: number, data: { version_id: number; result: Record<string, unknown>; evaluation?: string }) =>
     fetchJson<{ outcome: { id: number; result: Record<string, unknown>; evaluation: string } }>(
       `/api/subplans/${encodeURIComponent(id)}/stages/${stageId}/outcomes`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+  createSubplanRound: (id: string, data: { topic_count?: number }) =>
+    fetchJson<{ round_id: number; round_number: number; topic_count: number; platforms: Platform[]; production_task_count: number; task_creation: string }>(
+      `/api/subplans/${encodeURIComponent(id)}/rounds`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+  reviewSubplanStageCondition: (id: string, stageId: number, data: {
+    condition_type: "business" | "effect"; decision: "passed" | "failed" | "needs_review";
+    reason: string; evidence: Record<string, unknown>; confidence?: "low" | "medium" | "high";
+    recommendation?: string;
+  }) =>
+    fetchJson<{ stage: SubPlanStageRecord; completion_gates: Record<string, unknown> }>(
+      `/api/subplans/${encodeURIComponent(id)}/stages/${stageId}/condition-review`,
       { method: "POST", body: JSON.stringify(data) },
     ),
   reviewSubplan: (id: string, versionId: number, action: "approve" | "reject", reason?: string) =>

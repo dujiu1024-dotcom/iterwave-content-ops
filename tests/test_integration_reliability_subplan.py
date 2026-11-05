@@ -197,6 +197,11 @@ def test_round_is_pinned_to_effective_version_and_survives_new_draft(client):
     assert bound["plan_attribution_status"] == "resolved"
     assert bound["production_line_version_id"] is not None
     assert json.loads(bound["sub_plan_snapshot"])["title"] == "联调子计划"
+    assert created.json()["task_creation"] == "deferred_to_round_executor"
+    assert created.json()["production_task_count"] == 0
+    assert int(conn.execute(
+        "SELECT COUNT(*) FROM production_tasks WHERE round_id=?", (round_id,)
+    ).fetchone()[0]) == 0
 
     # 修改子计划只产生新的草稿版本，审核生效前不得改写既有轮次。
     revised = tc.patch("/api/subplans/integration-sub", json={
@@ -516,3 +521,128 @@ def test_autogrow_round_is_queued_then_executed_by_worker(cfg, conn, seed, tmp_p
     assert observed["round_id"] == round_id
     assert observed["kwargs"]["platform_values"] == ["xhs"]
     assert observed["kwargs"]["feedback"] is None
+
+
+
+def test_manual_subplan_round_is_queued_without_placeholder_tasks(client, tmp_path, monkeypatch):
+    tc, conn, _ = client
+    _approved_subplan(conn, "manual-queue-sub")
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    monkeypatch.setattr(api_main, "_task_queue", queue)
+    monkeypatch.setattr(api_main, "_build_task_execution_snapshot", lambda *args, **kwargs: {})
+    api_main._g_ctx["runtime_tenant_id"] = "default"
+
+    created = tc.post("/api/subplans/manual-queue-sub/rounds", json={"topic_count": 2})
+    assert created.status_code == 201
+    round_id = int(created.json()["round_id"])
+    assert int(conn.execute(
+        "SELECT COUNT(*) FROM production_tasks WHERE round_id=?", (round_id,)
+    ).fetchone()[0]) == 0
+
+    submitted = tc.post(
+        f"/api/rounds/{round_id}/run",
+        json={"topic_count": 2, "platforms": ["xhs"]},
+    )
+    assert submitted.status_code == 202
+    task = queue.get(submitted.json()["task_id"])
+    assert task is not None and task.status == "queued"
+    assert task.task_type == "round_run"
+    assert task.aggregate_id == str(round_id)
+    assert int(conn.execute(
+        "SELECT COUNT(*) FROM production_tasks WHERE round_id=?", (round_id,)
+    ).fetchone()[0]) == 0
+
+
+def test_condition_review_api_records_business_gate_decision(client):
+    tc, conn, _ = client
+    _store, _master, _version, stage = _approved_subplan(conn, "condition-review-sub")
+    conn.execute(
+        "UPDATE sub_plan_stages SET business_completion_required=1 WHERE id=?",
+        (int(stage["id"]),),
+    )
+    conn.commit()
+
+    # needs_review is a valid human decision without pretending that the publish
+    # quantity target has already been met; the stats relation is a read-only view.
+    response = tc.post(
+        f"/api/subplans/condition-review-sub/stages/{int(stage['id'])}/condition-review",
+        json={
+            "condition_type": "business", "decision": "needs_review",
+            "reason": "需要补充业务证据后再确认",
+            "evidence": {"source": "acceptance-test"},
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["stage"]["business_completion_status"] == "needs_review"
+    history = tc.get(
+        f"/api/subplans/condition-review-sub/stages/{int(stage['id'])}/condition-reviews"
+    )
+    assert history.status_code == 200
+    assert history.json()["condition_reviews"][0]["decision"] == "needs_review"
+
+
+
+@pytest.mark.asyncio
+async def test_ai_subplan_description_does_not_enable_business_or_effect_gates_by_default(
+    client, monkeypatch
+):
+    from src.api import subplans as subplans_api
+
+    tc, conn, _seed = client
+    store = PlanVersionStore(conn)
+    master = store.create_master_draft(dict(PLAN_BASE), author="test", source="user")
+    store.activate_master_version(int(master["id"]), reviewer="test")
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": json.dumps({
+                "subplans": [{
+                    "platform": "xhs",
+                    "title": "AI 默认门禁测试",
+                    "snapshot": {},
+                    "stages": [{
+                        "stage_key": "ai-default-gates",
+                        "title": "阶段一",
+                        "target_count": 1,
+                        "completion_criteria": "完成目标内容生产",
+                        "effect_evaluation": "观察发布效果并总结",
+                    }],
+                }],
+            }, ensure_ascii=False)}}]}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(subplans_api.httpx, "AsyncClient", FakeAsyncClient)
+    cfg = api_main._g_ctx["cfg"]
+    cfg.llm.base_url = "https://llm.example/v1"
+    cfg.llm.model = "test-model"
+    cfg.llm.api_key_env = "T10_TEST_LLM_KEY"
+    monkeypatch.setenv("T10_TEST_LLM_KEY", "test-key")
+
+    response = tc.post(
+        "/api/subplans/ai-draft",
+        json={"master_plan_version_id": int(master["id"]), "platforms": ["xhs"]},
+    )
+    assert response.status_code == 201, response.text
+    stage = conn.execute(
+        """SELECT business_completion_required,effect_required
+           FROM sub_plan_stages WHERE sub_plan_version_id=?""",
+        (int(response.json()["items"][0]["draft"]["id"]),),
+    ).fetchone()
+    assert int(stage["business_completion_required"]) == 0
+    assert int(stage["effect_required"]) == 0
