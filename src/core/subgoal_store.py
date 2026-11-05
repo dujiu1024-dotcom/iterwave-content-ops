@@ -230,7 +230,11 @@ class SubGoalStore:
         principal = self._actor_principal(actor)
         goal_id = str(uuid.uuid4())
         now = _now()
-        self.conn.execute("BEGIN IMMEDIATE")
+        nested_transaction = self.conn.in_transaction
+        if nested_transaction:
+            self.conn.execute("SAVEPOINT subgoal_store_write")
+        else:
+            self.conn.execute("BEGIN IMMEDIATE")
         try:
             self.conn.execute(
                 """INSERT INTO sub_goals(id,sub_plan_version_id,stage_id,parent_goal_id,goal_type,
@@ -253,9 +257,16 @@ class SubGoalStore:
             self._validate_graph(version_id)
             self._refresh(version_id)
             self._record_audit(action="goal_created", sub_plan_id=sub_plan_id, version_id=version_id, goal_id=goal_id, actor=actor, payload=payload)
-            self.conn.commit()
+            if nested_transaction:
+                self.conn.execute("RELEASE SAVEPOINT subgoal_store_write")
+            else:
+                self.conn.commit()
         except Exception:
-            self.conn.rollback()
+            if nested_transaction:
+                self.conn.execute("ROLLBACK TO SAVEPOINT subgoal_store_write")
+                self.conn.execute("RELEASE SAVEPOINT subgoal_store_write")
+            else:
+                self.conn.rollback()
             raise
         return self._goal(goal_id)
 
@@ -301,7 +312,11 @@ class SubGoalStore:
         if not isinstance(deps, list) or len(set(deps)) != len(deps):
             raise SubGoalError("依赖必须是无重复的目标 ID 数组")
         principal = self._actor_principal(actor)
-        self.conn.execute("BEGIN IMMEDIATE")
+        nested_transaction = self.conn.in_transaction
+        if nested_transaction:
+            self.conn.execute("SAVEPOINT subgoal_store_write")
+        else:
+            self.conn.execute("BEGIN IMMEDIATE")
         try:
             old_order = int(goal["goal_order"])
             new_order = int(fields["goal_order"])
@@ -350,9 +365,16 @@ class SubGoalStore:
             self._validate_graph(int(version["id"]))
             self._refresh(int(version["id"]))
             self._record_audit(action="goal_updated", sub_plan_id=sub_plan_id, version_id=int(version["id"]), goal_id=goal_id, actor=actor, payload=payload)
-            self.conn.commit()
+            if nested_transaction:
+                self.conn.execute("RELEASE SAVEPOINT subgoal_store_write")
+            else:
+                self.conn.commit()
         except Exception:
-            self.conn.rollback()
+            if nested_transaction:
+                self.conn.execute("ROLLBACK TO SAVEPOINT subgoal_store_write")
+                self.conn.execute("RELEASE SAVEPOINT subgoal_store_write")
+            else:
+                self.conn.rollback()
             raise
         return self._goal(goal_id)
 
@@ -380,7 +402,11 @@ class SubGoalStore:
             raise SubGoalError("生产方向、执行条件和验收关联均不能为空")
         principal = self._actor_principal(actor)
         now = _now()
-        self.conn.execute("BEGIN IMMEDIATE")
+        nested_transaction = self.conn.in_transaction
+        if nested_transaction:
+            self.conn.execute("SAVEPOINT subgoal_store_write")
+        else:
+            self.conn.execute("BEGIN IMMEDIATE")
         try:
             self.conn.execute(
                 """INSERT INTO sub_goal_production_plans(
@@ -398,9 +424,16 @@ class SubGoalStore:
             )
             self.conn.execute("UPDATE sub_goals SET requires_production=1,updated_at=?,updated_by=? WHERE id=?", (now,principal,goal_id))
             self._record_audit(action="production_plan_saved", sub_plan_id=sub_plan_id, version_id=int(version["id"]), goal_id=goal_id, actor=actor, payload=payload)
-            self.conn.commit()
+            if nested_transaction:
+                self.conn.execute("RELEASE SAVEPOINT subgoal_store_write")
+            else:
+                self.conn.commit()
         except Exception:
-            self.conn.rollback()
+            if nested_transaction:
+                self.conn.execute("ROLLBACK TO SAVEPOINT subgoal_store_write")
+                self.conn.execute("RELEASE SAVEPOINT subgoal_store_write")
+            else:
+                self.conn.rollback()
             raise
         return dict(self.conn.execute("SELECT * FROM sub_goal_production_plans WHERE goal_id=?", (goal_id,)).fetchone())
 
@@ -436,7 +469,11 @@ class SubGoalStore:
                 raise SubGoalError("实际完成数量未达到目标值，不能验收通过")
         now = _now()
         status = {"passed":"completed","failed":"failed","needs_review":"needs_review"}[decision]
-        self.conn.execute("BEGIN IMMEDIATE")
+        nested_transaction = self.conn.in_transaction
+        if nested_transaction:
+            self.conn.execute("SAVEPOINT subgoal_store_write")
+        else:
+            self.conn.execute("BEGIN IMMEDIATE")
         try:
             self.conn.execute(
                 """INSERT INTO sub_goal_evidence(goal_id,decision,reason,evidence_json,actual_count,reviewed_by,created_at)
@@ -449,9 +486,16 @@ class SubGoalStore:
             )
             self._refresh(int(goal["sub_plan_version_id"]))
             self._record_audit(action="goal_accepted", sub_plan_id=sub_plan_id, version_id=int(goal["sub_plan_version_id"]), goal_id=goal_id, actor=reviewer, payload={"decision": decision})
-            self.conn.commit()
+            if nested_transaction:
+                self.conn.execute("RELEASE SAVEPOINT subgoal_store_write")
+            else:
+                self.conn.commit()
         except Exception:
-            self.conn.rollback()
+            if nested_transaction:
+                self.conn.execute("ROLLBACK TO SAVEPOINT subgoal_store_write")
+                self.conn.execute("RELEASE SAVEPOINT subgoal_store_write")
+            else:
+                self.conn.rollback()
             raise
         return self._goal(goal_id)
 
