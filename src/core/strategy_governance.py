@@ -18,7 +18,8 @@ def collect_strategy_governance(conn) -> dict[str, Any]:
     from src.core.north_star_repository import get_current
     from src.core.resource_baseline_repository import build_resource_baseline
 
-    north_star = get_current(conn)
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    north_star = get_current(conn) if "account_group_north_star_versions" in tables else None
     baseline = build_resource_baseline(conn)
     resources = [
         item for item in baseline.get("resources", [])
