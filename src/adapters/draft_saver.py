@@ -206,8 +206,6 @@ PLATFORM_SELECTORS: dict[Platform, dict] = {
             "button.save-draft",
         ],
         # R1 红线：发布按钮严禁点击
-        # 已有未发布草稿时只检测并停止，不覆盖平台现存草稿。
-        "draft_prompt_preserve": ["text=你还有上次未发布的图文"],
         "_publish_button_audit_only": [
             "button:has-text('发布')",
             "button:has-text('发送')",
