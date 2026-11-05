@@ -1095,8 +1095,6 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
                     production_line_version_id=line_version_id,
                 )
                 production_task_ids.append(task["id"])
-            if stage["status"] == "pending":
-                s.update_stage_status(int(stage["id"]), "in_progress")
             number = int(conn.execute("SELECT round_number FROM spiral_rounds WHERE id=?", (round_id,)).fetchone()[0])
             return {"round_id": round_id, "round_number": number, "deduped": created["deduped"],
                     "topic_count": topic_count, "platforms": [identity["platform"]],
