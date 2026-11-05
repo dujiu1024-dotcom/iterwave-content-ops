@@ -4854,6 +4854,8 @@ def test_review_adoption_master_draft_is_review_gated_and_rebase_path_is_reachab
     for extra_id, extra_status in (
         ("review-adoption-manual-pause", "paused"),
         ("review-adoption-cancelled", "cancelled"),
+        ("review-adoption-archived", "archived"),
+        ("review-adoption-expired-version", "expired_version"),
     ):
         store.create_subplan(
             extra_id, master_plan_version_id=active_id, platform="xhs",
@@ -4869,6 +4871,12 @@ def test_review_adoption_master_draft_is_review_gated_and_rebase_path_is_reachab
             conn.execute(
                 "UPDATE sub_plans SET status='paused',pause_reason='user' WHERE id=?",
                 (extra_id,),
+            )
+        elif extra_status == "expired_version":
+            # The child remains active, but its current version has been superseded.
+            conn.execute(
+                "UPDATE sub_plan_versions SET status='archived' WHERE id=?",
+                (extra_version["id"],),
             )
         else:
             conn.execute("UPDATE sub_plans SET status=? WHERE id=?", (extra_status, extra_id))
@@ -4931,10 +4939,12 @@ def test_review_adoption_master_draft_is_review_gated_and_rebase_path_is_reachab
     rebase_result = rebased.json()
     assert rebase_result["status"] == "partial"
     assert rebase_result["eligible_count"] == 1
-    assert rebase_result["skipped_count"] == 2
+    assert rebase_result["skipped_count"] == 4
     skipped_by_id = {item["sub_plan_id"]: item for item in rebase_result["skipped"]}
     assert skipped_by_id["review-adoption-manual-pause"]["reason"] == "not_paused_by_target"
     assert skipped_by_id["review-adoption-cancelled"]["reason"] == "terminal_status"
+    assert skipped_by_id["review-adoption-archived"]["reason"] == "terminal_status"
+    assert skipped_by_id["review-adoption-expired-version"]["reason"] == "no_effective_version"
     assert [item["sub_plan_id"] for item in rebase_result["drafts"]] == [sub_id]
     draft = rebase_result["drafts"][0]["draft_version"]
     assert int(draft["master_plan_version_id"]) == new_master_id
@@ -4957,6 +4967,7 @@ def test_review_adoption_master_draft_is_review_gated_and_rebase_path_is_reachab
     assert retried.json()["drafts"][0]["draft_version"]["id"] == draft["id"]
     assert {item["sub_plan_id"] for item in retried.json()["skipped"]} == {
         "review-adoption-manual-pause", "review-adoption-cancelled",
+        "review-adoption-archived", "review-adoption-expired-version",
     }
 
     approved_child = tc.post(f"/api/subplans/{sub_id}/review", json={
