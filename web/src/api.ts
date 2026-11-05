@@ -1302,7 +1302,7 @@ export interface AutogrowStatus {
 export interface MasterPlanVersion {
   id: number; version_no: number; status: string; plan_snapshot: string;
   plan_signature: string; created_at: string; reviewed_at?: string | null;
-  change_note?: string; north_star_version_id?: number | null; north_star_attribution_status?: string;
+  change_note?: string; source?: string; north_star_version_id?: number | null; north_star_attribution_status?: string;
 }
 export interface MasterPlanGenerationMetadata {
   generation_source: string;
