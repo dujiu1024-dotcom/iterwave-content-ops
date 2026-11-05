@@ -316,7 +316,25 @@ class SchedulerEngine:
         )
         trigger = self._trigger_for(job_id, start_date=start_date)
         if existing is not None:
-            if existing.trigger != trigger:
+            def trigger_signature(value):
+                timezone = getattr(value, "timezone", None)
+                zone_key = getattr(timezone, "key", str(timezone))
+                if isinstance(value, CronTrigger):
+                    return (
+                        "cron", zone_key,
+                        tuple((field.name, str(field)) for field in value.fields),
+                    )
+                if isinstance(value, IntervalTrigger):
+                    return (
+                        "interval", zone_key, value.interval.total_seconds(),
+                        value.start_date,
+                    )
+                return (type(value).__qualname__, str(value))
+            # CronTrigger equality may compare generated field internals that
+            # differ between instances despite identical configured expressions.
+            # Compare the effective schedule, not object identity, to avoid
+            # resetting a persisted misfire/next_run_time on every restart.
+            if trigger_signature(existing.trigger) != trigger_signature(trigger):
                 self.scheduler.reschedule_job(job_id, trigger=trigger)
             self.scheduler.modify_job(
                 job_id, args=[self.engine_key], max_instances=1, coalesce=True,
