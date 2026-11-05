@@ -43,6 +43,15 @@ from ..task_context import bind_task_context, business_timestamp, business_zone
 
 logger = logging.getLogger(__name__)
 
+
+def _draft_payload_content_hash(title, body, tags_json, image_paths_json) -> str:
+    """Fingerprint every image sent to the platform, not only the cover image."""
+    from ..content_version import content_version_hash, parse_json_list
+
+    return content_version_hash(
+        title, body, parse_json_list(tags_json), parse_json_list(image_paths_json),
+    )
+
 # SQLAlchemyJobStore 需要模块级可 pickle 的包装函数。以数据库绝对路径作为稳定引擎键，
 # 防止不同账号组的持久化任务通过可变的“当前活动引擎”指针串租。
 _ENGINES: dict[str, "SchedulerEngine"] = {}
@@ -645,11 +654,8 @@ class SchedulerEngine:
                 # 即使自动识别到了真实发布，也记录平台实际版本与当前本地版本是否一致。
                 # 这不阻断已发生的发布事实或采集，但让复盘知道指标对应哪一版内容。
                 try:
-                    from ...core.content_version import content_version_hash, parse_json_list
-                    images = parse_json_list(row["image_paths"])
-                    payload_images = [str(images[0])] if images and images[0] else []
-                    current_hash = content_version_hash(
-                        row["local_title"], row["body"], parse_json_list(row["tags"]), payload_images,
+                    current_hash = _draft_payload_content_hash(
+                        row["local_title"], row["body"], row["tags"], row["image_paths"],
                     )
                     saved_hash = row["saved_content_hash"]
                     sync_state = (
