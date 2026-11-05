@@ -322,11 +322,14 @@ def test_effect_feedback_isolated_between_subplans_with_same_stage_key(content_c
         "SELECT id FROM contents WHERE round_id=?", (other_round,),
     ).fetchone()["id"]
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    next_master_version = conn.execute(
+        "SELECT COALESCE(MAX(version_no), 0) + 1 FROM master_plan_versions"
+    ).fetchone()[0]
     master = conn.execute(
         """INSERT INTO master_plan_versions(
             version_no,plan_signature,plan_snapshot,status,source,created_at,created_by
-        ) VALUES(1,?,?, 'draft','system',?,'isolation-test')""",
-        ("t8-isolation-master", json.dumps({"fixture": "isolation"}), now),
+        ) VALUES(?,?,?, 'draft','system',?,'isolation-test')""",
+        (next_master_version, "t8-isolation-master", json.dumps({"fixture": "isolation"}), now),
     ).lastrowid
     conn.execute(
         """INSERT INTO sub_plans(
