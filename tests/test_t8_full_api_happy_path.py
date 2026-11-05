@@ -264,11 +264,11 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
 
     diagnosis = client.get("/api/business-diagnosis")
     assert diagnosis.status_code == 200
-    assert diagnosis.json()["report"]["status"] == "confirmed"
-    # Production history can change the full diagnosis fingerprint without
-    # invalidating the stable strategic inputs used for plan generation.
+    # The production line was added after diagnosis and is a genuine capacity
+    # resource change; this correctly requires a new diagnosis for future plans.
+    assert diagnosis.json()["report"]["status"] == "stale"
     assert diagnosis.json()["report"]["source_is_current"] is False
-    assert diagnosis.json()["report"]["strategy_is_current"] is True
+    assert diagnosis.json()["report"]["strategy_is_current"] is False
     subplan_read = client.get(f"/api/subplans/{subplan_id}")
     assert subplan_read.json()["subplan"]["master_plan_version_id"] == master_id
     assert subplan_read.json()["subplan"]["current_version_id"] == subplan_version_id
