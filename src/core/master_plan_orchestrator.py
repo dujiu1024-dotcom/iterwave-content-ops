@@ -45,6 +45,8 @@ async def generate_subplan_drafts(conn, cfg, master_version_id: int) -> dict[str
         snapshot = json.loads(master["plan_snapshot"])
     except (TypeError, ValueError):
         return {"status": "failed", "reason": "master_plan_snapshot_invalid", "items": []}
+    from src.core.strategy_governance import load_master_strategy_context
+    strategy_context = load_master_strategy_context(conn, master)
     platforms = list(dict.fromkeys(
         str(p) for p in (snapshot.get("enabled_platforms") or [])
         if p in {"xhs", "douyin", "kuaishou", "wechat_channels"}
@@ -86,6 +88,8 @@ async def generate_subplan_drafts(conn, cfg, master_version_id: int) -> dict[str
         "不得带时间、中文、周次或斜杠；无法确定时可省略或置为 null。今天是 "
         + business_today(cfg).strftime("%Y-%m-%d") + "。"
         "\n母计划：" + json.dumps(snapshot, ensure_ascii=False)
+        + "\n该母计划绑定的账号组北极星及版本：" + json.dumps(strategy_context.get("north_star"), ensure_ascii=False)
+        + "\n该母计划审核时固化的资源基线：" + json.dumps(strategy_context.get("resource_baseline"), ensure_ascii=False)
         + "\n平台：" + json.dumps(platforms_to_generate, ensure_ascii=False)
     )
     providers = [{
