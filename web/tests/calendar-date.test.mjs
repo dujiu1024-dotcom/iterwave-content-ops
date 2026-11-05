@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { formatCalendarDate, shiftCalendarDate } from "../src/calendarDate.mjs";
+import { formatCalendarDate, shiftCalendarDate } from "../src/calendarDate.mjs";\nimport { formatBusinessDateTime } from "../src/businessTime.mjs";
 
 test("month navigation clamps to the first day and crosses year boundaries", () => {
   const date = new Date(2026, 0, 31, 12, 30);
@@ -37,4 +37,18 @@ test("invalid date, mode, and zero direction are rejected", () => {
   assert.throws(() => formatCalendarDate(new Date("invalid")), TypeError);
   assert.throws(() => shiftCalendarDate(new Date(), "quarter", 1), TypeError);
   assert.throws(() => shiftCalendarDate(new Date(), "week", 0), TypeError);
+});
+
+test("API timestamps render in fixed Asia/Shanghai time regardless of browser timezone", () => {
+  const previousTz = process.env.TZ;
+  process.env.TZ = "America/Los_Angeles";
+  try {
+    assert.equal(formatBusinessDateTime("2026-11-05T00:30:00Z"), "2026-11-05 08:30:00");
+    assert.equal(formatBusinessDateTime("2026-11-04T16:30:00+00:00"), "2026-11-05 00:30:00");
+    assert.equal(formatBusinessDateTime(null), "—");
+    assert.equal(formatBusinessDateTime("legacy-invalid"), "legacy-invalid");
+  } finally {
+    if (previousTz === undefined) delete process.env.TZ;
+    else process.env.TZ = previousTz;
+  }
 });
