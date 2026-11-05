@@ -343,7 +343,7 @@ export default function Goals() {
                   <div className="task-title">目标模式 · {GOAL_MODE_META[mode as keyof typeof GOAL_MODE_META]?.title ?? displayCodeLabel(mode)}</div>
                   <div className="task-desc">
                     {GOAL_MODE_META[mode as keyof typeof GOAL_MODE_META]?.desc}
-                    {mode === "hybrid" && (summary?.north_star ? ` · 总目标：${summary.north_star.goal_text}` : " · 还没有总目标，新建目标时选择「总目标」")}
+                    {mode === "hybrid" && (summary?.north_star ? ` · 账号组经营目标：${summary.north_star.goal_text}` : " · 还没有账号组经营目标，新建目标时选择「账号组经营目标」")}
                   </div>
                 </div>
               </div>
@@ -484,7 +484,7 @@ export default function Goals() {
             <label className="form-label">目标层级</label>
             <select className="field" value={newGoal.goal_level} onChange={(e) => setNewGoal({ ...newGoal, goal_level: e.target.value })}>
               <option value="platform">平台目标</option>
-              <option value="north_star" disabled={mode === "per_platform"}>总目标（账号矩阵北极星）</option>
+              <option value="north_star" disabled={mode === "per_platform"}>账号组经营目标（目标树顶层）</option>
             </select>
           </div>
           {newGoal.goal_level === "platform" && (
@@ -510,7 +510,7 @@ export default function Goals() {
           {newGoal.goal_level === "platform" && northStars.length > 0 && mode !== "per_platform" && (
             <>
               <div>
-                <label className="form-label">服务于哪个总目标</label>
+                <label className="form-label">服务于哪个账号组经营目标</label>
                 <select className="field" value={newGoal.parent_goal_id} onChange={(e) => setNewGoal({ ...newGoal, parent_goal_id: e.target.value })}>
                   <option value="">不挂靠</option>
                   {northStars.map((g) => <option key={g.id} value={g.id}>{g.goal_text}</option>)}
@@ -525,7 +525,7 @@ export default function Goals() {
           )}
           {newGoal.goal_level === "platform" && (
             <div style={{ gridColumn: "span 2" }}>
-              <label className="form-label">如何促进总目标 / 其它平台（选填）</label>
+              <label className="form-label">如何促进账号组经营目标 / 其它平台（选填）</label>
               <input className="field" placeholder="如：小红书种草，为视频号直播导流" value={newGoal.contribution_note}
                 onChange={(e) => setNewGoal({ ...newGoal, contribution_note: e.target.value })} />
             </div>
@@ -662,7 +662,7 @@ export default function Goals() {
                 return (
                   <tr key={g.id}>
                     <td style={{ fontWeight: 600 }}>{g.goal_text}</td>
-                    <td>{g.goal_level === "north_star" ? <span className="tag purple">总目标</span> : g.target_platform ? platformMeta(g.target_platform).label : "全平台"}</td>
+                    <td>{g.goal_level === "north_star" ? <span className="tag purple">账号组经营目标</span> : g.target_platform ? platformMeta(g.target_platform).label : "全平台"}</td>
                     <td style={{ fontSize: 11 }}>{METRICS.find((m) => m.value === g.target_metric)?.label ?? displayCodeLabel(g.target_metric)}</td>
                     <td>{g.target_value}</td>
                     <td>{g.current_value != null
