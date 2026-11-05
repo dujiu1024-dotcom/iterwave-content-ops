@@ -85,6 +85,20 @@ def _row(row):
     return dict(row) if row is not None else None
 
 
+def _asset_quality_snapshot(row) -> str:
+    """Serialize the immutable quality classifications captured at task authorization."""
+    fields = (
+        "readability_status", "completeness_status", "duplicate_status",
+        "commercial_use_status", "asset_version_no",
+    )
+    return json.dumps(
+        {field: row[field] for field in fields},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def build_original_assets_router(get_context, *, route_class=None):
     router = APIRouter(route_class=route_class) if route_class else APIRouter()
 
@@ -602,9 +616,14 @@ def build_original_assets_router(get_context, *, route_class=None):
             conn.execute(
                 """INSERT OR IGNORE INTO production_task_asset_usages(
                     production_task_id,original_asset_id,asset_version_no,permission_snapshot,
-                    privacy_snapshot
-                ) VALUES(?,?,?,'allowed',?)""",
-                (task_id, asset_id, row["current_version_no"], row["privacy_status"]),
+                    privacy_snapshot,asset_quality_snapshot
+                ) VALUES(?,?,?,'allowed',?,?)""",
+                (
+                    task_id, asset_id, row["current_version_no"], row["privacy_status"],
+                    _asset_quality_snapshot({
+                        **dict(row), "asset_version_no": row["current_version_no"],
+                    }),
+                ),
             )
         conn.commit()
         return {"task_id": task_id, "assets": [
