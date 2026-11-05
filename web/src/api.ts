@@ -392,6 +392,7 @@ export interface Draft {
   visual_status?: "degraded" | "media_asset" | "generated" | null;
   visual_reason?: string | null;
   scheduled_publish_at?: string | null;
+  published_at?: string | null;
   /** 用户补填的平台笔记链接（被动评论轮询靠它定位笔记） */
   platform_note_url?: string | null;
   guard_outcome?: "pass" | "warn" | "fail" | "error" | null;
@@ -1878,7 +1879,7 @@ export interface VisualUsageSummary {
 }
 export interface VisualVersionHistory {
   id: number; version: number; content_hash: string; renderer: string;
-  style_key: string; status: string; created_at: string;
+  style_key: string; status: string; created_at: string; approved_at?: string | null;
   design: { pages?: Array<{ page_index: number; image_url: string | null; can_revise?: boolean }> };
 }
 export interface OriginalAsset {
@@ -2795,9 +2796,9 @@ export const api = {
   recheckContent: (id: string) =>
     fetchJson<RecheckResult>(`/api/contents/${id}/recheck`, { method: "POST" }),
   /** 按当前标题/正文重新出图（封面 + 正文分页） */
-  regenerateContentCards: (id: string) =>
-    fetchJson<{ id: string; image_count: number; image_paths: string[] }>(
-      `/api/contents/${id}/cards`, { method: "POST" },
+  regenerateContentCards: (id: string, reason: string) =>
+    fetchJson<{ id: string; image_count: number; image_paths: string[]; request_id?: string }>(
+      `/api/contents/${id}/cards`, { method: "POST", body: JSON.stringify({ reason }) },
     ),
   visualGenerationTask: (id: string) =>
     fetchJson<VisualGenerationTask>(
@@ -2924,10 +2925,10 @@ export const api = {
     fetchJson<{ content_id: string; versions: VisualVersionHistory[]; jobs: Array<Record<string, unknown>> }>(
       `/api/contents/${encodeURIComponent(contentId)}/visual-versions`,
     ),
-  reviseVisualPage: (contentId: string, versionId: number, pageIndex: number, instruction: string) =>
-    fetchJson<{ content_id: string; job_id: string; version_id: number; page_index: number; image_url: string; status: string }>(
+  reviseVisualPage: (contentId: string, versionId: number, pageIndex: number, reason: string) =>
+    fetchJson<{ content_id: string; job_id: string; version_id: number; page_index: number; image_url: string; status: string; request_id?: string }>(
       `/api/contents/${encodeURIComponent(contentId)}/visual-versions/${versionId}/pages/${pageIndex}/revise`,
-      { method: "POST", body: JSON.stringify({ instruction }) },
+      { method: "POST", body: JSON.stringify({ reason }) },
     ),
   subplanGoals: (id: string, versionId: number) =>
     fetchJson<{ items: SubGoalRecord[] }>(`/api/subplans/${encodeURIComponent(id)}/goals?version_id=${versionId}`),
