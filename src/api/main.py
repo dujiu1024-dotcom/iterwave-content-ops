@@ -6019,7 +6019,7 @@ def _register_routes(app: FastAPI) -> None:
                 "SELECT id FROM master_plan_versions WHERE status='effective' AND deleted_at IS NULL"
             ).fetchone()
             active_id = int(active["id"]) if active else None
-            north_star_id = current_governance.get("north_star", {}).get("version_id")
+            north_star_id = (current_governance.get("north_star") or {}).get("version_id")
             if (draft_row["status"] != "draft"
                     or diagnosis is None
                     or diagnosis["status"] != "confirmed"
