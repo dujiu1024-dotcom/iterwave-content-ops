@@ -47,6 +47,9 @@ async def generate_subplan_drafts(conn, cfg, master_version_id: int) -> dict[str
         return {"status": "failed", "reason": "master_plan_snapshot_invalid", "items": []}
     from src.core.strategy_governance import load_master_strategy_context
     strategy_context = load_master_strategy_context(conn, master)
+    if (not strategy_context.get("north_star") or strategy_context["north_star"].get("invalid")
+            or not strategy_context.get("resource_baseline_available")):
+        return {"status": "failed", "reason": "master_strategy_snapshot_missing", "items": []}
     platforms = list(dict.fromkeys(
         str(p) for p in (snapshot.get("enabled_platforms") or [])
         if p in {"xhs", "douyin", "kuaishou", "wechat_channels"}
