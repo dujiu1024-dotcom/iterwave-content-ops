@@ -71,21 +71,21 @@ def register_production_line_routes(app: FastAPI, get_runtime) -> None:
             raise HTTPException(404, str(exc)) from exc
 
     @app.post("/api/production-context/waivers", status_code=201)
-    def create_production_context_waiver(req: dict):
+    def create_production_context_waiver(req: dict, request: Request):
         from src.core.content_production_line_store import ContentProductionLineStore, ContentProductionLineError
         conn = get_runtime()["conn"]
         try:
             waiver = ContentProductionLineStore(conn).record_waiver(
                 round_id=int(req.get("round_id")), platform=str(req.get("platform") or ""),
                 waived_items=req.get("waived_items") or [], reason=str(req.get("reason") or ""),
-                actor="operator", evidence=req.get("evidence") if isinstance(req.get("evidence"), dict) else {},
+                actor=auth.audit_actor(request), evidence=req.get("evidence") if isinstance(req.get("evidence"), dict) else {},
             )
             return {"waiver": waiver}
         except (ContentProductionLineError, TypeError, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
     @app.post("/api/content-production-lines/{line_id}/events")
-    def record_content_production_line_event(line_id: str, req: dict):
+    def record_content_production_line_event(line_id: str, req: dict, request: Request):
         from src.core.content_production_line_store import ContentProductionLineStore, ContentProductionLineError
         conn = get_runtime()["conn"]
         event_type = str(req.get("event_type") or "")
@@ -94,7 +94,7 @@ def register_production_line_routes(app: FastAPI, get_runtime) -> None:
         try:
             return ContentProductionLineStore(conn).transition(
                 line_id, event_type=event_type,
-                actor=("work_item_4" if req.get("source") == "work_item_4" else "operator"),
+                actor=auth.audit_actor(request),
                 reason=str(req.get("reason") or ""),
                 evidence=req.get("evidence") if isinstance(req.get("evidence"), dict) else {},
             )
