@@ -817,6 +817,42 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
             confidence = str(req.get("confidence") or "medium")
             if confidence not in {"low", "medium", "high"}:
                 raise HTTPException(422, "confidence 只能是 low、medium 或 high")
+            source_review_id = req.get("effect_review_id")
+            if source_review_id is not None:
+                try:
+                    source_review_id = int(source_review_id)
+                except (TypeError, ValueError) as exc:
+                    raise HTTPException(422, "effect_review_id 必须为正整数") from exc
+                if source_review_id < 1:
+                    raise HTTPException(422, "effect_review_id 必须为正整数")
+                source_review = conn.execute(
+                    """SELECT id,stage_id,assessment,recommendation,evidence_json
+                       FROM strategy_effect_reviews
+                       WHERE id=? AND stage_id=?""",
+                    (source_review_id, stage_id),
+                ).fetchone()
+                if source_review is None:
+                    raise HTTPException(404, "指定效果反馈不存在或不属于当前策略步骤")
+                allowed_assessments = {
+                    "passed": {"effective"},
+                    "failed": {"ineffective"},
+                    "needs_review": {"insufficient_data", "mixed"},
+                }
+                if source_review["assessment"] not in allowed_assessments[decision]:
+                    raise HTTPException(409, "人工确认结论与来源效果反馈评估不一致")
+                try:
+                    source_evidence = json.loads(source_review["evidence_json"] or "{}")
+                except (TypeError, ValueError) as exc:
+                    raise HTTPException(409, "来源效果反馈证据快照损坏") from exc
+                if not isinstance(source_evidence, dict):
+                    raise HTTPException(409, "来源效果反馈证据快照格式无效")
+                evidence = {
+                    "source_effect_review_id": int(source_review["id"]),
+                    "source_assessment": source_review["assessment"],
+                    "source_recommendation": source_review["recommendation"],
+                    "source_evidence": source_evidence,
+                    "review_evidence": evidence,
+                }
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         column = "business_completion_status" if condition_type == "business" else "effect_status"
