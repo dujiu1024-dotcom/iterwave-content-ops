@@ -5915,17 +5915,30 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(400, f"维度分配合计 {alloc_total} 条，超过每平台选题数 {req.topic_count_per_platform}")
         conn = _g()["conn"]
         from src.core.business_diagnosis import collect_business_context
+        from src.core.strategy_governance import (
+            collect_strategy_governance, strategy_governance_fingerprint,
+            strategy_governance_from_diagnosis_snapshot,
+        )
         latest_diagnosis = conn.execute(
             "SELECT * FROM business_diagnosis_reports ORDER BY version_no DESC LIMIT 1"
         ).fetchone()
         if latest_diagnosis is None or latest_diagnosis["status"] != "confirmed":
-            raise HTTPException(409, "请先完成并确认 AI 经营分析报告，再制定母计划")
-        current_sources = collect_business_context(conn, _g()["cfg"])
-        if latest_diagnosis["source_fingerprint"] != current_sources["fingerprint"]:
-            conn.execute("UPDATE business_diagnosis_reports SET status='stale' WHERE id=?",
-                         (latest_diagnosis["id"],))
-            conn.commit()
-            raise HTTPException(409, "经营资料或素材已变化，请重新分析并确认经营分析报告")
+            raise HTTPException(409, "请先完成并确认经营分析报告，再制定母计划")
+        try:
+            diagnosis_snapshot = json.loads(latest_diagnosis["source_snapshot_json"])
+        except (TypeError, ValueError, KeyError) as exc:
+            raise HTTPException(409, "经营分析报告快照损坏，请重新分析并确认") from exc
+        current_governance = collect_strategy_governance(conn)
+        diagnosed_governance = strategy_governance_from_diagnosis_snapshot(diagnosis_snapshot)
+        if diagnosed_governance is not None:
+            sources_match = strategy_governance_fingerprint(diagnosed_governance) == strategy_governance_fingerprint(current_governance)
+        else:
+            current_sources = collect_business_context(conn, _g()["cfg"])
+            sources_match = latest_diagnosis["source_fingerprint"] == current_sources["fingerprint"]
+        if not sources_match:
+            raise HTTPException(409, "账号组北极星或资源基线已变化，请重新分析并确认经营分析报告")
+        if not current_governance.get("north_star"):
+            raise HTTPException(409, "请先在计划管理中建立并确认账号组北极星，再创建母计划")
         pvm = _g()["plan_version_manager"]
         cfg = _g()["cfg"]
         platforms = req.enabled_platforms or cfg.platforms.enabled_keys()
@@ -6001,12 +6014,15 @@ def _register_routes(app: FastAPI) -> None:
             latest_diagnosis = conn.execute(
                 "SELECT id,version_no FROM business_diagnosis_reports ORDER BY version_no DESC LIMIT 1"
             ).fetchone()
-            from src.core.business_diagnosis import collect_business_context
-            current_context = collect_business_context(conn, cfg)
+            from src.core.strategy_governance import (
+                collect_strategy_governance, strategy_governance_fingerprint,
+            )
+            current_governance = collect_strategy_governance(conn)
             active = conn.execute(
                 "SELECT id FROM master_plan_versions WHERE status='effective' AND deleted_at IS NULL"
             ).fetchone()
             active_id = int(active["id"]) if active else None
+            north_star_id = current_governance.get("north_star", {}).get("version_id")
             if (draft_row["status"] != "draft"
                     or diagnosis is None
                     or diagnosis["status"] != "confirmed"
@@ -6014,11 +6030,9 @@ def _register_routes(app: FastAPI) -> None:
                     or int(latest_diagnosis["id"]) != int(diagnosis["id"])
                     or int(diagnosis["version_no"]) != int(metadata.get("diagnosis_version_no", -1))
                     or diagnosis["source_fingerprint"] != metadata.get("source_fingerprint")
-                    or diagnosis["source_fingerprint"] != current_context["fingerprint"]
+                    or strategy_governance_fingerprint(current_governance) != metadata.get("strategy_fingerprint")
+                    or int(draft_row["north_star_version_id"] or 0) != int(north_star_id or 0)
                     or draft_row["based_on_version_id"] != active_id):
-                if (diagnosis is not None and diagnosis["status"] == "confirmed"
-                        and diagnosis["source_fingerprint"] != current_context["fingerprint"]):
-                    stale_diagnosis_id.append(int(diagnosis["id"]))
                 raise HTTPException(
                     409,
                     "AI 母计划草稿的诊断依据或母计划基准版本已变化，拒绝审核；请重新生成草稿",
