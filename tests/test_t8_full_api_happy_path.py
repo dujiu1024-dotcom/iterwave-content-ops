@@ -56,6 +56,16 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
     })
     assert profile.status_code == 200, profile.text
 
+    offering = client.post("/api/business-profile/items/service", json={
+        "name": "T8-E 图文内容运营服务",
+        "details": {
+            "service_type": "图文内容运营",
+            "introduction": "用于验证生产上下文中的业务服务快照",
+            "delivery_method": "线上内容策划与制作",
+        },
+    })
+    assert offering.status_code == 200, offering.text
+
     asset = client.post(
         "/api/original-assets",
         content=json.dumps({
