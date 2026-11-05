@@ -28,67 +28,39 @@ def _acquire_slot_in_child(db_path, result_queue):
     result_queue.put(_try_acquire_provider_lease(db_path, ttl_seconds=60))
 
 
-def test_primary_and_fallback_provider_requests_share_article_and_page_budget():
-    with image_generation_run(max_calls=30, timeout_seconds=300) as run:
-        with article_budget(max_calls=27, page_max_calls=3) as article:
+def test_usage_tracking_does_not_enforce_article_or_page_quotas():
+    with image_generation_run(max_calls=1, timeout_seconds=0.001) as run:
+        with article_budget(max_calls=1, page_max_calls=1) as article:
+            with page_budget():
+                for _ in range(5):
+                    with provider_request():
+                        pass
             with page_budget():
                 with provider_request():
                     pass
-                with provider_request():
-                    pass
-                with provider_request():
-                    pass
-                with pytest.raises(ImageBudgetExceeded, match="当前页"):
-                    with provider_request():
-                        pass
-            assert article.calls == 3
-            assert run.snapshot()["api_calls"] == 3
+            assert article.calls == 6
+            assert run.snapshot()["api_calls"] == 6
+            assert "max_api_calls" not in run.snapshot()
 
 
-def test_article_budget_caps_calls_across_multiple_pages():
-    with image_generation_run(max_calls=30, timeout_seconds=300):
-        with article_budget(max_calls=3, page_max_calls=3) as article:
-            for _ in range(3):
-                with page_budget():
-                    with provider_request():
-                        pass
-            with page_budget():
-                with pytest.raises(ImageBudgetExceeded, match="单篇"):
-                    with provider_request():
-                        pass
-            assert article.calls == 3
+def test_usage_tracking_does_not_enforce_run_call_or_time_limits():
+    with image_generation_run(max_calls=1, timeout_seconds=0.001) as run:
+        for _ in range(4):
+            with provider_request():
+                pass
+        time.sleep(0.01)
+        with provider_request():
+            pass
+        assert run.snapshot()["api_calls"] == 5
+        assert remaining_budget_seconds() is None
 
 
-def test_round_budget_is_shared_across_nested_article_contexts():
-    with image_generation_run(max_calls=2, timeout_seconds=300) as run:
-        for _ in range(2):
-            with article_budget(max_calls=27, page_max_calls=3):
-                with page_budget():
-                    with provider_request():
-                        pass
-        with article_budget(max_calls=27, page_max_calls=3):
-            with page_budget():
-                with pytest.raises(ImageBudgetExceeded, match="本轮"):
-                    with provider_request():
-                        pass
-        assert run.snapshot()["api_calls"] == 2
-
-
-def test_run_budget_enforces_configured_concurrency_limit():
-    with image_generation_run(max_calls=30, timeout_seconds=300, max_concurrency=1):
+def test_run_budget_still_enforces_configured_concurrency_limit():
+    with image_generation_run(max_concurrency=1):
         with provider_request():
             with pytest.raises(ImageBudgetExceeded, match="并发数"):
                 with provider_request():
                     pass
-
-
-def test_hard_timeout_starts_at_first_budgeted_operation():
-    with image_generation_run(max_calls=30, timeout_seconds=0.01):
-        assert remaining_budget_seconds() > 0
-        time.sleep(0.02)
-        with pytest.raises(ImageBudgetExceeded, match="硬超时"):
-            with provider_request():
-                pass
 
 
 def test_sqlite_provider_leases_cap_slots_and_release(tmp_path):
