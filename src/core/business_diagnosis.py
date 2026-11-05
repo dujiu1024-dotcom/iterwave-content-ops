@@ -204,7 +204,12 @@ def collect_business_context(conn, cfg) -> dict[str, Any]:
             "经营诊断使用统一指标事实、发布后复盘和当前经营缺口；历史来源保留用于追溯。",
         ],
     }
-    canonical = _json(context)
+    # Plan/round history is downstream output of a confirmed diagnosis, not an
+    # upstream business source. Keep it in the model context, but exclude it from
+    # freshness identity so creating plans or opening production rounds cannot
+    # invalidate the diagnosis that authorized those actions.
+    fingerprint_context = {key: value for key, value in context.items() if key != "plan_history"}
+    canonical = _json(fingerprint_context)
     return {"context": context, "fingerprint": hashlib.sha256(canonical.encode("utf-8")).hexdigest()}
 
 
