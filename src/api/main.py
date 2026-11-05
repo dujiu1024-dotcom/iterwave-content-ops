@@ -6039,18 +6039,28 @@ def _register_routes(app: FastAPI) -> None:
                 )
                 conn.commit()
             raise
-        # The mother plan is effective only after the atomic store transition.
-        # AI decomposition creates draft-only child plans and cannot undo approval.
-        from src.core.master_plan_orchestrator import generate_subplan_drafts
-        try:
-            child_generation = await generate_subplan_drafts(conn, cfg, version_id)
-        except Exception as generation_exc:
-            logger.exception("母计划已生效，但自动 AI 子计划拆解未完成")
+        # Review-adoption approval deliberately pauses the old child plans so they
+        # can be rebased through the explicit adoption endpoint. Do not also generate
+        # fresh child identities for the same platforms, which would create duplicates.
+        if result.get("source") == "review_adoption":
             child_generation = {
-                "status": "failed",
-                "reason": type(generation_exc).__name__,
+                "status": "rebase_required",
                 "items": [],
+                "target_master_plan_version_id": int(version_id),
             }
+        else:
+            # The mother plan is effective only after the atomic store transition.
+            # AI decomposition creates draft-only child plans and cannot undo approval.
+            from src.core.master_plan_orchestrator import generate_subplan_drafts
+            try:
+                child_generation = await generate_subplan_drafts(conn, cfg, version_id)
+            except Exception as generation_exc:
+                logger.exception("母计划已生效，但自动 AI 子计划拆解未完成")
+                child_generation = {
+                    "status": "failed",
+                    "reason": type(generation_exc).__name__,
+                    "items": [],
+                }
         return {"version": result, "effective": True,
                 "subplan_generation": child_generation}
 
@@ -6202,7 +6212,8 @@ def _register_routes(app: FastAPI) -> None:
                 (target_master_version_id,),
             ).fetchone()
             if (target_master is None or target_master["status"] != "effective"
-                    or target_master["source"] != "review_adoption"):
+                    or target_master["source"] != "review_adoption"
+                    or target_master["based_on_version_id"] is None):
                 raise HTTPException(409, "目标母计划必须是已审核生效的 review_adoption 版本")
         else:
             target_master = None
