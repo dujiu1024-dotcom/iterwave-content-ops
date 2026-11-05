@@ -4369,6 +4369,34 @@ def test_ai_master_plan_generation_api_failure_is_atomic_and_retryable(client, m
 
 
 
+def test_manual_master_plan_creation_works_without_model_configuration(client, monkeypatch):
+    tc, conn, _ = client
+    _seed_confirmed_master_plan_diagnosis(conn)
+    monkeypatch.setattr(
+        "src.core.business_diagnosis.collect_business_context",
+        lambda *_: {"fingerprint": "stable-fingerprint", "context": {}},
+    )
+    cfg = api_main._g_ctx["cfg"]
+    cfg.llm.model = ""
+    cfg.llm.base_url = ""
+    response = tc.post("/api/plans", json={
+        "topic_count_per_platform": 4,
+        "dimension_allocation": {"AI教育": 2},
+        "enabled_platforms": ["xhs"],
+        "content_format": "image_text",
+        "per_platform": {},
+        "cadence": {},
+        "change_note": "无模型环境下人工创建母计划",
+    })
+    assert response.status_code == 200, response.text
+    draft = response.json()["draft"]
+    assert draft["status"] == "draft"
+    assert draft["source"] == "user"
+    assert draft["north_star_version_id"] is not None
+    assert response.json()["requires_review"] is True
+    assert response.json()["effective"] is False
+
+
 def test_ai_master_plan_generation_api_maps_timeout_without_changing_effective_version(client, monkeypatch):
     from src.core.plan_version_store import PlanVersionStore
 
