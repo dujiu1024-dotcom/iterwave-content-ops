@@ -1,10 +1,16 @@
 """T8-E API acceptance: confirmed diagnosis to an attributed production task."""
 from __future__ import annotations
 
+import asyncio
 import json
+from datetime import datetime, timezone
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+
+from src.adapters.base import Platform
 
 from src.api import main as api_main
 from src.core.metrics import Normalizer
@@ -13,6 +19,8 @@ from src.core.plan_version import PlanVersionManager
 from src.core.state_machine import DraftStateMachine, RoundStateMachine
 from src.core.task_queue import GlobalTaskQueue
 from src.core.production_task_store import ProductionTaskStore
+from src.core.round_executor import RoundExecutor
+from src.core.task_worker import GlobalTaskWorker
 
 
 @pytest.fixture()
@@ -211,6 +219,18 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
     assert approved_line.status_code == 200, approved_line.text
     assert approved_line.json()["effective"] is True
 
+    # The worker must freeze only approved, minimum-provenance asset fields.
+    asset_link = client.post(f"/api/original-assets/{asset_id}/links", json={
+        "entity_type": "plan", "entity_id": subplan_id,
+        "relation_type": "reference_candidate",
+    })
+    assert asset_link.status_code == 201, asset_link.text
+    conn.execute(
+        "UPDATE sub_plan_stages SET effect_required=1,effect_status='pending' WHERE id=?",
+        (stage_id,),
+    )
+    conn.commit()
+
     opened = client.post(f"/api/subplans/{subplan_id}/rounds", json={"topic_count": 1})
     assert opened.status_code == 201, opened.text
     round_id = opened.json()["round_id"]
@@ -232,35 +252,237 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
     assert queued is not None and queued.status == "queued"
     assert queued.task_type == "round_run" and queued.aggregate_id == str(round_id)
 
-    # Isolate the downstream task/asset API contract with a concrete executor-shaped
-    # task. Actual executor task creation and worker execution are covered by T8-B.
-    task = ProductionTaskStore(conn).create_task(
-        round_id=round_id,
-        master_plan_version_id=int(master_id),
-        sub_plan_id=subplan_id,
-        sub_plan_version_id=int(subplan_version_id),
-        strategy_step_id="t8-e-stage-1",
-        platform="xhs",
-        task_ordinal=1,
-        idempotency_key=f"round:{round_id}:step:t8-e-stage-1:topic:t8-e-topic:platform:xhs",
-        input_snapshot={"topic": {"id": "t8-e-topic", "title": "T8-E 测试选题"}},
-        production_line_version_id=int(line_version_id),
+    # Execute the queued round with the real RoundExecutor/Worker. Only external
+    # model and browser rendering boundaries are deterministic test doubles.
+    from src.core import round_executor as executor_module, task_snapshot
+    from src.core.guard.ultimate_goal_checker import CheckOutcome, CheckResult
+
+    monkeypatch.setattr(task_snapshot, "validate_execution_snapshot", lambda *a, **k: None)
+    worker_cfg = cfg.model_copy(update={
+        "paths": cfg.paths.model_copy(update={
+            "data_dir": str(tmp_path / "tenant" / "data"),
+            "output_dir": str(tmp_path / "tenant" / "output"),
+        }),
+    })
+    topic = SimpleNamespace(
+        id="t8-e-api-topic", title="T8-E 全链路真实 Worker 选题",
+        summary="从已确认诊断与生效计划生成图文内容",
+        dimension="AI教育", source="test", date="2026-11-05",
     )
-    assert task["round_id"] == round_id
+    scored = SimpleNamespace(
+        topic=topic, total_score=91.0, score_breakdown={}, is_exploration=False,
+    )
+
+    class PassingGuard:
+        def check_content(self, *_args, **_kwargs):
+            return CheckOutcome(CheckResult.PASS, "deterministic test pass")
+
+    def fake_generate_card_set(*, output_dir, **_kwargs):
+        output = Path(output_dir)
+        output.mkdir(parents=True, exist_ok=True)
+        image = output / "t8-e-full-api-card.png"
+        image.write_bytes(b"\\x89PNG\\r\\n\\x1a\\n" + b"deterministic-image")
+        return [str(image)], []
+
+    monkeypatch.setattr(executor_module, "load_pool", lambda *_: ([topic], {}))
+    monkeypatch.setattr(executor_module, "_llm_available", lambda _cfg: True)
+    monkeypatch.setattr(
+        executor_module, "generate_copy_content",
+        lambda *_args, **_kwargs: (
+            "T8-E 真实 Worker 图文标题",
+            "这条图文内容由真实 RoundExecutor 生成，用于验证诊断到反馈的完整业务链路。",
+            ["AI教育"],
+        ),
+    )
+    monkeypatch.setattr(
+        executor_module.PlanVersionManager, "load_plan",
+        lambda _self: (
+            {"enabled_platforms": ["xhs"], "topic_count_per_platform": 1,
+             "dimension_allocation": {}},
+            "t8-e-frozen-plan-signature", None, "test",
+        ),
+    )
+    monkeypatch.setattr(executor_module, "effective_persona", lambda *_: {"persona_keywords": ["AI教育"]})
+    monkeypatch.setattr(RoundExecutor, "_select_topics", lambda self, *_: [scored])
+    monkeypatch.setattr(RoundExecutor, "_resolve_platforms", lambda self, *_: [Platform.XHS])
+    monkeypatch.setattr(RoundExecutor, "_record_plan_signature", lambda *a, **k: None)
+    monkeypatch.setattr(RoundExecutor, "_platform_broken", lambda *a, **k: False)
+    monkeypatch.setattr(RoundExecutor, "_image_settings", lambda self: (
+        {"model": "deterministic-image", "fallback_enabled": False}, "",
+    ))
+    monkeypatch.setattr(
+        "src.core.ai_card_generation.generate_ai_card_set", fake_generate_card_set,
+    )
+    monkeypatch.setattr(
+        "src.core.visual_ocr.load_ocr_report",
+        lambda _paths: {"status": "passed", "gate": "passed", "reason": None},
+    )
+    monkeypatch.setattr(
+        "src.core.visual_review.assess_visual_pages",
+        lambda _paths: {"status": "not_evaluated", "reason": "deterministic test", "score": None},
+    )
+
+    def build_tenant_context(tenant_id):
+        assert tenant_id == "default"
+        executor = RoundExecutor(
+            worker_cfg, conn, scoring=None, guard=PassingGuard(), adapters={},
+            sm_round=RoundStateMachine(conn, cfg=worker_cfg),
+            sm_draft=DraftStateMachine(conn, cfg=worker_cfg),
+        )
+        return {
+            "cfg": worker_cfg, "conn": conn, "executor": executor,
+            "scheduler": SimpleNamespace(shutdown=lambda: None), "notifier": None,
+        }
+
+    stop = asyncio.Event()
+
+    class StopAfterOneWorker(GlobalTaskWorker):
+        async def _execute(self, task, **kwargs):
+            await super()._execute(task, **kwargs)
+            stop.set()
+
+    worker = StopAfterOneWorker(
+        queue, build_tenant_context, poll_interval_seconds=0.01,
+        lease_seconds=30, heartbeat_seconds=1, reconcile_terminal_rounds=False,
+    )
+    asyncio.run(worker.run(stop))
+
+    queue_task_id = submitted.json()["task_id"]
+    completed = queue.get(queue_task_id)
+    assert completed is not None and completed.status == "succeeded"
+    tasks = ProductionTaskStore(conn).list_tasks(round_id=round_id)
+    assert len(tasks) == 1
+    task = tasks[0]
+    assert task["status"] == "succeeded"
+    assert task["content_id"]
     assert task["master_plan_version_id"] == master_id
     assert task["sub_plan_id"] == subplan_id
     assert task["sub_plan_version_id"] == subplan_version_id
     assert task["strategy_step_id"] == "t8-e-stage-1"
     assert task["production_line_version_id"] == line_version_id
 
-    attached = client.post(f"/api/production-tasks/{task['id']}/assets", json=[asset_id])
-    assert attached.status_code == 201, attached.text
-    snapshot = client.get(f"/api/production-tasks/{task['id']}/assets")
-    assert snapshot.status_code == 200, snapshot.text
-    usage = snapshot.json()["items"][0]
-    assert usage["asset_version_no"] == reviewed_asset.json()["version_no"]
-    assert usage["permission_snapshot"] == "allowed"
-    assert usage["privacy_snapshot"] == "clear"
+    frozen_assets = task["input_snapshot"]["task_input"]["original_assets"]
+    assert len(frozen_assets) == 1
+    assert frozen_assets[0]["asset_id"] == asset_id
+    assert frozen_assets[0]["version_no"] == reviewed_asset.json()["version_no"]
+    assert frozen_assets[0]["privacy_status"] == "clear"
+    assert "metadata" not in frozen_assets[0]
+    assert "fixture" not in json.dumps(task["input_snapshot"], ensure_ascii=False)
+    # A reference candidate is not falsely counted as consumed by the generator.
+    assert conn.execute(
+        "SELECT COUNT(*) FROM production_task_asset_usages WHERE production_task_id=?",
+        (task["id"],),
+    ).fetchone()[0] == 0
+
+    content = conn.execute(
+        "SELECT id,production_task_id,round_id,title FROM contents WHERE production_task_id=?",
+        (task["id"],),
+    ).fetchone()
+    assert content is not None and content["id"] == task["content_id"]
+    assert content["title"] == "T8-E 真实 Worker 图文标题"
+    draft = conn.execute(
+        "SELECT id,status FROM drafts WHERE content_id=?", (content["id"],),
+    ).fetchone()
+    assert draft is not None and draft["status"] == "draft_pending"
+
+    approved_content = client.post(
+        f"/api/contents/{content['id']}/approve",
+        json={"reason": "T9-C 真实 Worker 成品审核通过"},
+    )
+    assert approved_content.status_code == 200, approved_content.text
+    assert approved_content.json()["review_status"] == "approved"
+
+    published = client.post(
+        f"/api/drafts/{draft['id']}/publish_confirm",
+        json={"note_url": "https://www.xiaohongshu.com/explore/t8-e-full-api"},
+    )
+    assert published.status_code == 200, published.text
+    assert published.json()["status"] == "user_published"
+
+    published_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    verification = client.post(
+        f"/api/drafts/{draft['id']}/publish-verification",
+        json={
+            "platform_content_id": "t8-e-full-api",
+            "content_url": "https://www.xiaohongshu.com/explore/t8-e-full-api",
+            "published_at": published_at,
+            "idempotency_key": "t8-e-full-api-publish-verification",
+        },
+    )
+    assert verification.status_code == 201, verification.text
+    verification_id = verification.json()["verification"]["verification_id"]
+    assert verification.json()["closure_event_pending"] is True
+
+    claimed = client.post("/api/production-line-close-events/claim", json={
+        "worker_id": "t8-e-e2e-outbox-consumer", "limit": 10,
+    })
+    assert claimed.status_code == 200, claimed.text
+    events = claimed.json()["items"]
+    assert len(events) == 1
+    event_id = events[0]["event_id"]
+    acknowledged = client.post(
+        f"/api/production-line-close-events/{event_id}/ack",
+        json={"succeeded": True},
+    )
+    assert acknowledged.status_code == 200, acknowledged.text
+    assert acknowledged.json()["status"] == "delivered"
+    verification_row = conn.execute(
+        "SELECT closure_status FROM content_publish_verifications WHERE verification_id=?",
+        (verification_id,),
+    ).fetchone()
+    assert verification_row["closure_status"] == "succeeded"
+    line_row = conn.execute(
+        "SELECT status FROM content_production_lines WHERE production_task_id=?",
+        (task["id"],),
+    ).fetchone()
+    assert line_row["status"] == "published"
+
+    metrics = client.post(
+        f"/api/drafts/{draft['id']}/metrics/manual",
+        json={"views": 120, "likes": 12, "collects": 8, "comments": 3},
+        headers={"Idempotency-Key": "t8-e-full-api-metrics"},
+    )
+    assert metrics.status_code == 200, metrics.text
+    metric_snapshot = client.get(
+        "/api/metrics/snapshots", params={"draft_id": draft["id"]},
+    )
+    assert metric_snapshot.status_code == 200
+    assert metric_snapshot.json()["total"] == 1
+    assert metric_snapshot.json()["items"][0]["content_id"] == content["id"]
+
+    feedback = client.post(
+        f"/api/subplans/stages/{stage_id}/effect-feedback",
+        json={
+            "assessment": "effective",
+            "recommendation": "保留当前内容方向并继续扩充样本。",
+            "evidence_note": "同一条真实 Worker 成品经审核、发布核验、Outbox 消费和指标回填。",
+            "confidence": "medium",
+        },
+    )
+    assert feedback.status_code == 201, feedback.text
+    effect_decision = client.post(
+        f"/api/subplans/{subplan_id}/stages/{stage_id}/condition-review",
+        json={
+            "condition_type": "effect", "decision": "passed",
+            "reason": "确认真实发布成品的效果证据",
+            "effect_review_id": feedback.json()["id"],
+        },
+    )
+    assert effect_decision.status_code == 200, effect_decision.text
+    assert effect_decision.json()["stage"]["effect_status"] == "passed"
+
+    adopted = client.post("/api/plan_adjustments/adopt", json={
+        "dimensions": ["内容结构"], "effect_review_id": feedback.json()["id"],
+    })
+    assert adopted.status_code == 200, adopted.text
+    assert adopted.json()["effective"] is False
+    assert adopted.json()["requires_human_review"] is True
+    assert len(adopted.json()["drafts"]) == 1
+    adopted_snapshot = json.loads(adopted.json()["drafts"][0]["draft_version"]["snapshot_json"])
+    provenance = adopted_snapshot["review_adoptions"][-1]["effect_feedback"]
+    assert provenance["id"] == feedback.json()["id"]
+    assert provenance["stage_id"] == stage_id
+    assert provenance["evidence"]["manual_metrics"]["views"] == 120.0
 
     diagnosis = client.get("/api/business-diagnosis")
     assert diagnosis.status_code == 200
