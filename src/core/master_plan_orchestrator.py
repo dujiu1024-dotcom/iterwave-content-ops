@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from src.core.plan_version_store import PlanVersionStore, normalize_stage_date
+from src.core.timezone import business_today
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +84,7 @@ async def generate_subplan_drafts(conn, cfg, master_version_id: int) -> dict[str
         "target_count 表示用户最终确认发布篇数。子计划只能作为待审核草稿，不得自动生效。"
         "start_date 和 end_date 只能使用 YYYY-MM-DD 格式（如 2026-11-03），"
         "不得带时间、中文、周次或斜杠；无法确定时可省略或置为 null。今天是 "
-        + datetime.now().strftime("%Y-%m-%d") + "。"
+        + business_today(cfg).isoformat() + "。"
         "\n母计划：" + json.dumps(snapshot, ensure_ascii=False)
         + "\n平台：" + json.dumps(platforms_to_generate, ensure_ascii=False)
     )
