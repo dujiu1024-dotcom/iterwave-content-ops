@@ -19,6 +19,7 @@ def _db():
       goal_type TEXT, goal_order INTEGER, priority INTEGER, title TEXT, description TEXT,
       target_count INTEGER, acceptance_criteria TEXT, requires_production INTEGER,
       status TEXT, completed_at TEXT, created_at TEXT, updated_at TEXT,
+      created_by TEXT NOT NULL DEFAULT 'legacy:unattributed', updated_by TEXT NOT NULL DEFAULT 'legacy:unattributed',
       UNIQUE(sub_plan_version_id,goal_order)
     );
     CREATE TABLE sub_goal_dependencies(goal_id TEXT,depends_on_goal_id TEXT,created_at TEXT);
@@ -26,7 +27,13 @@ def _db():
       evidence_json TEXT,actual_count INTEGER,reviewed_by TEXT,created_at TEXT);
     CREATE TABLE sub_goal_production_plans(id INTEGER PRIMARY KEY,goal_id TEXT UNIQUE,
       content_direction TEXT,suggested_count INTEGER,resource_requirements_json TEXT,priority INTEGER,
-      execution_conditions TEXT,acceptance_relation TEXT,enabled INTEGER,created_at TEXT,updated_at TEXT);
+      execution_conditions TEXT,acceptance_relation TEXT,enabled INTEGER,created_at TEXT,updated_at TEXT,
+      created_by TEXT NOT NULL DEFAULT 'legacy:unattributed', updated_by TEXT NOT NULL DEFAULT 'legacy:unattributed');
+    CREATE TABLE sub_goal_audit_events(
+      event_id INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id TEXT, action TEXT, sub_plan_id TEXT,
+      sub_plan_version_id INTEGER, goal_id TEXT, actor_type TEXT, actor_id TEXT,
+      initiating_actor TEXT, executing_actor TEXT, task_id TEXT, payload_json TEXT, created_at TEXT
+    );
     """)
     conn.execute("INSERT INTO sub_plans VALUES('p',1)")
     conn.execute("INSERT INTO sub_plan_versions VALUES(1,'p','draft')")
