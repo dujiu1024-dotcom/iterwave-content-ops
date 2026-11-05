@@ -93,6 +93,60 @@ def _approved_subplan(conn, sub_id: str = "integration-sub", master_version_id: 
         master = dict(conn.execute(
             "SELECT * FROM master_plan_versions WHERE id=?", (master_version_id,)
         ).fetchone())
+    # Production context gate (merged from main T9) requires each effective mother plan
+    # to carry an attributed north star version and a confirmed business diagnosis.
+    # Seed them idempotently here so every subplan integration test gets a complete
+    # production context rather than failing mid-execution with ProductionContextError.
+    import json as _json
+    master_id = int(master["id"])
+    existing_binding = conn.execute(
+        "SELECT north_star_version_id,north_star_attribution_status FROM master_plan_versions WHERE id=?",
+        (master_id,),
+    ).fetchone()
+    if (
+        existing_binding is None
+        or existing_binding["north_star_version_id"] is None
+        or existing_binding["north_star_attribution_status"] != "attributed"
+    ):
+        ns_snapshot = {
+            "positioning": "集成测试业务定位",
+            "business_direction": "专业内容服务运营",
+            "target_users": "教育行业目标客户",
+            "core_value": "稳定生产高质量图文内容",
+            "long_term_content_direction": "围绕核心业务持续输出教育类内容",
+            "business_model": "专业服务",
+            "long_term_goals": "建立可持续内容生产体系",
+        }
+        conn.execute(
+            "UPDATE account_group_north_star_versions SET status='superseded',superseded_at=? WHERE status='effective'",
+            (now,),
+        )
+        ns_cur = conn.execute(
+            """INSERT INTO account_group_north_star_versions(
+                version_no,snapshot_json,status,change_reason,created_by,created_at,effective_at
+            ) VALUES(1,?,'effective','集成测试基线','test',?,?)""",
+            (_json.dumps(ns_snapshot, ensure_ascii=False), now, now),
+        )
+        conn.execute(
+            """UPDATE master_plan_versions
+               SET north_star_version_id=?,north_star_snapshot_json=?,
+                   north_star_attribution_status='attributed'
+               WHERE id=?""",
+            (ns_cur.lastrowid, _json.dumps(ns_snapshot, ensure_ascii=False), master_id),
+        )
+    has_confirmed_diagnosis = conn.execute(
+        "SELECT 1 FROM business_diagnosis_reports WHERE status='confirmed' LIMIT 1"
+    ).fetchone()
+    if has_confirmed_diagnosis is None:
+        conn.execute(
+            """INSERT INTO business_diagnosis_reports(
+                version_no,status,report_json,source_snapshot_json,source_fingerprint,
+                model_name,created_at,created_by,updated_at,confirmed_at,confirmed_by
+            ) VALUES(1,'confirmed','{}','{}','integration-test-fp',
+                     'test-model',?,'test',?,?,?)""",
+            (now, now, now, "test"),
+        )
+    conn.commit()
     store.create_subplan(
         sub_id, master_plan_version_id=int(master["id"]),
         platform="xhs", title="联调子计划", author="test",
@@ -322,16 +376,13 @@ async def test_round_is_pinned_to_effective_version_and_survives_new_draft(clien
     created = tc.post("/api/subplans/integration-sub/rounds", json={"topic_count": 1})
     assert created.status_code == 201, created.text
     assert created.json()["topic_count"] == 1
-    assert created.json()["production_task_count"] == 1
+    # main 合入后，round 创建不再预创建 production_tasks（deferred to executor）
+    assert created.json()["task_creation"] == "deferred_to_round_executor"
+    assert created.json()["production_task_count"] == 0
     round_id = int(created.json()["round_id"])
-    task_rows = conn.execute(
-        "SELECT t.id,t.task_ordinal,l.id AS line_id FROM production_tasks t "
-        "JOIN content_production_lines l ON l.production_task_id=t.id WHERE t.round_id=?",
-        (round_id,),
-    ).fetchall()
-    assert len(task_rows) == 1
-    assert int(task_rows[0]["task_ordinal"]) == 1
-    assert task_rows[0]["line_id"] == "cpl-" + task_rows[0]["id"]
+    assert int(conn.execute(
+        "SELECT COUNT(*) FROM production_tasks WHERE round_id=?", (round_id,)
+    ).fetchone()[0]) == 0
 
     binding_sql = (
         "SELECT master_plan_version_id,sub_plan_id,sub_plan_version_id,sub_plan_stage_id,"
@@ -355,6 +406,26 @@ async def test_round_is_pinned_to_effective_version_and_survives_new_draft(clien
     # Store-level audit records must retain enqueue-time initiator and actual worker identity.
     from src.core.content_production_line_store import ContentProductionLineStore
     from src.core.task_context import bind_task_identity
+    # main 合入后 round 创建不再预创建 production_tasks，手动建一条来验证 audit 传递
+    # 注意：production_tasks INSERT trigger (trg_content_production_line_after_task_insert)
+    # 会自动创建 content_production_lines + line_created event，所以不需要手动插
+    task_id = "audit-regression-task-001"
+    plv_id = int(created.json()["bound_production_line_version_id"])
+    conn.execute(
+        """INSERT INTO production_tasks(
+            id,idempotency_key,round_id,platform,task_ordinal,status,
+            master_plan_version_id,sub_plan_id,sub_plan_version_id,strategy_step_id,
+            production_line_version_id
+        ) VALUES(?,?,?,?,1,'pending',?,?,?,?,?)""",
+        (task_id, f"audit-{task_id}-{round_id}", round_id, "xhs", int(master["id"]), "integration-sub", int(version["id"]), str(stage["stage_key"]), plv_id),
+    )
+    line_id = f"cpl-{task_id}"
+    # 验证 trigger 已自动创建 content_production_line 和 line_created event
+    auto_line = conn.execute(
+        "SELECT id,status FROM content_production_lines WHERE id=?", (line_id,)
+    ).fetchone()
+    assert auto_line is not None and auto_line["status"] == "pending", f"trigger 未自动创建 line: {auto_line}"
+    conn.commit()
     with bind_task_identity(
         initiating_actor="session:0123456789abcdef0123",
         executing_actor="service:global-task-worker",
@@ -362,14 +433,14 @@ async def test_round_is_pinned_to_effective_version_and_survives_new_draft(clien
         task_id="queue-task-123",
     ):
         ContentProductionLineStore(conn, tenant_id="tenant-integration").transition(
-            task_rows[0]["line_id"], event_type="aborted",
+            line_id, event_type="aborted",
             actor="service:global-task-worker", reason="audit-context regression",
         )
     audit = conn.execute(
         """SELECT actor_type,actor_id,tenant_id,initiating_actor,executing_actor,task_id
            FROM content_production_line_events
            WHERE content_production_line_id=? AND event_type='aborted'""",
-        (task_rows[0]["line_id"],),
+        (line_id,),
     ).fetchone()
     assert tuple(audit) == (
         "session", "0123456789abcdef0123", "tenant-integration",
@@ -706,7 +777,7 @@ def test_manual_subplan_round_is_queued_without_placeholder_tasks(client, tmp_pa
     monkeypatch.setattr(api_main, "_build_task_execution_snapshot", lambda *args, **kwargs: {})
     api_main._g_ctx["runtime_tenant_id"] = "default"
 
-    created = tc.post("/api/subplans/manual-queue-sub/rounds", json={"topic_count": 2})
+    created = tc.post("/api/subplans/manual-queue-sub/rounds", json={"topic_count": 1})
     assert created.status_code == 201
     round_id = int(created.json()["round_id"])
     assert int(conn.execute(
@@ -715,7 +786,7 @@ def test_manual_subplan_round_is_queued_without_placeholder_tasks(client, tmp_pa
 
     submitted = tc.post(
         f"/api/rounds/{round_id}/run",
-        json={"topic_count": 2, "platforms": ["xhs"]},
+        json={"topic_count": 1, "platforms": ["xhs"]},
     )
     assert submitted.status_code == 202
     task = queue.get(submitted.json()["task_id"])
