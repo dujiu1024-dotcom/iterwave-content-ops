@@ -1341,6 +1341,7 @@ export interface SubPlanRecord {
   id: string; master_plan_version_id: number; platform: Platform; title: string;
   status: string; current_version_id: number | null; current_version_no?: number | null;
   current_version_status?: string | null; master_version_status?: string | null;
+  paused_by_master_version_id?: number | null; pause_reason?: string | null;
 }
 export interface SubPlanDetail {
   subplan: SubPlanRecord; versions: SubPlanVersionRecord[];
