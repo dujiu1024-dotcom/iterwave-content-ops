@@ -42,6 +42,28 @@ def test_kb_scan_inserts_without_missing_columns(conn: sqlite3.Connection, cfg) 
     assert rows[0]["title"] == "标题一"
 
 
+def test_publish_polling_fingerprint_tracks_every_image_and_matches_save_hash():
+    import json
+    from src.core.content_version import content_version_hash
+    from src.core.scheduler import _draft_payload_content_hash
+
+    images = ["/assets/cover.png", "/assets/card-2.png", "/assets/card-3.png"]
+    saved_hash = content_version_hash("标题", "正文", ["运营"], images)
+
+    def polling_hash(paths):
+        return _draft_payload_content_hash(
+            "标题", "正文", json.dumps(["运营"], ensure_ascii=False), json.dumps(paths),
+        )
+
+    assert polling_hash(images) == saved_hash
+    # A change to a non-cover image must invalidate the saved-content fingerprint.
+    assert polling_hash([images[0], "/assets/card-2-revised.png", images[2]]) != saved_hash
+    # Ordering is part of the exact platform payload and must remain significant.
+    assert polling_hash([images[1], images[0], images[2]]) != saved_hash
+    assert polling_hash(images) == saved_hash
+
+
+
 def test_metrics_retry_params_from_typed_config(cfg) -> None:
     """数据采集重试次数与间隔直接来自类型化配置。"""
     eng = SchedulerEngine(cfg, Path(cfg.paths.db_file))
