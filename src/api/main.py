@@ -78,7 +78,11 @@ from src.api.tenant_skills import build_tenant_skills_router
 from src.api.platform_progress import build_platform_progress_router
 from src.api.tenant_settings import build_tenant_settings_router
 from src.api.action_items import build_action_items_router
-from src.api.original_assets import build_original_assets_router
+from src.api.original_assets import (
+    AssetRegisterRequest, AssetReviewRequest, AssetLinkRequest, AssetGapRequest,
+    AssetGapUpdateRequest, AssetAnalysisRequest, AssetAnalysisReviewRequest,
+    build_original_assets_router,
+)
 from src.api.platform_styles import build_platform_styles_router
 from src.core.tenant_registry import TenantRegistry, TenantError
 from src.core.task_queue import GlobalTaskQueue, TaskQueueError
