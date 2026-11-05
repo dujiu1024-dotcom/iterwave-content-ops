@@ -6303,17 +6303,16 @@ def _register_routes(app: FastAPI) -> None:
                     })
                 except PlanVersionError as exc:
                     raise HTTPException(409, str(exc)) from exc
-            return {
-                "drafts": drafts, "effective": False, "requires_human_review": True,
-                "adopted_dimensions": dims,
-                "message": "复盘建议已生成平台子计划草稿；修改并审核通过后才会生效",
-            }
-    
             conn.execute("RELEASE SAVEPOINT review_adoption_batch")
         except Exception:
             conn.execute("ROLLBACK TO SAVEPOINT review_adoption_batch")
             conn.execute("RELEASE SAVEPOINT review_adoption_batch")
             raise
+        return {
+            "drafts": drafts, "effective": False, "requires_human_review": True,
+            "adopted_dimensions": dims,
+            "message": "复盘建议已生成平台子计划草稿；修改并审核通过后才会生效",
+        }
 
     @app.post("/api/plans/suggest_from_goal")
     def plan_suggest_from_goal(req: dict):
