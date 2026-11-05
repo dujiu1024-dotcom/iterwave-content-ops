@@ -83,27 +83,29 @@ class GoalProgressUpdater:
             logger.info("目标 %s 指标 %s 暂不支持聚合", row["id"], row["target_metric"])
             return None
 
-        column, agg = column_spec
-        where = [f"{column} IS NOT NULL", "fetch_status IN ('success','partial')"]
-        params: list = []
+        metric_key, agg = column_spec
+        where = [
+            "metric_key = ?", "value IS NOT NULL",
+            "collection_status IN ('succeeded','partial')",
+        ]
+        params: list = [metric_key]
         if row["target_platform"]:
             where.append("platform = ?")
             params.append(row["target_platform"])
-        # Goal periods are business-calendar dates. Compare offset-aware rows as UTC
-        # instants and legacy naive metrics as business-local wall time, with an
-        # exclusive next-day upper bound so the whole end date is included.
+        # Filter the business-date window before choosing the latest observation
+        # for each content/metric. This prevents repeat reads from being summed twice.
         period_valid = True
         try:
             if row["metric_period_start"]:
                 utc_start, legacy_start = business_date_cutoffs(
                     date.fromisoformat(str(row["metric_period_start"])).isoformat(), self.cfg,
                 )
-                where.append(timestamp_since_sql("fetched_at"))
+                where.append(timestamp_since_sql("measured_at"))
                 params.extend((utc_start, legacy_start))
             if row["metric_period_end"]:
                 end_exclusive = date.fromisoformat(str(row["metric_period_end"])) + timedelta(days=1)
                 utc_end, legacy_end = business_date_cutoffs(end_exclusive.isoformat(), self.cfg)
-                where.append(timestamp_before_exclusive_sql("fetched_at"))
+                where.append(timestamp_before_exclusive_sql("measured_at"))
                 params.extend((utc_end, legacy_end))
         except (TypeError, ValueError):
             period_valid = False
@@ -111,7 +113,13 @@ class GoalProgressUpdater:
         if not period_valid:
             where.append("0 = 1")
 
-        sql = f"SELECT {agg.upper()}({column}) AS v, COUNT({column}) AS n FROM metrics WHERE " + " AND ".join(where)
+        sql = (
+            "WITH ranked AS (SELECT value, ROW_NUMBER() OVER ("
+            "PARTITION BY tenant_id,content_id,platform,metric_key "
+            "ORDER BY measured_at DESC,recorded_at DESC,fact_id DESC) AS rn "
+            "FROM metric_facts_effective WHERE " + " AND ".join(where) + ") "
+            f"SELECT {agg.upper()}(value) AS v, COUNT(value) AS n FROM ranked WHERE rn=1"
+        )
         agg_row = self.conn.execute(sql, params).fetchone()
         sample_count = int(agg_row["n"] or 0) if agg_row else 0
         # R3：没有样本 → NULL（不是 0）
