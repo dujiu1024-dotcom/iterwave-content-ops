@@ -1238,3 +1238,55 @@ def test_reviewed_feedback_adoption_drives_next_round_on_new_version(client):
     assert int(binding["sub_plan_stage_id"]) == int(new_stage["id"])
     assert int(binding["production_line_version_id"]) == int(new_line["id"])
     assert int(binding["sub_plan_version_id"]) != int(original["id"])
+
+
+
+def test_effect_feedback_is_idempotent_and_rejects_tenant_mismatch(client):
+    tc, conn, _ = client
+    store = PlanVersionStore(conn)
+    master = store.create_master_draft(dict(PLAN_BASE), author="test", source="user")
+    store.activate_master_version(int(master["id"]), reviewer="test")
+    store.create_subplan(
+        "effect-feedback-idempotency", master_plan_version_id=int(master["id"]),
+        platform="xhs", title="效果反馈幂等验收", author="test",
+    )
+    version = store.create_subplan_version(
+        "effect-feedback-idempotency", {"title": "效果反馈幂等验收", "platform": "xhs"},
+        master_plan_version_id=int(master["id"]), author="test",
+        stages=[{"stage_key": "idempotency-stage", "title": "幂等阶段", "target_count": 1}],
+    )
+    store.activate_subplan_version(int(version["id"]), reviewer="test")
+    stage = conn.execute(
+        "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=?", (int(version["id"]),)
+    ).fetchone()
+    url = f"/api/subplans/stages/{int(stage['id'])}/effect-feedback"
+    payload = {
+        "assessment": "effective",
+        "recommendation": "保持当前策略并扩大样本。",
+        "evidence_note": "重复请求应复用同一条不可变反馈。",
+        "confidence": "high",
+    }
+    before = int(conn.execute(
+        "SELECT COUNT(*) FROM strategy_effect_reviews WHERE stage_id=?", (int(stage["id"]),)
+    ).fetchone()[0])
+
+    cross_tenant = tc.post(url, headers={"X-Tenant-Id": "tenant-other"}, json=payload)
+    assert cross_tenant.status_code == 409, cross_tenant.text
+    assert int(conn.execute(
+        "SELECT COUNT(*) FROM strategy_effect_reviews WHERE stage_id=?", (int(stage["id"]),)
+    ).fetchone()[0]) == before
+
+    headers = {"Idempotency-Key": "effect-feedback-idempotency-key-001"}
+    first = tc.post(url, headers=headers, json=payload)
+    assert first.status_code == 201, first.text
+    replay = tc.post(url, headers=headers, json=payload)
+    assert replay.status_code == 201, replay.text
+    assert replay.json()["id"] == first.json()["id"]
+    assert replay.json()["deduplicated"] is True
+
+    changed_payload = {**payload, "recommendation": "相同幂等键不得覆盖原反馈。"}
+    conflict = tc.post(url, headers=headers, json=changed_payload)
+    assert conflict.status_code == 409, conflict.text
+    assert int(conn.execute(
+        "SELECT COUNT(*) FROM strategy_effect_reviews WHERE stage_id=?", (int(stage["id"]),)
+    ).fetchone()[0]) == before + 1
