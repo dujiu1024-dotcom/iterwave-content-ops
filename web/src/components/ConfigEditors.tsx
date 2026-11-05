@@ -553,7 +553,6 @@ export function ImageModelEditor({ onSaved }: { onSaved?: () => void }) {
     if (!settings.model.trim()) { showToast("图片主模型不能为空", "error"); return; }
     const res = await withPending("cfg:image_model", () => api.saveMediaGenerationSettings({
       enabled: settings.enabled,
-      monthly_quota: settings.monthly_quota,
       prompt_prefix: settings.prompt_prefix,
       model: settings.model.trim(),
       size: settings.size,

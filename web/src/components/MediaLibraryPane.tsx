@@ -201,7 +201,7 @@ export default function MediaLibraryPane() {
     await withPending("media:generation-settings", async () => {
       try {
         const saved = await api.saveMediaGenerationSettings({
-          enabled: settings.enabled, monthly_quota: settings.monthly_quota,
+          enabled: settings.enabled,
           prompt_prefix: settings.prompt_prefix, model: settings.model, size: settings.size,
           fallback_enabled: settings.fallback_enabled,
         });
