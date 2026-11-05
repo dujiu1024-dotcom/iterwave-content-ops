@@ -39,6 +39,8 @@ def _rows(conn, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
 def collect_business_context(conn, cfg) -> dict[str, Any]:
     """Collect only tenant-local business, asset and historical content evidence."""
     goal = cfg.ultimate_goal.model_dump(mode="json") if hasattr(cfg.ultimate_goal, "model_dump") else {}
+    from src.core.strategy_governance import collect_strategy_governance
+    strategy_governance = collect_strategy_governance(conn)
     goals = _rows(conn, "SELECT * FROM goals ORDER BY created_at DESC LIMIT 100")
     assets = _rows(conn, "SELECT id,asset_type,title,body,source_url,platform,version,is_active,created_at,updated_at FROM content_assets ORDER BY id")
     media = _rows(conn, "SELECT id,title,original_filename,mime_type,byte_size,width,height,alt_text,tags,source_type,source_ref,status,review_status,review_note,quality_score,quality_details,created_at FROM media_assets ORDER BY id")
@@ -149,6 +151,7 @@ def collect_business_context(conn, cfg) -> dict[str, Any]:
             "label": str(row["title"]),
         })
     context = {
+        "strategy_governance": strategy_governance,
         "business_profile": {
             "legacy_config": goal,
             "registered_profile": persisted_profiles[0] if persisted_profiles else None,
