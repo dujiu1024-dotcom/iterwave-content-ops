@@ -128,11 +128,12 @@ def business_date_cutoffs(
         raise ValueError("invalid business date") from exc
     business_midnight = datetime.combine(parsed_day, time.min, tzinfo=business_zone(cfg))
     legacy_zone = legacy_timezone or business_zone(cfg)
-    legacy_midnight = datetime.combine(parsed_day, time.min, tzinfo=legacy_zone)
     if end:
         next_day = parsed_day + timedelta(days=1)
         business_midnight = datetime.combine(next_day, time.min, tzinfo=business_zone(cfg)) - timedelta(seconds=1)
-        legacy_midnight = datetime.combine(next_day, time.min, tzinfo=legacy_zone) - timedelta(seconds=1)
+    # Interpret the business-calendar boundary in the legacy column's historical
+    # timezone before dropping tzinfo; UTC-naive columns therefore start at 16:00 UTC.
+    legacy_midnight = business_midnight.astimezone(legacy_zone)
     utc_value = business_midnight.astimezone(timezone.utc).isoformat(sep=" ", timespec="seconds")
     legacy_value = legacy_midnight.replace(tzinfo=None).isoformat(sep=" ", timespec="seconds")
     return utc_value, legacy_value
