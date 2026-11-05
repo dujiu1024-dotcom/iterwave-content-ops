@@ -6065,6 +6065,95 @@ def _register_routes(app: FastAPI) -> None:
         except PlanVersionError as exc:
             raise HTTPException(409, str(exc)) from exc
 
+    @app.post("/api/plan_adjustments/adopt_master")
+    def create_review_adoption_master_draft(req: dict, request: Request):
+        """将复盘采纳记录为母计划来源版本草稿；必须经人工审核后才会暂停旧子计划。"""
+        from src.core.plan_version_store import PlanVersionStore, PlanVersionError
+        raw = (req or {}).get("dimensions") or []
+        dims = list(dict.fromkeys(str(d).strip() for d in raw if str(d).strip()))
+        if not dims:
+            raise HTTPException(400, "dimensions 不能为空")
+        conn = _g()["conn"]
+        active = conn.execute(
+            """SELECT id,plan_snapshot FROM master_plan_versions
+               WHERE status='effective' AND deleted_at IS NULL
+               ORDER BY version_no DESC LIMIT 1"""
+        ).fetchone()
+        if active is None:
+            raise HTTPException(409, "当前没有生效母计划，无法创建复盘采纳版本")
+        effect_review_id = (req or {}).get("effect_review_id")
+        effect_feedback = None
+        if effect_review_id is not None:
+            try:
+                effect_review_id = int(effect_review_id)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(422, "effect_review_id 必须为正整数") from exc
+            if effect_review_id < 1:
+                raise HTTPException(422, "effect_review_id 必须为正整数")
+            source = conn.execute(
+                """SELECT er.id,er.stage_id,er.assessment,er.recommendation,
+                          er.evidence_note,er.confidence,er.evidence_json,
+                          s.stage_key,s.title AS stage_title,s.sub_plan_version_id,
+                          v.sub_plan_id,p.master_plan_version_id
+                   FROM strategy_effect_reviews er
+                   JOIN sub_plan_stages s ON s.id=er.stage_id
+                   JOIN sub_plan_versions v ON v.id=s.sub_plan_version_id
+                   JOIN sub_plans p ON p.id=v.sub_plan_id
+                   WHERE er.id=?""",
+                (effect_review_id,),
+            ).fetchone()
+            if source is None:
+                raise HTTPException(404, "策略效果反馈记录不存在")
+            if source["assessment"] == "insufficient_data":
+                raise HTTPException(409, "证据不足的效果反馈不能采纳为母计划调整")
+            if int(source["master_plan_version_id"]) != int(active["id"]):
+                raise HTTPException(409, "效果反馈不属于当前生效母计划，拒绝跨版本采纳")
+            try:
+                evidence = json.loads(source["evidence_json"] or "{}")
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(409, "效果反馈证据快照损坏") from exc
+            effect_feedback = {
+                "id": int(source["id"]), "stage_id": int(source["stage_id"]),
+                "stage_key": source["stage_key"], "stage_title": source["stage_title"],
+                "source_sub_plan_version_id": int(source["sub_plan_version_id"]),
+                "assessment": source["assessment"], "recommendation": source["recommendation"],
+                "evidence_note": source["evidence_note"], "confidence": source["confidence"],
+                "evidence": evidence,
+            }
+        try:
+            snapshot = json.loads(active["plan_snapshot"])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(409, "当前母计划快照损坏") from exc
+        if not isinstance(snapshot, dict):
+            raise HTTPException(409, "当前母计划快照格式无效")
+        records = snapshot.get("review_adoptions")
+        records = list(records) if isinstance(records, list) else []
+        adoption = {
+            "dimensions": dims,
+            "created_at": _storage_now().isoformat(timespec="seconds"),
+            "source": "review_adoption",
+            "status": "suggestion",
+        }
+        if effect_feedback is not None:
+            adoption["effect_feedback"] = effect_feedback
+        records.append(adoption)
+        snapshot["review_adoptions"] = records
+        try:
+            draft = PlanVersionStore(conn).create_master_draft(
+                snapshot, author=auth.audit_actor(request), source="review_adoption",
+                based_on_version_id=int(active["id"]),
+                change_note="复盘建议采纳母计划草稿：" + "、".join(dims),
+                enforce_generation_guard=True,
+                expected_active_version_id=int(active["id"]),
+            )
+        except PlanVersionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {
+            "draft": draft, "effective": False, "requires_human_review": True,
+            "based_on_version_id": int(active["id"]), "adopted_dimensions": dims,
+            "message": "已创建 review_adoption 母计划草稿；审核生效后可将暂停子计划 rebase 到该版本",
+        }
+
     @app.post("/api/plan_adjustments/adopt")
     def adopt_plan_adjustments(req: dict):
         """复盘采纳只为已存在的平台子计划创建新草稿版本，不写入生效母计划。"""
@@ -6099,16 +6188,44 @@ def _register_routes(app: FastAPI) -> None:
                 raise HTTPException(404, "策略效果反馈记录不存在")
             if effect_source["assessment"] == "insufficient_data":
                 raise HTTPException(409, "证据不足的效果反馈不能采纳为计划调整")
+        target_master_version_id = (req or {}).get("target_master_plan_version_id")
+        if target_master_version_id is not None:
+            try:
+                target_master_version_id = int(target_master_version_id)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(422, "target_master_plan_version_id 必须为正整数") from exc
+            if target_master_version_id < 1:
+                raise HTTPException(422, "target_master_plan_version_id 必须为正整数")
+            target_master = conn.execute(
+                """SELECT id,status,source,based_on_version_id
+                   FROM master_plan_versions WHERE id=?""",
+                (target_master_version_id,),
+            ).fetchone()
+            if (target_master is None or target_master["status"] != "effective"
+                    or target_master["source"] != "review_adoption"):
+                raise HTTPException(409, "目标母计划必须是已审核生效的 review_adoption 版本")
+        else:
+            target_master = None
         rows = conn.execute(
             """SELECT p.id,p.platform,p.master_plan_version_id,p.current_version_id,
-                      v.snapshot_json
+                      p.paused_by_master_version_id,v.snapshot_json
                FROM sub_plans p JOIN sub_plan_versions v ON v.id=p.current_version_id
-               WHERE p.status IN ('active','paused') AND v.status='effective'
+               WHERE v.status='effective'
                  AND (? IS NULL OR p.id=?)
+                 AND (
+                    (? IS NULL AND p.status IN ('active','paused'))
+                    OR
+                    (? IS NOT NULL AND p.status='paused'
+                     AND p.paused_by_master_version_id=?
+                     AND p.master_plan_version_id=?)
+                 )
                ORDER BY p.platform,p.id""",
             (
                 effect_source["sub_plan_id"] if effect_source is not None else None,
                 effect_source["sub_plan_id"] if effect_source is not None else None,
+                target_master_version_id, target_master_version_id,
+                target_master_version_id,
+                int(target_master["based_on_version_id"]) if target_master is not None else None,
             ),
         ).fetchall()
         if not rows:
@@ -6157,7 +6274,10 @@ def _register_routes(app: FastAPI) -> None:
             try:
                 draft = store.create_subplan_version(
                     row["id"], snapshot,
-                    master_plan_version_id=int(row["master_plan_version_id"]),
+                    master_plan_version_id=(
+                        target_master_version_id if target_master_version_id is not None
+                        else int(row["master_plan_version_id"])
+                    ),
                     author="review_adoption", stages=stages,
                     based_on_version_id=int(row["current_version_id"]),
                     change_note="复盘建议采纳草稿：" + "、".join(dims),
