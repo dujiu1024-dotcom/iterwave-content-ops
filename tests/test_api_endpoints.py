@@ -3492,6 +3492,24 @@ def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client
     assert before.status_code == 200
     assert before.json()["stages"] == []
 
+    stage_for_goal = conn.execute(
+        "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=?", (version_id,)
+    ).fetchone()
+    from src.core.subgoal_store import SubGoalStore
+    goal_store = SubGoalStore(conn)
+    production_goal = goal_store.create_goal(sub_id, int(version_id), {
+        "stage_id": int(stage_for_goal["id"]), "goal_type": "quantity",
+        "title": "首轮内容生产目标", "target_count": 2,
+        "acceptance_criteria": "完成首轮约定内容生产",
+        "requires_production": True,
+    })
+    goal_store.save_production_plan(sub_id, str(production_goal["id"]), {
+        "content_direction": "按已审核阶段方向生产内容",
+        "suggested_count": 2,
+        "execution_conditions": "阶段已生效且依赖门禁通过",
+        "acceptance_relation": "以本阶段内容数量及验收证据为准",
+    })
+
     reviewed = tc.post(f"/api/subplans/{sub_id}/review", json={
         "version_id": version_id, "action": "approve",
     })
