@@ -296,8 +296,8 @@ async def test_round_is_pinned_to_effective_version_and_survives_new_draft(clien
                   plv.sub_plan_version_id AS line_subplan_version_id,
                   p.current_version_id
            FROM sub_plans p
-           JOIN sub_plan_versions v ON v.id=p.current_version_id
-           JOIN master_plan_versions m ON m.id=p.master_plan_version_id
+           LEFT JOIN sub_plan_versions v ON v.id=p.current_version_id
+           LEFT JOIN master_plan_versions m ON m.id=p.master_plan_version_id
            LEFT JOIN production_lines pl ON pl.sub_plan_id=p.id
            LEFT JOIN production_line_versions plv ON plv.id=pl.current_version_id
            WHERE p.id='integration-sub'"""
