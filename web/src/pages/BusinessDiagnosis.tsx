@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, BusinessDiagnosisReport, BusinessDiagnosisVersion } from "../api";
+import { api, BusinessDiagnosisReport, BusinessDiagnosisVersion } from "../api";\nimport { formatBusinessDateTime } from "../businessTime.mjs";
 
 export default function BusinessDiagnosis() {
   const [report, setReport] = useState<BusinessDiagnosisReport | null>(null);
@@ -68,7 +68,7 @@ export default function BusinessDiagnosis() {
     {error && <div className="notice error">{error}</div>}
     <div className="panel">
       <div className="panel-head"><div><div className="panel-title">报告状态</div><div className="panel-sub">源数据变化会使已确认报告失效；重新分析生成新版本。</div></div><span className="tag gray">{report ? report.status : "尚未分析"}</span></div>
-      {report ? <><p>版本 V{report.version_no} · 模型 {report.model_name} · 创建于 {report.created_at}</p>
+      {report ? <><p>版本 V{report.version_no} · 模型 {report.model_name} · 创建于 {formatBusinessDateTime(report.created_at)}</p>
         <p>来源：经营目标 {report.source_snapshot.inventory_summary.business_goal_count} 项，业务档案 {report.source_snapshot.inventory_summary.registered_business_profile ? "已登记" : "未登记"}，产品/服务目录 {report.source_snapshot.inventory_summary.business_catalog_count ?? 0} 项，原始素材 {report.source_snapshot.inventory_summary.original_asset_count ?? 0} 项（可用 {report.source_snapshot.inventory_summary.original_asset_usable_count ?? 0} 项、待补缺口 {report.source_snapshot.inventory_summary.original_asset_open_gap_count ?? 0} 项），图片素材 {report.source_snapshot.inventory_summary.media_asset_count} 项，历史内容 {report.source_snapshot.inventory_summary.historical_content_count} 条。</p>
         <p>数据指纹：<code>{report.source_fingerprint.slice(0, 20)}</code> · {report.source_is_current ? "来源未变化" : "来源已变化，需重新分析"}</p>
         <div className="panel-sub">分析依据（{report.source_snapshot.source_references.length} 条）</div>
@@ -86,7 +86,7 @@ export default function BusinessDiagnosis() {
     </div>
     <div className="panel"><div className="panel-head"><div><div className="panel-title">历史版本</div><div className="panel-sub">历史报告保留，不覆盖旧版本。</div></div></div>
       <div className="table-wrap"><table><thead><tr><th>版本</th><th>状态</th><th>模型</th><th>创建时间</th><th>确认时间</th></tr></thead><tbody>
-        {versions.map(v => <tr key={v.id}><td>V{v.version_no}</td><td>{v.status}</td><td>{v.model_name}</td><td>{v.created_at}</td><td>{v.confirmed_at || "—"}</td></tr>)}
+        {versions.map(v => <tr key={v.id}><td>V{v.version_no}</td><td>{v.status}</td><td>{v.model_name}</td><td>{formatBusinessDateTime(v.created_at)}</td><td>{formatBusinessDateTime(v.confirmed_at)}</td></tr>)}
         {!versions.length && <tr><td colSpan={5}>暂无历史报告</td></tr>}
       </tbody></table></div>
     </div>
