@@ -1280,7 +1280,7 @@ class CreateGoalRequest(BaseModel):
     @classmethod
     def _level_enum(cls, v: str) -> str:
         if v not in ("north_star", "platform"):
-            raise ValueError("goal_level 只能是 north_star（总目标）或 platform（平台目标）")
+            raise ValueError("goal_level 只能是 north_star（账号组经营目标）或 platform（平台目标）")
         return v
 
     @field_validator("goal_text", "target_metric", "baseline_at",
@@ -1339,7 +1339,7 @@ class GoalUpdateRequest(BaseModel):
     @classmethod
     def _level_enum(cls, v: Optional[str]) -> Optional[str]:
         if v is not None and v not in ("north_star", "platform"):
-            raise ValueError("goal_level 只能是 north_star 或 platform")
+            raise ValueError("goal_level 只能是 north_star（账号组经营目标）或 platform")
         return v
 
     @field_validator("goal_text", "target_metric", "baseline_at",
