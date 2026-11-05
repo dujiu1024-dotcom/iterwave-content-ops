@@ -3,7 +3,7 @@ import { useApp } from "../AppContext";
 import EmptyHint from "../components/EmptyHint";
 import { api, ContentPlan, Platform, ScheduleEvent, UnscheduledDraft, ProductionBatch, ProductionBatchDetail } from "../api";
 import { ALL_PLATFORMS, platformMeta } from "../platforms";
-import { formatCalendarDate as _fmt, shiftCalendarDate } from "../calendarDate.mjs";
+import { businessCalendarDate, formatBusinessDateTimeInput, formatCalendarDate as _fmt, parseBusinessCalendarDate, shiftCalendarDate } from "../calendarDate.mjs";
 import { displayStatusLabel } from "../displayLabels";
 
 const PLAN_STATUS_LABEL: Record<ContentPlan["status"], string> = {
@@ -22,7 +22,7 @@ const TASK_STATUS_LABEL: Record<string, string> = {
 
 export default function Calendar() {
   const { showToast, withPending, isPending } = useApp();
-  const today = new Date();
+  const today = businessCalendarDate();
   const [cursorDate, setCursorDate] = useState(() => new Date(today));
   const [viewMode, setViewMode] = useState<"month" | "week" | "day">("month");
   const year = cursorDate.getFullYear();
@@ -66,7 +66,7 @@ export default function Calendar() {
     void api.draftById(targetDraftId).then((draft) => {
       if (!active || !draft) return;
       const targetDate = draft.scheduled_publish_at || draft.saved_at || draft.created_at;
-      const parsed = targetDate ? new Date(targetDate) : null;
+      const parsed = targetDate ? parseBusinessCalendarDate(targetDate) : null;
       if (parsed && !Number.isNaN(parsed.getTime())) {
         setCursorDate(new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate()));
         setViewMode("day");
@@ -128,7 +128,7 @@ export default function Calendar() {
     for (let d = new Date(visibleStart); d < visibleEndExclusive; d.setDate(d.getDate() + 1)) {
       const date = new Date(d);
       const key = _fmt(date);
-      result.push({ date, key, events: filteredEvents.filter((event) => _eventDate(event) === key && (platformFilter === "all" || event.platform === platformFilter)), plans: filteredPlans.filter((plan) => plan.scheduled_date === key && (platformFilter === "all" || plan.platforms.length === 0 || plan.platforms.includes(platformFilter)) && (showArchivedPlans || (plan.status !== "cancelled" && plan.status !== "archived"))), batches: filteredBatches.filter((batch) => batch.created_at.slice(0, 10) === key), inMonth: date.getMonth() === month });
+      result.push({ date, key, events: filteredEvents.filter((event) => _eventDate(event) === key && (platformFilter === "all" || event.platform === platformFilter)), plans: filteredPlans.filter((plan) => plan.scheduled_date === key && (platformFilter === "all" || plan.platforms.length === 0 || plan.platforms.includes(platformFilter)) && (showArchivedPlans || (plan.status !== "cancelled" && plan.status !== "archived"))), batches: filteredBatches.filter((batch) => { const batchDate = parseBusinessCalendarDate(batch.created_at); return batchDate !== null && _fmt(batchDate) === key; }), inMonth: date.getMonth() === month });
     }
     return result;
   }, [visibleStart, visibleEndExclusive, filteredEvents, filteredPlans, filteredBatches, month, showArchivedPlans, platformFilter]);
@@ -280,7 +280,7 @@ export default function Calendar() {
             ))}
           </div>
           <button className="btn sm" onClick={() => setCursorDate((d) => shiftCalendarDate(d, viewMode, -1))}>上一{viewMode === "month" ? "月" : viewMode === "week" ? "周" : "日"}</button>
-          <button className="btn sm" onClick={() => setCursorDate(new Date(today))}>今天</button>
+          <button className="btn sm" onClick={() => setCursorDate(businessCalendarDate())}>今天</button>
           <button className="btn sm" onClick={() => setCursorDate((d) => shiftCalendarDate(d, viewMode, 1))}>下一{viewMode === "month" ? "月" : viewMode === "week" ? "周" : "日"}</button>
           <input aria-label="选择日历日期" className="field calendar-date-picker" type="date" value={_fmt(cursorDate)} onChange={(e) => { if (e.target.value) { const [y, m, d] = e.target.value.split("-").map(Number); setCursorDate(new Date(y, m - 1, d)); } }} />
           <input className="field calendar-search" type="search" aria-label="搜索内容标题" placeholder="搜索标题…" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
@@ -584,12 +584,16 @@ export default function Calendar() {
 function _eventDate(e: ScheduleEvent): string {
   const raw = e.scheduled || e.saved_at || "";
   // ISO 含时间部分 —— 只取日期
-  return raw.slice(0, 10);
+  // Offset-aware timestamps are grouped by the fixed Shanghai business date.
+  const parsed = parseBusinessCalendarDate(raw);
+  return parsed ? _fmt(parsed) : "";
 }
 
 /** ISO / 日期串 → datetime-local 需要的 "YYYY-MM-DDTHH:MM"；无时间部分补 09:00 */
 function _toLocalInput(raw: string | null): string {
   if (!raw) return "";
+  const formatted = formatBusinessDateTimeInput(raw);
+  if (formatted) return formatted;
   const text = raw.replace(" ", "T");
   if (text.length >= 16) return text.slice(0, 16);
   return `${text.slice(0, 10)}T09:00`;
