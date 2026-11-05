@@ -24,8 +24,34 @@ def _json(value: Any) -> str:
 
 
 class SubGoalStore:
-    def __init__(self, conn: sqlite3.Connection):
+    def __init__(self, conn: sqlite3.Connection, *, tenant_id: str = "default"):
         self.conn = conn
+        self.tenant_id = str(tenant_id or "default")
+
+    def _record_audit(
+        self, *, action: str, sub_plan_id: str, version_id: int,
+        goal_id: str, actor: str, payload: dict[str, Any] | None = None,
+    ) -> None:
+        from src.core.task_context import current_task_identity
+
+        context = current_task_identity()
+        initiating = str(context.get("initiating_actor") or actor or "system:legacy-unattributed")
+        executing = str(context.get("executing_actor") or "service:api")
+        task_id = context.get("task_id")
+        principal = initiating
+        actor_type, separator, actor_id = principal.partition(":")
+        if not separator:
+            actor_type, actor_id = "unknown", principal
+        self.conn.execute(
+            """INSERT INTO sub_goal_audit_events(
+                tenant_id,action,sub_plan_id,sub_plan_version_id,goal_id,
+                actor_type,actor_id,initiating_actor,executing_actor,task_id,
+                payload_json,created_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (self.tenant_id, action, sub_plan_id, int(version_id), goal_id,
+             actor_type, actor_id, initiating, executing, task_id,
+             _json({"fields": sorted((payload or {}).keys())}), _now()),
+        )
 
     def _goal(self, goal_id: str) -> dict[str, Any]:
         row = self.conn.execute("SELECT * FROM sub_goals WHERE id=?", (goal_id,)).fetchone()
@@ -219,6 +245,7 @@ class SubGoalStore:
                 )
             self._validate_graph(version_id)
             self._refresh(version_id)
+            self._record_audit(action="goal_created", sub_plan_id=sub_plan_id, version_id=version_id, goal_id=goal_id, actor=actor, payload=payload)
             self.conn.commit()
         except Exception:
             self.conn.rollback()
@@ -314,6 +341,7 @@ class SubGoalStore:
                 )
             self._validate_graph(int(version["id"]))
             self._refresh(int(version["id"]))
+            self._record_audit(action="goal_updated", sub_plan_id=sub_plan_id, version_id=int(version["id"]), goal_id=goal_id, actor=actor, payload=payload)
             self.conn.commit()
         except Exception:
             self.conn.rollback()
@@ -343,22 +371,28 @@ class SubGoalStore:
         if not direction or not conditions or not acceptance:
             raise SubGoalError("生产方向、执行条件和验收关联均不能为空")
         now = _now()
-        self.conn.execute(
-            """INSERT INTO sub_goal_production_plans(
-                 goal_id,content_direction,suggested_count,resource_requirements_json,
-                 priority,execution_conditions,acceptance_relation,enabled,created_at,updated_at,created_by,updated_by
-               ) VALUES(?,?,?,?,?,?,?,1,?,?,?,?)
-               ON CONFLICT(goal_id) DO UPDATE SET content_direction=excluded.content_direction,
-                 suggested_count=excluded.suggested_count,
-                 resource_requirements_json=excluded.resource_requirements_json,
-                 priority=excluded.priority,execution_conditions=excluded.execution_conditions,
-                 acceptance_relation=excluded.acceptance_relation,enabled=1,updated_at=excluded.updated_at,
-                 updated_by=excluded.updated_by""",
-            (goal_id,direction,count,_json(resources),priority,conditions,acceptance,now,now,
-             str(actor or "system:unknown")[:120], str(actor or "system:unknown")[:120])
-        )
-        self.conn.execute("UPDATE sub_goals SET requires_production=1,updated_at=?,updated_by=? WHERE id=?", (now,str(actor or "system:unknown")[:120],goal_id))
-        self.conn.commit()
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            self.conn.execute(
+                """INSERT INTO sub_goal_production_plans(
+                     goal_id,content_direction,suggested_count,resource_requirements_json,
+                     priority,execution_conditions,acceptance_relation,enabled,created_at,updated_at,created_by,updated_by
+                   ) VALUES(?,?,?,?,?,?,?,1,?,?,?,?)
+                   ON CONFLICT(goal_id) DO UPDATE SET content_direction=excluded.content_direction,
+                     suggested_count=excluded.suggested_count,
+                     resource_requirements_json=excluded.resource_requirements_json,
+                     priority=excluded.priority,execution_conditions=excluded.execution_conditions,
+                     acceptance_relation=excluded.acceptance_relation,enabled=1,updated_at=excluded.updated_at,
+                     updated_by=excluded.updated_by""",
+                (goal_id,direction,count,_json(resources),priority,conditions,acceptance,now,now,
+                 str(actor or "system:unknown")[:120], str(actor or "system:unknown")[:120])
+            )
+            self.conn.execute("UPDATE sub_goals SET requires_production=1,updated_at=?,updated_by=? WHERE id=?", (now,str(actor or "system:unknown")[:120],goal_id))
+            self._record_audit(action="production_plan_saved", sub_plan_id=sub_plan_id, version_id=int(version["id"]), goal_id=goal_id, actor=actor, payload=payload)
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
         return dict(self.conn.execute("SELECT * FROM sub_goal_production_plans WHERE goal_id=?", (goal_id,)).fetchone())
 
     def accept(self, sub_plan_id: str, goal_id: str, payload: dict[str, Any], reviewer: str = "user") -> dict[str, Any]:
@@ -405,6 +439,7 @@ class SubGoalStore:
                 (status, now if status == "completed" else None, now, goal_id)
             )
             self._refresh(int(goal["sub_plan_version_id"]))
+            self._record_audit(action="goal_accepted", sub_plan_id=sub_plan_id, version_id=int(goal["sub_plan_version_id"]), goal_id=goal_id, actor=reviewer, payload={"decision": decision})
             self.conn.commit()
         except Exception:
             self.conn.rollback()
