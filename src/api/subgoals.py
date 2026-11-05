@@ -5,6 +5,7 @@ import sqlite3
 
 from fastapi import FastAPI, HTTPException
 
+from src.core import auth
 from src.core.subgoal_store import SubGoalError, SubGoalStore
 
 
