@@ -6266,6 +6266,8 @@ def _register_routes(app: FastAPI) -> None:
                 reason = "no_current_version"
             elif child["current_version_status"] != "effective":
                 reason = "no_effective_version"
+            elif child["status"] in ("archived", "cancelled", "completed"):
+                reason = "terminal_status"
             elif target_master_version_id is not None:
                 if not (
                     child["status"] == "paused"
