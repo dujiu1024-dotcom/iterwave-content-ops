@@ -515,3 +515,67 @@ def test_review_conclusion_api_persists_session_actor(monkeypatch, conn, seed):
     ).fetchone()
     assert task["conclusion_by"] == "session:conclusion-api"
     assert gap["actor"] == "session:conclusion-api"
+
+
+def test_operating_feedback_audit_persists_initiator_executor_and_queue_task_context(conn, seed):
+    from src.core.task_context import bind_task_identity
+
+    draft_id, published_at = _published_draft(conn, seed)
+    with bind_task_identity(
+        initiating_actor="session:initiator-123",
+        executing_actor="service:global-task-worker",
+        tenant_id="tenant-test",
+        task_id="queue-task-456",
+    ):
+        verification = create_publish_verification(
+            conn, tenant_id="tenant-test", draft_id=draft_id,
+            platform_content_id="note-actor-123",
+            content_url="https://www.xiaohongshu.com/explore/note-actor-123",
+            published_at=published_at, idempotency_key="publish:actor-context",
+        )
+        verification_row = conn.execute(
+            "SELECT verified_by,verified_executing_actor,verified_queue_task_id "
+            "FROM content_publish_verifications WHERE verification_id=?",
+            (verification["verification_id"],),
+        ).fetchone()
+        review_row = conn.execute(
+            "SELECT created_by,created_executing_actor,created_queue_task_id "
+            "FROM review_tasks WHERE task_id=?", (verification["review_task_id"],),
+        ).fetchone()
+        assert tuple(verification_row) == (
+            "session:initiator-123", "service:global-task-worker", "queue-task-456",
+        )
+        assert tuple(review_row) == (
+            "session:initiator-123", "service:global-task-worker", "queue-task-456",
+        )
+
+        run = create_collection_run(
+            conn, task_id=verification["review_task_id"], source="manual",
+            status="succeeded", metrics={"views": 0}, idempotency_key="actor-context-run",
+        )
+        run_row = conn.execute(
+            "SELECT recorded_by,recorded_executing_actor,recorded_queue_task_id "
+            "FROM review_collection_runs WHERE run_id=?", (run["run_id"],),
+        ).fetchone()
+        assert tuple(run_row) == (
+            "session:initiator-123", "service:global-task-worker", "queue-task-456",
+        )
+    conn.commit()
+
+
+def test_operating_feedback_api_actor_defaults_to_explicit_service_when_no_task_context(conn, seed):
+    draft_id, published_at = _published_draft(conn, seed)
+    verification = create_publish_verification(
+        conn, tenant_id="tenant-test", draft_id=draft_id,
+        platform_content_id="note-api-actor",
+        content_url="https://www.xiaohongshu.com/explore/note-api-actor",
+        published_at=published_at, idempotency_key="publish:api-actor",
+        actor="session:api-principal",
+    )
+    row = conn.execute(
+        "SELECT verified_by,verified_executing_actor,verified_queue_task_id "
+        "FROM content_publish_verifications WHERE verification_id=?",
+        (verification["verification_id"],),
+    ).fetchone()
+    assert tuple(row) == ("session:api-principal", "service:api", None)
+
