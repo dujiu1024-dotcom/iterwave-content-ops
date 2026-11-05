@@ -98,11 +98,16 @@ class RoundStateMachine:
             except (json.JSONDecodeError, TypeError):
                 log = []
 
+            identity = current_task_identity()
             log.append({
                 "from": current,
                 "to": target,
                 "at": storage_now().isoformat(),
                 "reason": reason,
+                "initiating_actor": identity.get("initiating_actor"),
+                "executing_actor": identity.get("executing_actor"),
+                "tenant_id": identity.get("tenant_id"),
+                "task_id": identity.get("task_id"),
             })
 
             # R8：阶段起点独立落库，供 round_timeout_sweeper 分阶段判定超时
