@@ -142,9 +142,28 @@ def test_content_review_publish_metrics_and_effect_feedback_api_chain(content_cl
     metrics = client.post(
         f"/api/drafts/{draft_id}/metrics/manual",
         json={"views": 120, "likes": 12, "collects": 8, "comments": 3},
+        headers={"Idempotency-Key": "t8b-manual-metrics-original"},
     )
     assert metrics.status_code == 200, metrics.text
     snapshot_id = metrics.json()["snapshot_id"]
+    repeated_metrics = client.post(
+        f"/api/drafts/{draft_id}/metrics/manual",
+        json={"views": 120, "likes": 12, "collects": 8, "comments": 3},
+        headers={"Idempotency-Key": "t8b-manual-metrics-original"},
+    )
+    assert repeated_metrics.status_code == 200, repeated_metrics.text
+    assert repeated_metrics.json()["snapshot_id"] == snapshot_id
+    assert repeated_metrics.json()["idempotent_replay"] is True
+    conflicting_metrics = client.post(
+        f"/api/drafts/{draft_id}/metrics/manual",
+        json={"views": 121, "likes": 12, "collects": 8, "comments": 3},
+        headers={"Idempotency-Key": "t8b-manual-metrics-original"},
+    )
+    assert conflicting_metrics.status_code == 409, conflicting_metrics.text
+    assert conn.execute(
+        "SELECT COUNT(*) FROM content_events WHERE content_id=? AND event_type='metrics_submitted'",
+        (content_id,),
+    ).fetchone()[0] == 1
     snapshots = client.get(
         "/api/metrics/snapshots", params={"draft_id": draft_id},
     )
@@ -574,3 +593,35 @@ def test_feedback_adoption_requires_formal_version_review_and_preserves_history(
     assert conn.execute(
         "SELECT status FROM sub_plan_versions WHERE id=?", (rejected_version_id,),
     ).fetchone()["status"] == "rejected"
+
+    # A different key denotes a genuinely new time-series measurement.
+    second_measurement = client.post(
+        f"/api/drafts/{draft_id}/metrics/manual",
+        json={"views": 150, "likes": 15, "collects": 9, "comments": 4},
+        headers={"Idempotency-Key": "t8b-manual-metrics-second"},
+    )
+    assert second_measurement.status_code == 200, second_measurement.text
+    assert second_measurement.json()["snapshot_id"] != snapshot_id
+
+    # Corrections are append-only and the same correction key is retry-safe.
+    correction_payload = {
+        "views": 145, "likes": 14, "collects": 9, "comments": 4,
+        "correction_of": snapshot_id,
+    }
+    correction = client.post(
+        f"/api/drafts/{draft_id}/metrics/manual",
+        json=correction_payload,
+        headers={"Idempotency-Key": "t8b-manual-metrics-correction"},
+    )
+    assert correction.status_code == 200, correction.text
+    repeated_correction = client.post(
+        f"/api/drafts/{draft_id}/metrics/manual",
+        json=correction_payload,
+        headers={"Idempotency-Key": "t8b-manual-metrics-correction"},
+    )
+    assert repeated_correction.status_code == 200, repeated_correction.text
+    assert repeated_correction.json()["snapshot_id"] == correction.json()["snapshot_id"]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM metric_snapshots WHERE tenant_id='default' AND draft_id=?",
+        (draft_id,),
+    ).fetchone()[0] == 3
