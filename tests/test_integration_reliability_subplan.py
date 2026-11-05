@@ -176,8 +176,35 @@ def test_tenant_context_is_enforced_before_any_round_is_created(client):
 
 # ---------------------------------------------------------------- 3. 计划版本绑定
 
-def test_round_is_pinned_to_effective_version_and_survives_new_draft(client):
+@pytest.mark.asyncio
+async def test_round_is_pinned_to_effective_version_and_survives_new_draft(client, monkeypatch):
     tc, conn, _ = client
+    # Production-task creation is intentionally fail-closed unless the business
+    # context is complete. Seed the same profile/North-Star/confirmed-diagnosis
+    # prerequisites as the full T8 API happy path rather than bypassing the gate.
+    from src.api import business_diagnosis
+    monkeypatch.setattr(business_diagnosis, "generate_diagnosis", _fake_diagnosis)
+    profile = tc.put("/api/business-profile", json={
+        "business_name": "子计划版本绑定验收业务", "industry": "测试行业",
+        "business_model": "图文内容运营", "business_stage": "测试阶段",
+        "operating_goal": "完成图文内容生产",
+    })
+    assert profile.status_code == 200, profile.text
+    north_star = tc.put("/api/north-star", json={
+        "change_reason": "建立版本绑定验收账号组北极星",
+        "snapshot": {
+            "positioning": "测试业务定位", "business_direction": "图文内容运营",
+            "target_users": "目标测试用户", "core_value": "稳定生产高质量内容",
+            "long_term_content_direction": "围绕核心业务持续输出",
+            "business_model": "内容营销", "long_term_goals": "建立可持续内容生产体系",
+        },
+    })
+    assert north_star.status_code == 200, north_star.text
+    analyzed = tc.post("/api/business-diagnosis/analyze")
+    assert analyzed.status_code == 201, analyzed.text
+    diagnosis_id = analyzed.json()["report"]["id"]
+    confirmed = tc.post(f"/api/business-diagnosis/{diagnosis_id}/confirm")
+    assert confirmed.status_code == 200, confirmed.text
     store, master, version, stage = _approved_subplan(conn)
 
     created = tc.post("/api/subplans/integration-sub/rounds", json={"topic_count": 3})
