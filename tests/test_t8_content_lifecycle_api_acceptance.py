@@ -187,6 +187,15 @@ def test_content_review_publish_metrics_and_effect_feedback_api_chain(content_cl
     assert evidence["manual_metrics"]["views"] == 120.0
 
     # Activate the fixture versions before exercising the effective-version-only review API.
+    source_version = conn.execute(
+        "SELECT sub_plan_version_id FROM sub_plan_stages WHERE id=?", (stage_id,),
+    ).fetchone()["sub_plan_version_id"]
+    master_version = conn.execute(
+        "SELECT master_plan_version_id FROM sub_plan_versions WHERE id=?", (source_version,),
+    ).fetchone()["master_plan_version_id"]
+    conn.execute("UPDATE master_plan_versions SET status='effective' WHERE id=?", (master_version,))
+    conn.execute("UPDATE sub_plan_versions SET status='effective' WHERE id=?", (source_version,))
+    conn.commit()
 
     # The human effect-gate decision must reference this exact frozen feedback.
     wrong_source = client.post(
@@ -240,15 +249,6 @@ def test_content_review_publish_metrics_and_effect_feedback_api_chain(content_cl
 
     # A feedback-derived adjustment must retain the exact review/evidence provenance
     # and create a draft only; it must not mutate the effective sub-plan in place.
-    source_version = conn.execute(
-        "SELECT sub_plan_version_id FROM sub_plan_stages WHERE id=?", (stage_id,),
-    ).fetchone()["sub_plan_version_id"]
-    master_version = conn.execute(
-        "SELECT master_plan_version_id FROM sub_plan_versions WHERE id=?", (source_version,),
-    ).fetchone()["master_plan_version_id"]
-    conn.execute("UPDATE master_plan_versions SET status='effective' WHERE id=?", (master_version,))
-    conn.execute("UPDATE sub_plan_versions SET status='effective' WHERE id=?", (source_version,))
-    conn.commit()
     original_snapshot = conn.execute(
         "SELECT snapshot_json FROM sub_plan_versions WHERE id=?", (source_version,),
     ).fetchone()["snapshot_json"]
