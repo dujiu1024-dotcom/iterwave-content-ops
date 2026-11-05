@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { businessCalendarDate, formatCalendarDate, parseBusinessCalendarDate, shiftCalendarDate } from "../src/calendarDate.mjs";
+import { businessCalendarDate, formatBusinessDateTimeInput, formatCalendarDate, parseBusinessCalendarDate, shiftCalendarDate } from "../src/calendarDate.mjs";
 import { formatBusinessDateTime } from "../src/businessTime.mjs";
 
 test("month navigation clamps to the first day and crosses year boundaries", () => {
@@ -67,4 +67,10 @@ test("naive API calendar timestamps remain Shanghai wall time", () => {
 test("offset-aware API timestamps are grouped by their Shanghai business date", () => {
   assert.equal(formatCalendarDate(parseBusinessCalendarDate("2026-11-04T16:30:00Z")), "2026-11-05");
   assert.equal(formatCalendarDate(parseBusinessCalendarDate("2026-11-05T00:30:00+09:00")), "2026-11-04");
+});
+
+
+test("datetime-local editing uses Shanghai wall time for offset-aware API timestamps", () => {
+  assert.equal(formatBusinessDateTimeInput("2026-11-04T16:30:00Z"), "2026-11-05T00:30");
+  assert.equal(formatBusinessDateTimeInput("2026-11-05 09:15:00"), "2026-11-05T09:15");
 });
