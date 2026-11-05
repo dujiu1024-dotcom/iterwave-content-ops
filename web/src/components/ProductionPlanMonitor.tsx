@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, ProductionMonitorResponse, ProductionMonitorStage, ProductionTaskItem, ProductionTaskDetail } from "../api";
 import { navigate } from "../nav";
+import { formatBusinessDateTime } from "../businessTime.mjs";
 import { displayCodeLabel, displayStatusLabel, displayPlatformLabel, displayStepLabel, displayErrorLabel } from "../displayLabels";
 
 const PLATFORM_LABEL: Record<string, string> = {
@@ -59,7 +60,7 @@ function Stage({ stage }: { stage: ProductionMonitorStage }) {
       {stage.rounds.map((round) => <div className="task-row" key={round.id}>
         <div className="task-main">
           <div className="task-title">第 {round.round_number} 轮 · {STATUS_LABEL[round.status] ?? displayStatusLabel(round.status)}</div>
-          <div className="task-desc">轮次 #{round.id} · {round.created_at ? new Date(round.created_at).toLocaleString("zh-CN") : "时间未知"} · {displayCodeLabel(round.trigger_source, "来源未知")}</div>
+          <div className="task-desc">轮次 #{round.id} · {round.created_at ? formatBusinessDateTime(round.created_at) : "时间未知"} · {displayCodeLabel(round.trigger_source, "来源未知")}</div>
         </div>
         <button className="btn sm" onClick={() => navigate("production", "rounds", { type: "round", id: round.id })}>查看轮次</button>
         <button className="btn sm" onClick={() => navigate("task-queue")}>查看任务队列</button>
@@ -105,7 +106,7 @@ export default function ProductionPlanMonitor() {
       <div className="panel" style={{ padding: 12, marginBottom: 12 }}>
         {data.master_plan ? <>
           <div className="panel-title">当前母计划 V{data.master_plan.version_no}</div>
-          <div className="tiny">版本 #{data.master_plan.id} · 生效于 {data.master_plan.effective_at ? new Date(data.master_plan.effective_at).toLocaleString("zh-CN") : "时间未知"}</div>
+          <div className="tiny">版本 #{data.master_plan.id} · 生效于 {data.master_plan.effective_at ? formatBusinessDateTime(data.master_plan.effective_at) : "时间未知"}</div>
         </> : <div className="empty-state">当前没有生效中的母计划。</div>}
         <div className="grid four" style={{ gap: 8, marginTop: 12 }}>
           <Metric label="平台子计划" value={data.totals.subplans}/>
@@ -175,7 +176,7 @@ export default function ProductionPlanMonitor() {
       </div>;
       })}
       <div className="tiny" style={{ marginTop: 10 }}>统计口径：发布状态优先采用 drafts.publish_status；生产任务来源：{displayCodeLabel(data.limitations.production_task_source)}。指标采集记录 {data.totals.metric_records ?? 0} 条。{data.limitations.legacy_task_run_fallback ? "当前尚未部署独立生产任务表，暂时使用旧轮次任务记录作为兼容统计。" : ""}</div>
-      <div className="tiny">数据范围：当前账号组的生效母计划 · 更新于 {new Date(data.generated_at).toLocaleString("zh-CN")}</div>
+      <div className="tiny">数据范围：当前账号组的生效母计划 · 更新于 {formatBusinessDateTime(data.generated_at)}</div>
     </>}
   </section>;
 }
