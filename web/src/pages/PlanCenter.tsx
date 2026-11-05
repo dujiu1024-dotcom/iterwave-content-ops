@@ -263,9 +263,18 @@ export default function PlanCenter() {
       const result = await api.reviewMasterPlan(reviewedVersionId, "approve");
       const generated = result.subplan_generation;
       if (generated?.status === "rebase_required") {
-        try {
+        const pendingRebase = await inspectRebaseDrafts(reviewedVersionId);
+        if (pendingRebase.expected === 0) {
+          setAdoption({
+            adopted_dimensions: pendingAdoptionDimensions, drafts: [],
+            message: "母计划已生效；当前没有需要 rebase 的旧子计划。",
+            rebaseStatus: "drafts_created", targetMasterPlanVersionId: reviewedVersionId,
+            expectedDraftCount: 0,
+          });
+          showToast("母计划已生效；没有旧子计划需要 rebase", "success");
+        } else try {
           const rebased = await api.adoptGaps(pendingAdoptionDimensions, reviewedVersionId);
-          setAdoption({ ...rebased, rebaseStatus: "drafts_created", targetMasterPlanVersionId: reviewedVersionId });
+          setAdoption({ ...rebased, rebaseStatus: "drafts_created", targetMasterPlanVersionId: reviewedVersionId, expectedDraftCount: pendingRebase.expected });
           showToast(`母计划已生效，已将 ${rebased.drafts.length} 个旧子计划 rebase 为新草稿；需逐项审核`, "success");
         } catch (rebaseError) {
           const errorMessage = rebaseError instanceof Error ? rebaseError.message : String(rebaseError);
@@ -348,9 +357,18 @@ export default function PlanCenter() {
   };
   const retryAdoptionRebase = async () => {
     if (!masterVersionId || !pendingAdoptionDimensions.length) return;
+    const pendingRebase = await inspectRebaseDrafts(masterVersionId);
+    if (pendingRebase.expected === 0) {
+      setAdoption((current) => current ? {
+        ...current, drafts: [], rebaseStatus: "drafts_created", expectedDraftCount: 0,
+        message: "当前没有需要 rebase 的旧子计划。",
+      } : current);
+      showToast("当前没有需要 rebase 的旧子计划", "success");
+      return;
+    }
     try {
       const result = await api.adoptGaps(pendingAdoptionDimensions, masterVersionId);
-      setAdoption({ ...result, rebaseStatus: "drafts_created", targetMasterPlanVersionId: masterVersionId });
+      setAdoption({ ...result, rebaseStatus: "drafts_created", targetMasterPlanVersionId: masterVersionId, expectedDraftCount: pendingRebase.expected });
       showToast(`已生成 ${result.drafts.length} 个子计划 rebase 草稿，需逐项审核`, "success");
       await load();
     } catch (e) {
