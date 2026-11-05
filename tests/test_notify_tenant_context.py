@@ -18,10 +18,11 @@ def test_notifier_prefixes_tenant_name_in_delivery_title(monkeypatch):
     delivered = {}
     monkeypatch.setattr(notifier, "_rule_override", lambda _event: None)
     monkeypatch.setattr(notifier, "_is_duplicate", lambda *_args: False)
-    monkeypatch.setattr(
-        notifier, "_send_webhook",
-        lambda _channel, _url_env, title, _body: delivered.setdefault("title", title) is None,
-    )
+    def send_webhook(_channel, _url_env, title, _body):
+        delivered["title"] = title
+        return True
+
+    monkeypatch.setattr(notifier, "_send_webhook", send_webhook)
     monkeypatch.setattr(notifier, "_save", lambda *_args, **_kwargs: None)
 
     assert notifier.emit("draft_failed", "小红书草稿保存失败")
