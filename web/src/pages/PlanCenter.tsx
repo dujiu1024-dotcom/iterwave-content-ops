@@ -504,6 +504,7 @@ export default function PlanCenter() {
     } catch (e) { showToast("删除阶段失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
   };
   const platforms = (data?.plan.enabled_platforms ?? []).filter((p): p is Platform => ALL_PLATFORMS.includes(p as Platform));
+  const diagnosisStrategyCurrent = diagnosis?.strategy_is_current ?? diagnosis?.source_is_current ?? false;
 
   return <div className="page plan-center-page">
     <div className="page-head"><div><div className="eyebrow">内容生产 · 计划体系</div><h1 className="page-title">计划管理</h1><div className="page-desc">主计划确定目标与策略，平台子计划承接平台差异，阶段负责节奏与完成条件，生产轮次按已生效计划执行。</div></div><div className="head-actions"><button className="btn" onClick={() => void load()} disabled={loading}>↻ 刷新</button><button className="btn" onClick={() => navigate("business-diagnosis")}>AI 经营分析</button><button className="btn primary" disabled={!data} onClick={() => { if (data) { setDraft({ ...structuredClone(data.plan), content_format: "image_text" }); setDirty(true); setSaved(false); setTab("master"); } }}>＋ 新建版本草稿</button></div></div>
@@ -518,20 +519,20 @@ export default function PlanCenter() {
     {!loading && !error && tab === "master" && data && draft && <>
       <div className="panel">
         <div className="panel-head">
-          <div><div className="panel-title">AI 制定母计划</div><div className="panel-sub">基于最新已确认且未过期的经营诊断生成不可直接生效的母计划草稿。</div></div>
-          <span className={"tag " + (diagnosis?.status === "confirmed" && diagnosis.source_is_current ? "green" : "orange")}>
-            {diagnosis?.status === "confirmed" && diagnosis.source_is_current ? "诊断已确认 · 依据有效" : diagnosis?.status === "stale" || (diagnosis?.status === "confirmed" && !diagnosis.source_is_current) ? "诊断已过期" : diagnosis ? "诊断待确认" : "尚无诊断报告"}
+          <div><div className="panel-title">AI 制定母计划</div><div className="panel-sub">基于已确认诊断、当前账号组北极星和资源基线生成不可直接生效的母计划草稿；生产期内容变化不会单独使战略依据失效。</div></div>
+          <span className={"tag " + (diagnosis?.status === "confirmed" && diagnosisStrategyCurrent ? "green" : "orange")}>
+            {diagnosis?.status === "confirmed" && diagnosisStrategyCurrent ? "诊断已确认 · 战略依据有效" : diagnosis?.status === "stale" || (diagnosis?.status === "confirmed" && !diagnosisStrategyCurrent) ? "战略依据已变化" : diagnosis ? "诊断待确认" : "尚无诊断报告"}
           </span>
         </div>
         {diagnosis ? <div className="grid two">
           <div className="plan-summary-card"><div className="tiny">当前经营诊断</div><b>报告 v{diagnosis.version_no}</b><div className="tiny">状态：{diagnosis.status === "confirmed" ? "已确认" : diagnosis.status === "stale" ? "已过期" : diagnosis.status === "superseded" ? "已被新版本替代" : "待确认"}</div><div className="tiny">确认时间：{diagnosis.confirmed_at ?? "尚未确认"}</div><div className="tiny">诊断模型：{diagnosis.model_name || "—"}</div></div>
-          <div className="plan-summary-card"><div className="tiny">依据完整性</div><b>{diagnosis.source_is_current ? "当前业务资料与诊断一致" : "业务资料已变化或报告已过期"}</b><div className="tiny">关联资料与素材：{diagnosis.source_snapshot?.source_references?.length ?? 0} 项</div><div className="tiny">依据摘要：{JSON.stringify(diagnosis.source_snapshot?.inventory_summary ?? {})}</div>{(diagnosis.source_snapshot?.source_references ?? []).map((source) => <div className="tiny" key={source.source_type + ":" + source.source_id}>{source.source_type} · {source.label}</div>)}</div>
+          <div className="plan-summary-card"><div className="tiny">依据完整性</div><b>{diagnosisStrategyCurrent ? "北极星与资源基线版本一致" : "战略依据已变化或缺少版本快照"}</b><div className="tiny">关联资料与素材：{diagnosis.source_snapshot?.source_references?.length ?? 0} 项</div><div className="tiny">依据摘要：{JSON.stringify(diagnosis.source_snapshot?.inventory_summary ?? {})}</div>{(diagnosis.source_snapshot?.source_references ?? []).map((source) => <div className="tiny" key={source.source_type + ":" + source.source_id}>{source.source_type} · {source.label}</div>)}</div>
         </div> : <div className="note">尚无经营诊断报告。请先完成 AI 经营分析并确认报告，再生成母计划。</div>}
         {diagnosis && diagnosis.status !== "confirmed" && <div className="note" style={{ marginTop: 10, color: "var(--orange)" }}>最新诊断报告尚未确认。请返回 AI 经营分析页面完成确认，生成入口会在确认后开放。</div>}
-        {diagnosis?.status === "confirmed" && !diagnosis.source_is_current && <div className="note" style={{ marginTop: 10, color: "var(--orange)" }}>诊断报告所依据的业务资料或素材已变化。请重新分析并确认最新报告，不能使用过期依据生成母计划。</div>}
+        {diagnosis?.status === "confirmed" && !diagnosis.source_is_current && <div className="note" style={{ marginTop: 10, color: "var(--orange)" }}>诊断报告绑定的账号组北极星或资源基线已变化，或报告缺少战略版本快照。请重新分析并确认。</div>}
         <div className="plan-form-actions">
           <button className="btn" onClick={() => navigate("business-diagnosis")}>查看经营分析</button>
-          <button className="btn primary" onClick={() => void generateAIMasterPlan()} disabled={aiGenerating || diagnosis?.status !== "confirmed" || !diagnosis.source_is_current}>
+          <button className="btn primary" onClick={() => void generateAIMasterPlan()} disabled={aiGenerating || diagnosis?.status !== "confirmed" || !diagnosisStrategyCurrent}>
             {aiGenerating ? "正在生成母计划…" : "AI 生成母计划草稿"}
           </button>
         </div>
