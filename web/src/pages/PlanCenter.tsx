@@ -113,9 +113,10 @@ export default function PlanCenter() {
       const pendingPlan = parseMasterPlan(pendingMaster?.plan_snapshot);
       const adoptionPrefix = "复盘建议采纳母计划草稿：";
       const adoptionMaster = [pendingMaster, effectiveMaster].find((item) => item?.change_note?.startsWith(adoptionPrefix));
-      if (adoptionMaster?.change_note?.startsWith(adoptionPrefix)) {
-        setPendingAdoptionDimensions(adoptionMaster.change_note.slice(adoptionPrefix.length).split("、").map((item) => item.trim()).filter(Boolean));
-      }
+      const adoptionDimensions = adoptionMaster?.change_note?.startsWith(adoptionPrefix)
+        ? adoptionMaster.change_note.slice(adoptionPrefix.length).split("、").map((item) => item.trim()).filter(Boolean)
+        : [];
+      if (adoptionDimensions.length) setPendingAdoptionDimensions(adoptionDimensions);
       setMasterDraftVersionId(pendingMaster?.id ?? null);
       setMasterNorthStarVersionId(effectiveMaster?.north_star_version_id ?? null);
       if (effectiveMaster?.north_star_version_id) {
@@ -177,8 +178,29 @@ export default function PlanCenter() {
       setChildren(mapped);
       setSelectedChildId((current) => mapped.some((item) => item.id === current && item.status !== "stale")
         ? current : (mapped.find((item) => item.status !== "stale") ?? mapped[0])?.id ?? "");
+      const pausedForMaster = effectiveMaster?.source === "review_adoption"
+        ? subplanResult.items.filter((item) => item.status === "paused" && Number(item.paused_by_master_version_id) === Number(effectiveMaster.id))
+        : [];
+      if (pausedForMaster.length > 0 && effectiveMaster) {
+        const rebaseDrafts = mapped.filter((item) => item.masterPlanVersionId === Number(effectiveMaster.id) && item.status === "draft");
+        const rebaseStatus = rebaseDrafts.length === pausedForMaster.length
+          ? "drafts_created" : rebaseDrafts.length > 0 ? "partial" : "failed";
+        setAdoption({
+          adopted_dimensions: adoptionDimensions,
+          drafts: rebaseDrafts.map((item) => ({ sub_plan_id: item.id, platform: item.platform, draft_version: { version_no: item.versionNo } })),
+          message: rebaseStatus === "drafts_created"
+            ? `母计划已生效；已创建 ${rebaseDrafts.length} 个子计划 rebase 草稿，等待逐项审核。`
+            : rebaseStatus === "partial"
+              ? `部分成功：已创建 ${rebaseDrafts.length} / ${pausedForMaster.length} 个子计划草稿。剩余平台请在平台子计划页基于当前母计划重建。`
+              : "母计划已生效，但子计划 rebase 尚未完成，可重试。",
+          rebaseStatus,
+          targetMasterPlanVersionId: Number(effectiveMaster.id),
+          expectedDraftCount: pausedForMaster.length,
+        });
+      }
       const preferred = preferredChildId ?? selectedChildId;
-      const selectedId = mapped.some((v) => v.id === preferred) ? preferred : mapped[0]?.id ?? "";
+      const selectedId = mapped.some((v) => v.id === preferred && v.status !== "stale")
+        ? preferred : (mapped.find((v) => v.status !== "stale") ?? mapped[0])?.id ?? "";
       setSelectedChildId(selectedId);
       const selected = mapped.find((item) => item.id === selectedId);
       setStages((selected?.stageRecords ?? []).map((stage) => ({
