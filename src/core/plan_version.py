@@ -101,13 +101,21 @@ class PlanVersionManager:
         base = int(plan.get("topic_count_per_platform") or 5)
         return int((plan.get("per_platform") or {}).get(platform, {}).get("topic_count") or base)
 
-    def compute_signature(self, plan: dict) -> str:
-        """对关键字段做规范化 JSON 后 sha256（平台分项篇数只在设置过时参与，旧签名保持稳定）。"""
+    def compute_signature(self, plan: dict, *, generation_metadata: dict | None = None) -> str:
+        """Sign the effective plan fields and, when present, the complete AI evidence metadata.
+
+        Omitting metadata preserves the historical signature format for non-AI and
+        legacy versions. New AI-generated versions pass metadata explicitly.
+        """
         payload = {k: plan.get(k) for k in _SIGNATURE_FIELDS}
         counts = {p: c["topic_count"] for p, c in (plan.get("per_platform") or {}).items() if c.get("topic_count")}
         if counts:
             payload["platform_topic_counts"] = counts
-        canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if generation_metadata is not None:
+            if not isinstance(generation_metadata, dict):
+                raise ValueError("generation_metadata must be an object")
+            payload["generation_metadata"] = generation_metadata
+        canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def current_plan(self, topic_count_per_platform: Optional[int] = None) -> dict:
