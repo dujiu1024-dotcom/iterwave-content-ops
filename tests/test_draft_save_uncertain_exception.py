@@ -1,4 +1,6 @@
 import asyncio
+
+import pytest
 from src.adapters.base import ContentToPublish, Platform
 from src.adapters.draft_saver import DraftSaver
 
@@ -168,3 +170,39 @@ def test_wechat_post_click_verification_exception_is_marked_for_human_verificati
 
     assert result.success is False
     assert result.needs_human_verify is True
+
+
+@pytest.mark.parametrize("platform", [Platform.XHS, Platform.DOUYIN, Platform.KUAISHOU])
+def test_ui_success_toast_without_platform_readback_remains_pending_verification(
+    monkeypatch, platform,
+):
+    _prepare_pre_save_path(monkeypatch)
+
+    async def no_failure(*_args, **_kwargs):
+        return None
+
+    async def ui_toast_only(*_args, **_kwargs):
+        return "toast:保存成功"
+
+    async def draft_id(*_args, **_kwargs):
+        return "platform-draft-123"
+
+    monkeypatch.setattr(DraftSaver, "_wait_save_failure", no_failure)
+    monkeypatch.setattr(DraftSaver, "_wait_save_success", ui_toast_only)
+    monkeypatch.setattr(DraftSaver, "_extract_draft_id", draft_id)
+    content = ContentToPublish(
+        content_id=f"content-readback-{platform.value}",
+        platform=platform,
+        title="待核实标题",
+        body="UI toast 不能证明平台草稿已持久化",
+        image_paths=[],
+        tags=[],
+    )
+
+    result = asyncio.run(DraftSaver(platform).save_draft_via_page(_Page(), content))
+
+    assert result.success is False
+    assert result.needs_human_verify is True
+    assert result.platform_draft_id == "platform-draft-123"
+    assert result.save_evidence == "ui_only:toast:保存成功"
+    assert "草稿箱服务端读回核验" in result.error_msg

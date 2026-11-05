@@ -170,8 +170,8 @@ def circuit_reason_guidance(reason: str) -> str:
 class DraftResult:
     """存草稿结果 — 三种语义严格区分（P0-3 / P1-1 修复后）：
 
-    1. ``success=True``          平台确认保存 ✅（检测到 toast / 页面跳转 / 草稿列表）
-    2. ``needs_human_verify=True`` 按钮点了但无成功证据（R17），需人工核实
+    1. ``success=True``          平台草稿箱读回核验成功（标题/平台 ID 匹配）
+    2. ``needs_human_verify=True`` 只有 UI 保存信号或读回未完成，需人工核实
     3. ``success=False``         明确失败（登录态过期 / 熔断 / 图片上传数量不符 / 按钮未找到 ...）
     """
     def __init__(
