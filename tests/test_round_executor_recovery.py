@@ -412,7 +412,8 @@ def test_feedback_resolution_exception_marks_round_and_task_failed(cfg, conn, se
 
     report = asyncio.run(executor.run(round_id))
     assert report["final_status"] == "failed"
-    assert any("执行异常" in msg for msg in report["errors"])
+    assert report["failure_code"] == "pipeline_error"
+    assert any("生产流程失败" in msg for msg in report["errors"])
     assert conn.execute(
         "SELECT status FROM spiral_rounds WHERE id = ?", (round_id,)
     ).fetchone()[0] == "failed"
@@ -606,3 +607,19 @@ def test_uncertain_draft_save_is_not_retried_and_remains_for_human_verification(
     else:
         raise AssertionError("pending_verify draft must be excluded from automatic retry")
     assert adapter.calls == 1
+
+
+def test_round_failure_classification_preserves_actionable_categories():
+    from src.core.round_executor import _classify_round_failure
+
+    class ImageGenerationError(RuntimeError):
+        pass
+
+    class BrowserError(RuntimeError):
+        pass
+
+    assert _classify_round_failure(TimeoutError("provider timed out"))[0] == "timeout"
+    assert _classify_round_failure(FileNotFoundError("asset missing"))[0] == "asset_missing"
+    assert _classify_round_failure(ImageGenerationError("model rejected request"))[0] == "image_generation_failed"
+    assert _classify_round_failure(BrowserError("browser closed"))[0] == "browser_save_failed"
+    assert _classify_round_failure(RuntimeError("unexpected"))[0] == "pipeline_error"
