@@ -320,10 +320,10 @@ class SchedulerEngine:
                 timezone = getattr(value, "timezone", None)
                 zone_key = getattr(timezone, "key", str(timezone))
                 if isinstance(value, CronTrigger):
-                    return (
-                        "cron", zone_key,
-                        tuple((field.name, str(field)) for field in value.fields),
-                    )
+                    # APScheduler persists a CronTrigger with equivalent field
+                    # expressions but its field internals may not compare
+                    # identically to a newly parsed trigger.
+                    return ("cron", zone_key, str(value))
                 if isinstance(value, IntervalTrigger):
                     return (
                         "interval", zone_key, value.interval.total_seconds(),
