@@ -905,3 +905,20 @@ def test_review_collection_queue_preserves_initiating_actor(cfg, conn, seed):
     assert conn.execute(
         "SELECT created_by FROM review_tasks WHERE task_id=?", (task_id,)
     ).fetchone()["created_by"] == "session:review-initiator"
+
+
+def test_publish_polling_fingerprint_includes_every_image():
+    import json
+    from src.core.scheduler import _draft_payload_content_hash
+
+    tags = json.dumps(["tag"])
+    first = json.dumps(["/assets/cover.png", "/assets/page-1.png"])
+    changed_non_cover = json.dumps(["/assets/cover.png", "/assets/page-2.png"])
+    reordered = json.dumps(["/assets/page-1.png", "/assets/cover.png"])
+
+    baseline = _draft_payload_content_hash("title", "body", tags, first)
+    assert baseline != _draft_payload_content_hash("title", "body", tags, changed_non_cover)
+    assert baseline != _draft_payload_content_hash("title", "body", tags, reordered)
+    assert baseline == _draft_payload_content_hash(
+        "title", "body", tags, json.dumps(["/assets/cover.png", "/assets/page-1.png"]),
+    )
