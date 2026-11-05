@@ -429,3 +429,148 @@ def test_content_review_rejection_requires_resubmission_before_approval(content_
     assert conn.execute(
         "SELECT status FROM drafts WHERE id=?", (draft_id,),
     ).fetchone()["status"] == "draft_pending"
+
+
+def test_feedback_adoption_requires_formal_version_review_and_preserves_history(content_client):
+    client, conn, seed = content_client
+    round_id = seed.round(status="awaiting_publish")
+    seed.draft(round_id, platform="xhs", draft_status="draft_pending", fetch_status=None)
+    content_id = conn.execute(
+        "SELECT id FROM contents WHERE round_id=?", (round_id,),
+    ).fetchone()["id"]
+    conn.execute(
+        "UPDATE contents SET guard_outcome='pass',guard_reason=NULL WHERE id=?",
+        (content_id,),
+    )
+    stage_id = _stage_for_round(conn, round_id)
+    source_version = conn.execute(
+        "SELECT sub_plan_version_id FROM sub_plan_stages WHERE id=?", (stage_id,),
+    ).fetchone()["sub_plan_version_id"]
+    master_version = conn.execute(
+        "SELECT master_plan_version_id FROM sub_plan_versions WHERE id=?", (source_version,),
+    ).fetchone()["master_plan_version_id"]
+    conn.execute("UPDATE master_plan_versions SET status='effective' WHERE id=?", (master_version,))
+    conn.execute("UPDATE sub_plan_versions SET status='effective' WHERE id=?", (source_version,))
+    conn.commit()
+
+    feedback = client.post(
+        f"/api/subplans/stages/{stage_id}/effect-feedback",
+        json={
+            "assessment": "effective",
+            "recommendation": "保持当前方向并扩大高表现选题样本。",
+            "evidence_note": "正式版本治理回归测试。",
+            "confidence": "high",
+        },
+    )
+    assert feedback.status_code == 201, feedback.text
+    review = client.post(
+        f"/api/subplans/t8-b-subplan/stages/{stage_id}/condition-review",
+        json={
+            "condition_type": "effect",
+            "decision": "passed",
+            "reason": "人工确认反馈证据",
+            "recommendation": "保持当前方向并扩大高表现选题样本。",
+            "confidence": "high",
+            "effect_review_id": feedback.json()["id"],
+        },
+    )
+    assert review.status_code == 200, review.text
+
+    original_snapshot = conn.execute(
+        "SELECT snapshot_json FROM sub_plan_versions WHERE id=?", (source_version,),
+    ).fetchone()["snapshot_json"]
+    original_round_binding = conn.execute(
+        "SELECT sub_plan_version_id,sub_plan_stage_id FROM spiral_rounds WHERE id=?",
+        (round_id,),
+    ).fetchone()
+
+    created = client.post(
+        "/api/plan_adjustments/adopt",
+        json={"dimensions": ["选题方向"], "effect_review_id": feedback.json()["id"]},
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["effective"] is False
+    draft_version = created.json()["drafts"][0]["draft_version"]
+    draft_version_id = int(draft_version["id"])
+
+    # Adoption creates a proposal only; the effective version must not move until
+    # the dedicated sub-plan review API approves this exact draft.
+    current_before_review = conn.execute(
+        "SELECT current_version_id FROM sub_plans WHERE id='t8-b-subplan'",
+    ).fetchone()["current_version_id"]
+    assert int(current_before_review) == int(source_version)
+    approved = client.post(
+        "/api/subplans/t8-b-subplan/review",
+        json={"version_id": draft_version_id, "action": "approve"},
+    )
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["authorization"] == "active"
+    current_after_review = conn.execute(
+        "SELECT current_version_id FROM sub_plans WHERE id='t8-b-subplan'",
+    ).fetchone()["current_version_id"]
+    assert int(current_after_review) == draft_version_id
+    assert conn.execute(
+        "SELECT status FROM sub_plan_versions WHERE id=?", (draft_version_id,),
+    ).fetchone()["status"] == "effective"
+
+    # A previously created round remains pinned to the original version and stage;
+    # activating a new version cannot rewrite its historical provenance.
+    historical_binding = conn.execute(
+        "SELECT sub_plan_version_id,sub_plan_stage_id FROM spiral_rounds WHERE id=?",
+        (round_id,),
+    ).fetchone()
+    assert tuple(historical_binding) == tuple(original_round_binding)
+    assert conn.execute(
+        "SELECT snapshot_json FROM sub_plan_versions WHERE id=?", (source_version,),
+    ).fetchone()["snapshot_json"] == original_snapshot
+
+    # A later proposal from feedback on the new effective version can be rejected
+    # without replacing the version that was already approved above.
+    new_stage_id = int(conn.execute(
+        "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order LIMIT 1",
+        (draft_version_id,),
+    ).fetchone()["id"])
+    new_feedback = client.post(
+        f"/api/subplans/stages/{new_stage_id}/effect-feedback",
+        json={
+            "assessment": "effective",
+            "recommendation": "调整发布节奏后继续观察。",
+            "evidence_note": "新生效版本的独立反馈。",
+            "confidence": "medium",
+        },
+    )
+    assert new_feedback.status_code == 201, new_feedback.text
+    new_review = client.post(
+        f"/api/subplans/t8-b-subplan/stages/{new_stage_id}/condition-review",
+        json={
+            "condition_type": "effect",
+            "decision": "passed",
+            "reason": "确认新版本反馈",
+            "recommendation": "调整发布节奏后继续观察。",
+            "confidence": "medium",
+            "effect_review_id": new_feedback.json()["id"],
+        },
+    )
+    assert new_review.status_code == 200, new_review.text
+    second = client.post(
+        "/api/plan_adjustments/adopt",
+        json={"dimensions": ["发布节奏"], "effect_review_id": new_feedback.json()["id"]},
+    )
+    assert second.status_code == 200, second.text
+    rejected_version_id = int(second.json()["drafts"][0]["draft_version"]["id"])
+    rejected = client.post(
+        "/api/subplans/t8-b-subplan/review",
+        json={
+            "version_id": rejected_version_id,
+            "action": "reject",
+            "reason": "本轮不采纳该调整建议",
+        },
+    )
+    assert rejected.status_code == 200, rejected.text
+    assert rejected.json()["authorization"] == "not_authorized"
+    assert int(conn.execute(
+        "SELECT current_version_id FROM sub_plans WHERE id='t8-b-subplan'",
+    ).fetchone()["current_version_id"]) == draft_version_id
+    assert conn.execute(
+        "SELECT status FROM sub_plan_versions WHERE id=?", (rejected_version_id,),
+    ).fetchone()["status"] == "rejected"
