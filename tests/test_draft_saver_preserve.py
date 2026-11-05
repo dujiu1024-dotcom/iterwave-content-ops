@@ -62,3 +62,13 @@ async def test_missing_stale_draft_prompt_does_not_block_save():
     page = _Page(visible=False)
 
     assert await saver._has_stale_draft_prompt(page) is False
+
+
+@pytest.mark.asyncio
+async def test_xhs_has_no_unverified_stale_prompt_selector():
+    # No equivalent XHS prompt has been confirmed; do not fabricate a positive match.
+    saver = DraftSaver(Platform.XHS)
+    page = _Page(visible=True)
+
+    assert await saver._has_stale_draft_prompt(page) is False
+    assert saver.selectors.get("draft_prompt_preserve") == []
