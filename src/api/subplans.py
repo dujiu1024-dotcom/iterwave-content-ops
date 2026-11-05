@@ -475,6 +475,9 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
             raise HTTPException(409, "生效主计划快照损坏")
         from src.core.strategy_governance import load_master_strategy_context
         strategy_context = load_master_strategy_context(conn, master)
+        if (not strategy_context.get("north_star") or strategy_context["north_star"].get("invalid")
+                or not strategy_context.get("resource_baseline_available")):
+            raise HTTPException(409, "当前母计划缺少有效的北极星/资源基线版本快照，不能执行 AI 子计划拆解")
         platforms = req.get("platforms") or master_snapshot.get("enabled_platforms") or []
         allowed = {"xhs", "douyin", "kuaishou", "wechat_channels"}
         platforms = list(dict.fromkeys(str(p) for p in platforms))
