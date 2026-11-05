@@ -95,6 +95,14 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
         },
     })
     assert north_star.status_code == 200, north_star.text
+    # Assert the North Star is durably visible to the same tenant/runtime before
+    # allowing master-plan creation; a successful PUT response alone is insufficient.
+    current_north_star = client.get("/api/north-star")
+    assert current_north_star.status_code == 200, current_north_star.text
+    assert current_north_star.json()["current"]["status"] == "effective"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM account_group_north_star_versions WHERE status='effective'"
+    ).fetchone()[0] == 1
 
     analyzed = client.post("/api/business-diagnosis/analyze")
     assert analyzed.status_code == 201, analyzed.text
