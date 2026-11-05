@@ -21,7 +21,18 @@ def build_business_diagnosis_router(get_runtime) -> APIRouter:
             raise HTTPException(409, "经营分析报告数据损坏") from exc
         current = collect_business_context(get_runtime()["conn"], get_runtime()["cfg"])
         item["source_is_current"] = item["source_fingerprint"] == current["fingerprint"]
-        if item["status"] == "confirmed" and not item["source_is_current"]:
+        from src.core.strategy_governance import (
+            collect_strategy_governance, strategy_governance_fingerprint,
+            strategy_governance_from_diagnosis_snapshot,
+        )
+        diagnosed_governance = strategy_governance_from_diagnosis_snapshot(item["source_snapshot"])
+        current_governance = collect_strategy_governance(get_runtime()["conn"])
+        item["strategy_is_current"] = (
+            diagnosed_governance is not None
+            and strategy_governance_fingerprint(diagnosed_governance)
+            == strategy_governance_fingerprint(current_governance)
+        )
+        if item["status"] == "confirmed" and not item["strategy_is_current"]:
             item["status"] = "stale"
         return item
 
