@@ -345,7 +345,7 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
         queue, build_tenant_context, poll_interval_seconds=0.01,
         lease_seconds=30, heartbeat_seconds=1, reconcile_terminal_rounds=False,
     )
-    asyncio.run(worker.run(stop))
+    await worker.run(stop)
 
     queue_task_id = submitted.json()["task_id"]
     completed = queue.get(queue_task_id)
