@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import EmptyHint from "../components/EmptyHint";
+import OperatingFeedbackPane from "../components/OperatingFeedbackPane";
 import { api, MetricsResponse, MetricRow, Platform, SpiralAnalysis, Draft, WeeklyReport, ActivationStatus, GoalSummary, BusinessAnalyticsSummary } from "../api";
 import { displayMetricLabel, displaySourceLabel, displayPlatformLabel } from "../displayLabels";
 
@@ -194,7 +195,9 @@ export default function Analytics() {
           <div className="eyebrow">数据复盘</div>
           <h1 className="page-title">数据分析</h1>
           <div className="page-desc">
-            总览看整体表现与本周建议；详细数据查看逐篇原始指标、平台基准和发布后数据回填。 当前视图：{detailView === "overview" ? "经营摘要" : "逐篇数据与回填"}。
+            总览看整体表现与本周建议；详细数据查看逐篇原始指标、平台基准和发布后数据回填。 当前视图：<OperatingFeedbackPane />
+
+      {detailView === "overview" ? "经营摘要" : "逐篇数据与回填"}。
           </div>
         </div>
         <div className="head-actions">
