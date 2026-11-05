@@ -200,3 +200,47 @@ def test_business_date_predicate_supports_legacy_naive_utc_created_at(cfg):
         "2026-11-03 15:59:59", "2026-11-02T16:00:00+00:00",
         "2026-11-03T15:59:59+00:00",
     }
+
+
+def test_business_date_range_predicate_uses_half_open_shanghai_window_for_utc_and_legacy_naive_rows(cfg):
+    import sqlite3
+    from datetime import timezone
+    from src.core.timezone import business_date_range_predicate
+
+    predicate, bounds = business_date_range_predicate(
+        "measured_at", "2026-11-03", "2026-11-05", cfg,
+        legacy_timezone=timezone.utc,
+    )
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE samples (measured_at TEXT)")
+    db.executemany(
+        "INSERT INTO samples(measured_at) VALUES (?)",
+        [
+            ("2026-11-02T15:59:59+00:00",),
+            ("2026-11-02T16:00:00+00:00",),
+            ("2026-11-04T15:59:59+00:00",),
+            ("2026-11-04T16:00:00+00:00",),
+            ("2026-11-02 15:59:59",),
+            ("2026-11-02 16:00:00",),
+            ("2026-11-04 15:59:59",),
+            ("2026-11-04 16:00:00",),
+        ],
+    )
+    rows = db.execute(
+        "SELECT measured_at FROM samples WHERE " + predicate + " ORDER BY measured_at",
+        bounds,
+    ).fetchall()
+    assert {row[0] for row in rows} == {
+        "2026-11-02T16:00:00+00:00", "2026-11-04T15:59:59+00:00",
+        "2026-11-02 16:00:00", "2026-11-04 15:59:59",
+    }
+
+
+def test_business_date_range_predicate_rejects_invalid_ranges_and_columns(cfg):
+    from datetime import timezone
+    from src.core.timezone import business_date_range_predicate
+
+    with pytest.raises(ValueError, match="after start_day"):
+        business_date_range_predicate("measured_at", "2026-11-05", "2026-11-05", cfg)
+    with pytest.raises(ValueError, match="invalid timestamp column"):
+        business_date_range_predicate("measured_at); DROP TABLE x", "2026-11-03", "2026-11-04", cfg, legacy_timezone=timezone.utc)
