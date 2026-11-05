@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 
 from src.core import auth
 from src.core.subgoal_store import SubGoalError, SubGoalStore
@@ -47,8 +47,8 @@ def register_subgoal_routes(app: FastAPI, get_runtime) -> None:
             fail(SubGoalError(str(exc)))
 
     @app.post("/api/subplans/{sub_plan_id}/goals/{goal_id}/acceptance")
-    def accept_subplan_goal(sub_plan_id: str, goal_id: str, req: dict):
+    def accept_subplan_goal(sub_plan_id: str, goal_id: str, req: dict, request: Request):
         try:
-            return {"goal": SubGoalStore(get_runtime()["conn"]).accept(sub_plan_id, goal_id, req)}
+            return {"goal": SubGoalStore(get_runtime()["conn"]).accept(sub_plan_id, goal_id, req, reviewer=auth.audit_actor(request))}
         except (SubGoalError, TypeError, ValueError, sqlite3.IntegrityError) as exc:
             fail(SubGoalError(str(exc)))
