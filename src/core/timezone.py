@@ -9,17 +9,17 @@ DEFAULT_TIMEZONE = "Asia/Shanghai"
 
 
 def business_zone(cfg=None) -> ZoneInfo:
-    name = getattr(cfg, "business_timezone", None) or DEFAULT_TIMEZONE
-    return ZoneInfo(str(name))
+    """Return the product-wide business timezone (fixed by product policy)."""
+    return ZoneInfo(DEFAULT_TIMEZONE)
 
 
 def business_now(cfg=None) -> datetime:
-    """Return naive wall-clock datetime for business-calendar calculations only."""
+    """Return naive Asia/Shanghai wall-clock time for business-calendar calculations only."""
     return datetime.now(business_zone(cfg)).replace(tzinfo=None)
 
 
 def business_timestamp(cfg=None) -> float:
-    """Unix timestamp for the configured business clock (DST-safe)."""
+    """Unix timestamp for the fixed Asia/Shanghai business clock."""
     return datetime.now(business_zone(cfg)).timestamp()
 
 
@@ -28,7 +28,7 @@ def business_today(cfg=None):
 
 
 def business_from_timestamp(value: float, cfg=None) -> datetime:
-    """Convert an epoch timestamp to the configured business timezone as a naive local value."""
+    """Convert an epoch timestamp to Asia/Shanghai as a naive local value."""
     return datetime.fromtimestamp(float(value), tz=business_zone(cfg)).replace(tzinfo=None)
 
 

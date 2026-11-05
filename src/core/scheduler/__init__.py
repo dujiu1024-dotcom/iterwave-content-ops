@@ -60,7 +60,7 @@ class SchedulerEngine:
             jobstores={
                 "default": SQLAlchemyJobStore(url=f"sqlite:///{db_path}"),
             },
-            timezone=ZoneInfo(self.cfg.business_timezone),
+            timezone=configured_business_zone(self.cfg),
             # 应用关闭期间错过的任务：按配置的宽限期决定重启后是否补跑。
             job_defaults={"misfire_grace_time": self.cfg.scheduler.misfire_grace_minutes * 60, "coalesce": True},
         )
