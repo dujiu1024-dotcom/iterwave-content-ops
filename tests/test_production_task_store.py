@@ -9,7 +9,7 @@ from src.core.production_task_store import ProductionTaskError, ProductionTaskSt
 
 
 @pytest.fixture
-def store():
+def store(monkeypatch):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("""CREATE TABLE spiral_rounds(
@@ -56,6 +56,22 @@ def store():
             UNIQUE(task_id, attempt_no)
         );
     """)
+    # These tests isolate the task repository contract. The full production-context
+    # assembler and content-line persistence are covered by migration/API acceptance
+    # tests, so stub those integration collaborators for this minimal schema fixture.
+    monkeypatch.setattr(
+        "src.core.production_context.build_production_context_snapshot",
+        lambda _conn, **_kwargs: {
+            "context": {"snapshot_id": "test-snapshot", "plan_versions": {}},
+            "captured_at": "2026-11-05T00:00:00+00:00",
+            "context_status": "complete", "waiver": None,
+            "fingerprint": "test-fingerprint",
+        },
+    )
+    monkeypatch.setattr(
+        "src.core.content_production_line_store.ContentProductionLineStore.attach_snapshot",
+        lambda _self, _task_id, _snapshot: {},
+    )
     yield ProductionTaskStore(conn)
     conn.close()
 

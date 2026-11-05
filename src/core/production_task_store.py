@@ -132,7 +132,7 @@ class ProductionTaskStore:
                 or row.get("production_line_version_id") != production_line_version_id
             ):
                 raise ProductionTaskError("幂等键已被不同生产任务占用")
-            return row
+            return self.get_task(str(row['id']))
 
         snapshot = {
             "round": {
@@ -150,8 +150,7 @@ class ProductionTaskStore:
         task_id = "pt-" + uuid.uuid4().hex
         now = _stamp()
         owns_transaction = not self.conn.in_transaction
-        if owns_transaction:
-            self.conn.execute("BEGIN IMMEDIATE")
+        self.conn.execute("SAVEPOINT production_task_create")
         try:
             self.conn.execute(
                 """INSERT INTO production_tasks(
@@ -169,30 +168,56 @@ class ProductionTaskStore:
                     available_at or now, now, now,
                 ),
             )
+            # Migration 150 creates the one-content line with an AFTER INSERT trigger.
+            # Freeze business context in the same savepoint before the task is visible
+            # to workers; a failed gate must leave neither task nor line behind.
+            from .production_context import build_production_context_snapshot
+            from .content_production_line_store import ContentProductionLineStore
+            context_snapshot = build_production_context_snapshot(
+                self.conn, task_id=task_id, idempotency_key=idempotency_key,
+                round_id=int(round_id), master_plan_version_id=int(master_plan_version_id),
+                sub_plan_id=str(sub_plan_id), sub_plan_version_id=int(sub_plan_version_id),
+                strategy_step_id=str(strategy_step_id), platform=str(platform),
+                task_input=input_snapshot or {},
+            )
+            ContentProductionLineStore(self.conn).attach_snapshot(task_id, context_snapshot)
+            self.conn.execute("RELEASE SAVEPOINT production_task_create")
             if owns_transaction:
                 self.conn.commit()
-        except sqlite3.IntegrityError:
-            if owns_transaction:
-                self.conn.rollback()
+        except sqlite3.IntegrityError as exc:
+            self.conn.execute("ROLLBACK TO SAVEPOINT production_task_create")
+            self.conn.execute("RELEASE SAVEPOINT production_task_create")
             existing = self.conn.execute(
                 "SELECT * FROM production_tasks WHERE idempotency_key=?",
                 (idempotency_key,),
             ).fetchone()
-            if existing is None:
-                raise
-            row = dict(existing)
-            if (
-                row["round_id"] != int(round_id)
-                or row["master_plan_version_id"] != int(master_plan_version_id)
-                or row["sub_plan_id"] != str(sub_plan_id)
-                or row["sub_plan_version_id"] != int(sub_plan_version_id)
-                or row["strategy_step_id"] != str(strategy_step_id)
-                or row["platform"] != str(platform)
-                or row["task_ordinal"] != int(task_ordinal)
-                or row.get("production_line_version_id") != production_line_version_id
-            ):
-                raise ProductionTaskError("幂等键已被不同生产任务占用")
-            return row
+            if existing is not None:
+                row = dict(existing)
+                if (
+                    row["round_id"] != int(round_id)
+                    or row["master_plan_version_id"] != int(master_plan_version_id)
+                    or row["sub_plan_id"] != str(sub_plan_id)
+                    or row["sub_plan_version_id"] != int(sub_plan_version_id)
+                    or row["strategy_step_id"] != str(strategy_step_id)
+                    or row["platform"] != str(platform)
+                    or row["task_ordinal"] != int(task_ordinal)
+                    or row.get("production_line_version_id") != production_line_version_id
+                ):
+                    raise ProductionTaskError("幂等键已被不同生产任务占用") from exc
+                return self.get_task(str(row['id']))
+            if "idx_content_production_line_single_active" in str(exc):
+                raise ProductionTaskError("上一条内容生产线尚未完成闭环，暂不能创建新任务") from exc
+            raise
+        except Exception:
+            self.conn.execute("ROLLBACK TO SAVEPOINT production_task_create")
+            self.conn.execute("RELEASE SAVEPOINT production_task_create")
+            raise
+
+        created = self.conn.execute(
+            "SELECT * FROM production_tasks WHERE id=?", (task_id,)
+        ).fetchone()
+        if created is None:
+            raise ProductionTaskError("生产任务创建后未能读取到任务记录")
         return self.get_task(task_id)
 
     def get_task(self, task_id: str) -> dict[str, Any]:

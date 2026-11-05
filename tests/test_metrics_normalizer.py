@@ -45,7 +45,7 @@ def test_normalizer_uses_business_timezone_for_history_window(monkeypatch):
 
     assert stats is not None
     assert conn.query[1] == (
-        "xhs", "2026-08-04 12:00:00+00:00", "2026-08-04 20:00:00",
+        "xhs", "views", "2026-08-04 12:00:00+00:00", "2026-08-04 20:00:00",
     )
 
 

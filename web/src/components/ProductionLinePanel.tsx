@@ -118,7 +118,7 @@ export default function ProductionLinePanel({ subPlanId, platform, subplanTitle 
     <div className="panel-head">
       <div>
         <div className="panel-title">生产线 · {platformMeta(platform).label}</div>
-        <div className="panel-sub">{subplanTitle} · 独立于策略步骤和生产轮次的执行编排</div>
+        <div className="panel-sub">{subplanTitle} · 子计划级策略模板；实际执行线按单条内容任务独立创建</div>
       </div>
       <span className={"tag " + (line?.is_stale ? "orange" : line?.status === "active" ? "green" : line?.status === "paused" ? "orange" : "gray")}>
         {line?.is_stale ? "绑定版本已过期" : line?.status === "active" ? "已确认生效" : line?.status === "paused" ? "已暂停" : line ? line.status : "尚未建立"}
@@ -140,7 +140,7 @@ export default function ProductionLinePanel({ subPlanId, platform, subplanTitle 
         <label className="form-label" style={{ marginTop: 8 }}>执行指令</label>
         <textarea className="field" rows={3} value={stage.instructions} onChange={(e) => updateStage(index, { instructions: e.target.value })}/>
         <div className="grid two">
-          <div><label className="form-label">每轮生产数量</label><input className="field" type="number" min={1} max={1000} value={stage.batch_size} onChange={(e) => updateStage(index, { batch_size: Math.max(1, Number(e.target.value) || 1) })}/></div>
+          <div><label className="form-label">单条执行规则</label><div className="note">每次仅生产 1 条内容；batch_size 为历史兼容字段，不再参与实际生产数量计算。</div></div>
           <div><label className="form-label">执行节奏</label><input className="field" value={stage.cadence} onChange={(e) => updateStage(index, { cadence: e.target.value })} placeholder="例如：每周 3 轮"/></div>
         </div>
       </div>)}

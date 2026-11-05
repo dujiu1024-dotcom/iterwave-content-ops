@@ -10000,6 +10000,10 @@ def _register_routes(app: FastAPI) -> None:
     register_subplan_routes(app, _g)
     from src.api.production_lines import register_production_line_routes
     register_production_line_routes(app, _g)
+    from src.api.subgoals import register_subgoal_routes
+    register_subgoal_routes(app, _g)
+    from src.api.operating_feedback import build_operating_feedback_router
+    app.include_router(build_operating_feedback_router(_g))
     from src.api.business_profile import register_business_profile_routes
     register_business_profile_routes(app, _g)
 

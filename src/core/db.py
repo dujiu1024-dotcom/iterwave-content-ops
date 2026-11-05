@@ -562,6 +562,7 @@ class Database:
                 "business_diagnosis_reports", "production_tasks",
                 "production_task_attempts", "strategy_step_condition_reviews",
                 "plan_change_audit",
+                "sub_goals", "sub_goal_dependencies", "sub_goal_evidence", "sub_goal_production_plans",
             }
             result["missing_tables"] = sorted(expected_tables - existing)
             result["existing_tables"] = sorted(existing & expected_tables)
@@ -663,6 +664,8 @@ class Database:
                 "idx_master_plan_based_on_version", "idx_sub_plan_versions_based_on_version",
                 "idx_round_open_master_version", "idx_round_open_sub_plan_version",
                 "idx_round_open_sub_plan_stage",
+                "idx_sub_goals_version_tree", "idx_sub_goals_stage_status",
+                "idx_sub_goal_dependencies_predecessor", "idx_sub_goal_evidence_goal",
             }
             existing_indexes = {
                 row[0] for row in conn.execute(
@@ -697,6 +700,7 @@ class Database:
                 "trg_sub_plan_stages_prevent_task_orphan",
                 "trg_sub_plan_stages_prevent_task_rekey",
                 "trg_production_line_versions_prevent_task_orphan",
+                "trg_sub_goal_evidence_no_update", "trg_sub_goal_evidence_no_delete",
             }
             existing_triggers = {
                 row[0] for row in conn.execute(
@@ -772,6 +776,13 @@ class Database:
                 ("sub_plan_stage_outcomes", "stage_id", "sub_plan_stages", "id", "RESTRICT"),
                 ("production_task_attempts", "task_id", "production_tasks", "id", "CASCADE"),
                 ("strategy_step_condition_reviews", "stage_id", "sub_plan_stages", "id", "RESTRICT"),
+                ("sub_goals", "sub_plan_version_id", "sub_plan_versions", "id", "RESTRICT"),
+                ("sub_goals", "stage_id", "sub_plan_stages", "id", "RESTRICT"),
+                ("sub_goals", "parent_goal_id", "sub_goals", "id", "RESTRICT"),
+                ("sub_goal_dependencies", "goal_id", "sub_goals", "id", "RESTRICT"),
+                ("sub_goal_dependencies", "depends_on_goal_id", "sub_goals", "id", "RESTRICT"),
+                ("sub_goal_evidence", "goal_id", "sub_goals", "id", "RESTRICT"),
+                ("sub_goal_production_plans", "goal_id", "sub_goals", "id", "RESTRICT"),
             }
             actual_foreign_keys = set()
             for table_name in existing:
@@ -808,6 +819,9 @@ class Database:
                 ("master_plan_versions", ("legacy_history_id",)),
                 ("sub_plan_versions", ("sub_plan_id", "version_no")),
                 ("sub_plan_stages", ("sub_plan_version_id", "stage_order")),
+                ("sub_goals", ("sub_plan_version_id", "goal_order")),
+                ("sub_goal_dependencies", ("goal_id", "depends_on_goal_id")),
+                ("sub_goal_production_plans", ("goal_id",)),
                 ("round_open_idempotency", ("idempotency_key",)),
                 ("round_open_idempotency", ("round_id",)),
                 ("visual_design_versions", ("content_id", "version")),
@@ -926,6 +940,23 @@ class Database:
                     "decision": "TEXT", "reason": "TEXT", "evidence_json": "TEXT",
                     "reviewed_by": "TEXT", "created_at": "TEXT",
                 },
+                "sub_goals": {
+                    "id":"TEXT","sub_plan_version_id":"INTEGER","stage_id":"INTEGER",
+                    "parent_goal_id":"TEXT","goal_type":"TEXT","goal_order":"INTEGER",
+                    "priority":"INTEGER","title":"TEXT","description":"TEXT","target_count":"INTEGER",
+                    "acceptance_criteria":"TEXT","requires_production":"INTEGER","status":"TEXT",
+                    "completed_at":"TEXT","created_at":"TEXT","updated_at":"TEXT",
+                },
+                "sub_goal_dependencies": {"goal_id":"TEXT","depends_on_goal_id":"TEXT","created_at":"TEXT"},
+                "sub_goal_evidence": {
+                    "id":"INTEGER","goal_id":"TEXT","decision":"TEXT","reason":"TEXT",
+                    "evidence_json":"TEXT","actual_count":"INTEGER","reviewed_by":"TEXT","created_at":"TEXT",
+                },
+                "sub_goal_production_plans": {
+                    "id":"INTEGER","goal_id":"TEXT","content_direction":"TEXT","suggested_count":"INTEGER",
+                    "resource_requirements_json":"TEXT","priority":"INTEGER","execution_conditions":"TEXT",
+                    "acceptance_relation":"TEXT","enabled":"INTEGER","created_at":"TEXT","updated_at":"TEXT",
+                },
             }
             missing_columns = []
             column_type_mismatches = []
@@ -984,6 +1015,13 @@ class Database:
                     "stage_id", "condition_type", "decision", "reason",
                     "evidence_json", "reviewed_by", "created_at",
                 },
+                "sub_goals": {"sub_plan_version_id","goal_type","goal_order","priority","title",
+                    "description","acceptance_criteria","requires_production","status","created_at","updated_at"},
+                "sub_goal_dependencies": {"goal_id","depends_on_goal_id","created_at"},
+                "sub_goal_evidence": {"goal_id","decision","reason","evidence_json","reviewed_by","created_at"},
+                "sub_goal_production_plans": {"goal_id","content_direction","suggested_count",
+                    "resource_requirements_json","priority","execution_conditions","acceptance_relation","enabled",
+                    "created_at","updated_at"},
             }
             nullable_mismatches = []
             for table_name, required_columns in expected_not_null_columns.items():
@@ -1033,6 +1071,13 @@ class Database:
                     "attempt_count": "0", "max_attempts": "3",
                     "input_snapshot_json": "'{}'",
                 },
+                "sub_goals": {"goal_order":"1","priority":"3","description":"''",
+                    "requires_production":"0","status":"'ready'"},
+                "sub_goal_dependencies": {},
+                "sub_goal_evidence": {"reason":"''"},
+                "sub_goal_production_plans": {"content_direction":"''","suggested_count":"1",
+                    "resource_requirements_json":"'{}'","priority":"3","execution_conditions":"''",
+                    "acceptance_relation":"''","enabled":"1"},
             }
             default_mismatches = []
             for table_name, defaults in expected_defaults.items():
@@ -1092,6 +1137,14 @@ class Database:
                     "length(trim(recommendation)) BETWEEN 1 AND 2000",
                     "confidence IN ('low','medium','high')",
                 ),
+                "sub_goals": (
+                    "goal_type IN ('quantity','business','effect','quality','capability')",
+                    "priority BETWEEN 1 AND 5",
+                    "status IN ('draft','blocked','ready','in_progress','completed','failed','needs_review','cancelled')",
+                ),
+                "sub_goal_dependencies": ("goal_id != depends_on_goal_id",),
+                "sub_goal_evidence": ("decision IN ('passed','failed','needs_review')",),
+                "sub_goal_production_plans": ("suggested_count BETWEEN 1 AND 10000","priority BETWEEN 1 AND 5"),
             }
             missing_check_constraints = []
             for table_name, fragments in expected_check_fragments.items():
@@ -1227,6 +1280,7 @@ class Database:
                 "original_asset_analyses", "original_asset_gaps",
                 "production_task_asset_usages", "plan_change_audit", "master_plan_versions",
                 "account_group_north_star_versions", "master_plan_resource_baselines",
+                "content_publish_verifications", "review_tasks", "review_collection_runs", "business_gap_events",
             }
             result["missing_governance_tables"] = sorted(governance_tables - existing)
 
@@ -1241,6 +1295,8 @@ class Database:
                 "idx_production_task_asset_usages_asset",
                 "idx_plan_change_audit_entity", "idx_plan_change_audit_versions",
                 "idx_north_star_one_effective", "idx_north_star_history",
+                "idx_publish_verification_actor", "idx_review_tasks_creator",
+                "idx_review_runs_actor", "idx_business_gap_events_actor", "idx_review_tasks_retry_actor",
             }
             result["missing_governance_indexes"] = sorted(
                 governance_indexes - existing_indexes
@@ -1322,6 +1378,10 @@ class Database:
                 "master_plan_resource_baselines": {
                     "master_plan_version_id", "snapshot_json", "captured_at", "captured_by",
                 },
+                "content_publish_verifications": {"verification_id", "tenant_id", "verified_by", "verified_at"},
+                "review_tasks": {"task_id", "tenant_id", "created_by", "conclusion_by", "last_retried_by"},
+                "review_collection_runs": {"run_id", "task_id", "recorded_by", "created_at"},
+                "business_gap_events": {"event_id", "gap_id", "actor", "created_at"},
             }
             missing_governance_columns = []
             for table_name, required_columns in governance_columns.items():

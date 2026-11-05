@@ -754,3 +754,154 @@ def test_tracked_scheduler_job_rolls_back_implicit_write_on_exception(cfg, conn)
     reader.start()
     reader.join(timeout=1)
     assert completed.is_set(), "scheduler finalizer leaked the retained transaction lock"
+
+
+def _verified_review_task(conn, seed, actor="session:review-creator"):
+    from src.core.operating_feedback import create_publish_verification
+
+    round_id = seed.round(status="completed")
+    draft_id = seed.draft(round_id, platform="xhs", draft_status="user_published", fetch_status=None)
+    published_at = "2026-11-04T02:00:00+00:00"
+    conn.execute(
+        "UPDATE drafts SET user_confirmed_at=?,published_at=? WHERE id=?",
+        (published_at, published_at, draft_id),
+    )
+    result = create_publish_verification(
+        conn, tenant_id="tenant-test", draft_id=draft_id,
+        platform_content_id=f"note-{draft_id}",
+        content_url=f"https://www.xiaohongshu.com/explore/{draft_id}",
+        published_at=published_at, actor=actor,
+    )
+    conn.commit()
+    return draft_id, result["review_task_id"]
+
+
+def test_independent_review_collection_records_platform_facts_and_retries_partial(cfg, conn, seed):
+    from src.adapters.base import FetchStatus, MetricsSnapshot
+
+    draft_id, task_id = _verified_review_task(conn, seed)
+
+    class _Adapter:
+        async def fetch_metrics(self, *_args, **_kwargs):
+            return MetricsSnapshot(
+                platform=Platform.XHS, fetch_status=FetchStatus.PARTIAL,
+                views=0, likes=8, comments=None,
+            )
+
+    eng = SchedulerEngine(cfg, Path(cfg.paths.db_file))
+    eng.wire(conn=conn, adapters={Platform.XHS: _Adapter()}, tenant_id="tenant-test")
+    from src.core.task_context import bind_task_identity
+    with bind_task_identity(
+        initiating_actor="session:review-creator",
+        executing_actor="service:global-task-worker",
+        tenant_id="tenant-test",
+        task_id="queue-review-run-1",
+    ):
+        report = asyncio.run(eng._job_review_collection(task_id, attempt=1))
+
+    assert report["final_status"] == "partial"
+    run_actor = conn.execute(
+        "SELECT recorded_by FROM review_collection_runs WHERE task_id=?", (task_id,)
+    ).fetchone()["recorded_by"]
+    assert run_actor == "service:global-task-worker"
+    assert report["retry_scheduled"] is True
+    assert f"review_collect_{task_id}_initial_a2" in {job.id for job in eng.scheduler.get_jobs()}
+    assert conn.execute("SELECT status FROM drafts WHERE id=?", (draft_id,)).fetchone()[0] == "user_published"
+    task = conn.execute("SELECT status,attempt_count FROM review_tasks WHERE task_id=?", (task_id,)).fetchone()
+    assert task["status"] == "scheduled"
+    assert task["attempt_count"] == 1
+    facts = conn.execute(
+        "SELECT metric_key,value,collection_status FROM metric_facts "
+        "WHERE source_record_type='review_collection_run' ORDER BY metric_key"
+    ).fetchall()
+    assert [(row["metric_key"], row["value"]) for row in facts] == [("likes", 8.0), ("views", 0.0)]
+    assert all(row["collection_status"] == "partial" for row in facts)
+
+
+def test_independent_review_collection_failure_is_recorded_and_never_changes_draft(cfg, conn, seed):
+    draft_id, task_id = _verified_review_task(conn, seed)
+    eng = SchedulerEngine(cfg, Path(cfg.paths.db_file))
+    eng.wire(conn=conn, adapters={}, tenant_id="tenant-test")
+
+    report = asyncio.run(eng._job_review_collection(task_id, attempt=1))
+
+    assert report["final_status"] == "failed"
+    assert report["retry_scheduled"] is True
+    assert conn.execute("SELECT status FROM drafts WHERE id=?", (draft_id,)).fetchone()[0] == "user_published"
+    run = conn.execute(
+        "SELECT status,error_message,metrics_json FROM review_collection_runs WHERE task_id=?",
+        (task_id,),
+    ).fetchone()
+    assert run["status"] == "failed"
+    assert "适配器未启用" in run["error_message"]
+    assert run["metrics_json"] == "{}"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM metric_facts WHERE source_record_type='review_collection_run'"
+    ).fetchone()[0] == 0
+
+
+def test_scheduler_restores_persisted_review_tasks_after_restart(cfg, conn, seed):
+    draft_id, task_id = _verified_review_task(conn, seed)
+    eng = SchedulerEngine(cfg, Path(cfg.paths.db_file))
+    eng.wire(conn=conn, adapters={}, tenant_id="tenant-test")
+
+    eng._bind_persisted_review_tasks()
+
+    jobs = {job.id: job for job in eng.scheduler.get_jobs()}
+    assert f"review_collect_{task_id}_initial_a1" in jobs
+    assert jobs[f"review_collect_{task_id}_initial_a1"].kwargs["task_id"] == task_id
+    assert conn.execute("SELECT status FROM drafts WHERE id=?", (draft_id,)).fetchone()[0] == "user_published"
+
+
+def test_stale_review_collection_job_is_ignored_after_manual_retry(cfg, conn, seed):
+    from src.core.operating_feedback import create_publish_verification, retry_review_task
+
+    round_id = seed.round(status="completed")
+    draft_id = seed.draft(round_id, platform="xhs", draft_status="user_published", fetch_status=None)
+    conn.execute(
+        "UPDATE drafts SET user_confirmed_at=?,published_at=? WHERE id=?",
+        ("2026-11-04T02:00:00+00:00", "2026-11-04T02:00:00+00:00", draft_id),
+    )
+    conn.commit()
+    verification = create_publish_verification(
+        conn, tenant_id="tenant-test", draft_id=draft_id,
+        platform_content_id="note-stale-cycle",
+        content_url="https://www.xiaohongshu.com/explore/stale-cycle",
+        published_at="2026-11-04T02:00:00+00:00",
+    )
+    task_id = verification["review_task_id"]
+    conn.execute("UPDATE review_tasks SET status='partial' WHERE task_id=?", (task_id,))
+    conn.commit()
+    retry_review_task(conn, task_id)
+    engine = SchedulerEngine(cfg, Path(cfg.paths.db_file))
+    engine.wire(conn=conn, adapters={}, tenant_id="tenant-test")
+
+    result = asyncio.run(engine._job_review_collection(task_id, attempt=1, cycle_id="initial"))
+
+    assert result["final_status"] == "skipped"
+    assert "周期已更新" in result["reason"]
+
+
+def test_review_collection_queue_preserves_initiating_actor(cfg, conn, seed):
+    from datetime import datetime, timezone
+
+    draft_id, task_id = _verified_review_task(conn, seed, actor="session:review-initiator")
+
+    class _Queue:
+        def __init__(self):
+            self.items = []
+
+        def enqueue(self, **kwargs):
+            self.items.append(kwargs)
+
+    queue = _Queue()
+    engine = SchedulerEngine(cfg, Path(cfg.paths.db_file))
+    engine.wire(conn=conn, adapters={}, task_queue=queue, tenant_id="tenant-test")
+    engine.schedule_review_collection(task_id, datetime(2026, 11, 5, 10, tzinfo=timezone.utc))
+
+    assert len(queue.items) == 1
+    assert queue.items[0]["payload"]["initiating_actor"] == "session:review-initiator"
+    assert queue.items[0]["payload"]["args"] == [task_id, 1, "initial"]
+    assert conn.execute(
+        "SELECT created_by FROM review_tasks WHERE task_id=?", (task_id,)
+    ).fetchone()["created_by"] == "session:review-initiator"
