@@ -524,10 +524,37 @@ def test_feedback_adoption_requires_formal_version_review_and_preserves_history(
         "SELECT snapshot_json FROM sub_plan_versions WHERE id=?", (source_version,),
     ).fetchone()["snapshot_json"] == original_snapshot
 
-    # A later proposal can be rejected without replacing the already-effective version.
+    # A later proposal from feedback on the new effective version can be rejected
+    # without replacing the version that was already approved above.
+    new_stage_id = int(conn.execute(
+        "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order LIMIT 1",
+        (draft_version_id,),
+    ).fetchone()["id"])
+    new_feedback = client.post(
+        f"/api/subplans/stages/{new_stage_id}/effect-feedback",
+        json={
+            "assessment": "mixed",
+            "recommendation": "调整发布节奏后继续观察。",
+            "evidence_note": "新生效版本的独立反馈。",
+            "confidence": "medium",
+        },
+    )
+    assert new_feedback.status_code == 201, new_feedback.text
+    new_review = client.post(
+        f"/api/subplans/t8-b-subplan/stages/{new_stage_id}/condition-review",
+        json={
+            "condition_type": "effect",
+            "decision": "passed",
+            "reason": "确认新版本反馈",
+            "recommendation": "调整发布节奏后继续观察。",
+            "confidence": "medium",
+            "effect_review_id": new_feedback.json()["id"],
+        },
+    )
+    assert new_review.status_code == 200, new_review.text
     second = client.post(
         "/api/plan_adjustments/adopt",
-        json={"dimensions": ["发布节奏"], "effect_review_id": feedback.json()["id"]},
+        json={"dimensions": ["发布节奏"], "effect_review_id": new_feedback.json()["id"]},
     )
     assert second.status_code == 200, second.text
     rejected_version_id = int(second.json()["drafts"][0]["draft_version"]["id"])
