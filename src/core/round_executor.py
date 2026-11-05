@@ -1144,7 +1144,6 @@ class RoundExecutor:
                         "readability_status": row["readability_status"],
                         "completeness_status": row["completeness_status"],
                         "duplicate_status": row["duplicate_status"],
-                        "metadata": json.loads(row["metadata_json"] or "{}"),
                     } for row in linked_assets]
                     task = task_store.create_task(
                         round_id=round_id,
