@@ -3455,6 +3455,37 @@ def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client
             draft = store.create_master_draft(snapshot, based_on_version_id=active_id)
             active_id = store.activate_master_version(draft["id"], reviewer="test")["id"]
 
+    # Freeze a non-empty business profile and offer on a fresh master version.
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    conn.execute(
+        """INSERT INTO business_profiles(
+            id,business_name,introduction,industry,business_model,business_stage,
+            operating_goal,field_evidence_json,version_no,updated_at
+        ) VALUES(1,'测试企业','提供专业内容服务','教育服务','专业服务','成长阶段',
+                 '获取目标客户','{}',1,?)
+        ON CONFLICT(id) DO UPDATE SET business_name=excluded.business_name,
+            introduction=excluded.introduction,industry=excluded.industry,
+            business_model=excluded.business_model,business_stage=excluded.business_stage,
+            operating_goal=excluded.operating_goal,field_evidence_json=excluded.field_evidence_json,
+            version_no=excluded.version_no,updated_at=excluded.updated_at""",
+        (now,),
+    )
+    conn.execute(
+        """INSERT INTO business_catalog_items(
+            id,entity_type,name,details_json,field_evidence_json,is_active,created_at,updated_at
+        ) VALUES('api-test-offer','service','专业内容咨询','{}','{}',1,?,?)
+        ON CONFLICT(id) DO UPDATE SET is_active=1,updated_at=excluded.updated_at""",
+        (now, now),
+    )
+    active_plan_row = conn.execute(
+        "SELECT plan_snapshot FROM master_plan_versions WHERE id=?", (active_id,)
+    ).fetchone()
+    fresh_master = store.create_master_draft(
+        json.loads(active_plan_row["plan_snapshot"]),
+        based_on_version_id=active_id, author="test",
+    )
+    active_id = int(store.activate_master_version(fresh_master["id"], reviewer="test")["id"])
+
     created = tc.post("/api/subplans", json={
         "master_plan_version_id": active_id,
         "platform": "xhs",
@@ -3514,6 +3545,23 @@ def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client
         json={"action": "approve"},
     )
     assert line_review.status_code == 200, line_review.text
+
+    from src.core.subgoal_store import SubGoalStore
+    subgoals = SubGoalStore(conn)
+    goal = subgoals.create_goal(sub_id, int(version_id), {
+        "goal_type": "quantity", "goal_order": 1, "priority": 3,
+        "title": "完成第一阶段内容生产", "description": "API 验收正式生产目标",
+        "target_count": int(stage["target_count"]),
+        "acceptance_criteria": "达到阶段目标数量并完成业务验收",
+        "requires_production": True, "stage_id": int(stage["id"]),
+    })
+    subgoals.save_production_plan(sub_id, str(goal["id"]), {
+        "content_direction": "围绕已确认业务定位生产内容",
+        "suggested_count": int(stage["target_count"]),
+        "resource_requirements": {}, "priority": 3,
+        "execution_conditions": "母计划、子计划和生产线均已审核生效",
+        "acceptance_relation": "以阶段目标数量和验收证据为准",
+    })
     invalid_reorder = tc.post(f"/api/subplans/{sub_id}/stages/reorder", json={
         "based_on_version_id": version_id, "expected_version_no": 1, "stage_ids": [True],
     })
