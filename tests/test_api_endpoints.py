@@ -4369,12 +4369,18 @@ def test_ai_master_plan_generation_api_failure_is_atomic_and_retryable(client, m
 
 
 
-def test_manual_master_plan_creation_works_without_model_configuration(client, monkeypatch):
+def test_manual_master_plan_creation_works_without_model_or_ai_diagnosis(client):
     tc, conn, _ = client
-    _seed_confirmed_master_plan_diagnosis(conn)
-    monkeypatch.setattr(
-        "src.core.business_diagnosis.collect_business_context",
-        lambda *_: {"fingerprint": "stable-fingerprint", "context": {}},
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    conn.execute(
+        """INSERT INTO account_group_north_star_versions(
+            version_no,snapshot_json,status,change_reason,created_by,created_at,effective_at
+        ) VALUES(1,?,'effective','manual fallback test','test',?,?)""",
+        (json.dumps({
+            "positioning": "测试定位", "business_direction": "测试方向", "target_users": "测试用户",
+            "core_value": "测试价值", "long_term_content_direction": "测试内容方向",
+            "business_model": "测试模式", "platform_relationships": "", "long_term_goals": "测试目标",
+        }, ensure_ascii=False), now, now),
     )
     cfg = api_main._g_ctx["cfg"]
     cfg.llm.model = ""
