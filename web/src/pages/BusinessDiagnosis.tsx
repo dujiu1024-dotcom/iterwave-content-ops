@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { api, BusinessDiagnosisReport, BusinessDiagnosisVersion } from "../api";\nimport { formatBusinessDateTime } from "../businessTime.mjs";
+import { api, BusinessDiagnosisReport, BusinessDiagnosisVersion } from "../api";
+import { formatBusinessDateTime } from "../businessTime.mjs";
 
 export default function BusinessDiagnosis() {
   const [report, setReport] = useState<BusinessDiagnosisReport | null>(null);
