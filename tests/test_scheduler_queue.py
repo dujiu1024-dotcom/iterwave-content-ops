@@ -178,3 +178,4 @@ def test_independent_review_job_uses_durable_global_queue(cfg, conn):
     assert item["aggregate_id"] == "_job_review_collection:review-task-1:initial:2"
     assert item["payload"]["method"] == "_job_review_collection"
     assert item["payload"]["args"] == ["review-task-1", 2, "initial"]
+    assert item["payload"]["initiating_actor"] == "system:legacy-unattributed"
