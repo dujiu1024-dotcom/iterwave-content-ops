@@ -27,10 +27,15 @@ class VisualTaskStore:
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
-    def get_task(self, task_id: str) -> dict | None:
-        """Return a safe task snapshot and mark expired workers interrupted."""
+    def get_task(self, task_id: str, connection: sqlite3.Connection | None = None) -> dict | None:
+        """Return a safe task snapshot and mark expired workers interrupted.
+
+        An API request may supply its already-scoped connection so status reads
+        cannot accidentally inspect a different on-disk database.
+        """
         now = time.time()
-        conn = self._connect()
+        owns_connection = connection is None
+        conn = connection if connection is not None else self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
@@ -145,7 +150,8 @@ class VisualTaskStore:
             conn.rollback()
             raise
         finally:
-            conn.close()
+            if owns_connection:
+                conn.close()
 
     def acquire(self, task_id: str, account_group: str, owner: str | None = None,
                 lease_seconds: int = 180) -> str:
