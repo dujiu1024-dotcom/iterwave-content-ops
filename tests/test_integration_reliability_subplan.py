@@ -580,3 +580,70 @@ def test_condition_review_api_records_business_gate_decision(client):
     )
     assert history.status_code == 200
     assert history.json()["condition_reviews"][0]["decision"] == "needs_review"
+
+
+
+@pytest.mark.asyncio
+async def test_ai_subplan_description_does_not_enable_business_or_effect_gates_by_default(
+    client, monkeypatch
+):
+    from src.api import subplans as subplans_api
+
+    tc, conn, _seed = client
+    store = PlanVersionStore(conn)
+    master = store.create_master_draft(dict(PLAN_BASE), author="test", source="user")
+    store.activate_master_version(int(master["id"]), reviewer="test")
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": json.dumps({
+                "subplans": [{
+                    "platform": "xhs",
+                    "title": "AI 默认门禁测试",
+                    "snapshot": {},
+                    "stages": [{
+                        "stage_key": "ai-default-gates",
+                        "title": "阶段一",
+                        "target_count": 1,
+                        "completion_criteria": "完成目标内容生产",
+                        "effect_evaluation": "观察发布效果并总结",
+                    }],
+                }],
+            }, ensure_ascii=False)}}]}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(subplans_api.httpx, "AsyncClient", FakeAsyncClient)
+    cfg = api_main._g_ctx["cfg"]
+    cfg.llm.base_url = "https://llm.example/v1"
+    cfg.llm.model = "test-model"
+    cfg.llm.api_key_env = "T10_TEST_LLM_KEY"
+    monkeypatch.setenv("T10_TEST_LLM_KEY", "test-key")
+
+    response = tc.post(
+        "/api/subplans/ai-draft",
+        json={"master_plan_version_id": int(master["id"]), "platforms": ["xhs"]},
+    )
+    assert response.status_code == 201, response.text
+    subplan_id = response.json()["items"][0]["subplan"]["id"]
+    stage = conn.execute(
+        """SELECT business_completion_required,effect_required
+           FROM sub_plan_stages WHERE sub_plan_version_id=?""",
+        (int(response.json()["items"][0]["draft"]["id"]),),
+    ).fetchone()
+    assert int(stage["business_completion_required"]) == 0
+    assert int(stage["effect_required"]) == 0
