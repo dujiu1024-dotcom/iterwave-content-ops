@@ -4945,6 +4945,20 @@ def test_review_adoption_master_draft_is_review_gated_and_rebase_path_is_reachab
         "SELECT master_plan_version_id FROM sub_plans WHERE id=?", (sub_id,)
     ).fetchone()[0] == active_id
 
+    # Retrying the same mixed-state adoption reuses the persisted eligible draft
+    # and returns the same explicit skipped-child report without duplication.
+    retried = tc.post("/api/plan_adjustments/adopt", json={
+        "dimensions": ["内容结构"],
+        "target_master_plan_version_id": new_master_id,
+    })
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["status"] == "partial"
+    assert retried.json()["drafts"][0]["reused"] is True
+    assert retried.json()["drafts"][0]["draft_version"]["id"] == draft["id"]
+    assert {item["sub_plan_id"] for item in retried.json()["skipped"]} == {
+        "review-adoption-manual-pause", "review-adoption-cancelled",
+    }
+
     approved_child = tc.post(f"/api/subplans/{sub_id}/review", json={
         "version_id": int(draft["id"]), "action": "approve",
     })
