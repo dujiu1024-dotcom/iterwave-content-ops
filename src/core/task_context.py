@@ -43,7 +43,7 @@ def current_task_identity() -> dict[str, Optional[str]]:
 @contextmanager
 def bind_task_identity(
     *, initiating_actor: Optional[str], executing_actor: str,
-    tenant_id: str, task_id: str,
+    tenant_id: str, task_id: Optional[str],
 ) -> Iterator[None]:
     """Bind immutable enqueue-time actor and worker identity for nested services.
 
