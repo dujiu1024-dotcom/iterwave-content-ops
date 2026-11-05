@@ -6242,68 +6242,78 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(409, "当前没有与反馈来源匹配的已审核平台子计划；请先确认子计划仍有生效版本")
         store = PlanVersionStore(conn)
         drafts = []
-        for row in rows:
-            try:
-                snapshot = json.loads(row["snapshot_json"])
-            except (TypeError, ValueError):
-                raise HTTPException(409, f"子计划 {row['id']} 的生效快照损坏")
-            prior_adoptions = snapshot.get("review_adoptions")
-            adoption = list(prior_adoptions) if isinstance(prior_adoptions, list) else []
-            adoption_record = {
-                "dimensions": dims,
-                "created_at": _storage_now().isoformat(timespec="seconds"),
-                "source": "review_adoption",
-                "status": "suggestion",
-                "target_master_plan_version_id": target_master_version_id,
-            }
-            if effect_source is not None:
+        # A batch adoption is all-or-nothing. Store methods use nested savepoints;
+        # this outer savepoint prevents an earlier child draft surviving a later failure.
+        conn.execute("SAVEPOINT review_adoption_batch")
+        try:
+            for row in rows:    
                 try:
-                    source_evidence = json.loads(effect_source["evidence_json"] or "{}")
+                    snapshot = json.loads(row["snapshot_json"])
                 except (TypeError, ValueError):
-                    raise HTTPException(409, "效果反馈证据快照损坏，拒绝生成不可追溯的调整草稿")
-                adoption_record["effect_feedback"] = {
-                    "id": int(effect_source["id"]),
-                    "stage_id": int(effect_source["stage_id"]),
-                    "stage_key": effect_source["stage_key"],
-                    "stage_title": effect_source["stage_title"],
-                    "source_sub_plan_version_id": int(effect_source["sub_plan_version_id"]),
-                    "assessment": effect_source["assessment"],
-                    "recommendation": effect_source["recommendation"],
-                    "evidence_note": effect_source["evidence_note"],
-                    "confidence": effect_source["confidence"],
-                    "evidence": source_evidence,
+                    raise HTTPException(409, f"子计划 {row['id']} 的生效快照损坏")
+                prior_adoptions = snapshot.get("review_adoptions")
+                adoption = list(prior_adoptions) if isinstance(prior_adoptions, list) else []
+                adoption_record = {
+                    "dimensions": dims,
+                    "created_at": _storage_now().isoformat(timespec="seconds"),
+                    "source": "review_adoption",
+                    "status": "suggestion",
+                    "target_master_plan_version_id": target_master_version_id,
                 }
-            adoption.append(adoption_record)
-            snapshot["review_adoptions"] = adoption
-            stages = [dict(stage) for stage in conn.execute(
-                "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order",
-                (row["current_version_id"],),
-            ).fetchall()]
-            for stage in stages:
-                for key in ("id", "sub_plan_version_id", "created_at", "updated_at"):
-                    stage.pop(key, None)
-            try:
-                draft = store.create_subplan_version(
-                    row["id"], snapshot,
-                    master_plan_version_id=(
-                        target_master_version_id if target_master_version_id is not None
-                        else int(row["master_plan_version_id"])
-                    ),
-                    author="review_adoption", stages=stages,
-                    based_on_version_id=int(row["current_version_id"]),
-                    change_note="复盘建议采纳草稿：" + "、".join(dims),
-                )
-                drafts.append({
-                    "sub_plan_id": row["id"], "platform": row["platform"],
-                    "draft_version": draft, "effective": False,
-                })
-            except PlanVersionError as exc:
-                raise HTTPException(409, str(exc)) from exc
-        return {
-            "drafts": drafts, "effective": False, "requires_human_review": True,
-            "adopted_dimensions": dims,
-            "message": "复盘建议已生成平台子计划草稿；修改并审核通过后才会生效",
-        }
+                if effect_source is not None:
+                    try:
+                        source_evidence = json.loads(effect_source["evidence_json"] or "{}")
+                    except (TypeError, ValueError):
+                        raise HTTPException(409, "效果反馈证据快照损坏，拒绝生成不可追溯的调整草稿")
+                    adoption_record["effect_feedback"] = {
+                        "id": int(effect_source["id"]),
+                        "stage_id": int(effect_source["stage_id"]),
+                        "stage_key": effect_source["stage_key"],
+                        "stage_title": effect_source["stage_title"],
+                        "source_sub_plan_version_id": int(effect_source["sub_plan_version_id"]),
+                        "assessment": effect_source["assessment"],
+                        "recommendation": effect_source["recommendation"],
+                        "evidence_note": effect_source["evidence_note"],
+                        "confidence": effect_source["confidence"],
+                        "evidence": source_evidence,
+                    }
+                adoption.append(adoption_record)
+                snapshot["review_adoptions"] = adoption
+                stages = [dict(stage) for stage in conn.execute(
+                    "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order",
+                    (row["current_version_id"],),
+                ).fetchall()]
+                for stage in stages:
+                    for key in ("id", "sub_plan_version_id", "created_at", "updated_at"):
+                        stage.pop(key, None)
+                try:
+                    draft = store.create_subplan_version(
+                        row["id"], snapshot,
+                        master_plan_version_id=(
+                            target_master_version_id if target_master_version_id is not None
+                            else int(row["master_plan_version_id"])
+                        ),
+                        author="review_adoption", stages=stages,
+                        based_on_version_id=int(row["current_version_id"]),
+                        change_note="复盘建议采纳草稿：" + "、".join(dims),
+                    )
+                    drafts.append({
+                        "sub_plan_id": row["id"], "platform": row["platform"],
+                        "draft_version": draft, "effective": False,
+                    })
+                except PlanVersionError as exc:
+                    raise HTTPException(409, str(exc)) from exc
+            return {
+                "drafts": drafts, "effective": False, "requires_human_review": True,
+                "adopted_dimensions": dims,
+                "message": "复盘建议已生成平台子计划草稿；修改并审核通过后才会生效",
+            }
+    
+            conn.execute("RELEASE SAVEPOINT review_adoption_batch")
+        except Exception:
+            conn.execute("ROLLBACK TO SAVEPOINT review_adoption_batch")
+            conn.execute("RELEASE SAVEPOINT review_adoption_batch")
+            raise
 
     @app.post("/api/plans/suggest_from_goal")
     def plan_suggest_from_goal(req: dict):
