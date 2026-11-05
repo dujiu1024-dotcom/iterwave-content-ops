@@ -311,7 +311,7 @@ PLATFORM_SELECTORS: dict[Platform, dict] = {
             "text=取消",
         ],
         "save_success_text": ["还有上次未发布的图集", "继续编辑"],
-        "draft_prompt_preserve": ["text=你还有上次未发布的图文"],
+        "draft_prompt_preserve": ["text=还有上次未发布的图集"],
         "_publish_button_audit_only": [
             "button:has-text('发布')",
         ],
