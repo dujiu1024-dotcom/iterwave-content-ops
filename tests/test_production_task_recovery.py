@@ -49,6 +49,7 @@ def store():
             id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, attempt_no INTEGER,
             status TEXT, worker_id TEXT, started_at TEXT, finished_at TEXT,
             error_code TEXT, error_message TEXT, output_content_id TEXT,
+            initiating_actor TEXT, executing_actor TEXT, tenant_id TEXT, queue_task_id TEXT,
             UNIQUE(task_id,attempt_no)
         );
     """)
