@@ -663,6 +663,12 @@ def test_subplan_round_worker_persists_task_content_and_frozen_plan_lineage(
     saved_tenant = api_main._g_ctx.get("runtime_tenant_id")
     api_main._g_ctx["runtime_tenant_id"] = "default"
     store, master, version, stage = _approved_subplan(conn, "worker-provenance-sub")
+    # The generated content must flow through the real effect-review gate as well.
+    conn.execute(
+        "UPDATE sub_plan_stages SET effect_required=1,effect_status='pending' WHERE id=?",
+        (int(stage["id"]),),
+    )
+    conn.commit()
     opened = tc.post(
         "/api/subplans/worker-provenance-sub/rounds", json={"topic_count": 1},
     )
@@ -819,6 +825,56 @@ def test_subplan_round_worker_persists_task_content_and_frozen_plan_lineage(
             "SELECT id,status FROM drafts WHERE content_id=?", (content["id"],),
         ).fetchone()
         assert draft is not None and draft["status"] == "draft_pending"
+
+        # Continue with the actual content lifecycle APIs; no SQL state changes are
+        # used for review, publication, metrics, or effect feedback.
+        approved = tc.post(
+            f"/api/contents/{content['id']}/approve",
+            json={"reason": "真实 Worker 成品进入 T8-B 审核验收"},
+        )
+        assert approved.status_code == 200, approved.text
+        assert approved.json()["review_status"] == "approved"
+
+        published = tc.post(
+            f"/api/drafts/{draft['id']}/publish_confirm",
+            json={"note_url": "https://www.xiaohongshu.com/explore/t8b-worker-provenance"},
+        )
+        assert published.status_code == 200, published.text
+        assert published.json()["status"] == "user_published"
+
+        metrics = tc.post(
+            f"/api/drafts/{draft['id']}/metrics/manual",
+            json={"views": 120, "likes": 12, "collects": 8, "comments": 3},
+        )
+        assert metrics.status_code == 200, metrics.text
+        metric_rows = tc.get(
+            "/api/metrics/snapshots", params={"draft_id": draft["id"]},
+        )
+        assert metric_rows.status_code == 200
+        assert metric_rows.json()["total"] == 1
+        assert metric_rows.json()["items"][0]["content_id"] == content["id"]
+
+        effect = tc.post(
+            f"/api/subplans/stages/{int(stage['id'])}/effect-feedback",
+            json={
+                "assessment": "effective",
+                "recommendation": "保留该选题方向并继续观察。",
+                "evidence_note": "来自真实 Worker 成品、人工审核、发布确认和指标回填。",
+                "confidence": "medium",
+            },
+        )
+        assert effect.status_code == 201, effect.text
+        decision = tc.post(
+            f"/api/subplans/worker-provenance-sub/stages/{int(stage['id'])}/condition-review",
+            json={
+                "condition_type": "effect",
+                "decision": "passed",
+                "reason": "核验真实发布成品的效果数据",
+                "effect_review_id": effect.json()["id"],
+            },
+        )
+        assert decision.status_code == 200, decision.text
+        assert decision.json()["stage"]["effect_status"] == "passed"
     finally:
         api_main._task_queue = saved_queue
         if saved_tenant is None:
