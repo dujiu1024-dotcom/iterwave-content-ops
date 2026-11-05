@@ -392,6 +392,7 @@ export interface Draft {
   visual_status?: "degraded" | "media_asset" | "generated" | null;
   visual_reason?: string | null;
   scheduled_publish_at?: string | null;
+  published_at?: string | null;
   /** 用户补填的平台笔记链接（被动评论轮询靠它定位笔记） */
   platform_note_url?: string | null;
   guard_outcome?: "pass" | "warn" | "fail" | "error" | null;
