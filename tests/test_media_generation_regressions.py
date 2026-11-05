@@ -46,7 +46,7 @@ def test_failed_image_generation_is_recorded_without_quota_block(
         assert "provider error" not in first.text
         settings = client.get("/api/media/generation-settings")
         assert settings.status_code == 200
-        assert settings.json()["used_this_month"] == 1
+        assert settings.json()["used_this_month"] == 2
         jobs = conn.execute("SELECT status FROM media_generation_jobs").fetchall()
         assert len(jobs) == 2
         assert all(row["status"] == "failed" for row in jobs)
@@ -200,7 +200,7 @@ def test_recommendation_limit_can_return_more_than_eight_items(conn, seed, test_
 def test_successful_image_generation_is_not_monthly_quota_blocked(
     conn, cfg, test_auth, monkeypatch, tmp_path
 ):
-    """月度配额按已启动的生成任务计数，成功或失败都不能重复绕过。"""
+    """Legacy quota values do not block generation; successful calls remain measurable."""
     from src.core import media_quality
 
     registry = TenantRegistry(tmp_path / "workspace")
@@ -234,7 +234,7 @@ def test_successful_image_generation_is_not_monthly_quota_blocked(
         assert [response.status_code for response in responses] == [201, 201]
         assert conn.execute(
             "SELECT COUNT(*) FROM media_generation_jobs WHERE status='succeeded'"
-        ).fetchone()[0] == 1
+        ).fetchone()[0] == 2
     finally:
         api_main._g_ctx.clear()
         api_main._g_ctx.update(saved)
