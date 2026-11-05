@@ -412,7 +412,8 @@ def test_feedback_resolution_exception_marks_round_and_task_failed(cfg, conn, se
 
     report = asyncio.run(executor.run(round_id))
     assert report["final_status"] == "failed"
-    assert any("执行异常" in msg for msg in report["errors"])
+    assert report["failure_code"] == "pipeline_error"
+    assert any("生产流程失败" in msg for msg in report["errors"])
     assert conn.execute(
         "SELECT status FROM spiral_rounds WHERE id = ?", (round_id,)
     ).fetchone()[0] == "failed"
@@ -620,5 +621,5 @@ def test_round_failure_classification_preserves_actionable_categories():
     assert _classify_round_failure(TimeoutError("provider timed out"))[0] == "timeout"
     assert _classify_round_failure(FileNotFoundError("asset missing"))[0] == "asset_missing"
     assert _classify_round_failure(ImageGenerationError("model rejected request"))[0] == "image_generation_failed"
-    assert _classify_round_failure(BrowserError("browser closed"))[0] == "pipeline_error"
+    assert _classify_round_failure(BrowserError("browser closed"))[0] == "browser_save_failed"
     assert _classify_round_failure(RuntimeError("unexpected"))[0] == "pipeline_error"
