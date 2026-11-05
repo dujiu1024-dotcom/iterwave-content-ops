@@ -3434,7 +3434,7 @@ def test_master_plan_approval_triggers_draft_only_ai_subplan_orchestration(clien
     assert response.json()["subplan_generation"]["status"] == "drafts_created"
 
 
-def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client):
+def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client, monkeypatch):
     from src.core.plan_version_store import PlanVersionStore
 
     tc, conn, _ = client
@@ -3454,6 +3454,67 @@ def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client
             snapshot["enabled_platforms"] = list(dict.fromkeys([*(snapshot.get("enabled_platforms") or []), "xhs"]))
             draft = store.create_master_draft(snapshot, based_on_version_id=active_id)
             active_id = store.activate_master_version(draft["id"], reviewer="test")["id"]
+
+    # Freeze a non-empty business profile and offer on a fresh master version.
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    conn.execute(
+        """INSERT INTO business_profiles(
+            id,business_name,introduction,industry,business_model,business_stage,
+            operating_goal,field_evidence_json,version_no,updated_at
+        ) VALUES(1,'测试企业','提供专业内容服务','教育服务','专业服务','成长阶段',
+                 '获取目标客户','{}',1,?)
+        ON CONFLICT(id) DO UPDATE SET business_name=excluded.business_name,
+            introduction=excluded.introduction,industry=excluded.industry,
+            business_model=excluded.business_model,business_stage=excluded.business_stage,
+            operating_goal=excluded.operating_goal,field_evidence_json=excluded.field_evidence_json,
+            version_no=excluded.version_no,updated_at=excluded.updated_at""",
+        (now,),
+    )
+    conn.execute(
+        """INSERT INTO business_catalog_items(
+            id,entity_type,name,details_json,field_evidence_json,is_active,created_at,updated_at
+        ) VALUES('api-test-offer','service','专业内容咨询','{}','{}',1,?,?)
+        ON CONFLICT(id) DO UPDATE SET is_active=1,updated_at=excluded.updated_at""",
+        (now, now),
+    )
+    # Production task creation requires a version-bound North Star and a confirmed
+    # business diagnosis. Seed them through the public API; do not bypass the gate.
+    from src.api import business_diagnosis
+    from src.core.business_diagnosis import collect_business_context
+
+    async def fake_diagnosis(conn, cfg):
+        context = collect_business_context(conn, cfg)
+        return (
+            {"business_summary": {"claim": "API 子计划验收业务", "classification": "fact"},
+             "assumptions": [], "source_references": []},
+            context["context"], "api-subplan-test-model",
+        )
+
+    monkeypatch.setattr(business_diagnosis, "generate_diagnosis", fake_diagnosis)
+    north_star = tc.put("/api/north-star", json={
+        "change_reason": "建立 API 子计划验收北极星",
+        "snapshot": {
+            "positioning": "专业内容服务", "business_direction": "AI 教育内容",
+            "target_users": "目标客户", "core_value": "持续提供高质量内容",
+            "long_term_content_direction": "围绕业务定位持续生产",
+            "business_model": "专业服务", "long_term_goals": "形成稳定内容生产体系",
+        },
+    })
+    assert north_star.status_code == 200, north_star.text
+    diagnosis = tc.post("/api/business-diagnosis/analyze")
+    assert diagnosis.status_code == 201, diagnosis.text
+    diagnosis_id = diagnosis.json()["report"]["id"]
+    confirmed = tc.post(f"/api/business-diagnosis/{diagnosis_id}/confirm")
+    assert confirmed.status_code == 200, confirmed.text
+
+    active_plan_row = conn.execute(
+        "SELECT plan_snapshot FROM master_plan_versions WHERE id=?", (active_id,)
+    ).fetchone()
+    fresh_master = store.create_master_draft(
+        json.loads(active_plan_row["plan_snapshot"]),
+        based_on_version_id=active_id, author="test",
+    )
+    active_id = int(store.activate_master_version(fresh_master["id"], reviewer="test")["id"])
 
     created = tc.post("/api/subplans", json={
         "master_plan_version_id": active_id,
@@ -3492,15 +3553,33 @@ def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client
     assert before.status_code == 200
     assert before.json()["stages"] == []
 
+    stage = conn.execute(
+        "SELECT id,stage_key,target_count FROM sub_plan_stages WHERE sub_plan_version_id=?",
+        (version_id,),
+    ).fetchone()
+    # Formal subgoals and production plans are part of the immutable draft.
+    # Create them while the subplan version is still a draft; review freezes it.
+    from src.core.subgoal_store import SubGoalStore
+    subgoals = SubGoalStore(conn)
+    goal = subgoals.create_goal(sub_id, int(version_id), {
+        "goal_type": "quantity", "goal_order": 1, "priority": 3,
+        "title": "完成第一阶段内容生产", "description": "API 验收正式生产目标",
+        "target_count": int(stage["target_count"]),
+        "acceptance_criteria": "达到阶段目标数量并完成业务验收",
+        "requires_production": True, "stage_id": int(stage["id"]),
+    })
+    subgoals.save_production_plan(sub_id, str(goal["id"]), {
+        "content_direction": "围绕已确认业务定位生产内容",
+        "suggested_count": int(stage["target_count"]),
+        "resource_requirements": {}, "priority": 3,
+        "execution_conditions": "母计划、子计划和生产线均已审核生效",
+        "acceptance_relation": "以阶段目标数量和验收证据为准",
+    })
     reviewed = tc.post(f"/api/subplans/{sub_id}/review", json={
         "version_id": version_id, "action": "approve",
     })
     assert reviewed.status_code == 200, reviewed.text
     assert reviewed.json()["authorization"] == "active"
-    stage = conn.execute(
-        "SELECT stage_key,target_count FROM sub_plan_stages WHERE sub_plan_version_id=?",
-        (version_id,),
-    ).fetchone()
     line_draft = tc.post(f"/api/subplans/{sub_id}/production-line/draft", json={
         "definition": {"title": "API 测试生产线", "stages": [{
             "stage_key": stage["stage_key"], "batch_size": int(stage["target_count"]),
@@ -3514,6 +3593,7 @@ def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client
         json={"action": "approve"},
     )
     assert line_review.status_code == 200, line_review.text
+
     invalid_reorder = tc.post(f"/api/subplans/{sub_id}/stages/reorder", json={
         "based_on_version_id": version_id, "expected_version_no": 1, "stage_ids": [True],
     })

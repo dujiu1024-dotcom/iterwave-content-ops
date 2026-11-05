@@ -8,8 +8,9 @@ import sqlite3
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 
+from src.core import auth
 from src.core.production_line_store import ProductionLineError, ProductionLineStore
 
 logger = logging.getLogger(__name__)
@@ -49,8 +50,63 @@ def register_production_line_routes(app: FastAPI, get_runtime) -> None:
             raise HTTPException(422, "生产线状态无效")
         return {"items": store().list_lines(status=status)}
 
+    @app.get("/api/content-production-lines")
+    def list_content_production_lines(status: str | None = Query(None), limit: int = Query(50, ge=1, le=200)):
+        from src.core.content_production_line_store import ContentProductionLineStore
+        conn = get_runtime()["conn"]
+        if not ContentProductionLineStore.available(conn):
+            raise HTTPException(503, "单内容生产线迁移尚未完成")
+        try:
+            return {"items": ContentProductionLineStore(conn).list_lines(status=status, limit=limit)}
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/api/content-production-lines/{line_id}")
+    def get_content_production_line(line_id: str):
+        from src.core.content_production_line_store import ContentProductionLineStore, ContentProductionLineError
+        conn = get_runtime()["conn"]
+        try:
+            return ContentProductionLineStore(conn).get_line(line_id)
+        except ContentProductionLineError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.post("/api/production-context/waivers", status_code=201)
+    def create_production_context_waiver(req: dict, request: Request):
+        from src.core.content_production_line_store import ContentProductionLineStore, ContentProductionLineError
+        runtime = get_runtime()
+        conn = runtime["conn"]
+        try:
+            waiver = ContentProductionLineStore(conn, tenant_id=runtime.get("runtime_tenant_id") or "default").record_waiver(
+                round_id=int(req.get("round_id")), platform=str(req.get("platform") or ""),
+                waived_items=req.get("waived_items") or [], reason=str(req.get("reason") or ""),
+                actor=auth.audit_actor(request), evidence=req.get("evidence") if isinstance(req.get("evidence"), dict) else {},
+            )
+            return {"waiver": waiver}
+        except (ContentProductionLineError, TypeError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/content-production-lines/{line_id}/events")
+    def record_content_production_line_event(line_id: str, req: dict, request: Request):
+        from src.core.content_production_line_store import ContentProductionLineStore, ContentProductionLineError
+        runtime = get_runtime()
+        conn = runtime["conn"]
+        event_type = str(req.get("event_type") or "")
+        if event_type in {"publish_verified", "closed"}:
+            # A caller-controlled source label is not a service credential. These
+            # transitions are owned by the publication-verification/outbox workflow.
+            raise HTTPException(403, "真实发布核验与生产线关闭只能由受控发布核验及 Outbox 流程执行")
+        try:
+            return ContentProductionLineStore(conn, tenant_id=runtime.get("runtime_tenant_id") or "default").transition(
+                line_id, event_type=event_type,
+                actor=auth.audit_actor(request),
+                reason=str(req.get("reason") or ""),
+                evidence=req.get("evidence") if isinstance(req.get("evidence"), dict) else {},
+            )
+        except ContentProductionLineError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     @app.post("/api/subplans/{sub_plan_id}/production-line/ai-draft", status_code=201)
-    async def create_ai_production_line_draft(sub_plan_id: str, req: dict):
+    async def create_ai_production_line_draft(sub_plan_id: str, req: dict, request: Request):
         runtime = get_runtime()
         conn, cfg = runtime["conn"], runtime["cfg"]
         identity = conn.execute(
@@ -151,7 +207,7 @@ def register_production_line_routes(app: FastAPI, get_runtime) -> None:
         try:
             version = store().create_draft(
                 sub_plan_id, int(identity["current_version_id"]), result,
-                generation_source="ai", author="ai", change_note="AI 生成生产线草稿，待人工确认",
+                generation_source="ai", author=auth.audit_actor(request), change_note="AI 生成生产线草稿，待人工确认",
             )
         except (ProductionLineError, sqlite3.Error) as exc:
             raise HTTPException(422 if isinstance(exc, ProductionLineError) else 503, str(exc)) from exc
@@ -162,7 +218,7 @@ def register_production_line_routes(app: FastAPI, get_runtime) -> None:
                 "effective": False, "requires_human_review": True}
 
     @app.post("/api/subplans/{sub_plan_id}/production-line/draft", status_code=201)
-    def create_manual_production_line_draft(sub_plan_id: str, req: dict):
+    def create_manual_production_line_draft(sub_plan_id: str, req: dict, request: Request):
         conn = get_runtime()["conn"]
         identity = conn.execute(
             """SELECT current_version_id FROM sub_plans WHERE id=? AND status='active'""",
@@ -173,7 +229,7 @@ def register_production_line_routes(app: FastAPI, get_runtime) -> None:
         try:
             version = store().create_draft(
                 sub_plan_id, int(identity["current_version_id"]), req.get("definition") or {},
-                generation_source="manual", author="user",
+                generation_source="manual", author=auth.audit_actor(request),
                 change_note=str(req.get("change_note") or "人工编辑生产线草稿"),
                 based_on_version_id=req.get("based_on_version_id"),
             )
@@ -185,7 +241,7 @@ def register_production_line_routes(app: FastAPI, get_runtime) -> None:
                 "effective": False, "requires_human_review": True}
 
     @app.post("/api/production-lines/{line_id}/versions/{version_id}/review")
-    def review_production_line(line_id: str, version_id: int, req: dict):
+    def review_production_line(line_id: str, version_id: int, req: dict, request: Request):
         action = str(req.get("action") or "")
         conn = get_runtime()["conn"]
         belongs = conn.execute(
@@ -196,9 +252,9 @@ def register_production_line_routes(app: FastAPI, get_runtime) -> None:
             raise HTTPException(404, "生产线版本不存在")
         try:
             if action == "approve":
-                version = store().activate(version_id, reviewer="user")
+                version = store().activate(version_id, reviewer=auth.audit_actor(request))
             elif action == "reject":
-                version = store().reject(version_id, reviewer="user", reason=str(req.get("reason") or ""))
+                version = store().reject(version_id, reviewer=auth.audit_actor(request), reason=str(req.get("reason") or ""))
             else:
                 raise HTTPException(422, "action 必须为 approve 或 reject")
         except ProductionLineError as exc:
@@ -207,11 +263,11 @@ def register_production_line_routes(app: FastAPI, get_runtime) -> None:
                 "effective": action == "approve"}
 
     @app.patch("/api/subplans/{sub_plan_id}/production-line/status")
-    def update_production_line_status(sub_plan_id: str, req: dict):
+    def update_production_line_status(sub_plan_id: str, req: dict, request: Request):
         try:
             line = store().set_status(
                 sub_plan_id, str(req.get("status") or ""),
-                actor="user", reason=str(req.get("reason") or ""),
+                actor=auth.audit_actor(request), reason=str(req.get("reason") or ""),
             )
         except ProductionLineError as exc:
             raise HTTPException(409, str(exc)) from exc

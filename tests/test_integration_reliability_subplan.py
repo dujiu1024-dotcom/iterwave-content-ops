@@ -60,11 +60,39 @@ def client(cfg, conn, seed, test_auth):
         api_main._g_ctx.update(saved)
 
 
-def _approved_subplan(conn, sub_id: str = "integration-sub"):
+def _approved_subplan(conn, sub_id: str = "integration-sub", master_version_id: int | None = None):
     """建一套生效母计划 + 生效子计划 + 可执行阶段，返回（store, master, version, stage）。"""
     store = PlanVersionStore(conn)
-    master = store.create_master_draft(dict(PLAN_BASE), author="test", source="user")
-    store.activate_master_version(int(master["id"]), reviewer="test")
+    # The activation trigger freezes the current business profile/catalog. Seed
+    # them before creating the effective version; later edits cannot rewrite it.
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    conn.execute(
+        """INSERT INTO business_profiles(
+            id,business_name,introduction,industry,business_model,business_stage,
+            operating_goal,field_evidence_json,version_no,updated_at
+        ) VALUES(1,'集成测试企业','提供专业内容服务','教育服务','专业服务','成长阶段',
+                 '获取目标客户','{}',1,?)
+        ON CONFLICT(id) DO UPDATE SET business_name=excluded.business_name,
+            introduction=excluded.introduction,industry=excluded.industry,
+            business_model=excluded.business_model,business_stage=excluded.business_stage,
+            operating_goal=excluded.operating_goal,field_evidence_json=excluded.field_evidence_json,
+            version_no=excluded.version_no,updated_at=excluded.updated_at""",
+        (now,),
+    )
+    conn.execute(
+        """INSERT INTO business_catalog_items(
+            id,entity_type,name,details_json,field_evidence_json,is_active,created_at,updated_at
+        ) VALUES('integration-test-offer','service','专业内容咨询','{}','{}',1,?,?)
+        ON CONFLICT(id) DO UPDATE SET is_active=1,updated_at=excluded.updated_at""",
+        (now, now),
+    )
+    if master_version_id is None:
+        master = store.create_master_draft(dict(PLAN_BASE), author="test", source="user")
+        store.activate_master_version(int(master["id"]), reviewer="test")
+    else:
+        master = dict(conn.execute(
+            "SELECT * FROM master_plan_versions WHERE id=?", (master_version_id,)
+        ).fetchone())
     store.create_subplan(
         sub_id, master_plan_version_id=int(master["id"]),
         platform="xhs", title="联调子计划", author="test",
@@ -74,11 +102,35 @@ def _approved_subplan(conn, sub_id: str = "integration-sub"):
         master_plan_version_id=int(master["id"]),
         stages=[{"title": "阶段一", "target_count": 6}],
     )
-    store.activate_subplan_version(int(version["id"]), reviewer="test")
     stage = conn.execute(
         "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=?",
         (int(version["id"]),),
     ).fetchone()
+    # Production context now requires a version-bound formal subgoal and enabled
+    # production plan. Build those prerequisites in the draft before activation;
+    # do not weaken the production gate to accommodate this integration fixture.
+    from src.core.subgoal_store import SubGoalStore
+    goals = SubGoalStore(conn)
+    goal = goals.create_goal(sub_id, int(version["id"]), {
+        "goal_type": "quantity",
+        "goal_order": 1,
+        "priority": 3,
+        "title": "完成阶段一图文生产",
+        "description": "联合回归正式生产目标",
+        "target_count": int(stage["target_count"]),
+        "acceptance_criteria": "达到阶段目标数量并完成业务验收",
+        "requires_production": True,
+        "stage_id": int(stage["id"]),
+    })
+    goals.save_production_plan(sub_id, str(goal["id"]), {
+        "content_direction": "围绕已确认业务定位生产图文内容",
+        "suggested_count": int(stage["target_count"]),
+        "resource_requirements": {},
+        "priority": 3,
+        "execution_conditions": "母计划、子计划和生产线均已审核生效",
+        "acceptance_relation": "以阶段目标数量和验收证据为准",
+    })
+    store.activate_subplan_version(int(version["id"]), reviewer="test")
     line_store = ProductionLineStore(conn)
     line_draft = line_store.create_draft(
         sub_id, int(version["id"]),
@@ -94,6 +146,9 @@ def _approved_subplan(conn, sub_id: str = "integration-sub"):
         generation_source="manual", author="test",
     )
     line_store.activate(int(line_draft["id"]), reviewer="test")
+    # API middleware rolls back any transaction left open at request teardown.
+    # This fixture seeds state directly, so commit it before the first TestClient request.
+    conn.commit()
     return store, master, version, stage
 
 
@@ -176,13 +231,107 @@ def test_tenant_context_is_enforced_before_any_round_is_created(client):
 
 # ---------------------------------------------------------------- 3. 计划版本绑定
 
-def test_round_is_pinned_to_effective_version_and_survives_new_draft(client):
+@pytest.mark.asyncio
+async def test_round_is_pinned_to_effective_version_and_survives_new_draft(client, monkeypatch):
     tc, conn, _ = client
-    store, master, version, stage = _approved_subplan(conn)
+    # Production-task creation is intentionally fail-closed unless the business
+    # context is complete. Seed the same profile/North-Star/confirmed-diagnosis
+    # prerequisites as the full T8 API happy path rather than bypassing the gate.
+    from src.api import business_diagnosis
+    from src.core.business_diagnosis import collect_business_context
 
-    created = tc.post("/api/subplans/integration-sub/rounds", json={"topic_count": 3})
-    assert created.status_code == 201
+    async def fake_diagnosis(conn, cfg):
+        context = collect_business_context(conn, cfg)
+        return (
+            {"business_summary": {"claim": "版本绑定测试业务", "classification": "fact"},
+             "assumptions": [], "source_references": []},
+            context["context"], "subplan-version-test-model",
+        )
+
+    monkeypatch.setattr(business_diagnosis, "generate_diagnosis", fake_diagnosis)
+    profile = tc.put("/api/business-profile", json={
+        "business_name": "子计划版本绑定验收业务", "industry": "测试行业",
+        "business_model": "图文内容运营", "business_stage": "测试阶段",
+        "operating_goal": "完成图文内容生产",
+    })
+    assert profile.status_code == 200, profile.text
+    # business_profile_snapshot 触发器在母计划批准瞬间冻结 catalog 状态；必须在批准前 seed
+    offering = tc.post("/api/business-profile/items/service", json={
+        "name": "联调业务内容服务",
+        "details": {"scope": "专业内容生产", "delivery": "四平台图文交付"},
+    })
+    assert offering.status_code == 200, offering.text
+    north_star = tc.put("/api/north-star", json={
+        "change_reason": "建立版本绑定验收账号组北极星",
+        "snapshot": {
+            "positioning": "测试业务定位", "business_direction": "图文内容运营",
+            "target_users": "目标测试用户", "core_value": "稳定生产高质量内容",
+            "long_term_content_direction": "围绕核心业务持续输出",
+            "business_model": "内容营销", "long_term_goals": "建立可持续内容生产体系",
+        },
+    })
+    assert north_star.status_code == 200, north_star.text
+    analyzed = tc.post("/api/business-diagnosis/analyze")
+    assert analyzed.status_code == 201, analyzed.text
+    diagnosis_id = analyzed.json()["report"]["id"]
+    confirmed = tc.post(f"/api/business-diagnosis/{diagnosis_id}/confirm")
+    assert confirmed.status_code == 200, confirmed.text
+    master_draft = tc.post("/api/plans", json={
+        "topic_count_per_platform": 1, "dimension_allocation": {},
+        "enabled_platforms": ["xhs"], "content_format": "image_text",
+        "per_platform": {"xhs": {"topic_count": 1, "publish_slots": ["20:00"]}},
+        "cadence": {"round_interval_days": 1, "rounds_planned": 1},
+        "change_note": "版本绑定测试母计划",
+    })
+    assert master_draft.status_code == 200, master_draft.text
+    master_id = int(master_draft.json()["draft"]["id"])
+    master_review = tc.post(f"/api/plans/{master_id}/review", json={"action": "approve"})
+    assert master_review.status_code == 200, master_review.text
+    store, master, version, stage = _approved_subplan(conn, master_version_id=master_id)
+
+    # Multi-item batches conflict with the tenant's single-active-line invariant.
+    # Reject before opening a round, rather than failing halfway through task inserts.
+    rounds_before = int(conn.execute("SELECT COUNT(*) FROM spiral_rounds").fetchone()[0])
+    batch = tc.post("/api/subplans/integration-sub/rounds", json={"topic_count": 3})
+    assert batch.status_code == 409
+    assert "topic_count 必须为 1" in batch.json()["detail"]
+    assert int(conn.execute("SELECT COUNT(*) FROM spiral_rounds").fetchone()[0]) == rounds_before
+    # A rejected multi-item request must not revoke the approved authorization
+    # or mutate the active production-line binding before the next valid request.
+    state_after_rejection = conn.execute(
+        """SELECT p.status AS subplan_status,v.status AS version_status,
+                  m.status AS master_status,pl.status AS line_status,
+                  plv.status AS line_version_status,
+                  plv.sub_plan_version_id AS line_subplan_version_id,
+                  p.current_version_id
+           FROM sub_plans p
+           LEFT JOIN sub_plan_versions v ON v.id=p.current_version_id
+           LEFT JOIN master_plan_versions m ON m.id=p.master_plan_version_id
+           LEFT JOIN production_lines pl ON pl.sub_plan_id=p.id
+           LEFT JOIN production_line_versions plv ON plv.id=pl.current_version_id
+           WHERE p.id='integration-sub'"""
+    ).fetchone()
+    assert state_after_rejection is not None, "rejected request removed the subplan"
+    assert state_after_rejection["subplan_status"] == "active", dict(state_after_rejection)
+    assert state_after_rejection["version_status"] == "effective", dict(state_after_rejection)
+    assert state_after_rejection["master_status"] == "effective", dict(state_after_rejection)
+    assert state_after_rejection["line_status"] == "active", dict(state_after_rejection)
+    assert state_after_rejection["line_version_status"] == "effective", dict(state_after_rejection)
+    assert state_after_rejection["line_subplan_version_id"] == state_after_rejection["current_version_id"], dict(state_after_rejection)
+
+    created = tc.post("/api/subplans/integration-sub/rounds", json={"topic_count": 1})
+    assert created.status_code == 201, created.text
+    assert created.json()["topic_count"] == 1
+    assert created.json()["production_task_count"] == 1
     round_id = int(created.json()["round_id"])
+    task_rows = conn.execute(
+        "SELECT t.id,t.task_ordinal,l.id AS line_id FROM production_tasks t "
+        "JOIN content_production_lines l ON l.production_task_id=t.id WHERE t.round_id=?",
+        (round_id,),
+    ).fetchall()
+    assert len(task_rows) == 1
+    assert int(task_rows[0]["task_ordinal"]) == 1
+    assert task_rows[0]["line_id"] == "cpl-" + task_rows[0]["id"]
 
     binding_sql = (
         "SELECT master_plan_version_id,sub_plan_id,sub_plan_version_id,sub_plan_stage_id,"
@@ -202,6 +351,30 @@ def test_round_is_pinned_to_effective_version_and_survives_new_draft(client):
     assert int(conn.execute(
         "SELECT COUNT(*) FROM production_tasks WHERE round_id=?", (round_id,)
     ).fetchone()[0]) == 0
+
+    # Store-level audit records must retain enqueue-time initiator and actual worker identity.
+    from src.core.content_production_line_store import ContentProductionLineStore
+    from src.core.task_context import bind_task_identity
+    with bind_task_identity(
+        initiating_actor="session:0123456789abcdef0123",
+        executing_actor="service:global-task-worker",
+        tenant_id="tenant-integration",
+        task_id="queue-task-123",
+    ):
+        ContentProductionLineStore(conn, tenant_id="tenant-integration").transition(
+            task_rows[0]["line_id"], event_type="aborted",
+            actor="service:global-task-worker", reason="audit-context regression",
+        )
+    audit = conn.execute(
+        """SELECT actor_type,actor_id,tenant_id,initiating_actor,executing_actor,task_id
+           FROM content_production_line_events
+           WHERE content_production_line_id=? AND event_type='aborted'""",
+        (task_rows[0]["line_id"],),
+    ).fetchone()
+    assert tuple(audit) == (
+        "session", "0123456789abcdef0123", "tenant-integration",
+        "session:0123456789abcdef0123", "service:global-task-worker", "queue-task-123",
+    )
 
     # 修改子计划只产生新的草稿版本，审核生效前不得改写既有轮次。
     revised = tc.patch("/api/subplans/integration-sub", json={

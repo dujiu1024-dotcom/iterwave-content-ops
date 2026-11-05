@@ -124,6 +124,7 @@ class SchedulerEngine:
             self.scheduler.start(paused=True)
             self._register_all_jobs()
             self._bind_persisted_data_fetch_jobs()
+            self._bind_persisted_review_tasks()
             self.scheduler.resume()
         except Exception:
             if _ENGINES.get(self.engine_key) is self:
@@ -147,6 +148,29 @@ class SchedulerEngine:
             kwargs["engine_key"] = self.engine_key
             self.scheduler.modify_job(job.id, kwargs=kwargs)
 
+    def _bind_persisted_review_tasks(self) -> None:
+        """应用重启后重新登记尚未完成的独立复盘任务。"""
+        if self.conn is None:
+            return
+        try:
+            rows = self.conn.execute(
+                """SELECT task_id,scheduled_at,attempt_count,max_attempts,status
+                   FROM review_tasks
+                   WHERE status IN ('scheduled','pending','partial','failed','running')
+                     AND attempt_count < max_attempts
+                   ORDER BY scheduled_at,task_id"""
+            ).fetchall()
+        except Exception:
+            logger.exception("[APS] 独立复盘任务恢复查询失败")
+            return
+        for row in rows:
+            run_at = parse_persisted_datetime(row["scheduled_at"], self.cfg) or storage_now()
+            if run_at < storage_now():
+                run_at = storage_now()
+            self.schedule_review_collection(
+                row["task_id"], run_at, attempt=max(1, int(row["attempt_count"] or 0) + 1),
+            )
+
     def shutdown(self) -> None:
         """停止调度器并解除本引擎注册；未启动时也可安全调用。"""
         try:
@@ -164,6 +188,7 @@ class SchedulerEngine:
         task_types = {
             "_job_publish_polling": "publish_polling",
             "_job_data_fetch": "data_fetch",
+            "_job_review_collection": "data_fetch",
             "_job_daily_ops": "daily_ops",
             "_job_comment_polling": "comment_polling",
             "_job_cb_recovery": "cb_recovery",
@@ -428,6 +453,54 @@ class SchedulerEngine:
         )
         logger.info("📅 注册 data_fetch: draft=%s attempt=%d run_at=%s",
                     draft_id, attempt, run_at.isoformat())
+
+    def schedule_review_collection(
+        self, task_id: str, run_at: datetime, attempt: int = 1,
+    ) -> None:
+        """安排独立复盘采集；任务与生产线状态机解耦，优先使用全局持久化队列。"""
+        if run_at.tzinfo is None:
+            run_at = run_at.replace(tzinfo=configured_business_zone(self.cfg))
+        cycle_row = self.conn.execute(
+            "SELECT collection_cycle_id,created_by FROM review_tasks WHERE task_id=?", (task_id,),
+        ).fetchone() if self.conn is not None else None
+        cycle_id = str(cycle_row["collection_cycle_id"] or "initial") if cycle_row else "initial"
+        from ...core.task_context import current_task_identity
+        active_identity = current_task_identity()
+        stored_initiator = str(cycle_row["created_by"] or "") if cycle_row else ""
+        initiating_actor = (
+            stored_initiator
+            if stored_initiator and stored_initiator != "legacy:unattributed"
+            else active_identity.get("initiating_actor") or "system:legacy-unattributed"
+        )
+        active_engine = _ENGINES.get(self.engine_key)
+        if active_engine is not None and active_engine is not self:
+            active_engine.schedule_review_collection(task_id, run_at, attempt)
+            return
+        if self.task_queue is not None and self.tenant_id:
+            self.task_queue.enqueue(
+                task_type="scheduler_job",
+                tenant_id=self.tenant_id,
+                aggregate_id=f"_job_review_collection:{task_id}:{cycle_id}:{attempt}",
+                payload={
+                    "method": "_job_review_collection",
+                    "args": [task_id, attempt, cycle_id],
+                    "initiating_actor": initiating_actor,
+                },
+                available_at=run_at,
+            )
+            logger.info(
+                "📊 独立复盘采集已入全局队列 task=%s cycle=%s attempt=%d run_at=%s",
+                task_id, cycle_id, attempt, run_at.isoformat(),
+            )
+            return
+        self.scheduler.add_job(
+            _run_review_collection, DateTrigger(run_date=run_at),
+            id=f"review_collect_{task_id}_{cycle_id}_a{attempt}",
+            kwargs={"engine_key": self.engine_key, "task_id": task_id, "attempt": attempt, "cycle_id": cycle_id},
+            replace_existing=True,
+        )
+        logger.info("📅 注册独立复盘采集 task=%s cycle=%s attempt=%d run_at=%s",
+                    task_id, cycle_id, attempt, run_at.isoformat())
 
     def _metrics_retry_params(self) -> tuple[int, int]:
         """返回配置化的数据采集重试次数与间隔（分钟）。"""
@@ -743,6 +816,139 @@ class SchedulerEngine:
             ],
             "attempt": attempt,
             "retry_scheduled": retry_scheduled,
+        }
+
+    async def _job_review_collection(
+        self, task_id: str, attempt: int = 1, cycle_id: str | None = None,
+    ) -> dict:
+        """独立复盘任务到期后重新读取平台指标；失败/部分成功按配置重试。"""
+        from ...adapters.base import Platform
+        from ...core.operating_feedback import create_collection_run
+        from ...core.task_context import current_task_identity
+
+        if self.conn is None:
+            return {"final_status": "failed", "errors": ["复盘采集数据库连接未注入"]}
+        row = self.conn.execute(
+            """SELECT rt.*,d.draft_id AS platform_draft_id,c.title,
+                      pv.published_at
+               FROM review_tasks rt
+               JOIN drafts d ON d.id=rt.draft_id
+               JOIN contents c ON c.id=rt.content_id
+               JOIN content_publish_verifications pv ON pv.verification_id=rt.verification_id
+               WHERE rt.task_id=?""",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            return {"final_status": "failed", "errors": ["独立复盘任务不存在"]}
+        if row["status"] in {"completed", "cancelled"}:
+            return {"final_status": row["status"], "skipped": True}
+        current_cycle_id = str(row["collection_cycle_id"] or "initial")
+        if cycle_id and cycle_id != current_cycle_id:
+            return {"final_status": "skipped", "reason": "复盘重试周期已更新，忽略过期任务"}
+        cycle_id = current_cycle_id
+        max_attempts = max(1, int(row["max_attempts"] or self._metrics_retry_params()[0]))
+        if attempt > max_attempts:
+            return {"final_status": "failed", "errors": ["独立复盘自动重试次数已耗尽"]}
+        idempotency_key = f"review:{task_id}:{cycle_id}:attempt:{attempt}"
+        existing_run = self.conn.execute(
+            "SELECT run_id,status,error_message FROM review_collection_runs WHERE idempotency_key=?",
+            (idempotency_key,),
+        ).fetchone()
+        if existing_run:
+            existing_status = existing_run["status"]
+            retry_scheduled = False
+            if existing_status in {"failed", "partial"} and attempt < max_attempts:
+                _, interval_min = self._metrics_retry_params()
+                next_at = storage_now() + timedelta(minutes=max(1, interval_min))
+                self.schedule_review_collection(task_id, next_at, attempt=attempt + 1)
+                with self.conn:
+                    self.conn.execute(
+                        "UPDATE review_tasks SET status='scheduled',scheduled_at=?,updated_at=? WHERE task_id=?",
+                        (next_at.isoformat(timespec="seconds"), storage_now().isoformat(timespec="seconds"), task_id),
+                    )
+                retry_scheduled = True
+            return {
+                "final_status": "success" if existing_status == "succeeded" else existing_status,
+                "task_id": task_id, "run_id": existing_run["run_id"], "attempt": attempt,
+                "retry_scheduled": retry_scheduled, "already_recorded": True,
+                "error": existing_run["error_message"],
+            }
+        with self.conn:
+            self.conn.execute(
+                "UPDATE review_tasks SET status='running',updated_at=? WHERE task_id=?",
+                (storage_now().isoformat(timespec="seconds"), task_id),
+            )
+
+        platform = Platform(row["platform"])
+        adapter = self.adapters.get(platform)
+        error = ""
+        snapshot = None
+        if adapter is None:
+            error = f"{platform.display_name} 数据采集适配器未启用或不可用"
+        else:
+            try:
+                async with self.platform_locks[platform]:
+                    snapshot = await adapter.fetch_metrics(
+                        row["platform_draft_id"], row["title"] or "",
+                    )
+            except Exception as exc:
+                logger.exception("[APS] 独立复盘平台采集异常 task=%s", task_id)
+                error = f"平台采集异常（{type(exc).__name__}）"
+
+        metrics = {}
+        collection_status = "failed"
+        if snapshot is not None:
+            status_value = snapshot.fetch_status.value
+            metrics = {
+                key: getattr(snapshot, key, None)
+                for key in (
+                    "views", "likes", "collects", "comments", "shares",
+                    "new_followers", "like_rate", "collect_rate",
+                    "interaction_rate", "follower_efficiency",
+                )
+                if getattr(snapshot, key, None) is not None
+            }
+            if status_value == "success":
+                collection_status = "succeeded"
+            elif status_value == "partial":
+                collection_status = "partial"
+            else:
+                collection_status = "failed"
+                error = str(snapshot.error_msg or f"平台返回采集状态：{status_value}")
+        if collection_status in {"succeeded", "partial"} and not metrics:
+            collection_status = "failed"
+            error = error or "平台未返回可用的数值指标"
+        if collection_status == "failed":
+            metrics = {}
+
+        now = storage_now().isoformat(timespec="seconds")
+        task_identity = current_task_identity()
+        with self.conn:
+            run = create_collection_run(
+                self.conn, task_id=task_id, source="platform_readback",
+                status=collection_status, metrics=metrics,
+                actor=task_identity.get("executing_actor") or "system:review-worker",
+                window_start=row["published_at"], window_end=now,
+                timezone_name=self.cfg.business_timezone,
+                error_message=error,
+                idempotency_key=idempotency_key,
+                measured_at=now,
+            )
+        retry_scheduled = False
+        if collection_status in {"failed", "partial"} and attempt < max_attempts:
+            _, interval_min = self._metrics_retry_params()
+            next_at = storage_now() + timedelta(minutes=max(1, interval_min))
+            self.schedule_review_collection(task_id, next_at, attempt=attempt + 1)
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE review_tasks SET status='scheduled',scheduled_at=?,updated_at=? WHERE task_id=?",
+                    (next_at.isoformat(timespec="seconds"), storage_now().isoformat(timespec="seconds"), task_id),
+                )
+            retry_scheduled = True
+        return {
+            "final_status": "success" if collection_status == "succeeded" else collection_status,
+            "task_id": task_id, "run_id": run["run_id"], "attempt": attempt,
+            "retry_scheduled": retry_scheduled, "error": error or None,
         }
 
     async def _job_daily_ops(self) -> dict:
@@ -1645,7 +1851,7 @@ async def _invoke(engine, method_name: str, *args) -> None:
     queue = getattr(engine, "task_queue", None)
     tenant_id = getattr(engine, "tenant_id", None)
     queued_methods = {
-        "_job_publish_polling", "_job_data_fetch", "_job_daily_ops",
+        "_job_publish_polling", "_job_data_fetch", "_job_review_collection", "_job_daily_ops",
         "_job_comment_polling", "_job_cb_recovery", "_job_kb_scan",
         "_job_kb_sync", "_job_hot_topics_refresh", "_job_data_retention_cleanup",
         "_job_round_timeout_sweeper", "_job_round_review", "_job_autogrow_next_round",
@@ -1689,6 +1895,15 @@ async def _run_data_fetch(engine_key: str | None = None, draft_id: str = "", att
     engine = _engine_for(engine_key)
     if engine is not None and draft_id:
         await _invoke(engine, "_job_data_fetch", draft_id, attempt)
+
+
+async def _run_review_collection(
+    engine_key: str | None = None, task_id: str = "", attempt: int = 1,
+    cycle_id: str | None = None,
+) -> None:
+    engine = _engine_for(engine_key)
+    if engine is not None and task_id:
+        await _invoke(engine, "_job_review_collection", task_id, attempt, cycle_id)
 
 
 async def _run_hot_topics_refresh(engine_key: str | None = None) -> None:

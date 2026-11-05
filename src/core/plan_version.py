@@ -304,11 +304,41 @@ def suggest_plan_from_goal(cfg, conn, goal_id: str, current_plan: Optional[dict]
     col = METRIC_COLUMNS.get(metric)
     contents_needed = None
     if col and col[1] == "sum":
-        where, params = [f"{col[0]} IS NOT NULL", "fetch_status IN ('success','partial')"], []
+        from .timezone import business_date_cutoffs, timestamp_since_sql, timestamp_before_exclusive_sql
+        where = [
+            "metric_key = ?", "value IS NOT NULL",
+            "collection_status IN ('succeeded','partial')",
+        ]
+        params = [col[0]]
         if g.get("target_platform"):
             where.append("platform = ?")
             params.append(g["target_platform"])
-        r = conn.execute(f"SELECT AVG({col[0]}), COUNT(*) FROM metrics WHERE " + " AND ".join(where), params).fetchone()
+        period_valid = True
+        try:
+            if g.get("metric_period_start"):
+                start_utc, start_legacy = business_date_cutoffs(
+                    str(g["metric_period_start"])[:10], cfg,
+                )
+                where.append(timestamp_since_sql("measured_at"))
+                params.extend((start_utc, start_legacy))
+            if g.get("metric_period_end"):
+                from datetime import date, timedelta
+                end_exclusive = date.fromisoformat(str(g["metric_period_end"])[:10]) + timedelta(days=1)
+                end_utc, end_legacy = business_date_cutoffs(end_exclusive.isoformat(), cfg)
+                where.append(timestamp_before_exclusive_sql("measured_at"))
+                params.extend((end_utc, end_legacy))
+        except (TypeError, ValueError):
+            period_valid = False
+        if not period_valid:
+            where.append("0 = 1")
+        r = conn.execute(
+            "WITH ranked AS (SELECT value,ROW_NUMBER() OVER ("
+            "PARTITION BY tenant_id,content_id,platform,metric_key "
+            "ORDER BY measured_at DESC,recorded_at DESC,fact_id DESC) rn "
+            "FROM metric_facts_effective WHERE " + " AND ".join(where) + ") "
+            "SELECT AVG(value),COUNT(value) FROM ranked WHERE rn=1",
+            params,
+        ).fetchone()
         per_content, n = (float(r[0]) if r and r[0] is not None else None), int(r[1] or 0)
         rate = GoalProgressUpdater.achievement_rate(
             g.get("current_value"), g.get("baseline_value"), g.get("target_value"), g.get("metric_scope"))
