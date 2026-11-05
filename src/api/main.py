@@ -506,7 +506,7 @@ def _build_tenant_runtime_context(
         spiral = SpiralEngine(cfg, conn)
         scheduler = SchedulerEngine(cfg, cfg.resolve_path(cfg.paths.db_file))
         ops = OperationsEngine(cfg, conn, adapters, cb, rhythm)
-        notifier = Notifier(cfg, conn)
+        notifier = Notifier(cfg, conn, tenant_name=registry.get(tenant_id)["name"])
         executor = RoundExecutor(
             cfg, conn, scoring, guard, adapters, sm_round, sm_draft,
             circuit_breaker=cb, notifier=notifier,
@@ -842,7 +842,7 @@ def _build_app() -> FastAPI:
         spiral = SpiralEngine(cfg, conn)
         scheduler = SchedulerEngine(cfg, cfg.resolve_path(cfg.paths.db_file))
         ops = OperationsEngine(cfg, conn, adapters, cb, rhythm)
-        notifier = Notifier(cfg, conn)
+        notifier = Notifier(cfg, conn, tenant_name=tenant_registry.get(active_tenant_id)["name"])
         set_active_notifier(notifier)
         executor = RoundExecutor(
             cfg, conn, scoring, guard, adapters, sm_round, sm_draft,
