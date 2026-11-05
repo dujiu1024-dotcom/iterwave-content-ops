@@ -260,7 +260,6 @@ async def generate_master_plan_draft(conn, cfg) -> dict[str, Any]:
     # closes the gap between re-checking diagnosis data and persisting the draft.
     conn.execute("BEGIN IMMEDIATE")
     try:
-        after = collect_business_context(conn, cfg)
         after_governance = collect_strategy_governance(conn)
         latest_again = conn.execute(
             "SELECT id,status,version_no FROM business_diagnosis_reports ORDER BY version_no DESC LIMIT 1"
