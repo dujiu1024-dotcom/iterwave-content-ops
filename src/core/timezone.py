@@ -186,6 +186,39 @@ def business_date_predicate(
 
 
 
+def business_date_range_predicate(
+    column: str, start_day: str, end_day_exclusive: str, cfg=None, *, legacy_timezone=None,
+) -> tuple[str, tuple[str, str, str, str]]:
+    """Return a half-open business-date range predicate for mixed timestamp storage.
+
+    Offset-aware values are compared as UTC instants. Legacy naive values are
+    interpreted using the column's documented historical timezone. The end day
+    is exclusive, avoiding second-precision end-of-day truncation.
+    """
+    if not re.fullmatch(
+        r"(?:[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)?|"
+        r"COALESCE\\([A-Za-z_][A-Za-z0-9_]*,\\s*[A-Za-z_][A-Za-z0-9_]*\\))",
+        column,
+    ):
+        raise ValueError("invalid timestamp column")
+    start = date.fromisoformat(str(start_day))
+    end = date.fromisoformat(str(end_day_exclusive))
+    if end <= start:
+        raise ValueError("end_day_exclusive must be after start_day")
+    utc_start, legacy_start = business_date_cutoffs(start.isoformat(), cfg, legacy_timezone=legacy_timezone)
+    utc_end, legacy_end = business_date_cutoffs(end.isoformat(), cfg, legacy_timezone=legacy_timezone)
+    value = f"COALESCE({column}, '')"
+    aware = (
+        f"(instr(substr({value}, 20), '+') > 0 "
+        f"OR instr(substr({value}, 20), '-') > 0 OR substr({value}, -1) = 'Z')"
+    )
+    sql = (
+        f"(({aware} AND datetime({column}) >= datetime(?) AND datetime({column}) < datetime(?)) "
+        f"OR (NOT {aware} AND datetime({column}) >= datetime(?) AND datetime({column}) < datetime(?)))"
+    )
+    return sql, (utc_start, utc_end, legacy_start, legacy_end)
+
+
 def parse_server_local_legacy_datetime(value) -> datetime | None:
     """Parse pre-UTC naive state-machine timestamps written in the host's local timezone.
 
