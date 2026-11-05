@@ -51,8 +51,8 @@ def test_subgoal_actor_migration_marks_history_and_adds_author_columns():
         CREATE TABLE sub_plan_versions(id INTEGER PRIMARY KEY);
         CREATE TABLE sub_plan_stages(id INTEGER PRIMARY KEY, sub_plan_version_id INTEGER);
         CREATE TABLE production_tasks(id TEXT PRIMARY KEY);
-        CREATE TABLE content_production_line_events(id INTEGER PRIMARY KEY);
-        CREATE TABLE production_context_waivers(id TEXT PRIMARY KEY);
+        CREATE TABLE content_production_line_events(id INTEGER PRIMARY KEY, created_at TEXT);
+        CREATE TABLE production_context_waivers(id TEXT PRIMARY KEY, created_at TEXT);
     """)
     root = Path(__file__).resolve().parents[1] / "migrations"
     conn.executescript((root / "149_subgoal_tree_dependency_gates.sql").read_text(encoding="utf-8"))
