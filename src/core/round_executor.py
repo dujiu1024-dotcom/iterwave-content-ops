@@ -1157,12 +1157,13 @@ class RoundExecutor:
                     for asset in frozen_task_input.get("original_assets", []):
                         self.conn.execute(
                             """INSERT OR IGNORE INTO production_task_asset_usages(
-                                production_task_id,original_asset_id,asset_version_no,permission_snapshot,privacy_snapshot
-                            ) VALUES(?,?,?,'allowed',?)""",
+                                production_task_id,original_asset_id,asset_version_no,
+                                permission_snapshot,privacy_snapshot,asset_quality_snapshot
+                            ) VALUES(?,?,?,'allowed',?,?)""",
                             (
                                 task["id"], int(asset["asset_id"]), int(asset["version_no"]),
+                                asset.get("privacy_status", "unknown"),
                                 json.dumps({
-                                    "privacy_status": asset.get("privacy_status", "unknown"),
                                     "readability_status": asset.get("readability_status", "unknown"),
                                     "completeness_status": asset.get("completeness_status", "unknown"),
                                     "duplicate_status": asset.get("duplicate_status", "unknown"),
