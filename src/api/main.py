@@ -8619,8 +8619,9 @@ def _register_routes(app: FastAPI) -> None:
         from datetime import timedelta
 
         conn = _g()["conn"]
-        since_utc, since_legacy = storage_window_cutoffs(
-            _storage_now() - timedelta(days=days - 1), _g()["cfg"],
+        business_start = business_now(_g()["cfg"]).date() - timedelta(days=days - 1)
+        since_utc, since_legacy = business_date_cutoffs(
+            business_start.isoformat(), _g()["cfg"],
         )
 
         contents_created = int(conn.execute(
@@ -8690,6 +8691,7 @@ def _register_routes(app: FastAPI) -> None:
         return {
             "window_days": days,
             "since": since_utc,
+            "since_business_date": business_start.isoformat(),
             "contents_created": contents_created,
             "drafts_created": drafts_created,
             "confirmed_published": confirmed_published,
@@ -8899,8 +8901,9 @@ def _register_routes(app: FastAPI) -> None:
         """
         conn = _g()["conn"]
         # ops_logs 统计（窗口由 days 决定；1 = 今日，R6/R16 计数口径不变）
-        ops_since_utc, ops_since_legacy = storage_window_cutoffs(
-            _storage_now() - timedelta(days=max(0, days - 1)), _g()["cfg"],
+        business_start = business_now(_g()["cfg"]).date() - timedelta(days=days - 1)
+        ops_since_utc, ops_since_legacy = business_date_cutoffs(
+            business_start.isoformat(), _g()["cfg"],
         )
         today_ops = conn.execute(
             "SELECT action_type, status, COUNT(*) AS n FROM ops_logs WHERE "
@@ -8954,6 +8957,7 @@ def _register_routes(app: FastAPI) -> None:
         return {
             "today_ops": ops_by_type,
             "window_days": days,
+            "since_business_date": business_start.isoformat(),
             "draft_status": draft_map,
             "circuit_breaker_active": [dict(r) for r in cb_active],
             "platform_stats": platform_stats,

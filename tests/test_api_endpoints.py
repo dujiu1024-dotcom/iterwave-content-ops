@@ -1344,6 +1344,40 @@ def test_ops_kpi_days_param(client):
     assert tc.get("/api/ops_kpi", params={"days": 0}).status_code == 422
     assert tc.get("/api/ops_kpi", params={"days": 999}).status_code == 422
 
+def test_kpi_one_day_window_starts_at_asia_shanghai_midnight(client, monkeypatch):
+    tc, conn, _ = client
+    monkeypatch.setattr(api_main, "business_now", lambda _cfg: datetime(2026, 11, 5, 9, 0))
+    # 17:00 UTC on Nov 4 is 01:00 on the Nov 5 Asia/Shanghai business day.
+    boundary = "2026-11-04T17:00:00+00:00"
+    conn.execute(
+        "INSERT INTO ops_logs (platform, action_type, content, executed_at, status) "
+        "VALUES ('xhs','browse','business-day boundary',?,'success')",
+        (boundary,),
+    )
+    conn.execute(
+        "INSERT INTO contents(id,platform,title,body,created_at) VALUES(?,?,?,?,?)",
+        ("business-day-content", "xhs", "业务日边界内容", "测试正文", boundary),
+    )
+    conn.execute(
+        "INSERT INTO drafts(id,content_id,platform,status,user_confirmed_at,created_at) "
+        "VALUES(?,?,?,?,?,?)",
+        ("business-day-draft", "business-day-content", "xhs", "user_published", boundary, boundary),
+    )
+    conn.commit()
+
+    ops = tc.get("/api/ops_kpi", params={"days": 1})
+    assert ops.status_code == 200, ops.text
+    assert ops.json()["since_business_date"] == "2026-11-05"
+    assert ops.json()["today_ops"]["browse"]["success"] == 1
+
+    summary = tc.get("/api/analytics/business-summary", params={"days": 1})
+    assert summary.status_code == 200, summary.text
+    assert summary.json()["since_business_date"] == "2026-11-05"
+    assert summary.json()["contents_created"] == 1
+    assert summary.json()["drafts_created"] == 1
+    assert summary.json()["confirmed_published"] == 1
+
+
 
 def test_global_todo_queue_fetches_beyond_first_500_records(client, cfg, tmp_path, monkeypatch):
     from pathlib import Path
