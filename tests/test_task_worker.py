@@ -1394,6 +1394,86 @@ def test_multiple_workers_write_only_to_task_tenant_database(tmp_path):
     asyncio.run(scenario())
 
 
+
+def test_worker_does_not_replay_after_ambiguous_artifact_completion(tmp_path, monkeypatch):
+    """A durable artifact plus failed queue finalization must never be blindly replayed."""
+    import sqlite3
+    import pytest
+
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    task, _ = queue.enqueue(
+        task_type="round_run", tenant_id="tenant-uncertain", aggregate_id="round-901",
+        payload={"round_id": 901, "operation": "run"},
+    )
+    worker = GlobalTaskWorker(queue, lambda _tenant_id: {})
+    worker.owner = "worker-uncertain"
+    claimed = queue.claim_next(worker.owner, lease_seconds=30)
+    assert claimed is not None and claimed.task_id == task.task_id
+
+    artifact_db = sqlite3.connect(tmp_path / "tenant-artifacts.sqlite3")
+    artifact_db.execute(
+        "CREATE TABLE contents(id TEXT PRIMARY KEY, round_id INTEGER NOT NULL)"
+    )
+
+    async def execute_and_persist_artifact(_task):
+        # Model the durable RoundExecutor artifact boundary: the content commit
+        # succeeded, but the separate shared-queue completion write is uncertain.
+        artifact_db.execute(
+            "INSERT INTO contents(id, round_id) VALUES('content-901', 901)"
+        )
+        artifact_db.commit()
+        return {"round_id": 901, "final_status": "completed"}
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError("simulated shared queue database outage")
+
+    monkeypatch.setattr(worker, "_run_task", execute_and_persist_artifact)
+    monkeypatch.setattr(queue, "finish", unavailable)
+    monkeypatch.setattr(queue, "fail", unavailable)
+
+    asyncio.run(worker._execute(claimed))
+
+    # Neither completion nor failure could be committed; retain running until
+    # lease recovery rather than guessing whether the execution committed.
+    saved = queue.get(task.task_id)
+    assert saved is not None and saved.status == "running"
+    assert artifact_db.execute(
+        "SELECT COUNT(*) FROM contents WHERE round_id=901"
+    ).fetchone()[0] == 1
+
+    # Simulate process death and lease expiry. Recovery marks the task interrupted;
+    # it does not enqueue an automatic replay of work with an uncertain side effect.
+    conn = queue._connect()
+    try:
+        conn.execute(
+            "UPDATE global_task_queue SET lease_expires_at='2000-01-01T00:00:00+00:00' "
+            "WHERE task_id=?", (task.task_id,),
+        )
+        conn.execute(
+            "UPDATE global_task_worker_leases SET expires_at='2000-01-01T00:00:00+00:00' "
+            "WHERE owner=?", (worker.owner,),
+        )
+    finally:
+        conn.close()
+
+    assert queue.recover_expired()["interrupted"] == 1
+    interrupted = queue.get(task.task_id)
+    assert interrupted is not None and interrupted.status == "interrupted"
+    assert queue.claim_next("replacement-worker") is None
+    with pytest.raises(ValueError, match="明确确认平台侧未执行"):
+        queue.retry_after_manual_verification(
+            task.task_id,
+            confirmed_by="operator:reviewer",
+            confirmation_note="执行结果不确定，不能确认平台侧未执行",
+            confirmed_not_executed=False,
+        )
+    assert artifact_db.execute(
+        "SELECT COUNT(*) FROM contents WHERE round_id=901"
+    ).fetchone()[0] == 1
+    artifact_db.close()
+
+
 def test_interrupted_round_reconciliation_binds_original_and_recovery_identity(tmp_path, monkeypatch):
     from src.core.task_context import current_config, current_task_identity
 
