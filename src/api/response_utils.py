@@ -31,6 +31,33 @@ def api_datetime(value, *, naive_timezone=timezone.utc):
     return parsed.isoformat()
 
 
+
+def serialize_round_detail_timestamps(round_data: dict, drafts, *, business_timezone):
+    """Serialize mixed legacy timestamp columns using their actual storage semantics.
+
+    SQLite CURRENT_TIMESTAMP columns (created_at/updated_at) are naive UTC.
+    Older phase and save timestamps may be naive Asia/Shanghai wall time.
+    """
+    result = dict(round_data)
+    for field in ("created_at", "updated_at"):
+        if result.get(field):
+            result[field] = api_datetime(result[field], naive_timezone=timezone.utc)
+    for field in ("producing_started_at", "collecting_metrics_started_at"):
+        if result.get(field):
+            result[field] = api_datetime(result[field], naive_timezone=business_timezone)
+
+    serialized_drafts = []
+    for draft in drafts:
+        item = dict(draft)
+        for field, value in tuple(item.items()):
+            if not field.endswith("_at") or not value:
+                continue
+            naive_zone = timezone.utc if field in {"created_at", "updated_at"} else business_timezone
+            item[field] = api_datetime(value, naive_timezone=naive_zone)
+        serialized_drafts.append(item)
+    return result, serialized_drafts
+
+
 def friendly_validation_messages(errors: list[dict]) -> list[str]:
     """Map Pydantic validation errors to stable Chinese messages without echoing raw input."""
     messages: list[str] = []
