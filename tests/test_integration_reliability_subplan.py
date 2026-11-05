@@ -582,7 +582,7 @@ def test_subplan_round_worker_persists_task_content_and_frozen_plan_lineage(
         path = Path(output_dir)
         path.mkdir(parents=True, exist_ok=True)
         image = path / "t8b-subplan-worker-card.png"
-        image.write_bytes(b"\\x89PNG\\r\\n\\x1a\\n" + b"deterministic-image")
+        image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"deterministic-image")
         return [str(image)], []
 
     monkeypatch.setattr(executor_module, "load_pool", lambda *_: ([topic], {}))
