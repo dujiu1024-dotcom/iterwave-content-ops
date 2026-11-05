@@ -1402,3 +1402,46 @@ def test_plan_change_audit_does_not_invent_worker_identity_for_direct_store_call
     assert tuple(row[key] for key in (
         "initiating_actor", "executing_actor", "tenant_id", "queue_task_id",
     )) == (None, None, None, None)
+
+
+def test_plan_store_audit_persists_bound_worker_identity():
+    from src.core.task_context import bind_task_identity
+
+    conn = _db()
+    conn.execute(
+        """CREATE TABLE plan_change_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, event_type TEXT NOT NULL,
+            from_version_id INTEGER, to_version_id INTEGER NOT NULL, change_reason TEXT NOT NULL,
+            before_snapshot_json TEXT, after_snapshot_json TEXT NOT NULL,
+            affected_tasks_json TEXT NOT NULL, actor TEXT NOT NULL,
+            initiating_actor TEXT, executing_actor TEXT, tenant_id TEXT, queue_task_id TEXT,
+            created_at TEXT NOT NULL
+        )"""
+    )
+    store = PlanVersionStore(conn)
+    with bind_task_identity(
+        initiating_actor="session:plan-initiator",
+        executing_actor="service:global-task-worker",
+        tenant_id="tenant-plan-audit",
+        task_id="queue-plan-audit-17",
+    ):
+        created = store.create_master_draft(
+            {"goal": "audit context test"},
+            author="session:plan-initiator",
+            change_note="verify worker identity propagation",
+        )
+
+    audit = conn.execute(
+        """SELECT actor,initiating_actor,executing_actor,tenant_id,queue_task_id
+           FROM plan_change_audit WHERE to_version_id=?""",
+        (created["id"],),
+    ).fetchone()
+    assert dict(audit) == {
+        "actor": "session:plan-initiator",
+        "initiating_actor": "session:plan-initiator",
+        "executing_actor": "service:global-task-worker",
+        "tenant_id": "tenant-plan-audit",
+        "queue_task_id": "queue-plan-audit-17",
+    }
+    conn.close()
