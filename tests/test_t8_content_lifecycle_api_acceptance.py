@@ -186,6 +186,47 @@ def test_content_review_publish_metrics_and_effect_feedback_api_chain(content_cl
     assert evidence["published_count"] == 1
     assert evidence["manual_metrics"]["views"] == 120.0
 
+    # A feedback-derived adjustment must retain the exact review/evidence provenance
+    # and create a draft only; it must not mutate the effective sub-plan in place.
+    source_version = conn.execute(
+        "SELECT sub_plan_version_id FROM sub_plan_stages WHERE id=?", (stage_id,),
+    ).fetchone()["sub_plan_version_id"]
+    master_version = conn.execute(
+        "SELECT master_plan_version_id FROM sub_plan_versions WHERE id=?", (source_version,),
+    ).fetchone()["master_plan_version_id"]
+    conn.execute("UPDATE master_plan_versions SET status='effective' WHERE id=?", (master_version,))
+    conn.execute("UPDATE sub_plan_versions SET status='effective' WHERE id=?", (source_version,))
+    conn.commit()
+    original_snapshot = conn.execute(
+        "SELECT snapshot_json FROM sub_plan_versions WHERE id=?", (source_version,),
+    ).fetchone()["snapshot_json"]
+
+    missing_source = client.post(
+        "/api/plan_adjustments/adopt",
+        json={"dimensions": ["内容结构"], "effect_review_id": 999999},
+    )
+    assert missing_source.status_code == 404
+
+    adopted = client.post(
+        "/api/plan_adjustments/adopt",
+        json={"dimensions": ["内容结构"], "effect_review_id": recorded.json()["id"]},
+    )
+    assert adopted.status_code == 200, adopted.text
+    assert adopted.json()["effective"] is False
+    assert adopted.json()["requires_human_review"] is True
+    assert len(adopted.json()["drafts"]) == 1
+    draft_version = adopted.json()["drafts"][0]["draft_version"]
+    provenance = json.loads(draft_version["snapshot_json"])["review_adoptions"][-1]["effect_feedback"]
+    assert provenance["id"] == recorded.json()["id"]
+    assert provenance["stage_id"] == stage_id
+    assert provenance["stage_key"] == "t8-b-stage"
+    assert provenance["source_sub_plan_version_id"] == source_version
+    assert provenance["recommendation"] == "保持当前选题方向，并增加同类内容样本。"
+    assert provenance["evidence"]["manual_metrics"]["views"] == 120.0
+    assert conn.execute(
+        "SELECT snapshot_json FROM sub_plan_versions WHERE id=?", (source_version,),
+    ).fetchone()["snapshot_json"] == original_snapshot
+
 
 def test_content_review_rejection_requires_resubmission_before_approval(content_client):
     client, conn, seed = content_client
