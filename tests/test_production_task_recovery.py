@@ -11,7 +11,7 @@ from src.core.production_task_recovery import (
 
 
 @pytest.fixture
-def store():
+def store(monkeypatch):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript("""
@@ -52,6 +52,22 @@ def store():
             UNIQUE(task_id,attempt_no)
         );
     """)
+    # These tests isolate task lease/reconciliation behavior. The complete
+    # business-context assembler and production-line persistence are covered by
+    # integration/API acceptance tests with the full migrated schema.
+    monkeypatch.setattr(
+        "src.core.production_context.build_production_context_snapshot",
+        lambda _conn, **_kwargs: {
+            "context": {"snapshot_id": "recovery-test-snapshot", "plan_versions": {}},
+            "captured_at": "2026-11-05T00:00:00+00:00",
+            "context_status": "complete", "waiver": None,
+            "fingerprint": "recovery-test-fingerprint",
+        },
+    )
+    monkeypatch.setattr(
+        "src.core.content_production_line_store.ContentProductionLineStore.attach_snapshot",
+        lambda _self, _task_id, _snapshot: {},
+    )
     yield ProductionTaskStore(conn)
     conn.close()
 
