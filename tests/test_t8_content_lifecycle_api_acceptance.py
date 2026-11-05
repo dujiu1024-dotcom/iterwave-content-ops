@@ -533,7 +533,7 @@ def test_feedback_adoption_requires_formal_version_review_and_preserves_history(
     new_feedback = client.post(
         f"/api/subplans/stages/{new_stage_id}/effect-feedback",
         json={
-            "assessment": "mixed",
+            "assessment": "effective",
             "recommendation": "调整发布节奏后继续观察。",
             "evidence_note": "新生效版本的独立反馈。",
             "confidence": "medium",
