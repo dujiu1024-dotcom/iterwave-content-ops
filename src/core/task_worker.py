@@ -340,7 +340,7 @@ class GlobalTaskWorker:
             with (
                 bind_config(cfg),
                 bind_task_identity(
-                    initiating_actor=task.payload.get("initiating_actor"),
+                    initiating_actor=task.payload.get("initiating_actor") or "system:legacy-unattributed",
                     executing_actor="service:global-task-recovery",
                     tenant_id=task.tenant_id,
                     task_id=task.task_id,
