@@ -1067,42 +1067,19 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
             if stage["status"] == "pending":
                 s.update_stage_status(int(stage["id"]), "in_progress")
             round_id = int(created["round_id"])
-            # A production round is the durable entry point for one task per requested
-            # content item. Keep task creation inside this API transaction so a partial
-            # round can never be exposed without its attributable work items.
-            from src.core.production_task_store import ProductionTaskStore
-            task_store = ProductionTaskStore(conn)
-            production_task_ids = []
-            for ordinal in range(1, topic_count + 1):
-                task = task_store.create_task(
-                    round_id=round_id,
-                    master_plan_version_id=int(identity["master_plan_version_id"]),
-                    sub_plan_id=sub_plan_id,
-                    sub_plan_version_id=int(identity["current_version_id"]),
-                    strategy_step_id=str(stage["stage_key"]),
-                    platform=str(identity["platform"]),
-                    task_ordinal=ordinal,
-                    idempotency_key=(
-                        f"round:{round_id}:stage:{stage['stage_key']}:item:{ordinal}"
-                    ),
-                    input_snapshot={
-                        "trigger_source": "manual",
-                        "topic_count": topic_count,
-                        "production_line_version_id": line_version_id,
-                        "production_line_stage": line_stage,
-                        "dependency_outcomes": ready_stage.get("dependency_outcomes", {}),
-                    },
-                    production_line_version_id=line_version_id,
-                )
-                production_task_ids.append(task["id"])
+            # Do not create placeholder production_tasks here. The executor selects
+            # concrete topics and owns the canonical topic/platform idempotency key.
+            # Pre-creating ordinal-only rows here created a second, incompatible key
+            # space and left permanently pending tasks beside the executor's real work.
             number = int(conn.execute("SELECT round_number FROM spiral_rounds WHERE id=?", (round_id,)).fetchone()[0])
             return {"round_id": round_id, "round_number": number, "deduped": created["deduped"],
                     "topic_count": topic_count, "platforms": [identity["platform"]],
                     "bound_subplan_version_id": identity["current_version_id"],
                     "bound_production_line_version_id": line_version_id,
                     "bound_stage_id": stage["id"],
-                    "production_task_ids": production_task_ids,
-                    "production_task_count": len(production_task_ids),
+                    "production_task_ids": [],
+                    "production_task_count": 0,
+                    "task_creation": "deferred_to_round_executor",
                     "dependency_outcomes": ready_stage.get("dependency_outcomes", {})}
         except HTTPException:
             raise

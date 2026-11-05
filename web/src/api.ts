@@ -2244,6 +2244,20 @@ export const api = {
       `/api/subplans/${encodeURIComponent(id)}/stages/${stageId}/outcomes`,
       { method: "POST", body: JSON.stringify(data) },
     ),
+  createSubplanRound: (id: string, data: { topic_count?: number }) =>
+    fetchJson<{ round_id: number; round_number: number; topic_count: number; platforms: Platform[]; production_task_count: number; task_creation: string }>(
+      `/api/subplans/${encodeURIComponent(id)}/rounds`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+  reviewSubplanStageCondition: (id: string, stageId: number, data: {
+    condition_type: "business" | "effect"; decision: "passed" | "failed" | "needs_review";
+    reason: string; evidence: Record<string, unknown>; confidence?: "low" | "medium" | "high";
+    recommendation?: string;
+  }) =>
+    fetchJson<{ stage: SubPlanStageRecord; completion_gates: Record<string, unknown> }>(
+      `/api/subplans/${encodeURIComponent(id)}/stages/${stageId}/condition-review`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
   reviewSubplan: (id: string, versionId: number, action: "approve" | "reject", reason?: string) =>
     fetchJson<{ version: SubPlanVersionRecord; authorization: string }>(`/api/subplans/${encodeURIComponent(id)}/review`, {
       method: "POST", body: JSON.stringify({ version_id: versionId, action, reason }),

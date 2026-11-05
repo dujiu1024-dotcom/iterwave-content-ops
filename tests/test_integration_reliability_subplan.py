@@ -197,6 +197,11 @@ def test_round_is_pinned_to_effective_version_and_survives_new_draft(client):
     assert bound["plan_attribution_status"] == "resolved"
     assert bound["production_line_version_id"] is not None
     assert json.loads(bound["sub_plan_snapshot"])["title"] == "联调子计划"
+    assert created.json()["task_creation"] == "deferred_to_round_executor"
+    assert created.json()["production_task_count"] == 0
+    assert int(conn.execute(
+        "SELECT COUNT(*) FROM production_tasks WHERE round_id=?", (round_id,)
+    ).fetchone()[0]) == 0
 
     # 修改子计划只产生新的草稿版本，审核生效前不得改写既有轮次。
     revised = tc.patch("/api/subplans/integration-sub", json={
@@ -516,3 +521,64 @@ def test_autogrow_round_is_queued_then_executed_by_worker(cfg, conn, seed, tmp_p
     assert observed["round_id"] == round_id
     assert observed["kwargs"]["platform_values"] == ["xhs"]
     assert observed["kwargs"]["feedback"] is None
+
+
+
+def test_manual_subplan_round_is_queued_without_placeholder_tasks(client, tmp_path, monkeypatch):
+    tc, conn, _ = client
+    _approved_subplan(conn, "manual-queue-sub")
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    monkeypatch.setattr(api_main, "_task_queue", queue)
+    monkeypatch.setattr(api_main, "_build_task_execution_snapshot", lambda *args, **kwargs: {})
+    api_main._g_ctx["runtime_tenant_id"] = "default"
+
+    created = tc.post("/api/subplans/manual-queue-sub/rounds", json={"topic_count": 2})
+    assert created.status_code == 201
+    round_id = int(created.json()["round_id"])
+    assert int(conn.execute(
+        "SELECT COUNT(*) FROM production_tasks WHERE round_id=?", (round_id,)
+    ).fetchone()[0]) == 0
+
+    submitted = tc.post(
+        f"/api/rounds/{round_id}/run",
+        json={"topic_count": 2, "platforms": ["xhs"]},
+    )
+    assert submitted.status_code == 202
+    task = queue.get(submitted.json()["task_id"])
+    assert task is not None and task.status == "queued"
+    assert task.task_type == "round_run"
+    assert task.aggregate_id == str(round_id)
+    assert int(conn.execute(
+        "SELECT COUNT(*) FROM production_tasks WHERE round_id=?", (round_id,)
+    ).fetchone()[0]) == 0
+
+
+def test_condition_review_api_records_business_gate_decision(client):
+    tc, conn, _ = client
+    _store, _master, _version, stage = _approved_subplan(conn, "condition-review-sub")
+    conn.execute(
+        "UPDATE sub_plan_stages SET business_completion_required=1 WHERE id=?",
+        (int(stage["id"]),),
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO sub_plan_stage_publish_stats(stage_id,confirmed_published_count) VALUES(?,?)",
+        (int(stage["id"]), int(stage["target_count"])),
+    )
+    conn.commit()
+
+    response = tc.post(
+        f"/api/subplans/condition-review-sub/stages/{int(stage['id'])}/condition-review",
+        json={
+            "condition_type": "business", "decision": "passed",
+            "reason": "已达到阶段目标并核对发布记录",
+            "evidence": {"confirmed_published_count": int(stage["target_count"])},
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["stage"]["business_completion_status"] == "passed"
+    history = tc.get(
+        f"/api/subplans/condition-review-sub/stages/{int(stage['id'])}/condition-reviews"
+    )
+    assert history.status_code == 200
+    assert history.json()["condition_reviews"][0]["decision"] == "passed"
