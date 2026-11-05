@@ -269,7 +269,7 @@ class ProductionTaskStore:
                 """INSERT INTO production_task_attempts(
                     task_id,attempt_no,status,worker_id,started_at,
                     initiating_actor,executing_actor,tenant_id,queue_task_id
-                ) VALUES(?,?,'running',?,?,?,?,?,?,?)""",
+                ) VALUES(?,?,'running',?,?,?,?,?,?)""",
                 (
                     task_id, attempt_no, worker_id, now_text,
                     identity.get("initiating_actor"), identity.get("executing_actor"),
