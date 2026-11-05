@@ -282,32 +282,18 @@ class SchedulerEngine:
         for job_id in JOB_RUNNERS:
             self.apply_job_config(job_id)
 
-    def _trigger_for(self, job_id: str):
+    def _trigger_for(self, job_id: str, *, start_date=None):
         sched = self.cfg.scheduler.job(job_id)
         if sched.cron:
             return CronTrigger.from_crontab(sched.cron, timezone=business_zone(self.cfg))
-        return IntervalTrigger(minutes=int(sched.interval_minutes))
-
-    @staticmethod
-    def _trigger_signature(trigger) -> tuple:
-        """Compare persisted trigger semantics without comparing generated interval start dates."""
-        timezone = getattr(trigger, "timezone", None)
-        zone_key = getattr(timezone, "key", str(timezone))
-        if isinstance(trigger, CronTrigger):
-            return (
-                "cron", zone_key,
-                tuple((field.name, str(field)) for field in trigger.fields),
-            )
-        if isinstance(trigger, IntervalTrigger):
-            return ("interval", zone_key, trigger.interval.total_seconds())
-        return (type(trigger).__qualname__, str(trigger))
+        return IntervalTrigger(minutes=int(sched.interval_minutes), start_date=start_date)
 
     def apply_job_config(self, job_id: str) -> dict:
-        """按当前配置更新任务；配置未变时保留持久化 next_run_time。
+        """按当前配置同步任务；配置未变时保留持久化 next_run_time。
 
-        启动时不应先删后加相同的 cron job，否则会丢失停机期间的 next_run_time，
+        启动时不应先删后加相同的周期任务，否则会丢失停机期间的 next_run_time，
         APScheduler 无法按 misfire_grace_time/coalesce 补跑错过的任务。
-        运行时 PATCH 修改了调度配置时仍立即替换触发器。
+        运行时 PATCH 修改调度配置时仍立即替换触发器。
         """
         if job_id not in JOB_RUNNERS:
             raise KeyError(f"未知定时任务：{job_id}")
@@ -321,12 +307,24 @@ class SchedulerEngine:
                 self.scheduler.remove_job(job_id)
             logger.info("⏸️ [APS] 定时任务 %s 已关闭", job_id)
             return {"job_id": job_id, "enabled": False}
-        trigger = self._trigger_for(job_id)
-        if existing is not None and self._trigger_signature(existing.trigger) == self._trigger_signature(trigger):
-            logger.info("⏰ [APS] 定时任务 %s 配置未变，保留持久化触发时间", job_id)
-            return {"job_id": job_id, "enabled": True, "schedule": sched.describe(), "preserved": True}
+
+        # IntervalTrigger 默认以当前时刻为 start_date；比较时复用持久化锚点，
+        # 否则每次重启都会误判配置变化并丢弃 next_run_time。
+        start_date = (
+            existing.trigger.start_date
+            if existing is not None and isinstance(existing.trigger, IntervalTrigger)
+            else None
+        )
+        trigger = self._trigger_for(job_id, start_date=start_date)
         if existing is not None:
-            self.scheduler.remove_job(job_id)
+            if existing.trigger != trigger:
+                self.scheduler.reschedule_job(job_id, trigger=trigger)
+            self.scheduler.modify_job(
+                job_id, args=[self.engine_key], max_instances=1, coalesce=True,
+            )
+            logger.info("⏰ [APS] 定时任务 %s：%s", job_id, sched.describe())
+            return {"job_id": job_id, "enabled": True, "schedule": sched.describe(), "preserved": True}
+
         self.scheduler.add_job(
             JOB_RUNNERS[job_id],
             trigger,
