@@ -245,7 +245,7 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
     # executor has selected a topic; no ordinal-only placeholders are exposed.
     submitted = client.post(
         f"/api/rounds/{round_id}/run",
-        json={"topic_count": 1, "platforms": ["xhs"]},
+        json={"topic_count": 1, "platforms": ["xhs"], "save_drafts": False},
     )
     assert submitted.status_code == 202, submitted.text
     queued = queue.get(submitted.json()["task_id"])
