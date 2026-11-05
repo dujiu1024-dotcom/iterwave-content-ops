@@ -287,6 +287,28 @@ async def test_round_is_pinned_to_effective_version_and_survives_new_draft(clien
     assert batch.status_code == 409
     assert "topic_count 必须为 1" in batch.json()["detail"]
     assert int(conn.execute("SELECT COUNT(*) FROM spiral_rounds").fetchone()[0]) == rounds_before
+    # A rejected multi-item request must not revoke the approved authorization
+    # or mutate the active production-line binding before the next valid request.
+    state_after_rejection = conn.execute(
+        """SELECT p.status AS subplan_status,v.status AS version_status,
+                  m.status AS master_status,pl.status AS line_status,
+                  plv.status AS line_version_status,
+                  plv.sub_plan_version_id AS line_subplan_version_id,
+                  p.current_version_id
+           FROM sub_plans p
+           JOIN sub_plan_versions v ON v.id=p.current_version_id
+           JOIN master_plan_versions m ON m.id=p.master_plan_version_id
+           LEFT JOIN production_lines pl ON pl.sub_plan_id=p.id
+           LEFT JOIN production_line_versions plv ON plv.id=pl.current_version_id
+           WHERE p.id='integration-sub'"""
+    ).fetchone()
+    assert state_after_rejection is not None, "rejected request removed the subplan"
+    assert state_after_rejection["subplan_status"] == "active", dict(state_after_rejection)
+    assert state_after_rejection["version_status"] == "effective", dict(state_after_rejection)
+    assert state_after_rejection["master_status"] == "effective", dict(state_after_rejection)
+    assert state_after_rejection["line_status"] == "active", dict(state_after_rejection)
+    assert state_after_rejection["line_version_status"] == "effective", dict(state_after_rejection)
+    assert state_after_rejection["line_subplan_version_id"] == state_after_rejection["current_version_id"], dict(state_after_rejection)
 
     created = tc.post("/api/subplans/integration-sub/rounds", json={"topic_count": 1})
     assert created.status_code == 201, created.text
