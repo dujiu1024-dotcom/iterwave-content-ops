@@ -98,19 +98,17 @@ class RoundExecutor:
         feedback=None,
         template_data: Optional[dict] = None,
     ) -> dict:
-        """Execute the complete round under one shared image API budget."""
+        """Execute the complete round while recording image API usage."""
         from .image_generation_budget import image_generation_run
         policy = self.cfg.media_generation
         with image_generation_run(
-            max_calls=getattr(policy, "max_api_calls_per_run", 30),
-            timeout_seconds=getattr(policy, "hard_timeout_seconds", 300),
             max_concurrency=getattr(policy, "max_concurrency", 2),
-        ) as budget:
+        ) as usage:
             report = await self._run_with_image_budget(
                 round_id, topic_count, platform_values, save_drafts, feedback, template_data,
             )
             if isinstance(report, dict):
-                report["image_generation_budget"] = budget.snapshot()
+                report["image_generation_usage"] = usage.snapshot()
                 try:
                     self.conn.execute(
                         "UPDATE spiral_rounds SET run_report = ? WHERE id = ?",
