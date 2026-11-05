@@ -227,6 +227,32 @@ def test_content_review_publish_metrics_and_effect_feedback_api_chain(content_cl
         "SELECT snapshot_json FROM sub_plan_versions WHERE id=?", (source_version,),
     ).fetchone()["snapshot_json"] == original_snapshot
 
+    # Evidence-insufficient feedback must not create an adoptable plan draft.
+    insufficient = client.post(
+        f"/api/subplans/stages/{stage_id}/effect-feedback",
+        json={
+            "assessment": "insufficient_data",
+            "recommendation": "继续收集样本后再判断。",
+            "evidence_note": "当前样本量不足。",
+            "confidence": "low",
+        },
+    )
+    assert insufficient.status_code == 201, insufficient.text
+    versions_before_rejection = conn.execute(
+        "SELECT COUNT(*) FROM sub_plan_versions WHERE sub_plan_id='t8-b-subplan'"
+    ).fetchone()[0]
+    blocked_adoption = client.post(
+        "/api/plan_adjustments/adopt",
+        json={
+            "dimensions": ["内容结构"],
+            "effect_review_id": insufficient.json()["id"],
+        },
+    )
+    assert blocked_adoption.status_code == 409, blocked_adoption.text
+    assert conn.execute(
+        "SELECT COUNT(*) FROM sub_plan_versions WHERE sub_plan_id='t8-b-subplan'"
+    ).fetchone()[0] == versions_before_rejection
+
 
 def test_content_review_rejection_requires_resubmission_before_approval(content_client):
     client, conn, seed = content_client
