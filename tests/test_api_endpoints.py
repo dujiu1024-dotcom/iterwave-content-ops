@@ -4521,7 +4521,7 @@ def test_ai_master_plan_generation_api_rejects_strategic_changes_during_model_ca
     response = tc.post("/api/plans/ai-draft")
 
     assert response.status_code == 409, response.text
-    assert "北极星或资源基线已变化" in response.json()["detail"]
+    assert "北极星、资源基线或诊断版本发生变化" in response.json()["detail"]
     assert conn.execute(
         "SELECT status FROM business_diagnosis_reports"
     ).fetchone()[0] == "confirmed"
