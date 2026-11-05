@@ -2930,40 +2930,40 @@ export const api = {
       { method: "POST", body: JSON.stringify({ instruction }) },
     ),
   subplanGoals: (id: string, versionId: number) =>
-    fetchJson<{ items: SubGoalRecord[] }>(`/api/subplans/${encodeURIComponent(id)}/goals?version_id=${versionId}`),,
+    fetchJson<{ items: SubGoalRecord[] }>(`/api/subplans/${encodeURIComponent(id)}/goals?version_id=${versionId}`),
 
   createSubplanGoal: (id: string, data: Record<string, unknown>) =>
-    fetchJson<{ goal: SubGoalRecord }>(`/api/subplans/${encodeURIComponent(id)}/goals`, { method: "POST", body: JSON.stringify(data) }),,
+    fetchJson<{ goal: SubGoalRecord }>(`/api/subplans/${encodeURIComponent(id)}/goals`, { method: "POST", body: JSON.stringify(data) }),
 
   updateSubplanGoal: (id: string, goalId: string, data: Record<string, unknown>) =>
-    fetchJson<{ goal: SubGoalRecord }>(`/api/subplans/${encodeURIComponent(id)}/goals/${encodeURIComponent(goalId)}`, { method: "PATCH", body: JSON.stringify(data) }),,
+    fetchJson<{ goal: SubGoalRecord }>(`/api/subplans/${encodeURIComponent(id)}/goals/${encodeURIComponent(goalId)}`, { method: "PATCH", body: JSON.stringify(data) }),
 
   saveSubgoalProductionPlan: (id: string, goalId: string, data: Record<string, unknown>) =>
-    fetchJson<{ production_plan: Record<string, unknown> }>(`/api/subplans/${encodeURIComponent(id)}/goals/${encodeURIComponent(goalId)}/production-plan`, { method: "PUT", body: JSON.stringify(data) }),,
+    fetchJson<{ production_plan: Record<string, unknown> }>(`/api/subplans/${encodeURIComponent(id)}/goals/${encodeURIComponent(goalId)}/production-plan`, { method: "PUT", body: JSON.stringify(data) }),
 
   acceptSubplanGoal: (id: string, goalId: string, data: Record<string, unknown>) =>
-    fetchJson<{ goal: SubGoalRecord }>(`/api/subplans/${encodeURIComponent(id)}/goals/${encodeURIComponent(goalId)}/acceptance`, { method: "POST", body: JSON.stringify(data) }),,
+    fetchJson<{ goal: SubGoalRecord }>(`/api/subplans/${encodeURIComponent(id)}/goals/${encodeURIComponent(goalId)}/acceptance`, { method: "POST", body: JSON.stringify(data) }),
 
   contentProductionLines: (status?: string, limit = 50) =>
     fetchJson<{ items: ContentProductionLineRecord[] }>(
       `/api/content-production-lines?limit=${limit}${status ? `&status=${encodeURIComponent(status)}` : ""}`,
-    ),,
+    ),
 
   contentProductionLine: (id: string) =>
-    fetchJson<ContentProductionLineRecord>(`/api/content-production-lines/${encodeURIComponent(id)}`),,
+    fetchJson<ContentProductionLineRecord>(`/api/content-production-lines/${encodeURIComponent(id)}`),
 
   createProductionContextWaiver: (payload: { round_id: number; platform: Platform; waived_items: string[]; reason: string; evidence?: Record<string, unknown> }) =>
     fetchJson<{ waiver: Record<string, unknown> }>("/api/production-context/waivers", {
       method: "POST", body: JSON.stringify(payload),
-    }),,
+    }),
 
   recordContentProductionLineEvent: (id: string, payload: { event_type: string; source?: string; actor?: string; reason?: string; evidence?: Record<string, unknown> }) =>
     fetchJson<ContentProductionLineRecord>(`/api/content-production-lines/${encodeURIComponent(id)}/events`, {
       method: "POST", body: JSON.stringify(payload),
-    }),,
+    }),
 
   publishVerifications: () =>
-    fetchJson<{ items: PublishVerificationItem[] }>("/api/publish-verifications"),,
+    fetchJson<{ items: PublishVerificationItem[] }>("/api/publish-verifications"),
 
   createPublishVerification: (draftId: string, payload: {
     platform_content_id: string; content_url: string; published_at: string;
@@ -2973,66 +2973,66 @@ export const api = {
     fetchJson<{ verification: PublishVerificationItem & { review_task_id?: string }; closure_event_pending: boolean }>(
       `/api/drafts/${encodeURIComponent(draftId)}/publish-verification`,
       { method: "POST", body: JSON.stringify(payload) },
-    ),,
+    ),
 
   reviewTasks: (status?: string) =>
-    fetchJson<{ items: ReviewTaskItem[] }>(`/api/review-tasks${status ? `?status=${encodeURIComponent(status)}` : ""}`),,
+    fetchJson<{ items: ReviewTaskItem[] }>(`/api/review-tasks${status ? `?status=${encodeURIComponent(status)}` : ""}`),
 
   reviewTaskDetail: (taskId: string) =>
     fetchJson<{ task: ReviewTaskItem & { collection_runs: Array<Record<string, unknown>> } }>(
       `/api/review-tasks/${encodeURIComponent(taskId)}`,
-    ),,
+    ),
 
   collectReviewTask: (taskId: string, payload: Record<string, unknown>) =>
     fetchJson<{ run: Record<string, unknown> }>(
       `/api/review-tasks/${encodeURIComponent(taskId)}/collect`,
       { method: "POST", body: JSON.stringify(payload) },
-    ),,
+    ),
 
   retryProductionLineClose: (eventId: string) =>
     fetchJson<{ event_id: string; status: string }>(
       `/api/production-line-close-events/${encodeURIComponent(eventId)}/retry`,
       { method: "POST" },
-    ),,
+    ),
 
   retryReviewTask: (taskId: string, scheduledAt?: string) =>
     fetchJson<{ task: ReviewTaskItem }>(
       `/api/review-tasks/${encodeURIComponent(taskId)}/retry`,
       { method: "POST", body: JSON.stringify({ scheduled_at: scheduledAt }) },
-    ),,
+    ),
 
   saveReviewConclusion: (taskId: string, payload: Record<string, unknown>) =>
     fetchJson<{ task_id: string; conclusion: Record<string, unknown>; gap_changes_recorded: number }>(
       `/api/review-tasks/${encodeURIComponent(taskId)}/conclusion`,
       { method: "POST", body: JSON.stringify(payload) },
-    ),,
+    ),
 
   metricFacts: (metricKey?: string, contentId?: string, limit = 100) => {
     const query = new URLSearchParams({ limit: String(limit) });
     if (metricKey) query.set("metric_key", metricKey);
     if (contentId) query.set("content_id", contentId);
     return fetchJson<{ items: MetricFactItem[] }>(`/api/metric-facts?${query.toString()}`);
-  },,
+  },
 
   businessGaps: (status: "active" | "resolved" | "all" = "active") =>
-    fetchJson<{ items: BusinessGapItem[] }>(`/api/business-gaps?status=${status}`),,
+    fetchJson<{ items: BusinessGapItem[] }>(`/api/business-gaps?status=${status}`),
 
   businessGapHistory: (gapId: string) =>
     fetchJson<{ items: Array<Record<string, unknown>> }>(
       `/api/business-gaps/${encodeURIComponent(gapId)}/history`,
-    ),,
+    ),
 
   rejectVisualVersion: (contentId: string, versionId: number, reason: string) =>
     fetchJson<{ content_id: string; version_id: number; status: string; reason: string }>(
       `/api/contents/${encodeURIComponent(contentId)}/visual-versions/${versionId}/reject`,
       { method: "POST", body: JSON.stringify({ reason }) },
-    ),,
+    ),
 
   approveVisualVersion: (contentId: string, versionId: number) =>
     fetchJson<{ content_id: string; version_id: number; status: string; image_count: number; already_active?: boolean }>(
       `/api/contents/${encodeURIComponent(contentId)}/visual-versions/${versionId}/approve`,
       { method: "POST", body: JSON.stringify({ approved: true }) },
-    ),,
+    ),
 
   visualRegenerationHistory: (contentId: string) =>
     fetchJson<{ items: Array<Record<string, unknown>> }>(
