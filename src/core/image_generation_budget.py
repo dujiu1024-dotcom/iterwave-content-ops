@@ -153,20 +153,19 @@ def has_active_article() -> bool:
 
 
 def remaining_budget_seconds() -> float | None:
-    run = _CURRENT_RUN.get()
-    return run.remaining_seconds() if run is not None else None
+    """Compatibility shim: image generation has no run-wide hard deadline."""
+    return None
 
 
 @contextmanager
-def image_generation_run(*, max_calls: int = _DEFAULT_ROUND_CALLS,
-                         timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
+def image_generation_run(*, max_calls: int | None = None,
+                         timeout_seconds: int | None = None,
                          max_concurrency: int = 2):
     existing = _CURRENT_RUN.get()
     if existing is not None:
         yield existing
         return
     budget = ImageBudget(
-        max_calls=max_calls, timeout_seconds=timeout_seconds,
         max_concurrency=max_concurrency,
         _semaphore=threading.BoundedSemaphore(max_concurrency),
     )
@@ -179,17 +178,18 @@ def image_generation_run(*, max_calls: int = _DEFAULT_ROUND_CALLS,
 
 
 @contextmanager
-def article_budget(*, max_calls: int = _DEFAULT_ARTICLE_CALLS,
-                   page_max_calls: int = _DEFAULT_PAGE_CALLS):
-    article = ArticleBudget(max_calls=max_calls, page_max_calls=page_max_calls)
+def article_budget(*, max_calls: int | None = None,
+                   page_max_calls: int | None = None):
+    # Legacy parameters are accepted for compatibility but never enforce quotas.
+    article = ArticleBudget()
     token = _CURRENT_ARTICLE.set(article)
     try:
         yield article
     finally:
         _CURRENT_ARTICLE.reset(token)
         logger.info(
-            "image article budget api_calls=%s failed_calls=%s max_api_calls=%s",
-            article.calls, article.failures, article.max_calls,
+            "image article usage api_calls=%s failed_calls=%s",
+            article.calls, article.failures,
         )
 
 
@@ -206,31 +206,16 @@ def page_budget():
         article.page_calls = 0
 
 
-def reserve_provider_call() -> float:
-    """Reserve one billable provider request and return the remaining run timeout."""
+def reserve_provider_call() -> float | None:
+    """Record provider usage without imposing per-run, per-article, or per-page quotas."""
     run = _CURRENT_RUN.get()
     article = _CURRENT_ARTICLE.get()
-    if run is None:
-        run = ImageBudget(max_calls=1, timeout_seconds=_DEFAULT_TIMEOUT_SECONDS)
+    if run is not None:
         run.reserve()
-        return run.remaining_seconds()
-    run.reserve()
     if article is not None:
-        if article.calls >= article.max_calls:
-            with run._lock:
-                run.calls -= 1
-            raise ImageBudgetExceeded(
-                f"单篇图片 API 调用预算已耗尽（{article.calls}/{article.max_calls}）"
-            )
-        if article.page_calls >= article.page_max_calls:
-            with run._lock:
-                run.calls -= 1
-            raise ImageBudgetExceeded(
-                f"当前页图片 API 调用预算已耗尽（{article.page_calls}/{article.page_max_calls}）"
-            )
         article.calls += 1
         article.page_calls += 1
-    return run.remaining_seconds()
+    return None
 
 
 @contextmanager
@@ -251,7 +236,7 @@ def provider_request():
 
 @contextmanager
 def provider_slot():
-    """Acquire both per-run and SQLite-backed global slots, failing closed."""
+    """Enforce concurrency safety only; usage is counted but never quota-blocked."""
     run = _CURRENT_RUN.get()
     acquired_local = False
     lease_id = None
@@ -260,17 +245,17 @@ def provider_slot():
         acquired_local = run._semaphore.acquire(blocking=False)
         if not acquired_local:
             raise ImageBudgetExceeded(
-                f"当前图片生成任务并发数已达到上限（{run.max_concurrency}）"
+                f"当前图片生成并发数已达到安全上限（{run.max_concurrency}）"
             )
     try:
         try:
             db_path = _database_path()
             lease_id = _try_acquire_provider_lease(db_path)
         except Exception as exc:
-            raise ImageBudgetExceeded("无法确认系统图片生成并发额度，已阻止图片 API 请求") from exc
+            raise ImageBudgetExceeded("无法确认系统图片生成并发状态，已阻止图片 API 请求") from exc
         if lease_id is None:
             raise ImageBudgetExceeded(
-                f"系统图片生成并发数已达到上限（{_GLOBAL_PROVIDER_CONCURRENCY}），请稍后重试"
+                f"系统图片生成并发数已达到安全上限（{_GLOBAL_PROVIDER_CONCURRENCY}），请稍后重试"
             )
         # Keep request exceptions outside the acquisition error handler. They must
         # reach generate_image_bytes so the configured fallback provider can run.
