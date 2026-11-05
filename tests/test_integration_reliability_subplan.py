@@ -1073,6 +1073,21 @@ def test_subplan_round_worker_persists_task_content_and_frozen_plan_lineage(
         assert production_task["sub_plan_version_id"] == int(version["id"])
         assert production_task["strategy_step_id"] == stage["stage_key"]
         assert production_task["production_line_version_id"] == round_row["production_line_version_id"]
+        asset_candidates = production_task["input_snapshot"]["original_assets"]
+        assert len(asset_candidates) == 1
+        candidate = asset_candidates[0]
+        assert candidate["asset_id"] == asset_id
+        assert candidate["version_no"] == reviewed_asset.json()["version_no"]
+        assert candidate["commercial_use_status"] == "allowed"
+        assert candidate["privacy_status"] == "clear"
+        assert "metadata" not in candidate
+        assert "private_contact" not in json.dumps(production_task["input_snapshot"], ensure_ascii=False)
+        # A linked candidate is not proof of actual consumption; it must not be
+        # recorded as used until an explicit task-assets authorization is made.
+        assert conn.execute(
+            "SELECT COUNT(*) FROM production_task_asset_usages WHERE production_task_id=?",
+            (production_task["id"],),
+        ).fetchone()[0] == 0
         frozen_round = production_task["input_snapshot"]["round"]
         assert frozen_round["master_plan_version_id"] == int(master["id"])
         assert frozen_round["sub_plan_id"] == "worker-provenance-sub"
