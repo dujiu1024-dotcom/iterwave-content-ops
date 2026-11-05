@@ -162,7 +162,7 @@ class GlobalTaskWorker:
                 bind_context_notifier(context.get("notifier")),
                 bind_config(context["cfg"]),
                 bind_task_identity(
-                    initiating_actor=task.payload.get("initiating_actor"),
+                    initiating_actor=task.payload.get("initiating_actor") or "system:legacy-unattributed",
                     executing_actor="service:global-task-worker",
                     tenant_id=task.tenant_id,
                     task_id=task.task_id,
@@ -330,9 +330,24 @@ class GlobalTaskWorker:
             return False
         reconciled = False
         try:
+            from src.core.task_context import bind_config, bind_task_identity
+
             conn = context.get("conn")
-            self._mark_round_failed(conn, round_id, reason, cfg=context.get("cfg"))
-            self._mark_content_plan_failed(conn, round_id, cfg=context.get("cfg"))
+            cfg = context.get("cfg")
+            # Recovery is a distinct service action, but it must retain the original
+            # enqueue-time initiator and tenant/task correlation. Legacy tasks remain
+            # explicitly unattributed; no human identity is inferred.
+            with (
+                bind_config(cfg),
+                bind_task_identity(
+                    initiating_actor=task.payload.get("initiating_actor") or "system:legacy-unattributed",
+                    executing_actor="service:global-task-recovery",
+                    tenant_id=task.tenant_id,
+                    task_id=task.task_id,
+                ),
+            ):
+                self._mark_round_failed(conn, round_id, reason, cfg=cfg)
+                self._mark_content_plan_failed(conn, round_id, cfg=cfg)
             reconciled = True
         except Exception:
             logger.exception(

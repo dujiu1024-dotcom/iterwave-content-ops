@@ -1472,3 +1472,76 @@ def test_worker_does_not_replay_after_ambiguous_artifact_completion(tmp_path, mo
         "SELECT COUNT(*) FROM contents WHERE round_id=901"
     ).fetchone()[0] == 1
     artifact_db.close()
+
+
+def test_interrupted_round_reconciliation_binds_original_and_recovery_identity(tmp_path, monkeypatch):
+    from src.core.task_context import current_config, current_task_identity
+
+    observed = []
+    cfg = SimpleNamespace(name="tenant-a-config")
+    context = {
+        "cfg": cfg,
+        "scheduler": SimpleNamespace(shutdown=lambda: None),
+        "conn": SimpleNamespace(close=lambda: None),
+    }
+    task = SimpleNamespace(
+        task_type="round_run",
+        task_id="queue-task-recovery-1",
+        tenant_id="tenant-a",
+        payload={"round_id": 41, "initiating_actor": "session:abcdef0123456789"},
+    )
+
+    def capture(*args, **kwargs):
+        observed.append((current_task_identity(), current_config()))
+
+    monkeypatch.setattr(GlobalTaskWorker, "_mark_round_failed", staticmethod(capture))
+    monkeypatch.setattr(GlobalTaskWorker, "_mark_content_plan_failed", staticmethod(capture))
+    worker = GlobalTaskWorker(GlobalTaskQueue(tmp_path / "shared" / "system.db"), lambda _: context)
+
+    assert worker._reconcile_round_failure(task, "worker interrupted") is True
+    expected = {
+        "initiating_actor": "session:abcdef0123456789",
+        "executing_actor": "service:global-task-recovery",
+        "tenant_id": "tenant-a",
+        "task_id": "queue-task-recovery-1",
+    }
+    assert len(observed) == 2
+    assert all(identity == expected and bound_cfg is cfg for identity, bound_cfg in observed)
+    assert current_task_identity() == {
+        "initiating_actor": None, "executing_actor": None,
+        "tenant_id": None, "task_id": None,
+    }
+    assert current_config() is None
+
+
+def test_legacy_interrupted_round_reconciliation_is_explicitly_unattributed(tmp_path, monkeypatch):
+    from src.core.task_context import current_task_identity
+
+    observed = []
+    context = {
+        "cfg": SimpleNamespace(),
+        "scheduler": SimpleNamespace(shutdown=lambda: None),
+        "conn": SimpleNamespace(close=lambda: None),
+    }
+    task = SimpleNamespace(
+        task_type="round_run",
+        task_id="queue-task-legacy",
+        tenant_id="tenant-legacy",
+        payload={"round_id": 42},
+    )
+
+    def capture(*args, **kwargs):
+        observed.append(current_task_identity())
+
+    monkeypatch.setattr(GlobalTaskWorker, "_mark_round_failed", staticmethod(capture))
+    monkeypatch.setattr(GlobalTaskWorker, "_mark_content_plan_failed", staticmethod(capture))
+    worker = GlobalTaskWorker(GlobalTaskQueue(tmp_path / "shared" / "system.db"), lambda _: context)
+
+    assert worker._reconcile_round_failure(task, "legacy interrupted") is True
+    assert observed == [{
+        "initiating_actor": "system:legacy-unattributed",
+        "executing_actor": "service:global-task-recovery",
+        "tenant_id": "tenant-legacy",
+        "task_id": "queue-task-legacy",
+    }] * 2
+    assert current_task_identity()["executing_actor"] is None

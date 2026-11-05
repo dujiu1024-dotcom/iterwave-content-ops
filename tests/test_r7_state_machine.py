@@ -282,3 +282,28 @@ def test_round_transition_does_not_overwrite_concurrent_status_change(conn, seed
     ).fetchone()[0] == "failed"
 
 
+
+
+def test_round_transition_log_persists_bound_worker_identity(conn: sqlite3.Connection, seed) -> None:
+    import json
+    from src.core.task_context import bind_task_identity
+
+    round_id = seed.round()
+    sm = RoundStateMachine(conn)
+    assert sm.transition(round_id, "producing", "worker started")
+    with bind_task_identity(
+        initiating_actor="session:0123456789abcdef",
+        executing_actor="service:global-task-recovery",
+        tenant_id="tenant-a",
+        task_id="queue-task-123",
+    ):
+        assert sm.transition(round_id, "failed", "worker recovery")
+
+    row = conn.execute(
+        "SELECT transition_log FROM spiral_rounds WHERE id=?", (round_id,)
+    ).fetchone()
+    events = json.loads(row["transition_log"] if hasattr(row, "keys") else row[0])
+    assert events[-1]["initiating_actor"] == "session:0123456789abcdef"
+    assert events[-1]["executing_actor"] == "service:global-task-recovery"
+    assert events[-1]["tenant_id"] == "tenant-a"
+    assert events[-1]["task_id"] == "queue-task-123"
