@@ -352,11 +352,23 @@ def test_effect_feedback_isolated_between_subplans_with_same_stage_key(content_c
     )
     conn.commit()
 
+    other_review = client.post(
+        f"/api/subplans/stages/{other_stage}/effect-feedback",
+        json={
+            "assessment": "insufficient_data",
+            "recommendation": "仅属于另一个子计划。",
+            "evidence_note": "隔离回归测试。",
+            "confidence": "low",
+        },
+    )
+    assert other_review.status_code == 201, other_review.text
+
     feedback = client.get(f"/api/subplans/stages/{own_stage}/effect-feedback")
     assert feedback.status_code == 200, feedback.text
     assert feedback.json()["content_count"] == 1
     assert feedback.json()["published_count"] == 0
     assert feedback.json()["manual_metrics"]["samples"] == 0
+    assert feedback.json()["reviews"] == []
     assert own_content != other_content
 
     recorded = client.post(
