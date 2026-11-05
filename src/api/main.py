@@ -7911,17 +7911,51 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(422,"调整建议必须为 1-2000 个字符，证据说明不能超过 2000 个字符")
         if confidence not in {"low","medium","high"}:
             raise HTTPException(422,"置信度无效")
-        snapshot=get_stage_effect_feedback(stage_id)
-        evidence={key:snapshot[key] for key in ("content_count","published_count","manual_metrics","automatic_metrics")}
-        conn=_g()["conn"]; now=_storage_now().isoformat(timespec="seconds")
-        cur=conn.execute(
-            "INSERT INTO strategy_effect_reviews(stage_id,assessment,recommendation,evidence_note,confidence,evidence_json,created_by,created_at) "
-            "VALUES(?,?,?,?,?,?,?,?)",
-            (stage_id,assessment,recommendation,evidence_note,confidence,json.dumps(evidence,ensure_ascii=False,sort_keys=True),auth.audit_actor(request),now),
-        )
-        conn.commit()
-        return {"id":cur.lastrowid,"stage_id":stage_id,"assessment":assessment,
-                "recommendation":recommendation,"confidence":confidence,"created_at":now}
+
+        idempotency_key=(request.headers.get("Idempotency-Key") or "").strip() or None
+        if idempotency_key is not None and len(idempotency_key)>128:
+            raise HTTPException(422,"Idempotency-Key 不能超过 128 个字符")
+        payload={
+            "assessment":assessment,"recommendation":recommendation,
+            "evidence_note":evidence_note,"confidence":confidence,
+        }
+        request_hash=hashlib.sha256(
+            json.dumps(payload,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode("utf-8")
+        ).hexdigest() if idempotency_key is not None else None
+
+        conn=_g()["conn"]
+        # Serialize lookup + insert so concurrent retries with the same key cannot
+        # create duplicate immutable reviews. A key reused with a different body is a conflict.
+        with connection_transaction(conn, immediate=True):
+            if idempotency_key is not None:
+                existing=conn.execute(
+                    "SELECT id,stage_id,assessment,recommendation,confidence,created_at,request_hash "
+                    "FROM strategy_effect_reviews WHERE stage_id=? AND idempotency_key=?",
+                    (stage_id,idempotency_key),
+                ).fetchone()
+                if existing is not None:
+                    if existing["request_hash"] != request_hash:
+                        raise HTTPException(409,"Idempotency-Key 已用于不同的效果反馈内容")
+                    return {
+                        "id":int(existing["id"]),"stage_id":int(existing["stage_id"]),
+                        "assessment":existing["assessment"],"recommendation":existing["recommendation"],
+                        "confidence":existing["confidence"],"created_at":existing["created_at"],
+                        "deduplicated":True,
+                    }
+
+            snapshot=get_stage_effect_feedback(stage_id)
+            evidence={key:snapshot[key] for key in ("content_count","published_count","manual_metrics","automatic_metrics")}
+            now=_storage_now().isoformat(timespec="seconds")
+            cur=conn.execute(
+                "INSERT INTO strategy_effect_reviews(stage_id,assessment,recommendation,evidence_note,confidence,evidence_json,created_by,created_at,idempotency_key,request_hash) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (stage_id,assessment,recommendation,evidence_note,confidence,
+                 json.dumps(evidence,ensure_ascii=False,sort_keys=True),auth.audit_actor(request),
+                 now,idempotency_key,request_hash),
+            )
+            return {"id":cur.lastrowid,"stage_id":stage_id,"assessment":assessment,
+                    "recommendation":recommendation,"confidence":confidence,"created_at":now,
+                    "deduplicated":False}
 
     # --- G-09 生产线阶段计数（G → G2 → H → I）---
     @app.get("/api/rounds/{round_id}/pipeline")
