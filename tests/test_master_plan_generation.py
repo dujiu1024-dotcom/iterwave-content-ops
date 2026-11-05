@@ -140,3 +140,32 @@ def test_generation_rejects_stale_source_before_model_call(monkeypatch):
         asyncio.run(generate_master_plan_draft(conn, SimpleNamespace()))
     assert conn.execute("SELECT status FROM business_diagnosis_reports").fetchone()[0] == "confirmed"
     conn.close()
+
+
+
+def test_generation_requires_north_star_even_with_confirmed_diagnosis(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("""CREATE TABLE business_diagnosis_reports (
+        id INTEGER, version_no INTEGER, status TEXT, source_fingerprint TEXT,
+        report_json TEXT, source_snapshot_json TEXT
+    )""")
+    governance = {
+        "north_star": None,
+        "resource_baseline": {"resources": [], "gaps": [{"category": "business_profile", "status": "missing"}], "summary": {"gaps": 1}},
+    }
+    conn.execute(
+        "INSERT INTO business_diagnosis_reports VALUES (1, 1, 'confirmed', 'fp', '{}', ?)",
+        (json.dumps({"strategy_governance": governance}),),
+    )
+    monkeypatch.setattr(
+        "src.core.business_diagnosis.collect_business_context",
+        lambda *_: {"fingerprint": "production-changed", "context": {}},
+    )
+    monkeypatch.setattr("src.core.strategy_governance.collect_strategy_governance", lambda *_: governance)
+    async def unexpected_model_call(*args, **kwargs):
+        raise AssertionError("model must not run without an effective North Star")
+    monkeypatch.setattr("src.core.master_plan_generation._call_model", unexpected_model_call)
+    with pytest.raises(LookupError, match="先建立并确认账号组北极星"):
+        asyncio.run(generate_master_plan_draft(conn, SimpleNamespace()))
+    conn.close()
