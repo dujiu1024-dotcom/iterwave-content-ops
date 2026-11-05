@@ -2384,8 +2384,9 @@ export const api = {
   adoptGaps: (dimensions: string[], targetMasterPlanVersionId?: number) =>
     fetchJson<{
       drafts: Array<{ sub_plan_id: string; platform: Platform; draft_version: SubPlanVersionRecord; effective: false }>;
+      skipped: Array<{ sub_plan_id: string; platform: Platform; status: string; reason: string; detail: string }>;
       effective: false; requires_human_review: true; adopted_dimensions: string[]; message: string;
-      status?: "success" | "partial" | "failed"; expected_draft_count?: number;
+      status: "completed" | "partial"; eligible_count: number; skipped_count: number; expected_draft_count: number;
     }>("/api/plan_adjustments/adopt", {
       method: "POST", body: JSON.stringify({
         dimensions, ...(targetMasterPlanVersionId ? { target_master_plan_version_id: targetMasterPlanVersionId } : {}),
