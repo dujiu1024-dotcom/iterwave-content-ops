@@ -111,8 +111,8 @@ export default function PlanCenter() {
       const effectiveMaster = versionResult.items.find((item) => item.status === "effective");
       const pendingMaster = versionResult.items.find((item) => item.status === "draft");
       const pendingPlan = parseMasterPlan(pendingMaster?.plan_snapshot);
-      const adoptionMaster = pendingMaster ?? effectiveMaster;
       const adoptionPrefix = "复盘建议采纳母计划草稿：";
+      const adoptionMaster = [pendingMaster, effectiveMaster].find((item) => item?.change_note?.startsWith(adoptionPrefix));
       if (adoptionMaster?.change_note?.startsWith(adoptionPrefix)) {
         setPendingAdoptionDimensions(adoptionMaster.change_note.slice(adoptionPrefix.length).split("、").map((item) => item.trim()).filter(Boolean));
       }
