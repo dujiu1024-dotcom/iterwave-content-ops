@@ -1087,7 +1087,9 @@ class RoundExecutor:
                     linked_assets = self.conn.execute(
                         """SELECT DISTINCT a.id,a.current_version_no,v.title,v.description,
                                   v.metadata_json,a.source_kind,a.source_media_asset_id,
-                                  a.source_content_asset_id,a.source_kb_id,a.commercial_use_status
+                                  a.source_content_asset_id,a.source_kb_id,a.commercial_use_status,
+                                  a.privacy_status,a.readability_status,a.completeness_status,
+                                  a.duplicate_status
                            FROM original_assets a
                            JOIN original_asset_versions v
                              ON v.original_asset_id=a.id AND v.version_no=a.current_version_no
@@ -1114,6 +1116,10 @@ class RoundExecutor:
                         "source_content_asset_id": row["source_content_asset_id"],
                         "source_kb_id": row["source_kb_id"],
                         "commercial_use_status": row["commercial_use_status"],
+                        "privacy_status": row["privacy_status"],
+                        "readability_status": row["readability_status"],
+                        "completeness_status": row["completeness_status"],
+                        "duplicate_status": row["duplicate_status"],
                         "metadata": json.loads(row["metadata_json"] or "{}"),
                     } for row in linked_assets]
                     task = task_store.create_task(
@@ -1151,9 +1157,19 @@ class RoundExecutor:
                     for asset in frozen_task_input.get("original_assets", []):
                         self.conn.execute(
                             """INSERT OR IGNORE INTO production_task_asset_usages(
-                                production_task_id,original_asset_id,asset_version_no,permission_snapshot
-                            ) VALUES(?,?,?,'allowed')""",
-                            (task["id"], int(asset["asset_id"]), int(asset["version_no"])),
+                                production_task_id,original_asset_id,asset_version_no,permission_snapshot,privacy_snapshot
+                            ) VALUES(?,?,?,'allowed',?)""",
+                            (
+                                task["id"], int(asset["asset_id"]), int(asset["version_no"]),
+                                json.dumps({
+                                    "privacy_status": asset.get("privacy_status", "unknown"),
+                                    "readability_status": asset.get("readability_status", "unknown"),
+                                    "completeness_status": asset.get("completeness_status", "unknown"),
+                                    "duplicate_status": asset.get("duplicate_status", "unknown"),
+                                    "commercial_use_status": asset.get("commercial_use_status", "unknown"),
+                                    "asset_version_no": int(asset["version_no"]),
+                                }, ensure_ascii=False, sort_keys=True),
+                            ),
                         )
                     self.conn.commit()
                     existing = task_store.get_content_for_task(task["id"])
