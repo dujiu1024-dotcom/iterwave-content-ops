@@ -7106,7 +7106,7 @@ def _register_routes(app: FastAPI) -> None:
         db_path = getattr(getattr(cfg, "paths", None), "db_file", "data/easel.db")
         if callable(getattr(cfg, "resolve_path", None)):
             db_path = cfg.resolve_path(db_path)
-        task = VisualTaskStore(db_path).get_task(task_id)
+        task = VisualTaskStore(db_path).get_task(task_id, connection=conn)
         from src.core.ai_card_generation import _paginate_body
         try:
             total_pages = 1 + len(_paginate_body(
