@@ -6255,6 +6255,7 @@ def _register_routes(app: FastAPI) -> None:
                 "created_at": _storage_now().isoformat(timespec="seconds"),
                 "source": "review_adoption",
                 "status": "suggestion",
+                "target_master_plan_version_id": target_master_version_id,
             }
             if effect_source is not None:
                 try:
