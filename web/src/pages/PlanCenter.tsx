@@ -63,6 +63,7 @@ export default function PlanCenter() {
   const [selectedChildId, setSelectedChildId] = useState("");
   const [masterVersionId, setMasterVersionId] = useState<number | null>(null);
   const [masterNorthStarVersionId, setMasterNorthStarVersionId] = useState<number | null>(null);
+  const [masterNorthStarVersionNo, setMasterNorthStarVersionNo] = useState<number | null>(null);
   const [masterResourceBaseline, setMasterResourceBaseline] = useState<{ captured_at: string; captured_by: string; snapshot: Record<string, unknown> } | null>(null);
   const [masterDraftVersionId, setMasterDraftVersionId] = useState<number | null>(null);
   const [diagnosis, setDiagnosis] = useState<BusinessDiagnosisReport | null>(null);
@@ -122,6 +123,14 @@ export default function PlanCenter() {
       }
       setMasterDraftVersionId(pendingMaster?.id ?? null);
       setMasterNorthStarVersionId(effectiveMaster?.north_star_version_id ?? null);
+      if (effectiveMaster?.north_star_version_id) {
+        try {
+          const boundNorthStar = await api.northStarVersion(effectiveMaster.north_star_version_id);
+          setMasterNorthStarVersionNo(boundNorthStar.version_no);
+        } catch { setMasterNorthStarVersionNo(null); }
+      } else {
+        setMasterNorthStarVersionNo(null);
+      }
       if (effectiveMaster?.id) {
         try { setMasterResourceBaseline(await api.masterPlanResourceBaseline(effectiveMaster.id)); }
         catch { setMasterResourceBaseline(null); }
@@ -600,7 +609,7 @@ export default function PlanCenter() {
       </div>
       <div className="panel">
         <div className="panel-head"><div><div className="panel-title">当前主计划</div><div className="panel-sub">现有 API 只维护一份当前母计划；历史签名作为版本记录，不代表多个独立主计划。</div></div><span className={"tag " + (data.source === "plan_settings" ? "green" : "gray")}>{data.source === "plan_settings" ? "服务器已保存" : "由最近轮次推导"}</span></div>
-        <div className="grid two"><div className="plan-summary-card"><div className="tiny">当前版本签名</div><div className="plan-signature">{data.signature}</div><div className="tiny">最后更新：{data.updated_at ?? "尚未保存"}</div></div><div className="plan-summary-card"><div className="tiny">目标与范围</div><b>{goals.find((g) => g.id === data.plan.cadence?.goal_id)?.goal_text ?? "尚未关联目标"}</b><div className="tiny">启用平台 {platforms.length} 个 · 每平台默认 {data.plan.topic_count_per_platform} 篇/轮</div></div><div className="plan-summary-card"><div className="tiny">战略版本绑定</div><b>{masterNorthStarVersionId ? `账号组北极星 V${masterNorthStarVersionId}` : "未归属北极星版本"}</b><div className="tiny">{masterResourceBaseline ? `资源基线已固化 · ${masterResourceBaseline.captured_at}` : "该母计划没有资源基线快照"}</div><div className="tiny">{masterResourceBaseline ? `确认资源 ${String((masterResourceBaseline.snapshot.summary as Record<string, number> | undefined)?.confirmed ?? 0)} / ${String((masterResourceBaseline.snapshot.summary as Record<string, number> | undefined)?.total ?? 0)}` : "旧版本可能尚未建立版本绑定"}</div></div></div>
+        <div className="grid two"><div className="plan-summary-card"><div className="tiny">当前版本签名</div><div className="plan-signature">{data.signature}</div><div className="tiny">最后更新：{data.updated_at ?? "尚未保存"}</div></div><div className="plan-summary-card"><div className="tiny">目标与范围</div><b>{goals.find((g) => g.id === data.plan.cadence?.goal_id)?.goal_text ?? "尚未关联目标"}</b><div className="tiny">启用平台 {platforms.length} 个 · 每平台默认 {data.plan.topic_count_per_platform} 篇/轮</div></div><div className="plan-summary-card"><div className="tiny">战略版本绑定</div><b>{masterNorthStarVersionId ? `账号组北极星 V${masterNorthStarVersionNo ?? "?"}（记录 ID ${masterNorthStarVersionId}）` : "未归属北极星版本"}</b><div className="tiny">{masterResourceBaseline ? `资源基线已固化 · ${masterResourceBaseline.captured_at}` : "该母计划没有资源基线快照"}</div><div className="tiny">{masterResourceBaseline ? `确认资源 ${String((masterResourceBaseline.snapshot.summary as Record<string, number> | undefined)?.confirmed ?? 0)} / ${String((masterResourceBaseline.snapshot.summary as Record<string, number> | undefined)?.total ?? 0)}` : "旧版本可能尚未建立版本绑定"}</div></div></div>
         <div className="panel" style={{ marginTop: 14 }}>
           <div className="panel-head"><div><div className="panel-title">复盘建议与版本关系</div><div className="panel-sub">仅用户可采纳的覆盖缺口可以写回母计划；采纳后会生成新签名，并标记基于旧版本的活跃轮次。</div></div><button className="btn sm" onClick={() => { window.location.search = "?page=gaps"; }}>查看完整复盘</button></div>
           {adoption && <div className="note" style={{ marginBottom: 10 }}>最近采纳：{adoption.adopted_dimensions.join("、")}。{adoption.rebaseStatus === "awaiting_master_review" ? "母计划草稿待审核；审核生效后才会暂停旧子计划并执行 rebase。" : adoption.rebaseStatus === "drafts_created" ? `已创建 ${adoption.drafts.length} 个子计划 rebase 草稿；需逐项审核后生效。` : adoption.rebaseStatus === "failed" ? `rebase 未完成：${adoption.message}` : adoption.message}{adoption.rebaseStatus === "failed" && masterVersionId && <button className="btn sm" style={{ marginLeft: 8 }} onClick={() => void retryAdoptionRebase()}>重试子计划 rebase</button>}</div>}
