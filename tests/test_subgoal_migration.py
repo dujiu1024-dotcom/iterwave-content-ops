@@ -51,6 +51,7 @@ def test_subgoal_actor_migration_marks_history_and_adds_author_columns():
         CREATE TABLE sub_plan_versions(id INTEGER PRIMARY KEY);
         CREATE TABLE sub_plan_stages(id INTEGER PRIMARY KEY, sub_plan_version_id INTEGER);
         CREATE TABLE production_tasks(id TEXT PRIMARY KEY);
+        CREATE TABLE content_production_line_events(id INTEGER PRIMARY KEY);
     """)
     root = Path(__file__).resolve().parents[1] / "migrations"
     conn.executescript((root / "149_subgoal_tree_dependency_gates.sql").read_text(encoding="utf-8"))
@@ -65,4 +66,8 @@ def test_subgoal_actor_migration_marks_history_and_adds_author_columns():
     assert goal == ("legacy:unattributed", "legacy:unattributed")
     plan_columns = {row[1] for row in conn.execute("PRAGMA table_info(sub_goal_production_plans)")}
     assert {"created_by", "updated_by"} <= plan_columns
+    audit_columns = {row[1] for row in conn.execute("PRAGMA table_info(sub_goal_audit_events)")}
+    assert {"tenant_id", "actor_type", "actor_id", "initiating_actor", "executing_actor", "task_id"} <= audit_columns
+    event_columns = {row[1] for row in conn.execute("PRAGMA table_info(content_production_line_events)")}
+    assert {"tenant_id", "actor_type", "actor_id", "initiating_actor", "executing_actor", "task_id"} <= event_columns
     conn.close()
