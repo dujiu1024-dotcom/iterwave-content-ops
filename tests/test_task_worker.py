@@ -1266,3 +1266,97 @@ def test_worker_retry_preserves_initiating_actor_and_binds_new_task_correlation(
         "initiating_actor": None, "executing_actor": None,
         "tenant_id": None, "task_id": None,
     }
+
+
+def test_multiple_workers_write_only_to_task_tenant_database(tmp_path):
+    """Concurrent workers must persist outputs only in the DB selected by each queued tenant."""
+    import sqlite3
+
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    for tenant_id, round_id in (("tenant-a", 41), ("tenant-b", 42)):
+        queue.enqueue(
+            task_type="round_run", tenant_id=tenant_id, aggregate_id=str(round_id),
+            payload={
+                "round_id": round_id, "operation": "run",
+                "initiating_actor": f"session:{tenant_id}",
+            },
+        )
+
+    async def scenario():
+        stop = asyncio.Event()
+        both_started = asyncio.Event()
+        started = set()
+        completed = set()
+
+        class TenantExecutor:
+            def __init__(self, tenant_id, conn):
+                self.tenant_id = tenant_id
+                self.conn = conn
+
+            async def run(self, round_id, **_kwargs):
+                identity = current_task_identity()
+                assert identity["tenant_id"] == self.tenant_id
+                assert identity["initiating_actor"] == f"session:{self.tenant_id}"
+                assert identity["executing_actor"] == "service:global-task-worker"
+                assert identity["task_id"]
+                self.conn.execute(
+                    "INSERT INTO worker_outputs(tenant_id,round_id,queue_task_id) VALUES(?,?,?)",
+                    (identity["tenant_id"], round_id, identity["task_id"]),
+                )
+                self.conn.commit()
+                started.add(round_id)
+                if len(started) == 2:
+                    both_started.set()
+                await asyncio.wait_for(both_started.wait(), timeout=2)
+                completed.add(round_id)
+                if len(completed) == 2:
+                    stop.set()
+                return {"round_id": round_id, "final_status": "completed"}
+
+        database_paths = {}
+
+        def build_context(tenant_id):
+            data_dir = tmp_path / "tenants" / tenant_id / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            database_path = data_dir / "tenant.sqlite3"
+            database_paths[tenant_id] = database_path
+            conn = sqlite3.connect(database_path)
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS worker_outputs(
+                       tenant_id TEXT NOT NULL,round_id INTEGER NOT NULL,queue_task_id TEXT NOT NULL
+                   )"""
+            )
+            conn.commit()
+            cfg = SimpleNamespace(
+                paths=SimpleNamespace(data_dir=str(data_dir)),
+                resolve_path=lambda value: value,
+            )
+            return {
+                "cfg": cfg,
+                "conn": conn,
+                "executor": TenantExecutor(tenant_id, conn),
+                "scheduler": SimpleNamespace(shutdown=lambda: None),
+            }
+
+        workers = [
+            GlobalTaskWorker(queue, build_context, poll_interval_seconds=0.01,
+                             lease_seconds=30, heartbeat_seconds=1),
+            GlobalTaskWorker(queue, build_context, poll_interval_seconds=0.01,
+                             lease_seconds=30, heartbeat_seconds=1),
+        ]
+        await asyncio.wait_for(
+            asyncio.gather(*(worker.run(stop) for worker in workers)),
+            timeout=5,
+        )
+        assert started == {41, 42}
+        assert completed == {41, 42}
+
+        for tenant_id, expected_round in (("tenant-a", 41), ("tenant-b", 42)):
+            with sqlite3.connect(database_paths[tenant_id]) as check:
+                rows = check.execute(
+                    "SELECT tenant_id,round_id FROM worker_outputs ORDER BY round_id"
+                ).fetchall()
+            assert rows == [(tenant_id, expected_round)]
+
+    asyncio.run(scenario())
