@@ -4891,10 +4891,14 @@ def _register_routes(app: FastAPI) -> None:
                 ).fetchone()
                 goal_id = goal_row[0] if goal_row else None
 
+            # New round timestamps are explicit UTC ISO-8601 values. Historical
+            # SQLite CURRENT_TIMESTAMP rows remain naive UTC and are interpreted
+            # column-by-column by the round detail serializer.
+            created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
             cursor = conn.execute(
-                "INSERT INTO spiral_rounds (goal_id, round_number, status, topic_ids, content_variants) "
-                "VALUES (?, ?, 'created', ?, ?)",
-                (goal_id, round_number, "[]", "[]"),
+                "INSERT INTO spiral_rounds (goal_id, round_number, status, topic_ids, content_variants, created_at) "
+                "VALUES (?, ?, 'created', ?, ?, ?)",
+                (goal_id, round_number, "[]", "[]", created_at),
             )
             # R18 / G-21：创建轮次与母计划签名必须处于同一事务。
             # 签名写入失败时回滚轮次，避免出现 UI 报错但数据库残留的幽灵轮次。
