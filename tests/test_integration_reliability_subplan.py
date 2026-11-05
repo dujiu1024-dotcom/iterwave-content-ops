@@ -639,7 +639,6 @@ async def test_ai_subplan_description_does_not_enable_business_or_effect_gates_b
         json={"master_plan_version_id": int(master["id"]), "platforms": ["xhs"]},
     )
     assert response.status_code == 201, response.text
-    subplan_id = response.json()["items"][0]["subplan"]["id"]
     stage = conn.execute(
         """SELECT business_completion_required,effect_required
            FROM sub_plan_stages WHERE sub_plan_version_id=?""",
