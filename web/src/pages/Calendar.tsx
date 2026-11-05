@@ -584,7 +584,9 @@ export default function Calendar() {
 function _eventDate(e: ScheduleEvent): string {
   const raw = e.scheduled || e.saved_at || "";
   // ISO 含时间部分 —— 只取日期
-  const parsed = parseBusinessCalendarDate(raw);\n  return parsed ? _fmt(parsed) : "";
+  // Offset-aware timestamps are grouped by the fixed Shanghai business date.
+  const parsed = parseBusinessCalendarDate(raw);
+  return parsed ? _fmt(parsed) : "";
 }
 
 /** ISO / 日期串 → datetime-local 需要的 "YYYY-MM-DDTHH:MM"；无时间部分补 09:00 */
