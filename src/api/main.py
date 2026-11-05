@@ -6015,15 +6015,45 @@ def _register_routes(app: FastAPI) -> None:
         if not dims:
             raise HTTPException(400, "dimensions 不能为空")
         conn = _g()["conn"]
+        effect_review_id = (req or {}).get("effect_review_id")
+        effect_source = None
+        if effect_review_id is not None:
+            try:
+                effect_review_id = int(effect_review_id)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(422, "effect_review_id 必须为正整数") from exc
+            if effect_review_id < 1:
+                raise HTTPException(422, "effect_review_id 必须为正整数")
+            effect_source = conn.execute(
+                """SELECT er.id,er.stage_id,er.assessment,er.recommendation,
+                          er.evidence_note,er.confidence,er.evidence_json,
+                          s.stage_key,s.title AS stage_title,s.sub_plan_version_id,
+                          v.sub_plan_id,p.platform,p.master_plan_version_id
+                   FROM strategy_effect_reviews er
+                   JOIN sub_plan_stages s ON s.id=er.stage_id
+                   JOIN sub_plan_versions v ON v.id=s.sub_plan_version_id
+                   JOIN sub_plans p ON p.id=v.sub_plan_id
+                   WHERE er.id=?""",
+                (effect_review_id,),
+            ).fetchone()
+            if effect_source is None:
+                raise HTTPException(404, "策略效果反馈记录不存在")
+            if effect_source["assessment"] == "insufficient_data":
+                raise HTTPException(409, "证据不足的效果反馈不能采纳为计划调整")
         rows = conn.execute(
             """SELECT p.id,p.platform,p.master_plan_version_id,p.current_version_id,
                       v.snapshot_json
                FROM sub_plans p JOIN sub_plan_versions v ON v.id=p.current_version_id
                WHERE p.status IN ('active','paused') AND v.status='effective'
-               ORDER BY p.platform,p.id"""
+                 AND (? IS NULL OR p.id=?)
+               ORDER BY p.platform,p.id""",
+            (
+                effect_source["sub_plan_id"] if effect_source is not None else None,
+                effect_source["sub_plan_id"] if effect_source is not None else None,
+            ),
         ).fetchall()
         if not rows:
-            raise HTTPException(409, "当前没有已审核的平台子计划；请先创建并审核子计划")
+            raise HTTPException(409, "当前没有与反馈来源匹配的已审核平台子计划；请先确认子计划仍有生效版本")
         store = PlanVersionStore(conn)
         drafts = []
         for row in rows:
@@ -6033,12 +6063,30 @@ def _register_routes(app: FastAPI) -> None:
                 raise HTTPException(409, f"子计划 {row['id']} 的生效快照损坏")
             prior_adoptions = snapshot.get("review_adoptions")
             adoption = list(prior_adoptions) if isinstance(prior_adoptions, list) else []
-            adoption.append({
+            adoption_record = {
                 "dimensions": dims,
                 "created_at": _storage_now().isoformat(timespec="seconds"),
                 "source": "review_adoption",
                 "status": "suggestion",
-            })
+            }
+            if effect_source is not None:
+                try:
+                    source_evidence = json.loads(effect_source["evidence_json"] or "{}")
+                except (TypeError, ValueError):
+                    raise HTTPException(409, "效果反馈证据快照损坏，拒绝生成不可追溯的调整草稿")
+                adoption_record["effect_feedback"] = {
+                    "id": int(effect_source["id"]),
+                    "stage_id": int(effect_source["stage_id"]),
+                    "stage_key": effect_source["stage_key"],
+                    "stage_title": effect_source["stage_title"],
+                    "source_sub_plan_version_id": int(effect_source["sub_plan_version_id"]),
+                    "assessment": effect_source["assessment"],
+                    "recommendation": effect_source["recommendation"],
+                    "evidence_note": effect_source["evidence_note"],
+                    "confidence": effect_source["confidence"],
+                    "evidence": source_evidence,
+                }
+            adoption.append(adoption_record)
             snapshot["review_adoptions"] = adoption
             stages = [dict(stage) for stage in conn.execute(
                 "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order",
