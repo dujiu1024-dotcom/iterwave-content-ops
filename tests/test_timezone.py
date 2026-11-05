@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -139,6 +140,21 @@ def test_legacy_saved_at_preserves_explicit_timezone_offset():
 
     parsed = parse_server_local_legacy_datetime("2026-11-02T10:00:00+08:00")
     assert parsed == datetime(2026, 11, 2, 2, 0, tzinfo=timezone.utc)
+
+
+def test_scheduler_cron_trigger_uses_fixed_shanghai_timezone():
+    from src.core.scheduler import SchedulerEngine
+
+    cfg = SimpleNamespace(
+        business_timezone="America/Los_Angeles",
+        scheduler=SimpleNamespace(
+            job=lambda _job_id: SimpleNamespace(cron="0 8 * * *", interval_minutes=60),
+        ),
+    )
+    engine = SchedulerEngine.__new__(SchedulerEngine)
+    engine.cfg = cfg
+    trigger = engine._trigger_for("daily_ops")
+    assert trigger.timezone.key == "Asia/Shanghai"
 
 
 def test_business_date_predicate_accepts_qualified_and_coalesce_columns(cfg):
