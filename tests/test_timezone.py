@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -150,3 +151,19 @@ def test_business_date_predicate_accepts_qualified_and_coalesce_columns(cfg):
     )
     assert "m.fetched_at" in qualified
     assert "COALESCE(last_seen_at, discovered_at)" in coalesced
+
+
+
+def test_scheduler_cron_trigger_uses_fixed_shanghai_timezone():
+    from src.core.scheduler import SchedulerEngine
+
+    cfg = SimpleNamespace(
+        business_timezone="America/Los_Angeles",
+        scheduler=SimpleNamespace(
+            job=lambda _job_id: SimpleNamespace(cron="0 8 * * *", interval_minutes=60),
+        ),
+    )
+    engine = SchedulerEngine.__new__(SchedulerEngine)
+    engine.cfg = cfg
+    trigger = engine._trigger_for("daily_ops")
+    assert trigger.timezone.key == "Asia/Shanghai"
