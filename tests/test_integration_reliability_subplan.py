@@ -257,9 +257,27 @@ async def test_round_is_pinned_to_effective_version_and_survives_new_draft(clien
     assert master_review.status_code == 200, master_review.text
     store, master, version, stage = _approved_subplan(conn, master_version_id=master_id)
 
-    created = tc.post("/api/subplans/integration-sub/rounds", json={"topic_count": 3})
+    # Multi-item batches conflict with the tenant's single-active-line invariant.
+    # Reject before opening a round, rather than failing halfway through task inserts.
+    rounds_before = int(conn.execute("SELECT COUNT(*) FROM spiral_rounds").fetchone()[0])
+    batch = tc.post("/api/subplans/integration-sub/rounds", json={"topic_count": 3})
+    assert batch.status_code == 409
+    assert "topic_count 必须为 1" in batch.json()["detail"]
+    assert int(conn.execute("SELECT COUNT(*) FROM spiral_rounds").fetchone()[0]) == rounds_before
+
+    created = tc.post("/api/subplans/integration-sub/rounds", json={"topic_count": 1})
     assert created.status_code == 201, created.text
+    assert created.json()["topic_count"] == 1
+    assert created.json()["production_task_count"] == 1
     round_id = int(created.json()["round_id"])
+    task_rows = conn.execute(
+        "SELECT t.id,t.task_ordinal,l.id AS line_id FROM production_tasks t "
+        "JOIN content_production_lines l ON l.production_task_id=t.id WHERE t.round_id=?",
+        (round_id,),
+    ).fetchall()
+    assert len(task_rows) == 1
+    assert int(task_rows[0]["task_ordinal"]) == 1
+    assert task_rows[0]["line_id"] == "cpl-" + task_rows[0]["id"]
 
     binding_sql = (
         "SELECT master_plan_version_id,sub_plan_id,sub_plan_version_id,sub_plan_stage_id,"
