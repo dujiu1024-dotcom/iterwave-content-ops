@@ -48,7 +48,7 @@ class SubGoalStore:
                 actor_type,actor_id,initiating_actor,executing_actor,task_id,
                 payload_json,created_at
             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (self.tenant_id, action, sub_plan_id, int(version_id), goal_id,
+            (str(context.get("tenant_id") or self.tenant_id), action, sub_plan_id, int(version_id), goal_id,
              actor_type, actor_id, initiating, executing, task_id,
              _json({"fields": sorted((payload or {}).keys())}), _now()),
         )
