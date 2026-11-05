@@ -279,3 +279,21 @@ def test_complete_task_keeps_artifact_and_task_in_callers_transaction(store):
     assert conn.execute(
         "SELECT COUNT(*) FROM contents WHERE id='atomic-content'"
     ).fetchone()[0] == 0
+
+
+def test_artifact_insert_rolls_back_when_task_completion_fails(store):
+    """RoundExecutor must not commit an artifact unless task attribution succeeds."""
+    task = make_task(store)
+    store.claim_task(task["id"], worker_id="worker-atomic")
+
+    with pytest.raises(ProductionTaskError, match="轮次"):
+        with store.conn:
+            store.conn.execute(
+                "INSERT INTO contents(id,round_id,platform) VALUES('wrong-round-atomic',8,'xhs')"
+            )
+            store.complete_task(task["id"], content_id="wrong-round-atomic")
+
+    assert store.conn.execute(
+        "SELECT COUNT(*) FROM contents WHERE id='wrong-round-atomic'"
+    ).fetchone()[0] == 0
+    assert store.get_task(task["id"])["status"] == "running"
