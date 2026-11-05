@@ -1,4 +1,4 @@
-"""Shared hard limits for every image-provider request in one generation run.
+"""Usage tracking and concurrency coordination for image-provider requests.
 
 Provider fallback calls consume the same counters as primary calls. Context variables
 propagate through asyncio.to_thread. A SQLite lease table enforces provider concurrency
@@ -17,18 +17,13 @@ import uuid
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_ROUND_CALLS = 30
-_DEFAULT_ARTICLE_CALLS = 27
-_DEFAULT_PAGE_CALLS = 3
-_DEFAULT_TIMEOUT_SECONDS = 300
 _GLOBAL_PROVIDER_CONCURRENCY = 2
-# Provider HTTP calls are capped at 300s. The extra minute avoids lease expiry
-# racing normal request teardown; crashed workers are recovered after this TTL.
-_PROVIDER_LEASE_TTL_SECONDS = 360
+# Expired leases recover abandoned provider slots; this is not a request timeout.
+_PROVIDER_LEASE_TTL_SECONDS = 600
 
 
 class ImageBudgetExceeded(RuntimeError):
-    """A hard image-generation budget was exhausted."""
+    """Image-provider concurrency coordination could not be satisfied."""
 
 
 def _database_path() -> str:
@@ -104,8 +99,6 @@ def _release_provider_lease(db_path: str, lease_id: str) -> None:
 
 @dataclass
 class ImageBudget:
-    max_calls: int = _DEFAULT_ROUND_CALLS
-    timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS
     started_at: float | None = None
     calls: int = 0
     failures: int = 0
@@ -115,25 +108,16 @@ class ImageBudget:
         default_factory=lambda: threading.BoundedSemaphore(2), repr=False,
     )
 
-    @property
-    def deadline(self) -> float:
+    def remaining_seconds(self) -> None:
+        """No run-wide deadline is imposed; provider clients use their own transport policy."""
         if self.started_at is None:
             self.started_at = time.monotonic()
-        return self.started_at + self.timeout_seconds
-
-    def remaining_seconds(self) -> float:
-        remaining = self.deadline - time.monotonic()
-        if remaining <= 0:
-            raise ImageBudgetExceeded(f"本轮图片生成达到 {self.timeout_seconds} 秒硬超时")
-        return remaining
+        return None
 
     def reserve(self) -> None:
         with self._lock:
-            self.remaining_seconds()
-            if self.calls >= self.max_calls:
-                raise ImageBudgetExceeded(
-                    f"本轮图片 API 调用预算已耗尽（{self.calls}/{self.max_calls}）"
-                )
+            if self.started_at is None:
+                self.started_at = time.monotonic()
             self.calls += 1
 
     def failed(self) -> None:
@@ -145,17 +129,14 @@ class ImageBudget:
             return {
                 "api_calls": self.calls,
                 "failed_calls": self.failures,
-                "max_api_calls": self.max_calls,
                 "elapsed_seconds": round(time.monotonic() - self.started_at, 3) if self.started_at is not None else 0.0,
             }
 
 
 @dataclass
 class ArticleBudget:
-    max_calls: int = _DEFAULT_ARTICLE_CALLS
     calls: int = 0
     page_calls: int = 0
-    page_max_calls: int = _DEFAULT_PAGE_CALLS
     failures: int = 0
 
 
