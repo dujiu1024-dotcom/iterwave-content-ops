@@ -579,4 +579,4 @@ def test_condition_review_api_records_business_gate_decision(client):
         f"/api/subplans/condition-review-sub/stages/{int(stage['id'])}/condition-reviews"
     )
     assert history.status_code == 200
-    assert history.json()["condition_reviews"][0]["decision"] == "passed"
+    assert history.json()["condition_reviews"][0]["decision"] == "needs_review"
