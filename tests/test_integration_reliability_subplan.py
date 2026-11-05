@@ -79,11 +79,35 @@ def _approved_subplan(conn, sub_id: str = "integration-sub", master_version_id: 
         master_plan_version_id=int(master["id"]),
         stages=[{"title": "阶段一", "target_count": 6}],
     )
-    store.activate_subplan_version(int(version["id"]), reviewer="test")
     stage = conn.execute(
         "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=?",
         (int(version["id"]),),
     ).fetchone()
+    # Production context now requires a version-bound formal subgoal and enabled
+    # production plan. Build those prerequisites in the draft before activation;
+    # do not weaken the production gate to accommodate this integration fixture.
+    from src.core.subgoal_store import SubGoalStore
+    goals = SubGoalStore(conn)
+    goal = goals.create_goal(sub_id, int(version["id"]), {
+        "goal_type": "quantity",
+        "goal_order": 1,
+        "priority": 3,
+        "title": "完成阶段一图文生产",
+        "description": "联合回归正式生产目标",
+        "target_count": int(stage["target_count"]),
+        "acceptance_criteria": "达到阶段目标数量并完成业务验收",
+        "requires_production": True,
+        "stage_id": int(stage["id"]),
+    })
+    goals.save_production_plan(sub_id, str(goal["id"]), {
+        "content_direction": "围绕已确认业务定位生产图文内容",
+        "suggested_count": int(stage["target_count"]),
+        "resource_requirements": {},
+        "priority": 3,
+        "execution_conditions": "母计划、子计划和生产线均已审核生效",
+        "acceptance_relation": "以阶段目标数量和验收证据为准",
+    })
+    store.activate_subplan_version(int(version["id"]), reviewer="test")
     line_store = ProductionLineStore(conn)
     line_draft = line_store.create_draft(
         sub_id, int(version["id"]),
@@ -234,7 +258,7 @@ async def test_round_is_pinned_to_effective_version_and_survives_new_draft(clien
     store, master, version, stage = _approved_subplan(conn, master_version_id=master_id)
 
     created = tc.post("/api/subplans/integration-sub/rounds", json={"topic_count": 3})
-    assert created.status_code == 201
+    assert created.status_code == 201, created.text
     round_id = int(created.json()["round_id"])
 
     binding_sql = (
