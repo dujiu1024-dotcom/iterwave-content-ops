@@ -102,6 +102,8 @@ def test_media_generation_settings_do_not_expose_provider_url_or_key_variable(
         assert response.status_code == 200
         body = response.json()
         assert body["provider_configured"] is True
+        assert "monthly_quota" not in body
+        assert isinstance(body["used_this_month"], int)
         assert "api_base_url" not in body
         assert "api_key_env" not in body
         assert "internal-provider.example" not in response.text
