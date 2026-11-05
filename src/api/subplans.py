@@ -16,6 +16,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 
+from src.core.timezone import business_today
 from src.core.plan_version_store import (
     PlanVersionError, PlanVersionStore, normalize_stage_date,
 )
@@ -538,7 +539,7 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
             "不是生成草稿数。不得输出审核状态或要求自动生效。"
             "start_date 和 end_date 只能使用 YYYY-MM-DD 格式（如 2026-11-03），"
             "不得带时间、中文、周次或斜杠；无法确定时可省略或置为 null。今天是 "
-            + datetime.now().strftime("%Y-%m-%d") + "。"
+            + business_today(cfg).strftime("%Y-%m-%d") + "。"
             "\n母计划："
             + json.dumps(master_snapshot, ensure_ascii=False)
             + "\n目标平台：" + json.dumps(platforms, ensure_ascii=False)
