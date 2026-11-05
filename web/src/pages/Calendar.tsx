@@ -3,7 +3,7 @@ import { useApp } from "../AppContext";
 import EmptyHint from "../components/EmptyHint";
 import { api, ContentPlan, Platform, ScheduleEvent, UnscheduledDraft, ProductionBatch, ProductionBatchDetail } from "../api";
 import { ALL_PLATFORMS, platformMeta } from "../platforms";
-import { businessCalendarDate, formatCalendarDate as _fmt, parseBusinessCalendarDate, shiftCalendarDate } from "../calendarDate.mjs";
+import { businessCalendarDate, formatBusinessDateTimeInput, formatCalendarDate as _fmt, parseBusinessCalendarDate, shiftCalendarDate } from "../calendarDate.mjs";
 import { displayStatusLabel } from "../displayLabels";
 
 const PLAN_STATUS_LABEL: Record<ContentPlan["status"], string> = {
@@ -128,7 +128,7 @@ export default function Calendar() {
     for (let d = new Date(visibleStart); d < visibleEndExclusive; d.setDate(d.getDate() + 1)) {
       const date = new Date(d);
       const key = _fmt(date);
-      result.push({ date, key, events: filteredEvents.filter((event) => _eventDate(event) === key && (platformFilter === "all" || event.platform === platformFilter)), plans: filteredPlans.filter((plan) => plan.scheduled_date === key && (platformFilter === "all" || plan.platforms.length === 0 || plan.platforms.includes(platformFilter)) && (showArchivedPlans || (plan.status !== "cancelled" && plan.status !== "archived"))), batches: filteredBatches.filter((batch) => _fmt(parseBusinessCalendarDate(batch.created_at) ?? new Date(0)) === key), inMonth: date.getMonth() === month });
+      result.push({ date, key, events: filteredEvents.filter((event) => _eventDate(event) === key && (platformFilter === "all" || event.platform === platformFilter)), plans: filteredPlans.filter((plan) => plan.scheduled_date === key && (platformFilter === "all" || plan.platforms.length === 0 || plan.platforms.includes(platformFilter)) && (showArchivedPlans || (plan.status !== "cancelled" && plan.status !== "archived"))), batches: filteredBatches.filter((batch) => { const batchDate = parseBusinessCalendarDate(batch.created_at); return batchDate !== null && _fmt(batchDate) === key; }), inMonth: date.getMonth() === month });
     }
     return result;
   }, [visibleStart, visibleEndExclusive, filteredEvents, filteredPlans, filteredBatches, month, showArchivedPlans, platformFilter]);
@@ -584,12 +584,14 @@ export default function Calendar() {
 function _eventDate(e: ScheduleEvent): string {
   const raw = e.scheduled || e.saved_at || "";
   // ISO 含时间部分 —— 只取日期
-  return raw.slice(0, 10);
+  const parsed = parseBusinessCalendarDate(raw);\n  return parsed ? _fmt(parsed) : "";
 }
 
 /** ISO / 日期串 → datetime-local 需要的 "YYYY-MM-DDTHH:MM"；无时间部分补 09:00 */
 function _toLocalInput(raw: string | null): string {
   if (!raw) return "";
+  const formatted = formatBusinessDateTimeInput(raw);
+  if (formatted) return formatted;
   const text = raw.replace(" ", "T");
   if (text.length >= 16) return text.slice(0, 16);
   return `${text.slice(0, 10)}T09:00`;
