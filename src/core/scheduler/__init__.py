@@ -294,10 +294,7 @@ class SchedulerEngine:
         timezone = getattr(trigger, "timezone", None)
         zone_key = getattr(timezone, "key", str(timezone))
         if isinstance(trigger, CronTrigger):
-            return (
-                "cron", zone_key,
-                tuple((field.name, str(field)) for field in trigger.fields),
-            )
+            return ("cron", zone_key, str(trigger))
         if isinstance(trigger, IntervalTrigger):
             return ("interval", zone_key, trigger.interval.total_seconds())
         return (type(trigger).__qualname__, str(trigger))
