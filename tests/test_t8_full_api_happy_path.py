@@ -89,6 +89,20 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
     assert confirmed.status_code == 200, confirmed.text
     assert confirmed.json()["report"]["status"] == "confirmed"
 
+    north_star = client.put("/api/north-star", json={
+        "change_reason": "T8-E 验收建立账号组北极星",
+        "snapshot": {
+            "positioning": "测试业务定位",
+            "business_direction": "图文内容运营",
+            "target_users": "目标测试用户",
+            "core_value": "稳定生产高质量内容",
+            "long_term_content_direction": "围绕核心业务持续输出",
+            "business_model": "内容营销",
+            "long_term_goals": "建立可持续内容生产体系",
+        },
+    })
+    assert north_star.status_code == 200, north_star.text
+
     async def no_ai_provider(*_args, **_kwargs):
         return {"status": "failed", "reason": "t8_e_mocked_provider", "items": []}
     monkeypatch.setattr(master_plan_orchestrator, "generate_subplan_drafts", no_ai_provider)
