@@ -4947,3 +4947,18 @@ def test_manual_draft_save_verification_fingerprints_all_images(client):
     assert row["saved_content_hash"] != content_version_hash(
         row["title"], row["body"], json.loads(row["tags"] or "[]"), images[:1],
     )
+
+
+def test_round_detail_created_at_treats_legacy_naive_value_as_utc(client):
+    tc, conn, seed = client
+    round_id = seed.round(status="created")
+    conn.execute(
+        "UPDATE spiral_rounds SET created_at=? WHERE id=?",
+        ("2026-11-03 16:00:00", round_id),
+    )
+    conn.commit()
+
+    detail = tc.get(f"/api/rounds/{round_id}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["created_at"] == "2026-11-03T16:00:00+00:00"
+
