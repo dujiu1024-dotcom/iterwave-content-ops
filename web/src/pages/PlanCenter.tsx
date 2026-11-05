@@ -12,9 +12,9 @@ import SubgoalManager from "../components/SubgoalManager";
 type Tab = "master" | "platforms" | "stages" | "goals" | "production-line" | "assets" | "north-star";
 type StageStatus = "pending" | "active" | "completed" | "paused" | "cancelled";
 type Stage = { id: string; name: string; direction: string; count: number; start: string; end: string; rule: string; status: StageStatus; confirmed: number; strategyGoal: string; currentProblem: string; executionStrategy: string; prerequisites: string; inputInfo: string; expectedResult: string; completionCriteria: string; effectEvaluation: string; entryCondition: string; entryConditionMet: boolean; businessCompletionRequired: boolean; businessCompletionStatus: string; effectRequired: boolean; effectStatus: string; dependencies: string[]; latestOutcome?: SubPlanStageRecord["latest_outcome"] };
-type Child = { id: string; platform: Platform; name: string; direction: string; count: number; status: "draft" | "review" | "effective"; signature: string; versionId: number; versionNo: number; masterPlanVersionId: number; masterPlanVersionNo: number; versionHistory: Array<{ id:number; version_no:number; status:string; master_plan_version_id:number; snapshot:Record<string,unknown> }>; stageRecords: SubPlanStageRecord[] };
+type Child = { id: string; platform: Platform; name: string; direction: string; count: number; status: "draft" | "review" | "effective" | "stale"; signature: string; versionId: number; versionNo: number; masterPlanVersionId: number; masterPlanVersionNo: number; versionHistory: Array<{ id:number; version_no:number; status:string; master_plan_version_id:number; snapshot:Record<string,unknown> }>; stageRecords: SubPlanStageRecord[] };
 const stageLabels: Record<StageStatus, string> = { pending: "待执行", active: "执行中", completed: "已完成", paused: "已暂停", cancelled: "已取消" };
-const childLabels = { draft: "草稿", review: "待审核", effective: "已生效" };
+const childLabels = { draft: "草稿", review: "待审核", effective: "已生效", stale: "历史版本 · 需重建" };
 const localDate = (date: Date) => {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -128,15 +128,19 @@ export default function PlanCenter() {
           ?? detail.versions[0];
         const snapshot = current?.snapshot ?? {};
         const stageRecords = current?.stages ?? [];
-        const status = identity.status === "active" && current?.status === "effective"
-          ? "effective" : current?.status === "draft" ? "draft" : "review";
+        const parentVersionId = Number(current?.master_plan_version_id ?? identity.master_plan_version_id ?? 0);
+        const parentMaster = versionResult.items.find((item) => Number(item.id) === parentVersionId);
+        const parentIsCurrent = Boolean(effectiveMaster && parentVersionId === Number(effectiveMaster.id) && parentMaster?.status === "effective");
+        const status = !parentIsCurrent || identity.master_version_status !== "effective"
+          ? "stale"
+          : identity.status === "active" && current?.status === "effective"
+            ? "effective" : current?.status === "draft" ? "draft" : "review";
         const versionHistory = detail.versions.map((item) => ({
           id: Number(item.id), version_no: Number(item.version_no), status: String(item.status),
           master_plan_version_id: Number(item.master_plan_version_id ?? 0),
           snapshot: (item.snapshot ?? {}) as Record<string, unknown>,
         }));
-        const parentVersionId = Number(current?.master_plan_version_id ?? identity.master_plan_version_id ?? 0);
-        const parentVersionNo = Number(versionResult.items.find((item) => Number(item.id) === parentVersionId)?.version_no ?? 0);
+        const parentVersionNo = Number(parentMaster?.version_no ?? 0);
         return {
           id: identity.id, platform: identity.platform,
           name: String(snapshot.title ?? identity.title),
@@ -287,7 +291,7 @@ export default function PlanCenter() {
     } catch (e) { showToast("创建失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
   };
   const saveChild = async () => {
-    if (!editingChild) return;
+    if (!editingChild || editingChild.status === "stale") return;
     const existing = children.find((item) => item.id === editingChild.id);
     if (!existing) return;
     try {
@@ -313,7 +317,7 @@ export default function PlanCenter() {
     } catch (e) { showToast("保存失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
   };
   const reviewChild = async (item: Child) => {
-    if (item.status === "effective") return;
+    if (item.status === "effective" || item.status === "stale") return;
     if (!window.confirm("确认审核通过该子计划版本？通过后该平台子计划将获得生产授权。")) return;
     try {
       await api.reviewSubplan(item.id, item.versionId, "approve");
@@ -561,7 +565,7 @@ export default function PlanCenter() {
     </>}
 
     {!loading && !error && tab === "platforms" && data && <>
-      <div className="panel"><div className="panel-head"><div><div className="panel-title">平台子计划</div><div className="panel-sub">各平台独立维护方向、目标篇数与执行授权，并引用来源主计划版本。</div></div><div className="head-actions"><button className="btn" onClick={async () => { if (!masterVersionId) { showToast("请先审核生效母计划", "error"); return; } try { const result = await api.aiDraftSubplans(masterVersionId, platforms); showToast(result.already_exists ? "所选平台均已有子计划，无需重复拆解" : `AI 已生成 ${result.items.length} 个子计划草稿，需人工审核`, result.already_exists ? "info" : "success"); await load(); } catch (e) { showToast("AI 拆解失败：" + (e instanceof Error ? e.message : String(e)), "error"); } }}>AI 拆解</button><button className="btn primary" onClick={() => { setChildForm(true); setChildPlatform(platforms[0] ?? "xhs"); setChildCount(data.plan.topic_count_per_platform); }}>＋ 手工创建</button></div></div><div className="note">来源主计划版本：<code>{data.signature.slice(0, 16)}…</code>。子计划和版本均持久化在当前账号组数据库；草稿不会自动获得生产授权。</div><div className="grid two" style={{ marginTop: 12 }}>{platforms.map((p) => { const child = children.find((c) => c.platform === p); return <div className="plan-child-card" key={p}><div className="panel-head"><b>{platformMeta(p).label}</b><span className="tag gray">{child ? childLabels[child.status] : "尚未创建子计划"}</span></div>{child ? <><h3>{child.name}</h3><p>{child.direction || "未填写方向"}</p><div className="tiny">目标 {child.count} 篇 · 来源母计划 V{child.masterPlanVersionNo || "—"} · 子计划 V{child.versionNo}</div>{child.versionHistory.length > 1 && <div className="tiny">最近版本差异：{Object.keys({ ...child.versionHistory[0].snapshot, ...child.versionHistory[1].snapshot }).filter((key) => JSON.stringify(child.versionHistory[0].snapshot[key]) !== JSON.stringify(child.versionHistory[1].snapshot[key])).join("、") || "无字段变化"}（V{child.versionHistory[1].version_no} → V{child.versionHistory[0].version_no}）</div>}<div className="plan-form-actions"><button className="btn sm" onClick={() => setEditingChild({ ...child })}>编辑</button><button className="btn sm" onClick={() => reviewChild(child)}>{child.status === "draft" ? "提交审核" : child.status === "review" ? "审核并生效" : "已生效"}</button>{child.status === "effective" && <button className="btn sm primary" onClick={() => { setSelectedChildId(child.id); setTab("production-line"); }}>管理生产线 →</button>}</div></> : <><p>继承主计划目标与约束；当前没有独立子计划记录。</p><button className="btn sm" onClick={() => { setChildForm(true); setChildPlatform(p); setChildCount(data.plan.topic_count_per_platform); }}>创建该平台子计划</button></>}</div>; })}</div></div>
+      <div className="panel"><div className="panel-head"><div><div className="panel-title">平台子计划</div><div className="panel-sub">各平台独立维护方向、目标篇数与执行授权，并引用来源主计划版本。</div></div><div className="head-actions"><button className="btn" onClick={async () => { if (!masterVersionId) { showToast("请先审核生效母计划", "error"); return; } try { const result = await api.aiDraftSubplans(masterVersionId, platforms); showToast(result.already_exists ? "所选平台均已有子计划，无需重复拆解" : `AI 已生成 ${result.items.length} 个子计划草稿，需人工审核`, result.already_exists ? "info" : "success"); await load(); } catch (e) { showToast("AI 拆解失败：" + (e instanceof Error ? e.message : String(e)), "error"); } }}>AI 拆解</button><button className="btn primary" onClick={() => { setChildForm(true); setChildPlatform(platforms[0] ?? "xhs"); setChildCount(data.plan.topic_count_per_platform); }}>＋ 手工创建</button></div></div><div className="note">来源主计划版本：<code>{data.signature.slice(0, 16)}…</code>。子计划和版本均持久化在当前账号组数据库；草稿不会自动获得生产授权。</div><div className="grid two" style={{ marginTop: 12 }}>{platforms.map((p) => { const child = children.find((c) => c.platform === p); return <div className="plan-child-card" key={p}><div className="panel-head"><b>{platformMeta(p).label}</b><span className="tag gray">{child ? childLabels[child.status] : "尚未创建子计划"}</span></div>{child ? <><h3>{child.name}</h3><p>{child.direction || "未填写方向"}</p><div className="tiny">目标 {child.count} 篇 · 来源母计划 V{child.masterPlanVersionNo || "—"} · 子计划 V{child.versionNo}</div>{child.status === "stale" && <div className="note" role="status">该子计划绑定的母计划版本已归档，不能继续审核、编辑或生产。请基于当前生效母计划重新创建子计划；历史阶段和生产记录仍保留。</div>}{child.versionHistory.length > 1 && <div className="tiny">最近版本差异：{Object.keys({ ...child.versionHistory[0].snapshot, ...child.versionHistory[1].snapshot }).filter((key) => JSON.stringify(child.versionHistory[0].snapshot[key]) !== JSON.stringify(child.versionHistory[1].snapshot[key])).join("、") || "无字段变化"}（V{child.versionHistory[1].version_no} → V{child.versionHistory[0].version_no}）</div>}<div className="plan-form-actions">{child.status === "stale" ? <button className="btn sm primary" disabled={!masterVersionId} onClick={() => { setChildForm(true); setChildPlatform(child.platform); setChildName(`${child.name}（新母计划）`); setChildDirection(child.direction); setChildCount(Math.max(1, child.count)); }}>基于当前母计划重建</button> : <><button className="btn sm" onClick={() => setEditingChild({ ...child })}>编辑</button><button className="btn sm" onClick={() => reviewChild(child)}>{child.status === "draft" ? "提交审核" : child.status === "review" ? "审核并生效" : "已生效"}</button></>}{child.status === "effective" && <button className="btn sm primary" onClick={() => { setSelectedChildId(child.id); setTab("production-line"); }}>管理生产线 →</button>}</div></> : <><p>继承主计划目标与约束；当前没有独立子计划记录。</p><button className="btn sm" onClick={() => { setChildForm(true); setChildPlatform(p); setChildCount(data.plan.topic_count_per_platform); }}>创建该平台子计划</button></>}</div>; })}</div></div>
       {childForm && <div className="panel"><div className="panel-head"><b>手工创建子计划</b><button className="btn sm" onClick={() => setChildForm(false)}>取消</button></div><div className="grid two"><div><label className="form-label">平台</label><select className="field" value={childPlatform} onChange={(e) => setChildPlatform(e.target.value as Platform)}>{ALL_PLATFORMS.map((p) => <option value={p} key={p}>{platformMeta(p).label}</option>)}</select><label className="form-label" style={{ marginTop: 10 }}>名称</label><input className="field" value={childName} onChange={(e) => setChildName(e.target.value)}/></div><div><label className="form-label">选题方向</label><textarea className="field" rows={3} value={childDirection} onChange={(e) => setChildDirection(e.target.value)}/><label className="form-label" style={{ marginTop: 10 }}>目标篇数</label><input className="field" type="number" min={1} value={childCount} onChange={(e) => setChildCount(Math.max(1, Number(e.target.value) || 1))}/></div></div><div className="plan-form-actions"><button className="btn primary" onClick={createChild}>保存子计划草稿</button></div></div>}
       {editingChild && <div className="panel"><div className="panel-head"><b>编辑子计划 · {platformMeta(editingChild.platform).label}</b><button className="btn sm" onClick={() => setEditingChild(null)}>取消</button></div><label className="form-label">名称</label><input className="field" value={editingChild.name} onChange={(e) => setEditingChild({ ...editingChild, name: e.target.value })}/><label className="form-label" style={{ marginTop: 10 }}>方向</label><textarea className="field" rows={3} value={editingChild.direction} onChange={(e) => setEditingChild({ ...editingChild, direction: e.target.value })}/><div className="note">子计划总目标篇数由各阶段目标合计；请在「阶段管理」中调整阶段篇数。</div><div className="plan-form-actions"><button className="btn primary" onClick={saveChild}>保存修改</button></div></div>}
     </>}
