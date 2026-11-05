@@ -11,6 +11,8 @@ from src.core.metrics import Normalizer
 from src.core.notify import Notifier
 from src.core.plan_version import PlanVersionManager
 from src.core.state_machine import DraftStateMachine, RoundStateMachine
+from src.core.task_queue import GlobalTaskQueue
+from src.core.production_task_store import ProductionTaskStore
 
 
 @pytest.fixture()
@@ -42,11 +44,16 @@ async def _fake_diagnosis(conn, cfg):
 
 
 @pytest.mark.asyncio
-async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_client, monkeypatch):
+async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_client, monkeypatch, tmp_path):
     from src.api import business_diagnosis
     from src.core import master_plan_orchestrator
 
     client, conn = workflow_client
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    monkeypatch.setattr(api_main, "_task_queue", queue)
+    monkeypatch.setattr(api_main, "_build_task_execution_snapshot", lambda *args, **kwargs: {})
+    api_main._g_ctx["runtime_tenant_id"] = "default"
     monkeypatch.setattr(business_diagnosis, "generate_diagnosis", _fake_diagnosis)
 
     profile = client.put("/api/business-profile", json={
@@ -177,15 +184,36 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
     round_id = opened.json()["round_id"]
     assert opened.json()["bound_subplan_version_id"] == subplan_version_id
     assert opened.json()["bound_production_line_version_id"] == line_version_id
-    assert opened.json()["production_task_count"] == 1
-    assert len(opened.json()["production_task_ids"]) == 1
+    assert opened.json()["production_task_count"] == 0
+    assert opened.json()["task_creation"] == "deferred_to_round_executor"
+    assert client.get("/api/production-tasks", params={"round_id": round_id}).json()["total"] == 0
 
-    tasks = client.get("/api/production-tasks", params={"round_id": round_id})
-    assert tasks.status_code == 200, tasks.text
-    items = tasks.json().get("items", [])
-    assert tasks.json()["total"] == 1
-    assert len(items) == 1, "生产入口必须按 topic_count 创建且只创建一条任务"
-    task = items[0]
+    # The durable round is then submitted to the same global queue used by the
+    # production UI. Concrete topic/platform task rows are created only after the
+    # executor has selected a topic; no ordinal-only placeholders are exposed.
+    submitted = client.post(
+        f"/api/rounds/{round_id}/run",
+        json={"topic_count": 1, "platforms": ["xhs"]},
+    )
+    assert submitted.status_code == 202, submitted.text
+    queued = queue.get(submitted.json()["task_id"])
+    assert queued is not None and queued.status == "queued"
+    assert queued.task_type == "round_run" and queued.aggregate_id == str(round_id)
+
+    # Isolate the downstream task/asset API contract with a concrete executor-shaped
+    # task. Actual executor task creation and worker execution are covered by T8-B.
+    task = ProductionTaskStore(conn).create_task(
+        round_id=round_id,
+        master_plan_version_id=int(master_id),
+        sub_plan_id=subplan_id,
+        sub_plan_version_id=int(subplan_version_id),
+        strategy_step_id="t8-e-stage-1",
+        platform="xhs",
+        task_ordinal=1,
+        idempotency_key=f"round:{round_id}:step:t8-e-stage-1:topic:t8-e-topic:platform:xhs",
+        input_snapshot={"topic": {"id": "t8-e-topic", "title": "T8-E 测试选题"}},
+        production_line_version_id=int(line_version_id),
+    )
     assert task["round_id"] == round_id
     assert task["master_plan_version_id"] == master_id
     assert task["sub_plan_id"] == subplan_id
