@@ -114,18 +114,28 @@ def timestamp_before_sql(column: str) -> str:
     )
 
 
-def business_date_cutoffs(day: str, cfg=None, *, end: bool = False) -> tuple[str, str]:
-    """UTC and legacy-local cutoffs for an inclusive business-calendar date."""
+def business_date_cutoffs(
+    day: str, cfg=None, *, end: bool = False, legacy_timezone=None,
+) -> tuple[str, str]:
+    """UTC and legacy-naive cutoffs for an inclusive business-calendar date.
+
+    legacy_timezone is column-specific: use UTC for historical naive UTC columns
+    such as SQLite CURRENT_TIMESTAMP, and the business zone for naive wall-time columns.
+    """
     try:
         parsed_day = date.fromisoformat(str(day))
     except (TypeError, ValueError) as exc:
         raise ValueError("invalid business date") from exc
-    local_midnight = datetime.combine(parsed_day, time.min, tzinfo=business_zone(cfg))
+    business_midnight = datetime.combine(parsed_day, time.min, tzinfo=business_zone(cfg))
+    legacy_zone = legacy_timezone or business_zone(cfg)
     if end:
         next_day = parsed_day + timedelta(days=1)
-        local_midnight = datetime.combine(next_day, time.min, tzinfo=business_zone(cfg)) - timedelta(seconds=1)
-    utc_value = local_midnight.astimezone(timezone.utc).isoformat(sep=" ", timespec="seconds")
-    legacy_value = local_midnight.replace(tzinfo=None).isoformat(sep=" ", timespec="seconds")
+        business_midnight = datetime.combine(next_day, time.min, tzinfo=business_zone(cfg)) - timedelta(seconds=1)
+    # Interpret the business-calendar boundary in the legacy column's historical
+    # timezone before dropping tzinfo; UTC-naive columns therefore start at 16:00 UTC.
+    legacy_midnight = business_midnight.astimezone(legacy_zone)
+    utc_value = business_midnight.astimezone(timezone.utc).isoformat(sep=" ", timespec="seconds")
+    legacy_value = legacy_midnight.replace(tzinfo=None).isoformat(sep=" ", timespec="seconds")
     return utc_value, legacy_value
 
 
@@ -144,7 +154,9 @@ def timestamp_before_exclusive_sql(column: str) -> str:
         f"OR (NOT {aware} AND datetime({column}) < datetime(?)))"
     )
 
-def business_date_predicate(column: str, day: str, cfg=None) -> tuple[str, tuple[str, str, str, str]]:
+def business_date_predicate(
+    column: str, day: str, cfg=None, *, legacy_timezone=None,
+) -> tuple[str, tuple[str, str, str, str]]:
     """Return a mixed-format SQL predicate and bounds for one business calendar day.
 
     Offset-aware rows are compared as UTC instants; legacy naive rows are interpreted
@@ -157,8 +169,10 @@ def business_date_predicate(column: str, day: str, cfg=None) -> tuple[str, tuple
         column,
     ):
         raise ValueError("invalid timestamp column")
-    utc_start, legacy_start = business_date_cutoffs(day, cfg)
-    utc_end, legacy_end = business_date_cutoffs(day, cfg, end=True)
+    utc_start, legacy_start = business_date_cutoffs(day, cfg, legacy_timezone=legacy_timezone)
+    utc_end, legacy_end = business_date_cutoffs(
+        day, cfg, end=True, legacy_timezone=legacy_timezone,
+    )
     aware = (
         f"(instr(substr(COALESCE({column}, ''), 20), '+') > 0 "
         f"OR instr(substr(COALESCE({column}, ''), 20), '-') > 0 "

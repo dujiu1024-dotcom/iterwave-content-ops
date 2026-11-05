@@ -167,3 +167,36 @@ def test_scheduler_cron_trigger_uses_fixed_shanghai_timezone():
     engine.cfg = cfg
     trigger = engine._trigger_for("daily_ops")
     assert trigger.timezone.key == "Asia/Shanghai"
+
+
+def test_business_date_predicate_supports_legacy_naive_utc_created_at(cfg):
+    import sqlite3
+    from datetime import timezone
+    from src.core.timezone import business_date_predicate
+
+    predicate, bounds = business_date_predicate(
+        "created_at", "2026-11-03", cfg, legacy_timezone=timezone.utc,
+    )
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE rounds (created_at TEXT)")
+    db.executemany(
+        "INSERT INTO rounds(created_at) VALUES (?)",
+        [
+            ("2026-11-02 15:59:59",),
+            ("2026-11-02 16:00:00",),
+            ("2026-11-03 00:00:00",),
+            ("2026-11-03 15:59:59",),
+            ("2026-11-03 16:00:00",),
+            ("2026-11-02T16:00:00+00:00",),
+            ("2026-11-03T15:59:59+00:00",),
+        ],
+    )
+    rows = db.execute(
+        "SELECT created_at FROM rounds WHERE " + predicate + " ORDER BY created_at",
+        bounds,
+    ).fetchall()
+    assert {row[0] for row in rows} == {
+        "2026-11-02 16:00:00", "2026-11-03 00:00:00",
+        "2026-11-03 15:59:59", "2026-11-02T16:00:00+00:00",
+        "2026-11-03T15:59:59+00:00",
+    }
