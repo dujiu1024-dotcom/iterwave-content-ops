@@ -91,11 +91,14 @@ class Normalizer:
             storage_now() - timedelta(days=window_days), cfg,
         )
         rows = self.db.execute(
-            f"SELECT {col_name} FROM metrics "
-            f"WHERE platform = ? AND fetch_status IN ('success','partial') "
-            f"AND {col_name} IS NOT NULL "
-            f"AND {timestamp_since_sql('fetched_at')}",
-            (platform.value, cutoff_utc, cutoff_legacy),
+            "WITH ranked AS (SELECT value,ROW_NUMBER() OVER ("
+            "PARTITION BY tenant_id,content_id,platform,metric_key "
+            "ORDER BY measured_at DESC,recorded_at DESC,fact_id DESC) rn "
+            "FROM metric_facts_effective "
+            "WHERE platform=? AND metric_key=? AND collection_status IN ('succeeded','partial') "
+            "AND value IS NOT NULL AND " + timestamp_since_sql("measured_at") + ") "
+            "SELECT value FROM ranked WHERE rn=1",
+            (platform.value, metric, cutoff_utc, cutoff_legacy),
         ).fetchall()
 
         values = [r[0] for r in rows if r[0] is not None]
