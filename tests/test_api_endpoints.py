@@ -4913,3 +4913,37 @@ def test_review_adoption_master_draft_rejects_effect_feedback_from_superseded_ma
     assert conn.execute(
         "SELECT COUNT(*) FROM master_plan_versions WHERE source='review_adoption' AND status='draft'"
     ).fetchone()[0] == 0
+
+
+def test_manual_draft_save_verification_fingerprints_all_images(client):
+    import json
+    from src.core.content_version import content_version_hash
+
+    tc, conn, seed = client
+    round_id = seed.round(status="completed")
+    draft_id = seed.draft(round_id, platform="xhs", draft_status="draft_pending", fetch_status=None)
+    images = ["/assets/cover.png", "/assets/page-1.png", "/assets/page-2.png"]
+    conn.execute("UPDATE contents SET image_paths=? WHERE id=(SELECT content_id FROM drafts WHERE id=?)",
+                 (json.dumps(images), draft_id))
+    conn.execute(
+        "INSERT INTO draft_save_verifications (draft_id,status,attempted_at,platform_draft_id,error_msg) "
+        "VALUES (?,'pending_verify','2026-11-05T00:00:00','platform-draft-123','uncertain')",
+        (draft_id,),
+    )
+    conn.commit()
+
+    response = tc.post(
+        f"/api/drafts/{draft_id}/verify_save",
+        json={"saved": True, "note": "已在平台草稿箱核实"},
+    )
+    assert response.status_code == 200, response.text
+    row = conn.execute(
+        "SELECT c.title,c.body,c.tags,c.image_paths,d.saved_content_hash "
+        "FROM drafts d JOIN contents c ON c.id=d.content_id WHERE d.id=?", (draft_id,),
+    ).fetchone()
+    assert row["saved_content_hash"] == content_version_hash(
+        row["title"], row["body"], json.loads(row["tags"] or "[]"), images,
+    )
+    assert row["saved_content_hash"] != content_version_hash(
+        row["title"], row["body"], json.loads(row["tags"] or "[]"), images[:1],
+    )
