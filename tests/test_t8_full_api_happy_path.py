@@ -505,6 +505,33 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
     assert approved_adoption.status_code == 200, approved_adoption.text
     assert approved_adoption.json()["effective"] is True
 
+    adopted_stage = conn.execute(
+        "SELECT stage_key FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order LIMIT 1",
+        (adopted_version_id,),
+    ).fetchone()
+    assert adopted_stage is not None
+    next_line = client.post(f"/api/subplans/{subplan_id}/production-line/draft", json={
+        "definition": {
+            "title": "T8-E 反馈采纳后的生产线",
+            "description": "绑定正式审核后的新子计划版本",
+            "execution_mode": "sequential",
+            "stages": [{
+                "stage_key": adopted_stage["stage_key"], "batch_size": 1,
+                "production_goal": "按反馈采纳后的策略生产内容",
+                "instructions": "遵循新版本的已审核策略",
+            }],
+        },
+        "change_note": "同步已审核采纳的策略版本",
+    })
+    assert next_line.status_code == 201, next_line.text
+    next_line_version_id = next_line.json()["draft"]["id"]
+    next_line_review = client.post(
+        f"/api/production-lines/{line_id}/versions/{next_line_version_id}/review",
+        json={"action": "approve"},
+    )
+    assert next_line_review.status_code == 200, next_line_review.text
+    assert next_line_review.json()["effective"] is True
+
     diagnosis = client.get("/api/business-diagnosis")
     assert diagnosis.status_code == 200
     # The production line was added after diagnosis and is a genuine capacity
@@ -514,7 +541,7 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
     assert diagnosis.json()["report"]["strategy_is_current"] is False
     subplan_read = client.get(f"/api/subplans/{subplan_id}")
     assert subplan_read.json()["subplan"]["master_plan_version_id"] == master_id
-    assert subplan_read.json()["subplan"]["current_version_id"] == subplan_version_id
+    assert subplan_read.json()["subplan"]["current_version_id"] == adopted_version_id
     line_read = client.get(f"/api/subplans/{subplan_id}/production-line")
-    assert line_read.json()["production_line"]["current_version_id"] == line_version_id
-    assert line_read.json()["production_line"]["sub_plan_version_id"] == subplan_version_id
+    assert line_read.json()["production_line"]["current_version_id"] == next_line_version_id
+    assert line_read.json()["production_line"]["sub_plan_version_id"] == adopted_version_id
