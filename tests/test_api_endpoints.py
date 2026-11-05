@@ -4962,3 +4962,29 @@ def test_round_detail_created_at_treats_legacy_naive_value_as_utc(client):
     assert detail.status_code == 200, detail.text
     assert detail.json()["created_at"] == "2026-11-03T16:00:00+00:00"
 
+
+
+def test_round_detail_serializes_created_and_updated_utc_fields_separately_from_business_wall_times(client):
+    tc, conn, seed = client
+    round_id = seed.round(status="created")
+    draft_id = seed.draft(round_id, platform="xhs", draft_status="draft_saved", fetch_status=None)
+    conn.execute(
+        "UPDATE spiral_rounds SET created_at=?, producing_started_at=? WHERE id=?",
+        ("2026-11-03 16:00:00", "2026-11-04 10:00:00", round_id),
+    )
+    conn.execute(
+        "UPDATE drafts SET created_at=?, updated_at=?, saved_at=? WHERE id=?",
+        ("2026-11-03 16:01:00", "2026-11-03 16:02:00", "2026-11-04 11:00:00", draft_id),
+    )
+    conn.commit()
+
+    detail = tc.get(f"/api/rounds/{round_id}")
+    assert detail.status_code == 200, detail.text
+    payload = detail.json()
+    draft = next(item for item in payload["drafts"] if item["id"] == draft_id)
+    assert payload["created_at"] == "2026-11-03T16:00:00+00:00"
+    assert payload["producing_started_at"] == "2026-11-04T10:00:00+08:00"
+    assert draft["created_at"] == "2026-11-03T16:01:00+00:00"
+    assert draft["updated_at"] == "2026-11-03T16:02:00+00:00"
+    assert draft["saved_at"] == "2026-11-04T11:00:00+08:00"
+
