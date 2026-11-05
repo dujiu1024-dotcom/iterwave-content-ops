@@ -50,6 +50,28 @@ from ..adapters.base import DraftStatus, CircuitBreakerReason
 
 logger = logging.getLogger(__name__)
 
+
+def _classify_round_failure(exc: Exception) -> tuple[str, str]:
+    """Return a stable, user-visible failure category and a redacted summary."""
+    from .redact import safe_error_summary
+
+    name = type(exc).__name__.lower()
+    module = type(exc).__module__.lower()
+    detail = safe_error_summary(exc, "执行失败，详细信息请检查服务端日志")
+    if isinstance(exc, TimeoutError) or "timeout" in name:
+        return "timeout", f"任务超时：{detail}"
+    if isinstance(exc, FileNotFoundError):
+        return "asset_missing", f"素材文件缺失：{detail}"
+    if "imagegenerationerror" in name or "media_generation" in module:
+        return "image_generation_failed", f"图片生成失败：{detail}"
+    if module.startswith("playwright") or name in {"targetclosederror", "browsererror"}:
+        return "browser_save_failed", f"浏览器或平台保存失败：{detail}"
+    if module.startswith("sqlite3") or name in {"databaseerror", "integrityerror", "operationalerror"}:
+        return "database_error", f"数据库操作失败：{detail}"
+    if module.startswith("httpx") or name in {"connecterror", "remoteprotocolerror"}:
+        return "provider_network_error", f"外部服务连接失败：{detail}"
+    return "pipeline_error", f"生产流程失败：{detail}"
+
 class RoundPreconditionError(ValueError):
     """执行前置条件不满足；错误文案经过业务层整理，可安全展示给用户。"""
 
@@ -508,15 +530,17 @@ class RoundExecutor:
                 report["errors"].append("失败状态收尾异常，请检查服务端运行日志")
         except Exception as exc:  # noqa: BLE001 — 执行器兜底，必须留痕
             logger.exception("轮次 %s 执行异常", round_id)
-            report["errors"].append("执行异常，请检查运行日志")
-            report["failure_code"] = "generation_pipeline_failed"
+            failure_code, failure_message = _classify_round_failure(exc)
+            report["errors"].append(failure_message)
+            report["failure_code"] = failure_code
+            report["failure_message"] = failure_message
             report["final_status"] = "failed"
-            fail_current("执行异常，请检查运行日志")
+            fail_current(failure_message)
             # 状态迁移本身也可能因数据库/状态机异常失败；不能让它覆盖原始异常，
             # 否则下方 task_runs 收尾和 run_report 持久化都不会执行。
             try:
                 transitioned = self.sm_round.transition(
-                    round_id, "failed", "执行异常，请检查服务端运行日志",
+                    round_id, "failed", failure_message,
                 )
                 if not transitioned:
                     report["errors"].append("失败收尾：轮次状态未能迁移到 failed")
