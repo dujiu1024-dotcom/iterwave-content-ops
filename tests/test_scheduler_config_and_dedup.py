@@ -52,38 +52,53 @@ def test_register_jobs_respects_enabled_and_trigger(cfg, tmp_path):
     assert "cron" in str(eng.scheduler.get_job("hot_topics_refresh").trigger)
 
 
-def test_register_jobs_preserves_persisted_next_run_when_config_is_unchanged(cfg, tmp_path):
+@pytest.mark.asyncio
+async def test_register_jobs_preserves_persisted_next_run_when_config_is_unchanged(cfg, tmp_path):
     """启动时同步同一 cron 配置不能删除持久化 next_run_time（否则错过的任务无法补跑）。"""
+    import asyncio
     from datetime import timedelta
 
     eng = SchedulerEngine(cfg, tmp_path / "persisted-jobs.db")
-    eng._register_all_jobs()
-    original = eng.scheduler.get_job("daily_ops")
-    assert original is not None
-    expected = datetime.now(original.next_run_time.tzinfo) + timedelta(days=3)
-    eng.scheduler.modify_job("daily_ops", next_run_time=expected)
+    eng.scheduler.start(paused=True)
+    try:
+        eng._register_all_jobs()
+        original = eng.scheduler.get_job("daily_ops")
+        assert original is not None
+        expected = datetime.now(original.next_run_time.tzinfo) + timedelta(days=3)
+        eng.scheduler.modify_job("daily_ops", next_run_time=expected)
 
-    eng._register_all_jobs()
+        eng._register_all_jobs()
 
-    current = eng.scheduler.get_job("daily_ops")
-    assert current is not None
-    assert current.next_run_time == expected
+        current = eng.scheduler.get_job("daily_ops")
+        assert current is not None
+        assert current.next_run_time == expected
+    finally:
+        eng.scheduler.shutdown(wait=False)
+        await asyncio.sleep(0)
 
 
-def test_register_jobs_preserves_interval_anchor_when_config_is_unchanged(cfg, tmp_path):
+@pytest.mark.asyncio
+async def test_register_jobs_preserves_interval_anchor_when_config_is_unchanged(cfg, tmp_path):
+    import asyncio
+
     eng = SchedulerEngine(cfg, tmp_path / "persisted-interval-jobs.db")
-    eng._register_all_jobs()
-    original = eng.scheduler.get_job("hot_topics_refresh")
-    assert original is not None
-    original_start = original.trigger.start_date
-    original_next = original.next_run_time
+    eng.scheduler.start(paused=True)
+    try:
+        eng._register_all_jobs()
+        original = eng.scheduler.get_job("hot_topics_refresh")
+        assert original is not None
+        original_start = original.trigger.start_date
+        original_next = original.next_run_time
 
-    eng._register_all_jobs()
+        eng._register_all_jobs()
 
-    current = eng.scheduler.get_job("hot_topics_refresh")
-    assert current is not None
-    assert current.trigger.start_date == original_start
-    assert current.next_run_time == original_next
+        current = eng.scheduler.get_job("hot_topics_refresh")
+        assert current is not None
+        assert current.trigger.start_date == original_start
+        assert current.next_run_time == original_next
+    finally:
+        eng.scheduler.shutdown(wait=False)
+        await asyncio.sleep(0)
 
 
 def test_patch_switches_trigger_and_persists(cfg, conn, tmp_path, monkeypatch):
