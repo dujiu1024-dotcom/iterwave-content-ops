@@ -2487,27 +2487,25 @@ def _register_routes(app: FastAPI) -> None:
                 }
 
         snapshot_id = uuid.uuid4().hex
-        try:
-            conn.execute(
-                "INSERT INTO metric_snapshots "
-                "(id, tenant_id, draft_id, content_id, platform, source, views, likes, collects, comments, shares, "
-                "measured_at, recorded_at, correction_of, created_at, idempotency_key, payload_hash) "
-                "VALUES (?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (snapshot_id, tenant_id, draft_id, row["content_id"], row["platform"],
-                 values["views"], values["likes"], values["collects"], values["comments"],
-                 values["shares"], measured_at, now, correction_of, now, idempotency_key, payload_hash),
-            )
-            conn.commit()
-        except sqlite3.IntegrityError:
-            if not idempotency_key:
-                raise
+        cursor = conn.execute(
+            "INSERT INTO metric_snapshots "
+            "(id, tenant_id, draft_id, content_id, platform, source, views, likes, collects, comments, shares, "
+            "measured_at, recorded_at, correction_of, created_at, idempotency_key, payload_hash) "
+            "VALUES (?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(tenant_id, draft_id, idempotency_key) "
+            "WHERE idempotency_key IS NOT NULL DO NOTHING",
+            (snapshot_id, tenant_id, draft_id, row["content_id"], row["platform"],
+             values["views"], values["likes"], values["collects"], values["comments"],
+             values["shares"], measured_at, now, correction_of, now, idempotency_key, payload_hash),
+        )
+        if cursor.rowcount == 0:
             existing = conn.execute(
                 "SELECT id, payload_hash, source, recorded_at, views, likes, collects, comments, shares "
                 "FROM metric_snapshots WHERE tenant_id=? AND draft_id=? AND idempotency_key=?",
                 (tenant_id, draft_id, idempotency_key),
             ).fetchone()
             if existing is None:
-                raise
+                raise RuntimeError("Idempotency conflict row disappeared")
             if existing["payload_hash"] != payload_hash:
                 raise HTTPException(409, "Idempotency-Key 已用于不同的指标数据")
             return {
@@ -2515,6 +2513,7 @@ def _register_routes(app: FastAPI) -> None:
                 "recorded_at": existing["recorded_at"], "idempotent_replay": True,
                 **{field: existing[field] for field in known_fields},
             }
+        conn.commit()
         _record_content_event("metrics_submitted", content_id=row["content_id"],
                               metadata={"source": "manual", "snapshot_id": snapshot_id})
         return {"snapshot_id": snapshot_id, "source": "manual", "recorded_at": now,
