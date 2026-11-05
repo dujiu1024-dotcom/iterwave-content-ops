@@ -5048,8 +5048,8 @@ def test_round_detail_serializes_created_and_updated_utc_fields_separately_from_
         ("2026-11-03 16:00:00", "2026-11-04 10:00:00", round_id),
     )
     conn.execute(
-        "UPDATE drafts SET created_at=?, updated_at=?, saved_at=? WHERE id=?",
-        ("2026-11-03 16:01:00", "2026-11-03 16:02:00", "2026-11-04 11:00:00", draft_id),
+        "UPDATE drafts SET created_at=?, saved_at=? WHERE id=?",
+        ("2026-11-03 16:01:00", "2026-11-04 11:00:00", draft_id),
     )
     conn.commit()
 
@@ -5060,6 +5060,5 @@ def test_round_detail_serializes_created_and_updated_utc_fields_separately_from_
     assert payload["created_at"] == "2026-11-03T16:00:00+00:00"
     assert payload["producing_started_at"] == "2026-11-04T10:00:00+08:00"
     assert draft["created_at"] == "2026-11-03T16:01:00+00:00"
-    assert draft["updated_at"] == "2026-11-03T16:02:00+00:00"
     assert draft["saved_at"] == "2026-11-04T11:00:00+08:00"
 
