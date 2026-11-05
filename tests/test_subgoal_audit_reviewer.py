@@ -10,7 +10,7 @@ def test_subgoal_acceptance_uses_authenticated_reviewer(monkeypatch):
     monkeypatch.setattr(subgoals.auth, "audit_actor", lambda request: "session:0123456789abcdef0123")
 
     class FakeStore:
-        def __init__(self, conn):
+        def __init__(self, conn, *, tenant_id="default"):
             pass
 
         def accept(self, sub_plan_id, goal_id, payload, reviewer="user"):
