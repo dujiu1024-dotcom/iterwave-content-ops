@@ -281,7 +281,7 @@ def create_publish_verification(
     # The line state is in the same tenant database, so apply the verified
     # publication transition atomically while retaining the outbox for downstream consumers.
     _mark_production_line_published(
-        conn, event_payload, verification_id=verification_id, now=now
+        conn, event_payload, verification_id=verification_id, now=now, audit=audit
     )
     due_at = _normalize_datetime(scheduled_review_at, "UTC", "复盘计划时间") if scheduled_review_at else (
         published_dt + timedelta(hours=24)
@@ -374,7 +374,9 @@ def claim_close_events(conn, *, tenant_id: str, worker_id: str, limit: int = 10,
     return claimed
 
 
-def _mark_production_line_published(conn, payload: dict, *, verification_id: str, now: str) -> None:
+def _mark_production_line_published(
+    conn, payload: dict, *, verification_id: str, now: str, audit: dict | None = None,
+) -> None:
     line_id = payload.get("production_line_id")
     if not line_id and payload.get("production_task_id"):
         line = conn.execute(
@@ -414,14 +416,21 @@ def _mark_production_line_published(conn, payload: dict, *, verification_id: str
         "published_at": payload.get("published_at"),
         "content_snapshot_sha256": payload.get("content_snapshot_sha256"),
     }
+    audit = audit or _audit_context("system:publication-verification", tenant_id=payload.get("tenant_id"))
+    initiating = audit["initiating_actor"] or "system:legacy-unattributed"
+    actor_type, _, actor_id = initiating.partition(":")
     conn.execute(
         """INSERT INTO content_production_line_events(
             content_production_line_id,event_type,from_status,to_status,
-            actor,reason,evidence_json,created_at
-        ) VALUES(?,?,?,?,?,?,?,?)""",
+            actor,reason,evidence_json,created_at,actor_type,actor_id,tenant_id,
+            initiating_actor,executing_actor,task_id
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (line_id, "publish_verified", "verification_pending", "published",
-         "task4-publication-verification", "平台发布事实已核验",
-         _json(evidence), now),
+         initiating, "平台发布事实已核验", _json(evidence), now,
+         actor_type or "unknown", actor_id or initiating,
+         str(audit.get("tenant_id") or payload.get("tenant_id") or "legacy"),
+         initiating, audit.get("executing_actor") or "service:operating-feedback",
+         audit.get("queue_task_id")),
     )
 
 
@@ -505,7 +514,7 @@ def acknowledge_close_event(
     audit = _audit_context(actor, tenant_id=tenant_id or payload.get("tenant_id"))
     if succeeded:
         _mark_production_line_published(
-            conn, payload, verification_id=str(row["verification_id"]), now=now
+            conn, payload, verification_id=str(row["verification_id"]), now=now, audit=audit
         )
         conn.execute(
             """UPDATE production_line_close_outbox SET status='delivered',claimed_by=NULL,lease_expires_at=NULL,
