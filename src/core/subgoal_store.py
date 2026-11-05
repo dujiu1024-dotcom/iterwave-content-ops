@@ -53,6 +53,12 @@ class SubGoalStore:
              _json({"fields": sorted((payload or {}).keys())}), _now()),
         )
 
+    def _actor_principal(self, actor: str) -> str:
+        from src.core.task_context import current_task_identity
+
+        context_actor = current_task_identity().get("initiating_actor")
+        return str(context_actor or actor or "system:legacy-unattributed")[:120]
+
     def _goal(self, goal_id: str) -> dict[str, Any]:
         row = self.conn.execute("SELECT * FROM sub_goals WHERE id=?", (goal_id,)).fetchone()
         if row is None:
@@ -221,6 +227,7 @@ class SubGoalStore:
         deps = payload.get("dependencies") or []
         if not isinstance(deps, list) or len(set(deps)) != len(deps):
             raise SubGoalError("依赖必须是无重复的目标 ID 数组")
+        principal = self._actor_principal(actor)
         goal_id = str(uuid.uuid4())
         now = _now()
         self.conn.execute("BEGIN IMMEDIATE")
@@ -233,7 +240,7 @@ class SubGoalStore:
                 (goal_id, version_id, stage_id, parent_id, goal_type, order, priority, title,
                  str(payload.get("description") or ""), target_count, criteria,
                  1 if payload.get("requires_production") else 0, "ready", now, now,
-                 str(actor or "system:unknown")[:120], str(actor or "system:unknown")[:120])
+                 principal, principal)
             )
             for dep in deps:
                 predecessor = self._goal(str(dep))
@@ -293,6 +300,7 @@ class SubGoalStore:
         deps = payload.get("dependencies", self._dependencies(goal_id))
         if not isinstance(deps, list) or len(set(deps)) != len(deps):
             raise SubGoalError("依赖必须是无重复的目标 ID 数组")
+        principal = self._actor_principal(actor)
         self.conn.execute("BEGIN IMMEDIATE")
         try:
             old_order = int(goal["goal_order"])
@@ -328,7 +336,7 @@ class SubGoalStore:
                    goal_order=?,target_count=?,stage_id=?,parent_goal_id=?,requires_production=?,
                    status=CASE WHEN status IN ('failed','needs_review') THEN 'ready' ELSE status END,
                    updated_at=?,updated_by=? WHERE id=?""",
-                (*fields.values(), _now(), str(actor or "system:unknown")[:120], goal_id)
+                (*fields.values(), _now(), principal, goal_id)
             )
             self.conn.execute("DELETE FROM sub_goal_dependencies WHERE goal_id=?", (goal_id,))
             for dep in deps:
@@ -370,6 +378,7 @@ class SubGoalStore:
             raise SubGoalError("生产计划数量、优先级或资源需求格式无效")
         if not direction or not conditions or not acceptance:
             raise SubGoalError("生产方向、执行条件和验收关联均不能为空")
+        principal = self._actor_principal(actor)
         now = _now()
         self.conn.execute("BEGIN IMMEDIATE")
         try:
@@ -385,9 +394,9 @@ class SubGoalStore:
                      acceptance_relation=excluded.acceptance_relation,enabled=1,updated_at=excluded.updated_at,
                      updated_by=excluded.updated_by""",
                 (goal_id,direction,count,_json(resources),priority,conditions,acceptance,now,now,
-                 str(actor or "system:unknown")[:120], str(actor or "system:unknown")[:120])
+                 principal, principal)
             )
-            self.conn.execute("UPDATE sub_goals SET requires_production=1,updated_at=?,updated_by=? WHERE id=?", (now,str(actor or "system:unknown")[:120],goal_id))
+            self.conn.execute("UPDATE sub_goals SET requires_production=1,updated_at=?,updated_by=? WHERE id=?", (now,principal,goal_id))
             self._record_audit(action="production_plan_saved", sub_plan_id=sub_plan_id, version_id=int(version["id"]), goal_id=goal_id, actor=actor, payload=payload)
             self.conn.commit()
         except Exception:
