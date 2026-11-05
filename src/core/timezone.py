@@ -196,8 +196,8 @@ def business_date_range_predicate(
     is exclusive, avoiding second-precision end-of-day truncation.
     """
     if not re.fullmatch(
-        r"(?:[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)?|"
-        r"COALESCE\\([A-Za-z_][A-Za-z0-9_]*,\\s*[A-Za-z_][A-Za-z0-9_]*\\))",
+        r"(?:[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?|"
+        r"COALESCE\([A-Za-z_][A-Za-z0-9_]*,\s*[A-Za-z_][A-Za-z0-9_]*\))",
         column,
     ):
         raise ValueError("invalid timestamp column")
