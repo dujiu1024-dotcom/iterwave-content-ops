@@ -1,5 +1,9 @@
 """四平台适配器包."""
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from .base import (
     Platform, PlatformAdapter,
     DraftResult, ContentToPublish, MetricsSnapshot,
@@ -58,7 +62,9 @@ def new_context_for_platform(platform: Platform):
     """
     from contextlib import asynccontextmanager
     from playwright.async_api import async_playwright
-    from ..core.login_manager import background_headless, get_or_create_context
+    from ..core.login_manager import (
+        background_headless, get_or_create_context, save_context_state_async,
+    )
     from .draft_saver import _install_publish_network_guard
 
     @asynccontextmanager
@@ -74,6 +80,12 @@ def new_context_for_platform(platform: Platform):
                 yield ctx
             finally:
                 if ctx is not None:
+                    try:
+                        await save_context_state_async(ctx, platform)
+                    except Exception:
+                        # State persistence is best-effort during teardown; never mask
+                        # the platform operation's original result or exception.
+                        logger.exception("平台登录态回写失败 platform=%s", platform.value)
                     await ctx.close()
                 await browser.close()
 
