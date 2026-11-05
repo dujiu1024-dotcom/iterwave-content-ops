@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from types import SimpleNamespace
 
@@ -85,13 +86,23 @@ def test_generation_model_failure_does_not_create_a_draft(monkeypatch):
         id INTEGER, version_no INTEGER, status TEXT, source_fingerprint TEXT,
         report_json TEXT, source_snapshot_json TEXT
     )""")
+    governance = {
+        "north_star": {"version_id": 1, "version_no": 1, "snapshot": {"positioning": "test"}},
+        "resource_baseline": {"resources": [], "gaps": [], "summary": {}},
+    }
     conn.execute(
-        "INSERT INTO business_diagnosis_reports VALUES (1, 1, 'confirmed', 'fp', '{}', '{}')"
+        "INSERT INTO business_diagnosis_reports VALUES (1, 1, 'confirmed', 'old-production-fingerprint', '{}', ?)",
+        (json.dumps({"strategy_governance": governance}),),
     )
     conn.execute("CREATE TABLE master_plan_versions (id INTEGER, status TEXT, deleted_at TEXT, version_no INTEGER)")
+    # Full diagnosis inputs changed, but the stable strategic projection did not.
     monkeypatch.setattr(
         "src.core.business_diagnosis.collect_business_context",
-        lambda *_: {"fingerprint": "fp", "context": {}},
+        lambda *_: {"fingerprint": "new-production-fingerprint", "context": {}},
+    )
+    monkeypatch.setattr(
+        "src.core.strategy_governance.collect_strategy_governance",
+        lambda *_: governance,
     )
     monkeypatch.setattr(
         "src.core.plan_version.PlanVersionManager.load_plan",
@@ -110,17 +121,51 @@ def test_generation_rejects_stale_source_before_model_call(monkeypatch):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("""CREATE TABLE business_diagnosis_reports (
-        id INTEGER, version_no INTEGER, status TEXT, source_fingerprint TEXT
+        id INTEGER, version_no INTEGER, status TEXT, source_fingerprint TEXT,
+        report_json TEXT, source_snapshot_json TEXT
     )""")
-    conn.execute("INSERT INTO business_diagnosis_reports VALUES (1, 1, 'confirmed', 'old')")
+    conn.execute("INSERT INTO business_diagnosis_reports VALUES (1, 1, 'confirmed', 'old', '{}', '{}')")
     monkeypatch.setattr(
         "src.core.business_diagnosis.collect_business_context",
-        lambda *_: {"fingerprint": "new"},
+        lambda *_: {"fingerprint": "new", "context": {}},
+    )
+    monkeypatch.setattr(
+        "src.core.strategy_governance.collect_strategy_governance",
+        lambda *_: {"north_star": {"version_id": 1, "version_no": 1, "snapshot": {}}, "resource_baseline": {}},
     )
     async def unexpected_model_call(*args, **kwargs):
         raise AssertionError("stale diagnosis must be rejected before model invocation")
     monkeypatch.setattr("src.core.master_plan_generation._call_model", unexpected_model_call)
-    with pytest.raises(LookupError, match="已过期"):
+    with pytest.raises(LookupError, match="旧版经营诊断缺少战略版本快照"):
         asyncio.run(generate_master_plan_draft(conn, SimpleNamespace()))
-    assert conn.execute("SELECT status FROM business_diagnosis_reports").fetchone()[0] == "stale"
+    assert conn.execute("SELECT status FROM business_diagnosis_reports").fetchone()[0] == "confirmed"
+    conn.close()
+
+
+
+def test_generation_requires_north_star_even_with_confirmed_diagnosis(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("""CREATE TABLE business_diagnosis_reports (
+        id INTEGER, version_no INTEGER, status TEXT, source_fingerprint TEXT,
+        report_json TEXT, source_snapshot_json TEXT
+    )""")
+    governance = {
+        "north_star": None,
+        "resource_baseline": {"resources": [], "gaps": [{"category": "business_profile", "status": "missing"}], "summary": {"gaps": 1}},
+    }
+    conn.execute(
+        "INSERT INTO business_diagnosis_reports VALUES (1, 1, 'confirmed', 'fp', '{}', ?)",
+        (json.dumps({"strategy_governance": governance}),),
+    )
+    monkeypatch.setattr(
+        "src.core.business_diagnosis.collect_business_context",
+        lambda *_: {"fingerprint": "production-changed", "context": {}},
+    )
+    monkeypatch.setattr("src.core.strategy_governance.collect_strategy_governance", lambda *_: governance)
+    async def unexpected_model_call(*args, **kwargs):
+        raise AssertionError("model must not run without an effective North Star")
+    monkeypatch.setattr("src.core.master_plan_generation._call_model", unexpected_model_call)
+    with pytest.raises(LookupError, match="先建立并确认账号组北极星"):
+        asyncio.run(generate_master_plan_draft(conn, SimpleNamespace()))
     conn.close()
