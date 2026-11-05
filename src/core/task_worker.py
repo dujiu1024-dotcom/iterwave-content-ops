@@ -141,10 +141,12 @@ class GlobalTaskWorker:
         queue-to-database boundary rather than trusting a payload/header tenant ID.
         """
         registry = context.get("tenant_registry")
-        if registry is None:
-            return
         runtime_tenant_id = context.get("runtime_tenant_id")
-        if not runtime_tenant_id or str(runtime_tenant_id) != str(task.tenant_id):
+        # Legacy unit-test contexts omit both trusted factory fields. A partially
+        # populated production context is a configuration error and must fail closed.
+        if registry is None and runtime_tenant_id is None:
+            return
+        if registry is None or not runtime_tenant_id or str(runtime_tenant_id) != str(task.tenant_id):
             raise PermissionError("Worker runtime tenant does not match the queued task tenant")
         try:
             registry.get(task.tenant_id)
