@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .task_context import current_task_identity
+
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
@@ -129,11 +131,13 @@ def record_plan_change(
         """INSERT INTO plan_change_audit(
                entity_type,entity_id,event_type,from_version_id,to_version_id,
                change_reason,before_snapshot_json,after_snapshot_json,
-               affected_tasks_json,actor,created_at
-           ) VALUES(?,?,?,?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))""",
+               affected_tasks_json,actor,initiating_actor,executing_actor,tenant_id,queue_task_id,created_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%f+00:00','now'))""",
         (entity_type, str(entity_id), event_type, from_version_id, to_version_id,
          str(change_reason or "")[:2000],
          _json(before_snapshot) if before_snapshot is not None else None,
-         _json(after_snapshot or {}), _json(impact), str(actor or "system")[:120]),
+         _json(after_snapshot or {}), _json(impact), str(actor or "system")[:120],
+         (identity := current_task_identity()).get("initiating_actor"),
+         identity.get("executing_actor"), identity.get("tenant_id"), identity.get("task_id")),
     )
     return {"audit_id": int(cursor.lastrowid), "impact": impact}

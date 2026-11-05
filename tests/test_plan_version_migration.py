@@ -136,6 +136,8 @@ def test_stage_publish_stats_count_only_user_confirmed_drafts():
     db._run_migration(conn, Migration(138, completion_migration, "strategy_step_business_completion"))
     audit_migration = Path(__file__).resolve().parents[1] / "migrations" / "145_plan_change_audit.sql"
     db._run_migration(conn, Migration(145, audit_migration, "plan_change_audit"))
+    actor_audit_migration = Path(__file__).resolve().parents[1] / "migrations" / "158_plan_change_audit_actor_context.sql"
+    db._run_migration(conn, Migration(158, actor_audit_migration, "plan_change_audit_actor_context"))
     conn.execute(
         "INSERT INTO spiral_rounds(id,round_number,status,plan_signature,created_at) "
         "VALUES(3,3,'created',NULL,'2026-01-03')"
