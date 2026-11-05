@@ -1205,7 +1205,6 @@ def _build_app() -> FastAPI:
 
 class MediaGenerationSettingsRequest(BaseModel):
     enabled: bool = False
-    monthly_quota: int = Field(default=20, ge=0, le=1000)
     prompt_prefix: str = Field(default="", max_length=2000)
     model: str = Field(default="gpt-image-1", min_length=1, max_length=120)
     size: str = Field(default="1024x1024", pattern="^(1024x1024|1024x1536|1536x1024)$")
@@ -3078,11 +3077,11 @@ def _register_routes(app: FastAPI) -> None:
     def get_media_generation_settings():
         conn = _g()["conn"]
         row = conn.execute(
-            "SELECT enabled, monthly_quota, prompt_prefix, model, size, fallback_enabled, updated_at "
+            "SELECT enabled, prompt_prefix, model, size, fallback_enabled, updated_at "
             "FROM media_generation_settings WHERE id = 1"
         ).fetchone()
         settings = dict(row) if row else {
-            "enabled": False, "monthly_quota": 20, "prompt_prefix": "",
+            "enabled": False, "prompt_prefix": "",
             "model": os.getenv("ITERWAVE_IMAGE_MODEL", "gpt-image-1"),
             "size": "1024x1024", "updated_at": None, "fallback_enabled": 1,
         }
@@ -3111,11 +3110,11 @@ def _register_routes(app: FastAPI) -> None:
     def put_media_generation_settings(req: MediaGenerationSettingsRequest):
         conn = _g()["conn"]
         conn.execute(
-            "INSERT INTO media_generation_settings (id, enabled, monthly_quota, prompt_prefix, model, size, updated_at) "
-            "VALUES (1, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%f+00:00','now')) "
-            "ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled, monthly_quota=excluded.monthly_quota, "
+            "INSERT INTO media_generation_settings (id, enabled, prompt_prefix, model, size, updated_at) "
+            "VALUES (1, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%f+00:00','now')) "
+            "ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled, "
             "prompt_prefix=excluded.prompt_prefix, model=excluded.model, size=excluded.size, updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now')",
-            (int(req.enabled), req.monthly_quota, req.prompt_prefix.strip(), req.model.strip(), req.size),
+            (int(req.enabled), req.prompt_prefix.strip(), req.model.strip(), req.size),
         )
         conn.commit()
         return get_media_generation_settings()
