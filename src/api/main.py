@@ -506,7 +506,7 @@ def _build_tenant_runtime_context(
         spiral = SpiralEngine(cfg, conn)
         scheduler = SchedulerEngine(cfg, cfg.resolve_path(cfg.paths.db_file))
         ops = OperationsEngine(cfg, conn, adapters, cb, rhythm)
-        notifier = Notifier(cfg, conn, tenant_name=registry.get(tenant_id)["name"])
+        notifier = Notifier(cfg, conn, tenant_name=str(tenant.get("name") or tenant_id))
         executor = RoundExecutor(
             cfg, conn, scoring, guard, adapters, sm_round, sm_draft,
             circuit_breaker=cb, notifier=notifier,
