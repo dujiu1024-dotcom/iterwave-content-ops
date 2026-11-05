@@ -642,7 +642,7 @@ class Database:
                 # Review, strategy outcome and production task indexes (133/136/137).
                 "idx_drafts_review_status", "idx_drafts_publish_status",
                 "idx_content_review_events_content", "idx_content_review_events_round",
-                "idx_strategy_effect_reviews_stage",
+                "idx_strategy_effect_reviews_stage", "idx_strategy_effect_reviews_idempotency",
                 "idx_sub_plan_stage_outcomes_lookup", "idx_sub_plan_stage_outcomes_version",
                 "idx_production_tasks_round_status", "idx_production_tasks_step_status",
                 "idx_production_tasks_recovery", "idx_production_task_attempts_task",
@@ -992,6 +992,7 @@ class Database:
                 "strategy_effect_reviews": {
                     "stage_id", "assessment", "recommendation", "evidence_note",
                     "confidence", "evidence_json", "created_by", "created_at",
+                    "idempotency_key", "request_hash",
                 },
                 "sub_plan_stage_outcomes": {
                     "sub_plan_id", "stage_key", "source_version_id", "stage_id",
