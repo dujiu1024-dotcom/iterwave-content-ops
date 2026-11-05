@@ -528,10 +528,12 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
             "只返回 JSON 对象，格式为 {subplans:[{platform,title,snapshot,stages:["
             "{stage_key,title,direction,target_count,start_date,end_date,completion_condition,"
             "strategy_goal,current_problem,execution_strategy,prerequisites,input_info,"
-            "expected_result,completion_criteria,effect_evaluation,entry_condition,"
+            "expected_result,completion_criteria,effect_evaluation,business_completion_required,effect_required,entry_condition,"
             "entry_condition_met,dependencies,notes}]}]}。"
             "每个阶段必须有唯一 stage_key；dependencies 是前置阶段 stage_key 数组，只能引用本子计划中更早的阶段；"
             "不得生成循环依赖。前置阶段的实际结果将供后续阶段引用。"
+            "business_completion_required 和 effect_required 必须是布尔值，默认 false；只有确实需要人工业务确认或效果审核时才设为 true。"
+            "completion_criteria 与 effect_evaluation 的描述文字本身不自动构成强制门禁。"
             "每个子计划至少 1 个阶段；阶段顺序按数组顺序；target_count 是用户最终确认发布篇数，"
             "不是生成草稿数。不得输出审核状态或要求自动生效。"
             "start_date 和 end_date 只能使用 YYYY-MM-DD 格式（如 2026-11-03），"
@@ -667,8 +669,8 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
                     "input_info": str(stage.get("input_info") or ""),
                     "expected_result": str(stage.get("expected_result") or ""),
                     "effect_evaluation": str(stage.get("effect_evaluation") or ""),
-                    "effect_required": stage.get("effect_required", bool(str(stage.get("effect_evaluation") or "").strip())),
-                    "business_completion_required": stage.get("business_completion_required", bool(stage.get("completion_criteria") or stage.get("completion_condition"))),
+                    "effect_required": stage.get("effect_required", False),
+                    "business_completion_required": stage.get("business_completion_required", False),
                     "entry_condition": str(stage.get("entry_condition") or ""),
                     "entry_condition_met": stage.get("entry_condition_met", True),
                     "dependencies": stage.get("dependencies") or [],
@@ -1103,42 +1105,19 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
             if stage["status"] == "pending":
                 s.update_stage_status(int(stage["id"]), "in_progress")
             round_id = int(created["round_id"])
-            # A production round is the durable entry point for one task per requested
-            # content item. Keep task creation inside this API transaction so a partial
-            # round can never be exposed without its attributable work items.
-            from src.core.production_task_store import ProductionTaskStore
-            task_store = ProductionTaskStore(conn)
-            production_task_ids = []
-            for ordinal in range(1, topic_count + 1):
-                task = task_store.create_task(
-                    round_id=round_id,
-                    master_plan_version_id=int(identity["master_plan_version_id"]),
-                    sub_plan_id=sub_plan_id,
-                    sub_plan_version_id=int(identity["current_version_id"]),
-                    strategy_step_id=str(stage["stage_key"]),
-                    platform=str(identity["platform"]),
-                    task_ordinal=ordinal,
-                    idempotency_key=(
-                        f"round:{round_id}:stage:{stage['stage_key']}:item:{ordinal}"
-                    ),
-                    input_snapshot={
-                        "trigger_source": "manual",
-                        "topic_count": topic_count,
-                        "production_line_version_id": line_version_id,
-                        "production_line_stage": line_stage,
-                        "dependency_outcomes": ready_stage.get("dependency_outcomes", {}),
-                    },
-                    production_line_version_id=line_version_id,
-                )
-                production_task_ids.append(task["id"])
+            # Do not create placeholder production_tasks here. The executor selects
+            # concrete topics and owns the canonical topic/platform idempotency key.
+            # Pre-creating ordinal-only rows here created a second, incompatible key
+            # space and left permanently pending tasks beside the executor's real work.
             number = int(conn.execute("SELECT round_number FROM spiral_rounds WHERE id=?", (round_id,)).fetchone()[0])
             return {"round_id": round_id, "round_number": number, "deduped": created["deduped"],
                     "topic_count": topic_count, "platforms": [identity["platform"]],
                     "bound_subplan_version_id": identity["current_version_id"],
                     "bound_production_line_version_id": line_version_id,
                     "bound_stage_id": stage["id"],
-                    "production_task_ids": production_task_ids,
-                    "production_task_count": len(production_task_ids),
+                    "production_task_ids": [],
+                    "production_task_count": 0,
+                    "task_creation": "deferred_to_round_executor",
                     "dependency_outcomes": ready_stage.get("dependency_outcomes", {})}
         except HTTPException:
             raise
