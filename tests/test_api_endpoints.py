@@ -4949,7 +4949,6 @@ def test_manual_draft_save_verification_fingerprints_all_images(client):
     )
 
 
-
 def test_review_adoption_batch_rolls_back_all_drafts_when_later_child_fails(client, monkeypatch):
     from src.core.plan_version_store import PlanVersionStore, PlanVersionError
 
