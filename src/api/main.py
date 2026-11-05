@@ -6188,6 +6188,10 @@ def _register_routes(app: FastAPI) -> None:
         if not dims:
             raise HTTPException(400, "dimensions 不能为空")
         conn = _g()["conn"]
+        # Lock the read/check/create batch so concurrent retries cannot race past
+        # the existing-draft check and create duplicate rebase versions.
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
         effect_review_id = (req or {}).get("effect_review_id")
         effect_source = None
         if effect_review_id is not None:
@@ -6263,6 +6267,54 @@ def _register_routes(app: FastAPI) -> None:
         conn.execute("SAVEPOINT review_adoption_batch")
         try:
             for row in rows:
+                target_master_id = (
+                    target_master_version_id if target_master_version_id is not None
+                    else int(row["master_plan_version_id"])
+                )
+                change_note = "复盘建议采纳草稿：" + "、".join(dims)
+                existing_draft = conn.execute(
+                    """SELECT * FROM sub_plan_versions
+                       WHERE sub_plan_id=? AND master_plan_version_id=?
+                         AND based_on_version_id=? AND status='draft'
+                       ORDER BY version_no DESC LIMIT 1""",
+                    (row["id"], target_master_id, int(row["current_version_id"])),
+                ).fetchone()
+                if existing_draft is not None:
+                    try:
+                        existing_snapshot = json.loads(existing_draft["snapshot_json"] or "{}")
+                    except (TypeError, ValueError):
+                        raise HTTPException(409, f"子计划 {row['id']} 已有损坏的未审核草稿，拒绝重复创建")
+                    existing_adoptions = existing_snapshot.get("review_adoptions")
+                    latest_adoption = (
+                        existing_adoptions[-1]
+                        if isinstance(existing_adoptions, list) and existing_adoptions
+                        else {}
+                    )
+                    existing_feedback = latest_adoption.get("effect_feedback")
+                    existing_feedback_id = (
+                        int(existing_feedback["id"])
+                        if isinstance(existing_feedback, dict) and existing_feedback.get("id") is not None
+                        else None
+                    )
+                    requested_feedback_id = int(effect_source["id"]) if effect_source is not None else None
+                    same_request = (
+                        existing_draft["created_by"] == "review_adoption"
+                        and existing_draft["change_note"] == change_note
+                        and latest_adoption.get("source") == "review_adoption"
+                        and latest_adoption.get("dimensions") == dims
+                        and latest_adoption.get("target_master_plan_version_id") == target_master_version_id
+                        and existing_feedback_id == requested_feedback_id
+                    )
+                    if not same_request:
+                        raise HTTPException(
+                            409,
+                            f"子计划 {row['id']} 已存在基于当前版本的未审核草稿；请先审核或驳回后重试",
+                        )
+                    drafts.append({
+                        "sub_plan_id": row["id"], "platform": row["platform"],
+                        "draft_version": dict(existing_draft), "effective": False, "reused": True,
+                    })
+                    continue
                 try:
                     snapshot = json.loads(row["snapshot_json"])
                 except (TypeError, ValueError):
@@ -6305,17 +6357,14 @@ def _register_routes(app: FastAPI) -> None:
                 try:
                     draft = store.create_subplan_version(
                         row["id"], snapshot,
-                        master_plan_version_id=(
-                            target_master_version_id if target_master_version_id is not None
-                            else int(row["master_plan_version_id"])
-                        ),
+                        master_plan_version_id=target_master_id,
                         author="review_adoption", stages=stages,
                         based_on_version_id=int(row["current_version_id"]),
-                        change_note="复盘建议采纳草稿：" + "、".join(dims),
+                        change_note=change_note,
                     )
                     drafts.append({
                         "sub_plan_id": row["id"], "platform": row["platform"],
-                        "draft_version": draft, "effective": False,
+                        "draft_version": draft, "effective": False, "reused": False,
                     })
                 except PlanVersionError as exc:
                     raise HTTPException(409, str(exc)) from exc
