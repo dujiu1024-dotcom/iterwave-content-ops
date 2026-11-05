@@ -170,3 +170,13 @@ def test_prune_by_days_and_cap(conn):
     assert prune(conn, retention_days=7, max_rows=4) == 3           # 剩 7 条 → 上限 4
     left = {r[0] for r in conn.execute("SELECT id FROM hot_topics")}
     assert left == {"t0", "t1", "t2", "t3"}
+
+
+def test_default_scheduler_misfire_grace_covers_daily_cron_restart_window():
+    config = SchedulerConfig()
+    assert config.misfire_grace_minutes == 24 * 60
+
+    # Daily 06:00 / 08:00 jobs use coalescing so a long outage triggers at most
+    # one catch-up execution per job, while the full previous business day remains eligible.
+    assert config.job("kb_scan").cron == "0 6 * * *"
+    assert config.job("daily_ops").cron == "0 8 * * *"
