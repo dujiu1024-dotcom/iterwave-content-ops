@@ -1324,6 +1324,8 @@ export interface SubPlanStageRecord {
   strategy_goal?: string; current_problem?: string; execution_strategy?: string;
   prerequisites?: string; input_info?: string; expected_result?: string;
   effect_evaluation?: string; entry_condition?: string; entry_condition_met?: boolean;
+  business_completion_required?: boolean; business_completion_status?: string;
+  effect_required?: boolean; effect_status?: string;
   dependencies?: string[]; latest_outcome?: { result: Record<string, unknown>; evaluation: string; recorded_at: string } | null;
 }
 export interface SubPlanVersionRecord {
