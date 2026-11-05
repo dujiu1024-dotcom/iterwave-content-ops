@@ -146,7 +146,7 @@ export default function PlanCenter() {
         const parentVersionId = Number(current?.master_plan_version_id ?? identity.master_plan_version_id ?? 0);
         const parentMaster = versionResult.items.find((item) => Number(item.id) === parentVersionId);
         const parentIsCurrent = Boolean(effectiveMaster && parentVersionId === Number(effectiveMaster.id) && parentMaster?.status === "effective");
-        const status = !parentIsCurrent || identity.master_version_status !== "effective"
+        const status = !parentIsCurrent
           ? "stale"
           : identity.status === "active" && current?.status === "effective"
             ? "effective" : current?.status === "draft" ? "draft" : "review";
