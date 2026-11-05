@@ -1151,27 +1151,12 @@ class RoundExecutor:
                             "original_assets": original_asset_snapshot,
                         },
                     )
-                    # Persist the exact same version references represented in the
-                    # task's immutable input snapshot. Never refresh them on retry.
-                    frozen_task_input = (task.get("input_snapshot") or {}).get("task_input") or {}
-                    for asset in frozen_task_input.get("original_assets", []):
-                        self.conn.execute(
-                            """INSERT OR IGNORE INTO production_task_asset_usages(
-                                production_task_id,original_asset_id,asset_version_no,
-                                permission_snapshot,privacy_snapshot,asset_quality_snapshot
-                            ) VALUES(?,?,?,'allowed',?,?)""",
-                            (
-                                task["id"], int(asset["asset_id"]), int(asset["version_no"]),
-                                asset.get("privacy_status", "unknown"),
-                                json.dumps({
-                                    "readability_status": asset.get("readability_status", "unknown"),
-                                    "completeness_status": asset.get("completeness_status", "unknown"),
-                                    "duplicate_status": asset.get("duplicate_status", "unknown"),
-                                    "commercial_use_status": asset.get("commercial_use_status", "unknown"),
-                                    "asset_version_no": int(asset["version_no"]),
-                                }, ensure_ascii=False, sort_keys=True),
-                            ),
-                        )
+                    # original_assets in the immutable task input are eligible reference
+                    # candidates, not proof that generation actually consumed them.
+                    # Do not mark every linked candidate as "used" here. Explicitly
+                    # selected task assets are recorded by the task-assets authorization
+                    # endpoint; this immutable input snapshot still preserves the
+                    # approval-time privacy and quality classifications for audit.
                     self.conn.commit()
                     existing = task_store.get_content_for_task(task["id"])
                     if existing is not None:
