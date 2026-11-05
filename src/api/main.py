@@ -6940,26 +6940,6 @@ def _register_routes(app: FastAPI) -> None:
             budget = None
             try:
                 conn.execute("BEGIN IMMEDIATE")
-                month_local = _now().replace(
-                    day=1, hour=0, minute=0, second=0, microsecond=0,
-                ).replace(tzinfo=business_zone(cfg))
-                month_utc, month_legacy = storage_window_cutoffs(
-                    month_local.astimezone(timezone.utc), cfg,
-                )
-                quota_row = conn.execute(
-                    "SELECT monthly_quota FROM media_generation_settings WHERE id=1"
-                ).fetchone()
-                monthly_quota = max(0, int(quota_row["monthly_quota"] if quota_row else 20))
-                used = int(conn.execute(
-                    "SELECT COUNT(*) FROM media_generation_jobs WHERE "
-                    + timestamp_since_sql("created_at"),
-                    (month_utc, month_legacy),
-                ).fetchone()[0])
-                if used >= monthly_quota:
-                    conn.rollback()
-                    raise HTTPException(
-                        429, f"本月图片生成配额已用完（{used}/{monthly_quota}），下月自动恢复",
-                    )
                 prompt = f"manual_visual_page_revision:{content_id}:{version_id}:{page_index}"
                 cur = conn.execute(
                     "INSERT INTO media_generation_jobs (prompt, final_prompt, model, status, created_at) "
@@ -7530,27 +7510,6 @@ def _register_routes(app: FastAPI) -> None:
         job_id = None
         try:
             conn.execute("BEGIN IMMEDIATE")
-            month_local = _now().replace(
-                day=1, hour=0, minute=0, second=0, microsecond=0,
-            ).replace(tzinfo=business_zone(cfg))
-            month_utc, month_legacy = storage_window_cutoffs(
-                month_local.astimezone(timezone.utc), cfg,
-            )
-            quota_row = conn.execute(
-                "SELECT monthly_quota FROM media_generation_settings WHERE id = 1"
-            ).fetchone()
-            monthly_quota = max(0, int(quota_row["monthly_quota"] if quota_row else 20))
-            used_this_month = int(conn.execute(
-                "SELECT COUNT(*) FROM media_generation_jobs WHERE "
-                + timestamp_since_sql("created_at"),
-                (month_utc, month_legacy),
-            ).fetchone()[0])
-            if used_this_month >= monthly_quota:
-                conn.rollback()
-                raise HTTPException(
-                    429,
-                    f"本月图片生成配额已用完（{used_this_month}/{monthly_quota}），下月自动恢复",
-                )
             job_prompt = f"manual_full_card_regeneration:{content_id}"
             cur = conn.execute(
                 "INSERT INTO media_generation_jobs (prompt, final_prompt, model, status, created_at) "
