@@ -1290,3 +1290,57 @@ def test_effect_feedback_is_idempotent_and_rejects_tenant_mismatch(client):
     assert int(conn.execute(
         "SELECT COUNT(*) FROM strategy_effect_reviews WHERE stage_id=?", (int(stage["id"]),)
     ).fetchone()[0]) == before + 1
+
+
+
+def test_feedback_adoption_is_scoped_to_its_exact_source_subplan(client):
+    tc, conn, _ = client
+    store = PlanVersionStore(conn)
+    master = store.create_master_draft(dict(PLAN_BASE), author="test", source="user")
+    store.activate_master_version(int(master["id"]), reviewer="test")
+    versions = {}
+    for sub_id, platform in (("feedback-source-xhs", "xhs"), ("feedback-unrelated-douyin", "douyin")):
+        store.create_subplan(
+            sub_id, master_plan_version_id=int(master["id"]), platform=platform,
+            title="反馈来源隔离验收", author="test",
+        )
+        version = store.create_subplan_version(
+            sub_id, {"title": "反馈来源隔离验收", "platform": platform},
+            master_plan_version_id=int(master["id"]), author="test",
+            stages=[{"stage_key": "same-key", "title": "同名阶段", "target_count": 1}],
+        )
+        store.activate_subplan_version(int(version["id"]), reviewer="test")
+        versions[sub_id] = int(version["id"])
+
+    source_stage = conn.execute(
+        "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=?",
+        (versions["feedback-source-xhs"],),
+    ).fetchone()
+    feedback = tc.post(
+        f"/api/subplans/stages/{int(source_stage['id'])}/effect-feedback",
+        json={
+            "assessment": "effective",
+            "recommendation": "仅调整反馈来源子计划。",
+            "evidence_note": "同 stage_key 的其他子计划不得被采纳。",
+            "confidence": "high",
+        },
+    )
+    assert feedback.status_code == 201, feedback.text
+
+    adopted = tc.post("/api/plan_adjustments/adopt", json={
+        "dimensions": ["内容结构"], "effect_review_id": feedback.json()["id"],
+    })
+    assert adopted.status_code == 200, adopted.text
+    drafts = adopted.json()["drafts"]
+    assert len(drafts) == 1
+    assert drafts[0]["sub_plan_id"] == "feedback-source-xhs"
+    unrelated = conn.execute(
+        "SELECT current_version_id,status FROM sub_plans WHERE id='feedback-unrelated-douyin'"
+    ).fetchone()
+    assert int(unrelated["current_version_id"]) == versions["feedback-unrelated-douyin"]
+    assert unrelated["status"] == "active"
+    source = conn.execute(
+        "SELECT current_version_id,status FROM sub_plans WHERE id='feedback-source-xhs'"
+    ).fetchone()
+    assert int(source["current_version_id"]) == versions["feedback-source-xhs"]
+    assert source["status"] == "active"
