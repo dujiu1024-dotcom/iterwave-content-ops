@@ -6405,7 +6405,8 @@ def _register_routes(app: FastAPI) -> None:
             raise
         return {
             "drafts": drafts, "skipped": skipped,
-            "eligible_count": len(rows), "skipped_count": len(skipped),
+            "eligible_count": len(rows), "expected_draft_count": len(rows),
+            "skipped_count": len(skipped),
             "status": "partial" if skipped else "completed",
             "effective": False, "requires_human_review": True,
             "adopted_dimensions": dims,
