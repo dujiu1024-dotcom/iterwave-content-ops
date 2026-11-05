@@ -134,7 +134,7 @@ class GlobalTaskWorker:
 
     async def _run_task(self, task: QueuedTask) -> dict[str, Any]:
         allowed_scheduler_methods = {
-            "_job_publish_polling", "_job_data_fetch", "_job_daily_ops",
+            "_job_publish_polling", "_job_data_fetch", "_job_review_collection", "_job_daily_ops",
             "_job_comment_polling", "_job_cb_recovery", "_job_hot_topics_refresh", "_job_kb_scan",
             "_job_kb_sync", "_job_data_retention_cleanup",
             "_job_round_timeout_sweeper", "_job_round_review", "_job_autogrow_next_round",
@@ -207,6 +207,7 @@ class GlobalTaskWorker:
                 task_type = {
                     "_job_publish_polling": "publish_polling",
                     "_job_data_fetch": "data_fetch",
+                    "_job_review_collection": "data_fetch",
                     "_job_daily_ops": "daily_ops",
                     "_job_comment_polling": "comment_polling",
                     "_job_cb_recovery": "cb_recovery",
