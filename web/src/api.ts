@@ -827,7 +827,7 @@ export interface BusinessDiagnosisReport {
   report: Record<string, any>;
   source_snapshot: { inventory_summary: Record<string, number>; source_references: Array<{ source_type: string; source_id: string; label: string }> };
   source_fingerprint: string; model_name: string; created_at: string; updated_at: string;
-  confirmed_at: string | null; source_is_current: boolean;
+  confirmed_at: string | null; source_is_current: boolean; strategy_is_current?: boolean;
 }
 export interface BusinessDiagnosisVersion {
   id: number; version_no: number; status: string; model_name: string;
@@ -1302,13 +1302,17 @@ export interface AutogrowStatus {
 export interface MasterPlanVersion {
   id: number; version_no: number; status: string; plan_snapshot: string;
   plan_signature: string; created_at: string; reviewed_at?: string | null;
-  change_note?: string;
+  change_note?: string; source?: string; north_star_version_id?: number | null; north_star_attribution_status?: string;
 }
 export interface MasterPlanGenerationMetadata {
   generation_source: string;
   diagnosis_report_id: number;
   diagnosis_version_no: number;
   source_fingerprint: string;
+  strategy_fingerprint: string;
+  north_star_version_id: number;
+  north_star_version_no: number;
+  resource_baseline: Record<string, unknown>;
   model: string;
   generated_at: string;
   summary: string;
@@ -1337,6 +1341,7 @@ export interface SubPlanRecord {
   id: string; master_plan_version_id: number; platform: Platform; title: string;
   status: string; current_version_id: number | null; current_version_no?: number | null;
   current_version_status?: string | null; master_version_status?: string | null;
+  paused_by_master_version_id?: number | null; pause_reason?: string | null;
 }
 export interface SubPlanDetail {
   subplan: SubPlanRecord; versions: SubPlanVersionRecord[];
@@ -2367,13 +2372,24 @@ export const api = {
       `/api/subplans/${encodeURIComponent(subPlanId)}/production-line/status`,
       { method: "PATCH", body: JSON.stringify({ status, reason }) },
     ),
-  /** 复盘「采纳建议」：把缺口维度写回母计划（后端触发 R18 下游失效） */
-  adoptGaps: (dimensions: string[]) =>
+  /** 第一阶段：将复盘采纳写成母计划草稿，审核通过后才切换母计划。 */
+  adoptMasterPlan: (dimensions: string[]) =>
+    fetchJson<{
+      draft: MasterPlanVersion; effective: false; requires_human_review: true;
+      adopted_dimensions: string[]; message: string;
+    }>("/api/plan_adjustments/adopt_master", {
+      method: "POST", body: JSON.stringify({ dimensions }),
+    }),
+  /** 第二阶段：仅把由本次母计划切换暂停的旧子计划 rebase 为新草稿。 */
+  adoptGaps: (dimensions: string[], targetMasterPlanVersionId?: number) =>
     fetchJson<{
       drafts: Array<{ sub_plan_id: string; platform: Platform; draft_version: SubPlanVersionRecord; effective: false }>;
       effective: false; requires_human_review: true; adopted_dimensions: string[]; message: string;
+      status?: "success" | "partial" | "failed"; expected_draft_count?: number;
     }>("/api/plan_adjustments/adopt", {
-      method: "POST", body: JSON.stringify({ dimensions }),
+      method: "POST", body: JSON.stringify({
+        dimensions, ...(targetMasterPlanVersionId ? { target_master_plan_version_id: targetMasterPlanVersionId } : {}),
+      }),
     }),
   /** 热点 → 选题库（R22：必须有 source + 原文链接） */
   importHotTopic: (payload: { title: string; source: string; url: string; dimension?: string; confirmed_by?: string }) =>
