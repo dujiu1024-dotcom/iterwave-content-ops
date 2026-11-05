@@ -139,15 +139,17 @@ def test_manual_master_plan_fallback_needs_north_star_but_not_ai_diagnosis(diagn
     assert conn.execute("SELECT COUNT(*) FROM master_plan_versions").fetchone()[0] == 0
 
     north_star = client.put("/api/north-star", json={
-        "positioning": "专业知识型个人IP",
-        "business_direction": "围绕专业服务建立信任",
-        "target_users": "有明确需求的目标客户",
-        "core_value": "提供可验证的专业解决方案",
-        "long_term_content_direction": "案例、方法论和实操经验",
-        "business_model": "服务型业务",
-        "platform_relationships": "小红书获客，公众号沉淀",
-        "long_term_goals": "建立稳定的专业服务品牌",
         "change_reason": "验证无模型人工创建门禁",
+        "snapshot": {
+            "positioning": "专业知识型个人IP",
+            "business_direction": "围绕专业服务建立信任",
+            "target_users": "有明确需求的目标客户",
+            "core_value": "提供可验证的专业解决方案",
+            "long_term_content_direction": "案例、方法论和实操经验",
+            "business_model": "服务型业务",
+            "platform_relationships": "小红书获客，公众号沉淀",
+            "long_term_goals": "建立稳定的专业服务品牌",
+        },
     })
     assert north_star.status_code == 200, north_star.text
 
