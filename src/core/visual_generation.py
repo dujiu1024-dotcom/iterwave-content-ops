@@ -26,11 +26,13 @@ def revise_visual_background(
     The temporary source copy is removed after the provider call. Visible text is never
     delegated to image generation; all copy remains rendered by the application.
     """
+    # A disabled feature remains a no-op; validate revision reasons only when
+    # an image-generation call can actually be made.
+    if not settings:
+        return {"status": "disabled", "path": None, "elapsed_ms": 0}
     reasons = [str(item).strip() for item in (feedback or []) if str(item).strip()]
     if not reasons:
         raise ValueError("必须提供用户修改理由")
-    if not settings:
-        return {"status": "disabled", "path": None, "elapsed_ms": 0}
 
     source_path = Path(source_path)
     if not source_path.is_file():
