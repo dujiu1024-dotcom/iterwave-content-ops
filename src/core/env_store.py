@@ -86,10 +86,9 @@ def _write_env_unlocked(key: str, value: str) -> Path:
         if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)
 
-    if value:
-        os.environ[key] = value
-    else:
-        os.environ.pop(key, None)
+    # Keep an explicit empty process value as an override. Otherwise read_env()
+    # would fall back to a stale value in config/.env after a caller clears it.
+    os.environ[key] = value
     return path
 
 
