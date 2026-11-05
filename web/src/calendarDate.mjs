@@ -47,7 +47,7 @@ export function businessCalendarDate(value = new Date()) {
 export function parseBusinessCalendarDate(value) {
   if (value instanceof Date) return businessCalendarDate(value);
   const raw = String(value ?? "").trim();
-  const match = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2})(?:\\.(\d+))?)?)?$/.exec(raw);
+  const match = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?)?$/.exec(raw);
   if (match) {
     const [, y, m, d, hh = "12", mm = "0", ss = "0"] = match;
     return new Date(Number(y), Number(m) - 1, Number(d), Number(hh), Number(mm), Number(ss));
@@ -62,8 +62,8 @@ export function parseBusinessCalendarDate(value) {
 export function formatBusinessDateTimeInput(value) {
   if (!value) return "";
   const raw = String(value).trim();
-  const naive = /^(\\d{4}-\\d{2}-\\d{2})[ T](\\d{2}:\\d{2})/.exec(raw);
-  if (naive && !/(?:Z|[+-]\\d{2}:?\\d{2})$/i.test(raw)) return `${naive[1]}T${naive[2]}`;
+  const naive = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/.exec(raw);
+  if (naive && !/(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw)) return `${naive[1]}T${naive[2]}`;
   const date = new Date(raw);
   if (Number.isNaN(date.getTime())) return "";
   const parts = new Intl.DateTimeFormat("en-CA", {
