@@ -50,7 +50,7 @@ export default function PlanCenter() {
   const [data, setData] = useState<PlanResponse | null>(null);
   const [goals, setGoals] = useState<Goal[]>([]);
   const [review, setReview] = useState<SpiralAnalysis | null>(null);
-  const [adoption, setAdoption] = useState<{ adopted_dimensions: string[]; drafts: Array<{ sub_plan_id: string; platform: string; draft_version: { version_no: number } }>; message: string; rebaseStatus?: "awaiting_master_review" | "drafts_created" | "failed"; targetMasterPlanVersionId?: number } | null>(null);
+  const [adoption, setAdoption] = useState<{ adopted_dimensions: string[]; drafts: Array<{ sub_plan_id: string; platform: string; draft_version: { version_no: number } }>; message: string; rebaseStatus?: "awaiting_master_review" | "drafts_created" | "partial" | "failed"; targetMasterPlanVersionId?: number; expectedDraftCount?: number } | null>(null);
   const [pendingAdoptionDimensions, setPendingAdoptionDimensions] = useState<string[]>([]);
   const [showStageHistory, setShowStageHistory] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -244,6 +244,22 @@ export default function PlanCenter() {
       showToast(`母计划草稿 v${result.draft.version_no} 已写入服务器，尚未生效`, "success");
     } catch (e) { showToast("保存母计划草稿失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
   };
+  const inspectRebaseDrafts = async (targetMasterPlanVersionId: number) => {
+    const listed = await api.subplans();
+    const details = await Promise.all(listed.items.map((item) => api.subplan(item.id)));
+    const drafts = details.flatMap((detail) => detail.versions
+      .filter((version) => Number(version.master_plan_version_id) === targetMasterPlanVersionId && version.status === "draft")
+      .map((version) => ({
+        sub_plan_id: detail.subplan.id,
+        platform: detail.subplan.platform,
+        draft_version: { version_no: version.version_no },
+      })));
+    const expected = details.filter((detail) =>
+      detail.subplan.status === "paused"
+      && Number(detail.subplan.paused_by_master_version_id) === targetMasterPlanVersionId
+    ).length;
+    return { drafts, expected };
+  };
   const submitMasterReview = async () => {
     if (!masterDraftVersionId) { showToast("请先保存一个母计划草稿版本", "error"); return; }
     if (!window.confirm("确认审核通过当前母计划草稿？这会切换生效母计划，并暂停基于旧版本的子计划。")) return;
@@ -257,14 +273,32 @@ export default function PlanCenter() {
           setAdoption({ ...rebased, rebaseStatus: "drafts_created", targetMasterPlanVersionId: reviewedVersionId });
           showToast(`母计划已生效，已将 ${rebased.drafts.length} 个旧子计划 rebase 为新草稿；需逐项审核`, "success");
         } catch (rebaseError) {
-          setAdoption((current) => ({
-            adopted_dimensions: pendingAdoptionDimensions,
-            drafts: current?.drafts ?? [],
-            message: rebaseError instanceof Error ? rebaseError.message : String(rebaseError),
-            rebaseStatus: "failed",
-            targetMasterPlanVersionId: reviewedVersionId,
-          }));
-          showToast("母计划已生效，但旧子计划 rebase 未完成，可重试：" + (rebaseError instanceof Error ? rebaseError.message : String(rebaseError)), "error");
+          const errorMessage = rebaseError instanceof Error ? rebaseError.message : String(rebaseError);
+          let observed: Awaited<ReturnType<typeof inspectRebaseDrafts>> | null = null;
+          try { observed = await inspectRebaseDrafts(reviewedVersionId); } catch { observed = null; }
+          if (observed && observed.drafts.length > 0) {
+            const partial = observed.drafts.length < observed.expected;
+            setAdoption({
+              adopted_dimensions: pendingAdoptionDimensions,
+              drafts: observed.drafts,
+              message: partial
+                ? `部分成功：已创建 ${observed.drafts.length} / ${observed.expected} 个子计划草稿。失败项未自动重复提交，请检查平台子计划状态。`
+                : `所有 ${observed.drafts.length} 个子计划草稿均已落库；接口响应异常：${errorMessage}`,
+              rebaseStatus: partial ? "partial" : "drafts_created",
+              targetMasterPlanVersionId: reviewedVersionId,
+              expectedDraftCount: observed.expected,
+            });
+            showToast(partial ? "母计划已生效，子计划 rebase 部分成功；已保留成功项明细" : "母计划已生效，子计划草稿已全部落库", partial ? "error" : "success");
+          } else {
+            setAdoption((current) => ({
+              adopted_dimensions: pendingAdoptionDimensions,
+              drafts: current?.drafts ?? [],
+              message: errorMessage,
+              rebaseStatus: "failed",
+              targetMasterPlanVersionId: reviewedVersionId,
+            }));
+            showToast("母计划已生效，但旧子计划 rebase 未完成，可重试：" + errorMessage, "error");
+          }
         }
       } else if (generated?.status === "drafts_created") {
         showToast(`母计划已生效，AI 自动生成 ${generated.items.length} 个平台子计划草稿，等待审核`, "success");
@@ -325,8 +359,24 @@ export default function PlanCenter() {
       showToast(`已生成 ${result.drafts.length} 个子计划 rebase 草稿，需逐项审核`, "success");
       await load();
     } catch (e) {
-      setAdoption((current) => current ? { ...current, rebaseStatus: "failed", message: e instanceof Error ? e.message : String(e) } : current);
-      showToast("子计划 rebase 失败：" + (e instanceof Error ? e.message : String(e)), "error");
+      const errorMessage = e instanceof Error ? e.message : String(e);
+      let observed: Awaited<ReturnType<typeof inspectRebaseDrafts>> | null = null;
+      try { observed = await inspectRebaseDrafts(masterVersionId); } catch { observed = null; }
+      if (observed && observed.drafts.length > 0) {
+        const partial = observed.drafts.length < observed.expected;
+        setAdoption((current) => current ? {
+          ...current, drafts: observed!.drafts,
+          rebaseStatus: partial ? "partial" : "drafts_created",
+          expectedDraftCount: observed!.expected,
+          message: partial
+            ? `部分成功：已创建 ${observed!.drafts.length} / ${observed!.expected} 个子计划草稿。请检查未完成的平台。`
+            : `所有 ${observed!.drafts.length} 个子计划草稿均已落库；接口响应异常：${errorMessage}`,
+        } : current);
+        showToast(partial ? "子计划 rebase 部分成功" : "子计划草稿已全部落库", partial ? "error" : "success");
+      } else {
+        setAdoption((current) => current ? { ...current, rebaseStatus: "failed", message: errorMessage } : current);
+        showToast("子计划 rebase 失败：" + errorMessage, "error");
+      }
     }
   };
   const createChild = async () => {
@@ -613,7 +663,7 @@ export default function PlanCenter() {
         <div className="grid two"><div className="plan-summary-card"><div className="tiny">当前版本签名</div><div className="plan-signature">{data.signature}</div><div className="tiny">最后更新：{data.updated_at ?? "尚未保存"}</div></div><div className="plan-summary-card"><div className="tiny">目标与范围</div><b>{goals.find((g) => g.id === data.plan.cadence?.goal_id)?.goal_text ?? "尚未关联目标"}</b><div className="tiny">启用平台 {platforms.length} 个 · 每平台默认 {data.plan.topic_count_per_platform} 篇/轮</div></div><div className="plan-summary-card"><div className="tiny">战略版本绑定</div><b>{masterNorthStarVersionId ? `账号组北极星 V${masterNorthStarVersionNo ?? "?"}（记录 ID ${masterNorthStarVersionId}）` : "未归属北极星版本"}</b><div className="tiny">{masterResourceBaseline ? `资源基线已固化 · ${masterResourceBaseline.captured_at}` : "该母计划没有资源基线快照"}</div><div className="tiny">{masterResourceBaseline ? `确认资源 ${String((masterResourceBaseline.snapshot.summary as Record<string, number> | undefined)?.confirmed ?? 0)} / ${String((masterResourceBaseline.snapshot.summary as Record<string, number> | undefined)?.total ?? 0)}` : "旧版本可能尚未建立版本绑定"}</div></div></div>
         <div className="panel" style={{ marginTop: 14 }}>
           <div className="panel-head"><div><div className="panel-title">复盘建议与版本关系</div><div className="panel-sub">仅用户可采纳的覆盖缺口可以写回母计划；采纳后会生成新签名，并标记基于旧版本的活跃轮次。</div></div><button className="btn sm" onClick={() => { window.location.search = "?page=gaps"; }}>查看完整复盘</button></div>
-          {adoption && <div className="note" style={{ marginBottom: 10 }}>最近采纳：{adoption.adopted_dimensions.join("、")}。{adoption.rebaseStatus === "awaiting_master_review" ? "母计划草稿待审核；审核生效后才会暂停旧子计划并执行 rebase。" : adoption.rebaseStatus === "drafts_created" ? `已创建 ${adoption.drafts.length} 个子计划 rebase 草稿；需逐项审核后生效。` : adoption.rebaseStatus === "failed" ? `rebase 未完成：${adoption.message}` : adoption.message}{adoption.rebaseStatus === "failed" && masterVersionId && <button className="btn sm" style={{ marginLeft: 8 }} onClick={() => void retryAdoptionRebase()}>重试子计划 rebase</button>}</div>}
+          {adoption && <div className="note" style={{ marginBottom: 10 }}>最近采纳：{adoption.adopted_dimensions.join("、")}。{adoption.rebaseStatus === "awaiting_master_review" ? "母计划草稿待审核；审核生效后才会暂停旧子计划并执行 rebase。" : adoption.rebaseStatus === "drafts_created" ? `已创建 ${adoption.drafts.length} 个子计划 rebase 草稿；需逐项审核后生效。` : adoption.rebaseStatus === "partial" ? adoption.message : adoption.rebaseStatus === "failed" ? `rebase 未完成：${adoption.message}` : adoption.message}{adoption.drafts.length > 0 && <div className="tiny">已落库草稿：{adoption.drafts.map((item) => `${platformMeta(item.platform as Platform).label} V${item.draft_version.version_no}`).join("、")}</div>}{adoption.rebaseStatus === "failed" && masterVersionId && <button className="btn sm" style={{ marginLeft: 8 }} onClick={() => void retryAdoptionRebase()}>重试子计划 rebase</button>}</div>}
           {(review?.gaps ?? []).filter((g) => g.audience === "user" && g.gap_type === "coverage_gap").length === 0 ? <EmptyHint next="完成一轮内容生产和数据采集后，复盘系统会给出可采纳建议">当前没有可采纳的覆盖缺口建议</EmptyHint> : <div className="list">{(review?.gaps ?? []).filter((g) => g.audience === "user" && g.gap_type === "coverage_gap").map((g) => <div className="task-row" key={g.dimension}><div className="task-main"><div className="task-title">{g.dimension}</div><div className="task-desc">{g.suggestion_text} · 当前 {g.current_count} 条 · 建议 {g.target_count ?? "—"} 条 · 样本 {g.sample_count}</div></div><button className="btn sm primary" onClick={() => void adoptGap(g.dimension)}>采纳并生成新版本</button></div>)}</div>}
         </div>
         <div className="panel-head" style={{ marginTop: 16 }}><div><div className="panel-title">主计划草稿编辑</div><div className="panel-sub">保存会创建服务端不可变草稿版本；只有审核通过后才切换生效计划。</div></div><span className={"tag " + (dirty ? "orange" : saved ? "green" : "gray")}>{dirty ? "有未保存修改" : saved ? "草稿已暂存" : "与当前版本一致"}</span></div>
