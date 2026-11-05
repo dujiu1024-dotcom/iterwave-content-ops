@@ -42,3 +42,27 @@ def test_subgoal_migration_creates_versioned_tables_and_append_only_evidence():
     assert "idx_sub_goals_version_tree" in indexes
     assert "idx_sub_goals_stage_status" in indexes
     conn.close()
+
+
+
+def test_subgoal_actor_migration_marks_history_and_adds_author_columns():
+    conn = sqlite3.connect(":memory:")
+    conn.executescript("""
+        CREATE TABLE sub_plan_versions(id INTEGER PRIMARY KEY);
+        CREATE TABLE sub_plan_stages(id INTEGER PRIMARY KEY, sub_plan_version_id INTEGER);
+        CREATE TABLE production_tasks(id TEXT PRIMARY KEY);
+    """)
+    root = Path(__file__).resolve().parents[1] / "migrations"
+    conn.executescript((root / "149_subgoal_tree_dependency_gates.sql").read_text(encoding="utf-8"))
+    conn.executescript("""
+        INSERT INTO sub_goals(id,sub_plan_version_id,goal_type,title,acceptance_criteria,created_at,updated_at)
+        VALUES('legacy-goal',1,'business','legacy','legacy criteria','now','now');
+    """)
+    conn.executescript((root / "157_subgoal_author_audit.sql").read_text(encoding="utf-8"))
+    goal = conn.execute(
+        "SELECT created_by,updated_by FROM sub_goals WHERE id='legacy-goal'"
+    ).fetchone()
+    assert goal == ("legacy:unattributed", "legacy:unattributed")
+    plan_columns = {row[1] for row in conn.execute("PRAGMA table_info(sub_goal_production_plans)")}
+    assert {"created_by", "updated_by"} <= plan_columns
+    conn.close()
