@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
@@ -109,6 +110,30 @@ def save_context_state(context: BrowserContext, platform: Platform) -> Path:
     os.chmod(path, 0o600)
     logger.info("✅ %s 登录态已保存: %s (权限 600)", platform.value, path)
     return path
+
+async def save_context_state_async(context: BrowserContext, platform: Platform) -> Optional[Path]:
+    """将后台异步 BrowserContext 的最新登录态原子写回 tenant storage_state。
+
+    仅更新已有登录态文件，避免未登录的临时上下文创建空白登录凭据。
+    """
+    path = _platform_state_path(platform)
+    if not path.is_file():
+        return None
+    login_dir = path.parent
+    login_dir.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        await context.storage_state(path=str(temporary))
+        os.chmod(temporary, 0o600)
+        os.chmod(login_dir, 0o700)
+        os.replace(temporary, path)
+        logger.info("✅ %s 后台登录态已更新: %s (权限 600)", platform.value, path)
+        return path
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            logger.exception("清理临时登录态文件失败 platform=%s", platform.value)
 
 
 async def login_with_qr(platform: Platform, login_url: str,
