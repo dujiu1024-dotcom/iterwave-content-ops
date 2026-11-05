@@ -306,6 +306,74 @@ def test_content_review_publish_metrics_and_effect_feedback_api_chain(content_cl
     ).fetchone()[0] == versions_before_rejection
 
 
+def test_effect_feedback_isolated_between_subplans_with_same_stage_key(content_client):
+    client, conn, seed = content_client
+    own_round = seed.round(status="awaiting_publish")
+    own_content = conn.execute(
+        "SELECT id FROM contents WHERE round_id=?", (own_round,),
+    ).fetchone()["id"]
+    own_stage = _stage_for_round(conn, own_round)
+
+    # A different sub-plan deliberately reuses the same stable stage key.
+    other_round = seed.round(status="awaiting_publish")
+    other_content = conn.execute(
+        "SELECT id FROM contents WHERE round_id=?", (other_round,),
+    ).fetchone()["id"]
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    master = conn.execute(
+        """INSERT INTO master_plan_versions(
+            version_no,plan_signature,plan_snapshot,status,source,created_at,created_by
+        ) VALUES(1,?,?, 'draft','system',?,'isolation-test')""",
+        ("t8-isolation-master", json.dumps({"fixture": "isolation"}), now),
+    ).lastrowid
+    conn.execute(
+        """INSERT INTO sub_plans(
+            id,master_plan_version_id,platform,title,status,created_at,updated_at,created_by
+        ) VALUES('t8-other-subplan',?,'xhs','隔离测试子计划','active',?,?,'isolation-test')""",
+        (master, now, now),
+    )
+    other_version = conn.execute(
+        """INSERT INTO sub_plan_versions(
+            sub_plan_id,version_no,master_plan_version_id,snapshot_json,status,created_at,created_by
+        ) VALUES('t8-other-subplan',1,?,?,'draft',?,'isolation-test')""",
+        (master, json.dumps({"fixture": "other"}), now),
+    ).lastrowid
+    other_stage = conn.execute(
+        """INSERT INTO sub_plan_stages(
+            sub_plan_version_id,stage_order,title,target_count,status,created_at,updated_at,
+            stage_key,effect_required,effect_status
+        ) VALUES(?,1,'同名稳定步骤',1,'pending',?,?,'t8-b-stage',1,'pending')""",
+        (other_version, now, now),
+    ).lastrowid
+    conn.execute(
+        "UPDATE spiral_rounds SET sub_plan_id='t8-other-subplan',sub_plan_version_id=?,"
+        "sub_plan_stage_id=?,master_plan_version_id=? WHERE id=?",
+        (other_version, other_stage, master, other_round),
+    )
+    conn.commit()
+
+    feedback = client.get(f"/api/subplans/stages/{own_stage}/effect-feedback")
+    assert feedback.status_code == 200, feedback.text
+    assert feedback.json()["content_count"] == 1
+    assert feedback.json()["published_count"] == 0
+    assert feedback.json()["manual_metrics"]["samples"] == 0
+    assert own_content != other_content
+
+    recorded = client.post(
+        f"/api/subplans/stages/{own_stage}/effect-feedback",
+        json={
+            "assessment": "insufficient_data",
+            "recommendation": "继续收集本子计划样本。",
+            "evidence_note": "隔离回归测试。",
+            "confidence": "low",
+        },
+    )
+    assert recorded.status_code == 201, recorded.text
+    saved = client.get(f"/api/subplans/stages/{own_stage}/effect-feedback")
+    assert saved.status_code == 200, saved.text
+    assert len(saved.json()["reviews"]) == 1
+
+
 def test_content_review_rejection_requires_resubmission_before_approval(content_client):
     client, conn, seed = content_client
     round_id = seed.round(status="producing")
