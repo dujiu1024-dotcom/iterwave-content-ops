@@ -1014,6 +1014,11 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
                 raise HTTPException(422, "topic_count 必须是 1-50 的整数")
         if requested_count < 1 or requested_count > 50:
             raise HTTPException(422, "topic_count 必须在 1-50 之间")
+        # The current tenant-level production-line invariant permits one active
+        # content task at a time. Reject batch requests before opening a round;
+        # silently truncating would make the accepted request differ from execution.
+        if requested_count != 1:
+            raise HTTPException(409, "当前生产线按单条内容任务执行，topic_count 必须为 1")
         try:
             line_definition = json.loads(identity["production_line_definition_json"] or "{}")
             line_stage = next(
