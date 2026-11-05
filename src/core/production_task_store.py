@@ -132,7 +132,7 @@ class ProductionTaskStore:
                 or row.get("production_line_version_id") != production_line_version_id
             ):
                 raise ProductionTaskError("幂等键已被不同生产任务占用")
-            return row
+            return self.get_task(str(row['id']))
 
         snapshot = {
             "round": {
@@ -204,7 +204,7 @@ class ProductionTaskStore:
                     or row.get("production_line_version_id") != production_line_version_id
                 ):
                     raise ProductionTaskError("幂等键已被不同生产任务占用") from exc
-                return row
+                return self.get_task(str(row['id']))
             if "idx_content_production_line_single_active" in str(exc):
                 raise ProductionTaskError("上一条内容生产线尚未完成闭环，暂不能创建新任务") from exc
             raise
@@ -218,7 +218,7 @@ class ProductionTaskStore:
         ).fetchone()
         if created is None:
             raise ProductionTaskError("生产任务创建后未能读取到任务记录")
-        return dict(created)
+        return self.get_task(task_id)
 
     def get_task(self, task_id: str) -> dict[str, Any]:
         row = self.conn.execute(
