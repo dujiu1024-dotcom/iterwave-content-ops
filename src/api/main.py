@@ -6246,7 +6246,7 @@ def _register_routes(app: FastAPI) -> None:
         # this outer savepoint prevents an earlier child draft surviving a later failure.
         conn.execute("SAVEPOINT review_adoption_batch")
         try:
-            for row in rows:    
+            for row in rows:
                 try:
                     snapshot = json.loads(row["snapshot_json"])
                 except (TypeError, ValueError):
