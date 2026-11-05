@@ -66,9 +66,9 @@ def _stage_for_round(conn, round_id: int) -> int:
     stage = conn.execute(
         """INSERT INTO sub_plan_stages(
             sub_plan_version_id,stage_order,title,target_count,status,created_at,updated_at,
-            stage_key,strategy_goal,execution_strategy
+            stage_key,strategy_goal,execution_strategy,effect_required,effect_status
         ) VALUES(?,1,'T8-B 内容效果验收',1,'pending',?,?,
-                 't8-b-stage','验证发布效果回流','API 集成验收')""",
+                 't8-b-stage','验证发布效果回流','API 集成验收',1,'pending')""",
         (version, now, now),
     ).lastrowid
     conn.execute(
@@ -186,8 +186,7 @@ def test_content_review_publish_metrics_and_effect_feedback_api_chain(content_cl
     assert evidence["published_count"] == 1
     assert evidence["manual_metrics"]["views"] == 120.0
 
-    # A feedback-derived adjustment must retain the exact review/evidence provenance
-    # and create a draft only; it must not mutate the effective sub-plan in place.
+    # Activate the fixture versions before exercising the effective-version-only review API.
     source_version = conn.execute(
         "SELECT sub_plan_version_id FROM sub_plan_stages WHERE id=?", (stage_id,),
     ).fetchone()["sub_plan_version_id"]
@@ -197,6 +196,59 @@ def test_content_review_publish_metrics_and_effect_feedback_api_chain(content_cl
     conn.execute("UPDATE master_plan_versions SET status='effective' WHERE id=?", (master_version,))
     conn.execute("UPDATE sub_plan_versions SET status='effective' WHERE id=?", (source_version,))
     conn.commit()
+
+    # The human effect-gate decision must reference this exact frozen feedback.
+    wrong_source = client.post(
+        f"/api/subplans/t8-b-subplan/stages/{stage_id}/condition-review",
+        json={
+            "condition_type": "effect",
+            "decision": "passed",
+            "reason": "核验效果反馈",
+            "effect_review_id": 999999,
+        },
+    )
+    assert wrong_source.status_code == 404, wrong_source.text
+    assert conn.execute(
+        "SELECT effect_status FROM sub_plan_stages WHERE id=?", (stage_id,)
+    ).fetchone()["effect_status"] == "pending"
+    mismatched_decision = client.post(
+        f"/api/subplans/t8-b-subplan/stages/{stage_id}/condition-review",
+        json={
+            "condition_type": "effect",
+            "decision": "failed",
+            "reason": "故意验证不一致结论被拒绝",
+            "effect_review_id": recorded.json()["id"],
+        },
+    )
+    assert mismatched_decision.status_code == 409, mismatched_decision.text
+    assert conn.execute(
+        "SELECT effect_status FROM sub_plan_stages WHERE id=?", (stage_id,)
+    ).fetchone()["effect_status"] == "pending"
+    confirmed = client.post(
+        f"/api/subplans/t8-b-subplan/stages/{stage_id}/condition-review",
+        json={
+            "condition_type": "effect",
+            "decision": "passed",
+            "reason": "人工确认指标证据达到目标",
+            "recommendation": "维持当前策略并继续观察。",
+            "confidence": "medium",
+            "effect_review_id": recorded.json()["id"],
+        },
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["stage"]["effect_status"] == "passed"
+    assert confirmed.json()["completion_gates"]["effect_status"] == "passed"
+    assert confirmed.json()["completion_gates"]["production_blocked"] is False
+    reviews = client.get(
+        f"/api/subplans/t8-b-subplan/stages/{stage_id}/condition-reviews",
+    )
+    assert reviews.status_code == 200, reviews.text
+    condition_evidence = reviews.json()["condition_reviews"][0]["evidence"]
+    assert condition_evidence["source_effect_review_id"] == recorded.json()["id"]
+    assert condition_evidence["source_evidence"]["manual_metrics"]["views"] == 120.0
+
+    # A feedback-derived adjustment must retain the exact review/evidence provenance
+    # and create a draft only; it must not mutate the effective sub-plan in place.
     original_snapshot = conn.execute(
         "SELECT snapshot_json FROM sub_plan_versions WHERE id=?", (source_version,),
     ).fetchone()["snapshot_json"]
