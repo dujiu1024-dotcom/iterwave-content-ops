@@ -37,7 +37,7 @@ from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.date import DateTrigger
-from zoneinfo import ZoneInfo
+from src.core.timezone import business_zone
 from ..timezone import (business_now, storage_now, parse_persisted_datetime, business_zone as configured_business_zone, storage_window_cutoffs, timestamp_since_sql, timestamp_before_sql, business_date_predicate)
 from ..task_context import bind_task_context, business_timestamp, business_zone
 
@@ -282,16 +282,29 @@ class SchedulerEngine:
         for job_id in JOB_RUNNERS:
             self.apply_job_config(job_id)
 
-    def _trigger_for(self, job_id: str):
+    def _trigger_for(self, job_id: str, *, start_date=None):
         sched = self.cfg.scheduler.job(job_id)
         if sched.cron:
-            return CronTrigger.from_crontab(sched.cron, timezone=ZoneInfo(self.cfg.business_timezone))
-        return IntervalTrigger(minutes=int(sched.interval_minutes))
+            return CronTrigger.from_crontab(sched.cron, timezone=business_zone(self.cfg))
+        return IntervalTrigger(minutes=int(sched.interval_minutes), start_date=start_date)
+
+    @staticmethod
+    def _trigger_signature(trigger) -> tuple:
+        """Compare configured schedule semantics, excluding generated trigger timestamps."""
+        timezone = getattr(trigger, "timezone", None)
+        zone_key = getattr(timezone, "key", str(timezone))
+        if isinstance(trigger, CronTrigger):
+            return ("cron", zone_key, str(trigger))
+        if isinstance(trigger, IntervalTrigger):
+            return ("interval", zone_key, trigger.interval.total_seconds())
+        return (type(trigger).__qualname__, str(trigger))
 
     def apply_job_config(self, job_id: str) -> dict:
-        """按当前配置（重新）排定单个任务：关闭则移除，开启则 replace_existing 重排。
+        """按当前配置同步任务；配置未变时保留持久化 next_run_time。
 
-        运行时修改配置（PATCH /api/config scheduler.jobs.*）后调用，立即生效，无需重启。
+        启动时不应先删后加相同的周期任务，否则会丢失停机期间的 next_run_time，
+        APScheduler 无法按 misfire_grace_time/coalesce 补跑错过的任务。
+        运行时 PATCH 修改调度配置时仍立即替换触发器。
         """
         if job_id not in JOB_RUNNERS:
             raise KeyError(f"未知定时任务：{job_id}")
@@ -299,16 +312,33 @@ class SchedulerEngine:
         enabled = sched.enabled
         if job_id == "hot_topics_refresh" and getattr(self.cfg.hot_topics, "enabled", True) is False:
             enabled = False
+        existing = self.scheduler.get_job(job_id)
         if not enabled:
-            if self.scheduler.get_job(job_id) is not None:
+            if existing is not None:
                 self.scheduler.remove_job(job_id)
             logger.info("⏸️ [APS] 定时任务 %s 已关闭", job_id)
             return {"job_id": job_id, "enabled": False}
-        if self.scheduler.get_job(job_id) is not None:
-            self.scheduler.remove_job(job_id)
+
+        # IntervalTrigger 默认以当前时刻为 start_date；比较时复用持久化锚点，
+        # 否则每次重启都会误判配置变化并丢弃 next_run_time。
+        start_date = (
+            existing.trigger.start_date
+            if existing is not None and isinstance(existing.trigger, IntervalTrigger)
+            else None
+        )
+        trigger = self._trigger_for(job_id, start_date=start_date)
+        if existing is not None:
+            if self._trigger_signature(existing.trigger) != self._trigger_signature(trigger):
+                self.scheduler.reschedule_job(job_id, trigger=trigger)
+            self.scheduler.modify_job(
+                job_id, args=[self.engine_key], max_instances=1, coalesce=True,
+            )
+            logger.info("⏰ [APS] 定时任务 %s：%s", job_id, sched.describe())
+            return {"job_id": job_id, "enabled": True, "schedule": sched.describe(), "preserved": True}
+
         self.scheduler.add_job(
             JOB_RUNNERS[job_id],
-            self._trigger_for(job_id),
+            trigger,
             id=job_id,
             args=[self.engine_key],
             replace_existing=True,
@@ -316,7 +346,7 @@ class SchedulerEngine:
             coalesce=True,
         )
         logger.info("⏰ [APS] 定时任务 %s：%s", job_id, sched.describe())
-        return {"job_id": job_id, "enabled": True, "schedule": sched.describe()}
+        return {"job_id": job_id, "enabled": True, "schedule": sched.describe(), "preserved": False}
 
     # ------------------------------------------------------------------
     # 外部接口：动态注册 data_fetch
