@@ -1238,3 +1238,169 @@ def test_reviewed_feedback_adoption_drives_next_round_on_new_version(client):
     assert int(binding["sub_plan_stage_id"]) == int(new_stage["id"])
     assert int(binding["production_line_version_id"]) == int(new_line["id"])
     assert int(binding["sub_plan_version_id"]) != int(original["id"])
+
+
+
+def test_effect_feedback_is_idempotent_and_rejects_tenant_mismatch(client):
+    tc, conn, _ = client
+    store = PlanVersionStore(conn)
+    master = store.create_master_draft(dict(PLAN_BASE), author="test", source="user")
+    store.activate_master_version(int(master["id"]), reviewer="test")
+    store.create_subplan(
+        "effect-feedback-idempotency", master_plan_version_id=int(master["id"]),
+        platform="xhs", title="效果反馈幂等验收", author="test",
+    )
+    version = store.create_subplan_version(
+        "effect-feedback-idempotency", {"title": "效果反馈幂等验收", "platform": "xhs"},
+        master_plan_version_id=int(master["id"]), author="test",
+        stages=[{"stage_key": "idempotency-stage", "title": "幂等阶段", "target_count": 1}],
+    )
+    store.activate_subplan_version(int(version["id"]), reviewer="test")
+    stage = conn.execute(
+        "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=?", (int(version["id"]),)
+    ).fetchone()
+    url = f"/api/subplans/stages/{int(stage['id'])}/effect-feedback"
+    payload = {
+        "assessment": "effective",
+        "recommendation": "保持当前策略并扩大样本。",
+        "evidence_note": "重复请求应复用同一条不可变反馈。",
+        "confidence": "high",
+    }
+    before = int(conn.execute(
+        "SELECT COUNT(*) FROM strategy_effect_reviews WHERE stage_id=?", (int(stage["id"]),)
+    ).fetchone()[0])
+
+    cross_tenant = tc.post(url, headers={"X-Tenant-Id": "tenant-other"}, json=payload)
+    assert cross_tenant.status_code == 409, cross_tenant.text
+    assert int(conn.execute(
+        "SELECT COUNT(*) FROM strategy_effect_reviews WHERE stage_id=?", (int(stage["id"]),)
+    ).fetchone()[0]) == before
+
+    headers = {"Idempotency-Key": "effect-feedback-idempotency-key-001"}
+    first = tc.post(url, headers=headers, json=payload)
+    assert first.status_code == 201, first.text
+    replay = tc.post(url, headers=headers, json=payload)
+    assert replay.status_code == 201, replay.text
+    assert replay.json()["id"] == first.json()["id"]
+    assert replay.json()["deduplicated"] is True
+
+    changed_payload = {**payload, "recommendation": "相同幂等键不得覆盖原反馈。"}
+    conflict = tc.post(url, headers=headers, json=changed_payload)
+    assert conflict.status_code == 409, conflict.text
+    assert int(conn.execute(
+        "SELECT COUNT(*) FROM strategy_effect_reviews WHERE stage_id=?", (int(stage["id"]),)
+    ).fetchone()[0]) == before + 1
+
+
+
+def test_feedback_adoption_is_scoped_to_its_exact_source_subplan(client):
+    tc, conn, _ = client
+    store = PlanVersionStore(conn)
+    master = store.create_master_draft(dict(PLAN_BASE), author="test", source="user")
+    store.activate_master_version(int(master["id"]), reviewer="test")
+    versions = {}
+    for sub_id, platform in (("feedback-source-xhs", "xhs"), ("feedback-unrelated-douyin", "douyin")):
+        store.create_subplan(
+            sub_id, master_plan_version_id=int(master["id"]), platform=platform,
+            title="反馈来源隔离验收", author="test",
+        )
+        version = store.create_subplan_version(
+            sub_id, {"title": "反馈来源隔离验收", "platform": platform},
+            master_plan_version_id=int(master["id"]), author="test",
+            stages=[{"stage_key": "same-key", "title": "同名阶段", "target_count": 1}],
+        )
+        store.activate_subplan_version(int(version["id"]), reviewer="test")
+        versions[sub_id] = int(version["id"])
+
+    source_stage = conn.execute(
+        "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=?",
+        (versions["feedback-source-xhs"],),
+    ).fetchone()
+    feedback = tc.post(
+        f"/api/subplans/stages/{int(source_stage['id'])}/effect-feedback",
+        json={
+            "assessment": "effective",
+            "recommendation": "仅调整反馈来源子计划。",
+            "evidence_note": "同 stage_key 的其他子计划不得被采纳。",
+            "confidence": "high",
+        },
+    )
+    assert feedback.status_code == 201, feedback.text
+
+    adopted = tc.post("/api/plan_adjustments/adopt", json={
+        "dimensions": ["内容结构"], "effect_review_id": feedback.json()["id"],
+    })
+    assert adopted.status_code == 200, adopted.text
+    drafts = adopted.json()["drafts"]
+    assert len(drafts) == 1
+    assert drafts[0]["sub_plan_id"] == "feedback-source-xhs"
+    first_draft_id = int(drafts[0]["draft_version"]["id"])
+
+    # A retry after a lost response must reuse the same pending draft, not
+    # increment the sub-plan version number or create another review item.
+    replay = tc.post("/api/plan_adjustments/adopt", json={
+        "dimensions": ["内容结构"], "effect_review_id": feedback.json()["id"],
+    })
+    assert replay.status_code == 200, replay.text
+    assert len(replay.json()["drafts"]) == 1
+    assert int(replay.json()["drafts"][0]["draft_version"]["id"]) == first_draft_id
+    assert replay.json()["drafts"][0]["reused"] is True
+    assert int(conn.execute(
+        "SELECT COUNT(*) FROM sub_plan_versions WHERE sub_plan_id=? AND status='draft'",
+        ("feedback-source-xhs",),
+    ).fetchone()[0]) == 1
+
+    unrelated = conn.execute(
+        "SELECT current_version_id,status FROM sub_plans WHERE id='feedback-unrelated-douyin'"
+    ).fetchone()
+    assert int(unrelated["current_version_id"]) == versions["feedback-unrelated-douyin"]
+    assert unrelated["status"] == "active"
+    source = conn.execute(
+        "SELECT current_version_id,status FROM sub_plans WHERE id='feedback-source-xhs'"
+    ).fetchone()
+    assert int(source["current_version_id"]) == versions["feedback-source-xhs"]
+    assert source["status"] == "active"
+
+
+
+def test_master_adoption_rejects_effect_feedback_from_superseded_master_version(client):
+    tc, conn, _ = client
+    store = PlanVersionStore(conn)
+    first_master = store.create_master_draft(dict(PLAN_BASE), author="test", source="user")
+    store.activate_master_version(int(first_master["id"]), reviewer="test")
+    store.create_subplan(
+        "superseded-feedback-source", master_plan_version_id=int(first_master["id"]),
+        platform="xhs", title="跨母计划版本反馈验收", author="test",
+    )
+    child = store.create_subplan_version(
+        "superseded-feedback-source", {"title": "跨母计划版本反馈验收", "platform": "xhs"},
+        master_plan_version_id=int(first_master["id"]), author="test",
+        stages=[{"stage_key": "old-master-stage", "title": "旧母计划阶段", "target_count": 1}],
+    )
+    store.activate_subplan_version(int(child["id"]), reviewer="test")
+    stage = conn.execute(
+        "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=?", (int(child["id"]),)
+    ).fetchone()
+    feedback = tc.post(
+        f"/api/subplans/stages/{int(stage['id'])}/effect-feedback",
+        json={
+            "assessment": "effective",
+            "recommendation": "旧母计划反馈不得跨版本写入新母计划。",
+            "evidence_note": "跨版本负向验收。",
+            "confidence": "high",
+        },
+    )
+    assert feedback.status_code == 201, feedback.text
+
+    second_master = store.create_master_draft(dict(PLAN_BASE), author="test", source="user")
+    store.activate_master_version(int(second_master["id"]), reviewer="test")
+    drafts_before = int(conn.execute(
+        "SELECT COUNT(*) FROM master_plan_versions WHERE status='draft'"
+    ).fetchone()[0])
+    rejected = tc.post("/api/plan_adjustments/adopt_master", json={
+        "dimensions": ["内容结构"], "effect_review_id": feedback.json()["id"],
+    })
+    assert rejected.status_code == 409, rejected.text
+    assert int(conn.execute(
+        "SELECT COUNT(*) FROM master_plan_versions WHERE status='draft'"
+    ).fetchone()[0]) == drafts_before

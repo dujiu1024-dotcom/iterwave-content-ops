@@ -6188,6 +6188,10 @@ def _register_routes(app: FastAPI) -> None:
         if not dims:
             raise HTTPException(400, "dimensions 不能为空")
         conn = _g()["conn"]
+        # Lock the read/check/create batch so concurrent retries cannot race past
+        # the existing-draft check and create duplicate rebase versions.
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
         effect_review_id = (req or {}).get("effect_review_id")
         effect_source = None
         if effect_review_id is not None:
@@ -6262,7 +6266,55 @@ def _register_routes(app: FastAPI) -> None:
         # this outer savepoint prevents an earlier child draft surviving a later failure.
         conn.execute("SAVEPOINT review_adoption_batch")
         try:
-            for row in rows:    
+            for row in rows:
+                target_master_id = (
+                    target_master_version_id if target_master_version_id is not None
+                    else int(row["master_plan_version_id"])
+                )
+                change_note = "复盘建议采纳草稿：" + "、".join(dims)
+                existing_draft = conn.execute(
+                    """SELECT * FROM sub_plan_versions
+                       WHERE sub_plan_id=? AND master_plan_version_id=?
+                         AND based_on_version_id=? AND status='draft'
+                       ORDER BY version_no DESC LIMIT 1""",
+                    (row["id"], target_master_id, int(row["current_version_id"])),
+                ).fetchone()
+                if existing_draft is not None:
+                    try:
+                        existing_snapshot = json.loads(existing_draft["snapshot_json"] or "{}")
+                    except (TypeError, ValueError):
+                        raise HTTPException(409, f"子计划 {row['id']} 已有损坏的未审核草稿，拒绝重复创建")
+                    existing_adoptions = existing_snapshot.get("review_adoptions")
+                    latest_adoption = (
+                        existing_adoptions[-1]
+                        if isinstance(existing_adoptions, list) and existing_adoptions
+                        else {}
+                    )
+                    existing_feedback = latest_adoption.get("effect_feedback")
+                    existing_feedback_id = (
+                        int(existing_feedback["id"])
+                        if isinstance(existing_feedback, dict) and existing_feedback.get("id") is not None
+                        else None
+                    )
+                    requested_feedback_id = int(effect_source["id"]) if effect_source is not None else None
+                    same_request = (
+                        existing_draft["created_by"] == "review_adoption"
+                        and existing_draft["change_note"] == change_note
+                        and latest_adoption.get("source") == "review_adoption"
+                        and latest_adoption.get("dimensions") == dims
+                        and latest_adoption.get("target_master_plan_version_id") == target_master_version_id
+                        and existing_feedback_id == requested_feedback_id
+                    )
+                    if not same_request:
+                        raise HTTPException(
+                            409,
+                            f"子计划 {row['id']} 已存在基于当前版本的未审核草稿；请先审核或驳回后重试",
+                        )
+                    drafts.append({
+                        "sub_plan_id": row["id"], "platform": row["platform"],
+                        "draft_version": dict(existing_draft), "effective": False, "reused": True,
+                    })
+                    continue
                 try:
                     snapshot = json.loads(row["snapshot_json"])
                 except (TypeError, ValueError):
@@ -6305,26 +6357,17 @@ def _register_routes(app: FastAPI) -> None:
                 try:
                     draft = store.create_subplan_version(
                         row["id"], snapshot,
-                        master_plan_version_id=(
-                            target_master_version_id if target_master_version_id is not None
-                            else int(row["master_plan_version_id"])
-                        ),
+                        master_plan_version_id=target_master_id,
                         author="review_adoption", stages=stages,
                         based_on_version_id=int(row["current_version_id"]),
-                        change_note="复盘建议采纳草稿：" + "、".join(dims),
+                        change_note=change_note,
                     )
                     drafts.append({
                         "sub_plan_id": row["id"], "platform": row["platform"],
-                        "draft_version": draft, "effective": False,
+                        "draft_version": draft, "effective": False, "reused": False,
                     })
                 except PlanVersionError as exc:
                     raise HTTPException(409, str(exc)) from exc
-            return {
-                "drafts": drafts, "effective": False, "requires_human_review": True,
-                "adopted_dimensions": dims,
-                "message": "复盘建议已生成平台子计划草稿；修改并审核通过后才会生效",
-            }
-    
             conn.execute("RELEASE SAVEPOINT review_adoption_batch")
         except Exception:
             conn.execute("ROLLBACK TO SAVEPOINT review_adoption_batch")
@@ -7911,17 +7954,51 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(422,"调整建议必须为 1-2000 个字符，证据说明不能超过 2000 个字符")
         if confidence not in {"low","medium","high"}:
             raise HTTPException(422,"置信度无效")
-        snapshot=get_stage_effect_feedback(stage_id)
-        evidence={key:snapshot[key] for key in ("content_count","published_count","manual_metrics","automatic_metrics")}
-        conn=_g()["conn"]; now=_storage_now().isoformat(timespec="seconds")
-        cur=conn.execute(
-            "INSERT INTO strategy_effect_reviews(stage_id,assessment,recommendation,evidence_note,confidence,evidence_json,created_by,created_at) "
-            "VALUES(?,?,?,?,?,?,?,?)",
-            (stage_id,assessment,recommendation,evidence_note,confidence,json.dumps(evidence,ensure_ascii=False,sort_keys=True),auth.audit_actor(request),now),
-        )
-        conn.commit()
-        return {"id":cur.lastrowid,"stage_id":stage_id,"assessment":assessment,
-                "recommendation":recommendation,"confidence":confidence,"created_at":now}
+
+        idempotency_key=(request.headers.get("Idempotency-Key") or "").strip() or None
+        if idempotency_key is not None and len(idempotency_key)>128:
+            raise HTTPException(422,"Idempotency-Key 不能超过 128 个字符")
+        payload={
+            "assessment":assessment,"recommendation":recommendation,
+            "evidence_note":evidence_note,"confidence":confidence,
+        }
+        request_hash=hashlib.sha256(
+            json.dumps(payload,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode("utf-8")
+        ).hexdigest() if idempotency_key is not None else None
+
+        conn=_g()["conn"]
+        # Serialize lookup + insert so concurrent retries with the same key cannot
+        # create duplicate immutable reviews. A key reused with a different body is a conflict.
+        with connection_transaction(conn, immediate=True):
+            if idempotency_key is not None:
+                existing=conn.execute(
+                    "SELECT id,stage_id,assessment,recommendation,confidence,created_at,request_hash "
+                    "FROM strategy_effect_reviews WHERE stage_id=? AND idempotency_key=?",
+                    (stage_id,idempotency_key),
+                ).fetchone()
+                if existing is not None:
+                    if existing["request_hash"] != request_hash:
+                        raise HTTPException(409,"Idempotency-Key 已用于不同的效果反馈内容")
+                    return {
+                        "id":int(existing["id"]),"stage_id":int(existing["stage_id"]),
+                        "assessment":existing["assessment"],"recommendation":existing["recommendation"],
+                        "confidence":existing["confidence"],"created_at":existing["created_at"],
+                        "deduplicated":True,
+                    }
+
+            snapshot=get_stage_effect_feedback(stage_id)
+            evidence={key:snapshot[key] for key in ("content_count","published_count","manual_metrics","automatic_metrics")}
+            now=_storage_now().isoformat(timespec="seconds")
+            cur=conn.execute(
+                "INSERT INTO strategy_effect_reviews(stage_id,assessment,recommendation,evidence_note,confidence,evidence_json,created_by,created_at,idempotency_key,request_hash) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (stage_id,assessment,recommendation,evidence_note,confidence,
+                 json.dumps(evidence,ensure_ascii=False,sort_keys=True),auth.audit_actor(request),
+                 now,idempotency_key,request_hash),
+            )
+            return {"id":cur.lastrowid,"stage_id":stage_id,"assessment":assessment,
+                    "recommendation":recommendation,"confidence":confidence,"created_at":now,
+                    "deduplicated":False}
 
     # --- G-09 生产线阶段计数（G → G2 → H → I）---
     @app.get("/api/rounds/{round_id}/pipeline")
