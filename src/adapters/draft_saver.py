@@ -260,7 +260,7 @@ PLATFORM_SELECTORS: dict[Platform, dict] = {
         # 存草稿成功后回到上传页，顶部出现「你还有上次未发布的图文，是否继续编辑？」
         "save_success_text": ["你还有上次未发布的图文", "继续编辑"],
         # 已有旧草稿时先放弃，保证本次存的是当前内容（不清空用户其它草稿）
-        "draft_prompt_discard": ["text=放弃"],
+        "draft_prompt_preserve": ["text=你还有上次未发布的图文"],
         "_publish_button_audit_only": [
             "button:has-text('发布')",
             "button.publish-btn",
@@ -311,7 +311,7 @@ PLATFORM_SELECTORS: dict[Platform, dict] = {
             "text=取消",
         ],
         "save_success_text": ["还有上次未发布的图集", "继续编辑"],
-        "draft_prompt_discard": ["text=放弃"],
+        "draft_prompt_preserve": ["text=还有上次未发布的图集"],
         "_publish_button_audit_only": [
             "button:has-text('发布')",
         ],
@@ -469,9 +469,13 @@ class DraftSaver:
             # —— 小红书/抖音/快手：默认停在视频 tab，先切到图文 tab ——
             await self._ensure_image_tab(page, bool(content.image_paths))
 
-            # —— 已有上次未发布的草稿时先「放弃」，保证本次存的是当前内容 ——
-            if content.image_paths:
-                await self._discard_stale_draft(page)
+            # 保留平台上次未发布的草稿：检测到旧草稿提示时停止本次操作，
+            # 绝不静默点击「放弃」或覆盖用户已有内容。
+            if content.image_paths and await self._has_stale_draft_prompt(page):
+                return DraftResult(
+                    success=False,
+                    error_msg="平台存在上一份未发布草稿，已保留原稿并停止本次保存；请先在平台确认旧草稿处理方式后重试。",
+                )
 
             # —— 一次性多图上传（小红书/抖音 set_input_files；快手必须走 filechooser）——
             if content.image_paths:
@@ -1068,26 +1072,17 @@ class DraftSaver:
             logger.warning("视频号草稿箱核对失败: %s", exc)
         return None
 
-    async def _discard_stale_draft(self, page: Page) -> None:
-        """平台提示「还有上次未发布的草稿，是否继续编辑？」时点「放弃」。
-
-        只在本次确实要存新草稿时调用；点的是「放弃」而非「继续编辑」，
-        避免把旧草稿的图片带进来导致重复。
-        """
-        selectors = self.selectors.get("draft_prompt_discard") or []
-        if not selectors:
-            return
-        for sel in selectors:
+    async def _has_stale_draft_prompt(self, page: Page) -> bool:
+        """Detect a prior unsent draft without deleting or mutating it."""
+        selectors = self.selectors.get("draft_prompt_preserve") or []
+        for selector in selectors:
             try:
-                loc = page.locator(sel).first
-                if await loc.count() > 0 and await loc.is_visible():
-                    await loc.click(timeout=4000)
-                    await page.wait_for_timeout(1500)
-                    logger.info("平台 %s 已放弃上次未发布的草稿", self.platform)
-                    return
+                locator = page.locator(selector).first
+                if await locator.count() > 0 and await locator.is_visible():
+                    return True
             except Exception:
                 continue
-
+        return False
     async def _upload_images(self, page: Page, image_paths: list[str]) -> None:
         """上传图片：快手必须点「上传图片」走 filechooser，其余平台直接 set_input_files。"""
         mode = self.selectors.get("image_upload_mode", "input")
