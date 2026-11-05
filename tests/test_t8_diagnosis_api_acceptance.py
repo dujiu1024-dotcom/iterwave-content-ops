@@ -181,9 +181,19 @@ def _create_provenance_valid_task(conn):
          now),
     )
     master_version_id = int(plan_cursor.lastrowid)
+    north_star = conn.execute(
+        "SELECT id,snapshot_json FROM account_group_north_star_versions "
+        "WHERE status='effective' ORDER BY version_no DESC LIMIT 1"
+    ).fetchone()
+    if north_star is None:
+        raise AssertionError("测试必须先建立有效北极星版本")
     conn.execute(
-        "UPDATE master_plan_versions SET status='effective',effective_at=? WHERE id=?",
-        (now, master_version_id),
+        """UPDATE master_plan_versions
+           SET north_star_version_id=?,north_star_snapshot_json=?,
+               north_star_attribution_status='attributed',
+               status='effective',effective_at=?
+           WHERE id=?""",
+        (int(north_star["id"]), north_star["snapshot_json"], now, master_version_id),
     )
 
     sub_plan_id = f"t8-a-subplan-{master_version_id}"
@@ -286,8 +296,51 @@ def _create_provenance_valid_task(conn):
     return str(task["id"])
 
 
-def test_original_asset_permission_and_privacy_gate_production_usage(diagnosis_client):
+def test_original_asset_permission_and_privacy_gate_production_usage(diagnosis_client, monkeypatch):
+    from src.api import business_diagnosis
+
     client, conn = diagnosis_client
+
+    profile = client.put("/api/business-profile", json={
+        "business_name": "T8-A 授权门禁测试业务",
+        "introduction": "用于验证原始素材权限与隐私门禁的图文内容运营业务",
+        "industry": "内容运营",
+        "business_model": "服务",
+        "business_stage": "测试验收",
+        "operating_goal": "验证生产上下文完整性",
+        "change_note": "T8-A provenance fixture",
+    })
+    assert profile.status_code == 200, profile.text
+    offering = client.post("/api/business-profile/items/service", json={
+        "name": "T8-A 图文内容运营服务",
+        "details": {
+            "service_type": "图文内容运营",
+            "introduction": "用于素材权限门禁验收",
+            "delivery_method": "线上内容策划与制作",
+        },
+    })
+    assert offering.status_code == 200, offering.text
+
+    north_star = client.put("/api/north-star", json={
+        "positioning": "以可验证的内容运营服务支持业务增长",
+        "business_direction": "持续建设合规图文内容生产能力",
+        "target_users": "需要图文内容运营的企业客户",
+        "core_value": "可追溯、合规、稳定的内容生产",
+        "long_term_content_direction": "围绕真实业务资料生产高质量图文内容",
+        "business_model": "企业内容运营服务",
+        "long_term_goals": "建立可审计的图文生产闭环",
+        "change_reason": "T8-A 生产上下文验收测试",
+    })
+    assert north_star.status_code == 200, north_star.text
+
+    monkeypatch.setattr(
+        business_diagnosis, "generate_diagnosis", _async_fake_diagnosis,
+    )
+    analyzed = client.post("/api/business-diagnosis/analyze")
+    assert analyzed.status_code == 201, analyzed.text
+    report_id = analyzed.json()["report"]["id"]
+    confirmed = client.post(f"/api/business-diagnosis/{report_id}/confirm")
+    assert confirmed.status_code == 200, confirmed.text
     cur = conn.execute(
         """INSERT INTO original_assets(
             asset_type,title,description,source_kind,metadata_json
