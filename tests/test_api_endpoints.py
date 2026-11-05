@@ -502,7 +502,7 @@ def test_adopt_gaps_requires_existing_approved_subplan(client):
     ).fetchone()
     r = tc.post("/api/plan_adjustments/adopt", json={"dimensions": ["政策解读", "家庭场景"]})
     assert r.status_code == 409
-    assert "已审核的平台子计划" in r.text
+    assert "已审核平台子计划" in r.text
     after = conn.execute(
         "SELECT id FROM master_plan_versions WHERE status='effective'"
     ).fetchone()
