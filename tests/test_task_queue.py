@@ -880,7 +880,14 @@ def test_cancel_and_retry_admin_actions_are_audited(tmp_path):
     assert audit[0]["action"] == "cancel"
     assert audit[0]["actor"] == "session:test-operator"
 
-    failed, _ = queue.enqueue(task_type="round_run", tenant_id="tenant-a", payload={})
+    failed, _ = queue.enqueue(
+        task_type="round_run", tenant_id="tenant-a", aggregate_id="round-identity-1",
+        payload={
+            "round_id": 91,
+            "initiating_actor": "session:original-request",
+            "execution_snapshot": {"plan_version_id": 17, "signature": "frozen"},
+        },
+    )
     conn = queue._connect()
     try:
         conn.execute("UPDATE global_task_queue SET status='failed' WHERE task_id=?", (failed.task_id,))
@@ -891,6 +898,12 @@ def test_cancel_and_retry_admin_actions_are_audited(tmp_path):
         confirmation_note="已核验平台无执行记录", confirmed_not_executed=True,
     )
     assert created
+    assert retry.tenant_id == failed.tenant_id == "tenant-a"
+    assert retry.task_type == failed.task_type == "round_run"
+    assert retry.aggregate_id == failed.aggregate_id == "round-identity-1"
+    assert retry.payload == failed.payload
+    assert retry.payload["initiating_actor"] == "session:original-request"
+    assert retry.payload["execution_snapshot"] == {"plan_version_id": 17, "signature": "frozen"}
     audit = queue.list_admin_audit(failed.task_id)
     assert audit[0]["action"] == "retry"
     assert audit[0]["actor"] == "session:test-operator"
