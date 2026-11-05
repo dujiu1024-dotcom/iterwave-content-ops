@@ -195,9 +195,7 @@ export default function Analytics() {
           <div className="eyebrow">数据复盘</div>
           <h1 className="page-title">数据分析</h1>
           <div className="page-desc">
-            总览看整体表现与本周建议；详细数据查看逐篇原始指标、平台基准和发布后数据回填。 当前视图：<OperatingFeedbackPane />
-
-      {detailView === "overview" ? "经营摘要" : "逐篇数据与回填"}。
+            总览看整体表现与本周建议；详细数据查看逐篇原始指标、平台基准和发布后数据回填。 当前视图：{detailView === "overview" ? "经营摘要" : "逐篇数据与回填"}。
           </div>
         </div>
         <div className="head-actions">
@@ -206,6 +204,8 @@ export default function Analytics() {
           <button className="btn" onClick={() => { loadMetrics(platformFilter, detailView === "details" ? metricsPage : undefined); loadGaps(); }}>↻ 刷新数据</button>
         </div>
       </div>
+
+      <OperatingFeedbackPane />
 
       {detailView === "overview" && <>
       {/* 总览只放经营指标：生产量、互动、粉丝增长、目标完成率。增长漏斗类（TTV、激活率、首次发布率等）不在此展示。 */}
