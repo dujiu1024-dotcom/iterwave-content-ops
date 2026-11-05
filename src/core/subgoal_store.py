@@ -154,7 +154,7 @@ class SubGoalStore:
             result.append(item)
         return result
 
-    def create_goal(self, sub_plan_id: str, version_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    def create_goal(self, sub_plan_id: str, version_id: int, payload: dict[str, Any], *, actor: str = "system:unknown") -> dict[str, Any]:
         self._assert_version(version_id, sub_plan_id, draft=True)
         goal_type = str(payload.get("goal_type") or "")
         title = str(payload.get("title") or "").strip()
@@ -202,11 +202,12 @@ class SubGoalStore:
             self.conn.execute(
                 """INSERT INTO sub_goals(id,sub_plan_version_id,stage_id,parent_goal_id,goal_type,
                    goal_order,priority,title,description,target_count,acceptance_criteria,
-                   requires_production,status,created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   requires_production,status,created_at,updated_at,created_by,updated_by)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (goal_id, version_id, stage_id, parent_id, goal_type, order, priority, title,
                  str(payload.get("description") or ""), target_count, criteria,
-                 1 if payload.get("requires_production") else 0, "ready", now, now)
+                 1 if payload.get("requires_production") else 0, "ready", now, now,
+                 str(actor or "system:unknown")[:120], str(actor or "system:unknown")[:120])
             )
             for dep in deps:
                 predecessor = self._goal(str(dep))
@@ -224,7 +225,7 @@ class SubGoalStore:
             raise
         return self._goal(goal_id)
 
-    def update_goal(self, sub_plan_id: str, goal_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def update_goal(self, sub_plan_id: str, goal_id: str, payload: dict[str, Any], *, actor: str = "system:unknown") -> dict[str, Any]:
         goal = self._goal(goal_id)
         version = self._assert_version(goal["sub_plan_version_id"], sub_plan_id, draft=True)
         if goal["status"] == "completed":
@@ -299,8 +300,8 @@ class SubGoalStore:
                 """UPDATE sub_goals SET title=?,description=?,acceptance_criteria=?,goal_type=?,priority=?,
                    goal_order=?,target_count=?,stage_id=?,parent_goal_id=?,requires_production=?,
                    status=CASE WHEN status IN ('failed','needs_review') THEN 'ready' ELSE status END,
-                   updated_at=? WHERE id=?""",
-                (*fields.values(), _now(), goal_id)
+                   updated_at=?,updated_by=? WHERE id=?""",
+                (*fields.values(), _now(), str(actor or "system:unknown")[:120], goal_id)
             )
             self.conn.execute("DELETE FROM sub_goal_dependencies WHERE goal_id=?", (goal_id,))
             for dep in deps:
@@ -319,7 +320,7 @@ class SubGoalStore:
             raise
         return self._goal(goal_id)
 
-    def save_production_plan(self, sub_plan_id: str, goal_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def save_production_plan(self, sub_plan_id: str, goal_id: str, payload: dict[str, Any], *, actor: str = "system:unknown") -> dict[str, Any]:
         goal = self._goal(goal_id)
         version = self._assert_version(goal["sub_plan_version_id"], sub_plan_id)
         if not (
@@ -345,16 +346,18 @@ class SubGoalStore:
         self.conn.execute(
             """INSERT INTO sub_goal_production_plans(
                  goal_id,content_direction,suggested_count,resource_requirements_json,
-                 priority,execution_conditions,acceptance_relation,enabled,created_at,updated_at
-               ) VALUES(?,?,?,?,?,?,?,1,?,?)
+                 priority,execution_conditions,acceptance_relation,enabled,created_at,updated_at,created_by,updated_by
+               ) VALUES(?,?,?,?,?,?,?,1,?,?,?,?)
                ON CONFLICT(goal_id) DO UPDATE SET content_direction=excluded.content_direction,
                  suggested_count=excluded.suggested_count,
                  resource_requirements_json=excluded.resource_requirements_json,
                  priority=excluded.priority,execution_conditions=excluded.execution_conditions,
-                 acceptance_relation=excluded.acceptance_relation,enabled=1,updated_at=excluded.updated_at""",
-            (goal_id,direction,count,_json(resources),priority,conditions,acceptance,now,now)
+                 acceptance_relation=excluded.acceptance_relation,enabled=1,updated_at=excluded.updated_at,
+                 updated_by=excluded.updated_by""",
+            (goal_id,direction,count,_json(resources),priority,conditions,acceptance,now,now,
+             str(actor or "system:unknown")[:120], str(actor or "system:unknown")[:120])
         )
-        self.conn.execute("UPDATE sub_goals SET requires_production=1,updated_at=? WHERE id=?", (now,goal_id))
+        self.conn.execute("UPDATE sub_goals SET requires_production=1,updated_at=?,updated_by=? WHERE id=?", (now,str(actor or "system:unknown")[:120],goal_id))
         self.conn.commit()
         return dict(self.conn.execute("SELECT * FROM sub_goal_production_plans WHERE goal_id=?", (goal_id,)).fetchone())
 
