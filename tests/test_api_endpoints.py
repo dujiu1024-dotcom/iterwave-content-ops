@@ -4666,3 +4666,30 @@ def test_round_run_queue_persists_authenticated_initiating_actor(client, tmp_pat
     assert task.payload["initiating_actor"].startswith("session:")
     assert task.payload["initiating_actor"] != "user"
     assert task.payload["initiating_actor"] != "web-ui"
+
+
+def test_tenant_context_mismatch_rejects_write_before_database_mutation(client):
+    tc, conn, _seed = client
+    before = int(conn.execute("SELECT COUNT(*) FROM master_plan_versions").fetchone()[0])
+
+    response = tc.post(
+        "/api/plans",
+        json={},
+        headers={"X-Tenant-Id": "another-tenant"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "TENANT_CONTEXT_CHANGED"
+    assert int(conn.execute("SELECT COUNT(*) FROM master_plan_versions").fetchone()[0]) == before
+
+
+def test_tenant_context_missing_rejects_write_before_database_mutation(client):
+    tc, conn, _seed = client
+    before = int(conn.execute("SELECT COUNT(*) FROM master_plan_versions").fetchone()[0])
+    tc.headers.pop("X-Tenant-Id", None)
+
+    response = tc.post("/api/plans", json={})
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "TENANT_CONTEXT_REQUIRED"
+    assert int(conn.execute("SELECT COUNT(*) FROM master_plan_versions").fetchone()[0]) == before
