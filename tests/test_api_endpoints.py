@@ -3434,10 +3434,59 @@ def test_master_plan_approval_triggers_draft_only_ai_subplan_orchestration(clien
     assert response.json()["subplan_generation"]["status"] == "drafts_created"
 
 
-def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client):
+def _seed_required_production_context(client, monkeypatch, label):
+    from src.api import business_diagnosis
+
+    async def fake_diagnosis(conn, cfg):
+        from src.core.business_diagnosis import collect_business_context
+        context = collect_business_context(conn, cfg)
+        return (
+            {"business_summary": {"claim": label, "classification": "fact"},
+             "assumptions": [], "source_references": []},
+            context["context"], "t4-fixture-model",
+        )
+
+    monkeypatch.setattr(business_diagnosis, "generate_diagnosis", fake_diagnosis)
+    profile = client.put("/api/business-profile", json={
+        "business_name": label, "industry": "测试行业",
+        "business_model": "图文内容运营", "business_stage": "测试阶段",
+        "operating_goal": "完成图文内容生产",
+    })
+    assert profile.status_code == 200, profile.text
+    offering = client.post("/api/business-profile/items/service", json={
+        "name": f"{label}服务",
+        "details": {
+            "service_type": "图文内容运营",
+            "introduction": "用于生产上下文验收的业务服务快照",
+            "delivery_method": "线上内容策划与制作",
+        },
+    })
+    assert offering.status_code == 200, offering.text
+    north_star = client.put("/api/north-star", json={
+        "change_reason": f"{label}建立账号组北极星",
+        "snapshot": {
+            "positioning": "测试业务定位",
+            "business_direction": "图文内容运营",
+            "target_users": "目标测试用户",
+            "core_value": "稳定生产高质量内容",
+            "long_term_content_direction": "围绕核心业务持续输出",
+            "business_model": "内容营销",
+            "long_term_goals": "建立可持续内容生产体系",
+        },
+    })
+    assert north_star.status_code == 200, north_star.text
+    analyzed = client.post("/api/business-diagnosis/analyze")
+    assert analyzed.status_code == 201, analyzed.text
+    report_id = analyzed.json()["report"]["id"]
+    confirmed = client.post(f"/api/business-diagnosis/{report_id}/confirm")
+    assert confirmed.status_code == 200, confirmed.text
+
+
+def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client, monkeypatch):
     from src.core.plan_version_store import PlanVersionStore
 
     tc, conn, _ = client
+    _seed_required_production_context(tc, monkeypatch, "T4 API 首轮测试业务")
     store = PlanVersionStore(conn)
     active = conn.execute(
         "SELECT id,plan_snapshot FROM master_plan_versions WHERE status='effective' ORDER BY version_no DESC LIMIT 1"
@@ -3491,6 +3540,24 @@ def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client
     before = tc.get(f"/api/subplans/{sub_id}/progress")
     assert before.status_code == 200
     assert before.json()["stages"] == []
+
+    stage_for_goal = conn.execute(
+        "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=?", (version_id,)
+    ).fetchone()
+    from src.core.subgoal_store import SubGoalStore
+    goal_store = SubGoalStore(conn)
+    production_goal = goal_store.create_goal(sub_id, int(version_id), {
+        "stage_id": int(stage_for_goal["id"]), "goal_type": "quantity",
+        "title": "首轮内容生产目标", "target_count": 2,
+        "acceptance_criteria": "完成首轮约定内容生产",
+        "requires_production": True,
+    })
+    goal_store.save_production_plan(sub_id, str(production_goal["id"]), {
+        "content_direction": "按已审核阶段方向生产内容",
+        "suggested_count": 2,
+        "execution_conditions": "阶段已生效且依赖门禁通过",
+        "acceptance_relation": "以本阶段内容数量及验收证据为准",
+    })
 
     reviewed = tc.post(f"/api/subplans/{sub_id}/review", json={
         "version_id": version_id, "action": "approve",

@@ -144,6 +144,12 @@ class RoundExecutor:
         ).fetchone()
         if not round_row:
             raise RoundPreconditionError(f"轮次 {round_id} 不存在")
+        # Subplan execution is strictly one content per invocation. A subsequent
+        # item must be selected only after the previous item's review is available.
+        # Older clients may still submit the legacy batch count; the server
+        # always normalizes subplan work to exactly one content item.
+        if round_row["sub_plan_id"]:
+            topic_count = 1
         from .subplan_production import production_paused
         if production_paused(self.conn):
             raise RoundPreconditionError("内容生产已暂停，拒绝执行轮次")
@@ -281,11 +287,7 @@ class RoundExecutor:
             remaining = max(0, int(stage_row["target_count"]) - int(stage_row["published_count"] or 0))
             if remaining <= 0:
                 raise RoundPreconditionError("阶段用户确认发布目标已达成，拒绝继续生产")
-            topic_count = min(
-                int(topic_count or self._plan.get("topic_count_per_platform")
-                    or self.cfg.plan_suggestion.default_topic_count),
-                remaining,
-            )
+            topic_count = 1
             if platform_values and set(platform_values) != {identity["platform"]}:
                 raise RoundPreconditionError("轮次只能执行其绑定子计划所属平台")
             platform_values = [identity["platform"]]
@@ -1145,6 +1147,10 @@ class RoundExecutor:
                             },
                             "template": template_data,
                             "original_assets": original_asset_snapshot,
+                            "previous_review_feedback": (
+                                feedback.to_dict() if hasattr(feedback, "to_dict")
+                                else (feedback if isinstance(feedback, dict) else None)
+                            ),
                         },
                     )
                     # Persist the exact same version references represented in the
