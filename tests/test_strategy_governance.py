@@ -42,6 +42,7 @@ def test_strategy_fingerprint_tracks_north_star_version(monkeypatch):
     monkeypatch.setattr("src.core.north_star_repository.get_current", lambda _conn: current)
     monkeypatch.setattr("src.core.resource_baseline_repository.build_resource_baseline", lambda _conn: {"resources": [], "gaps": []})
     conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE account_group_north_star_versions (id INTEGER)")
     first = strategy_governance.collect_strategy_governance(conn)
     current.update({"id": 2, "version_no": 2, "snapshot": {"positioning": "新定位"}})
     second = strategy_governance.collect_strategy_governance(conn)
