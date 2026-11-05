@@ -2952,31 +2952,12 @@ def _register_routes(app: FastAPI) -> None:
             source_mime = source["mime_type"]
             source_filename = source["original_filename"]
 
-        # 月度配额按已创建的生成任务计数，失败请求也可能已经产生供应商费用。
+        # Usage is recorded for visibility; generation is not quota-blocked.
         if not _media_generation_lock.acquire(blocking=False):
             raise HTTPException(409, "已有图片生成任务正在执行，请稍后重试")
         try:
             conn.execute("BEGIN IMMEDIATE")
             now = _storage_now().isoformat(timespec="seconds")
-            month_local = _now().replace(
-                day=1, hour=0, minute=0, second=0, microsecond=0,
-            ).replace(tzinfo=business_zone(cfg))
-            month_utc, month_legacy = storage_window_cutoffs(
-                month_local.astimezone(timezone.utc), cfg,
-            )
-            used_this_month = int(conn.execute(
-                "SELECT COUNT(*) FROM media_generation_jobs WHERE "
-                + timestamp_since_sql("created_at"),
-                (month_utc, month_legacy),
-            ).fetchone()[0])
-            monthly_quota = max(0, int(settings.get("monthly_quota") or 0))
-            if used_this_month >= monthly_quota:
-                conn.rollback()
-                raise HTTPException(
-                    429,
-                    f"本月图片生成配额已用完（{used_this_month}/{monthly_quota}），下月自动恢复",
-                )
-            # 每个已创建任务都计入月度配额，失败请求也可能已经产生供应商费用。
             cur = conn.execute(
                 "INSERT INTO media_generation_jobs (prompt, final_prompt, model, status, created_at) "
                 "VALUES (?, ?, ?, 'running', ?)",
