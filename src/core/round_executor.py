@@ -1694,6 +1694,23 @@ class RoundExecutor:
                 image_paths=row["image_paths"],
                 tags=row["tags"],
             )
+            # Persist an uncertain marker BEFORE crossing the external side-effect
+            # boundary. If the worker is killed after the platform receives the click
+            # but before Python gets a response, recovery must not blindly submit again.
+            from src.core.timezone import storage_now
+            attempt_started_at = storage_now().isoformat(timespec="seconds")
+            interrupted_message = "存草稿尝试已启动但进程未确认结果；请先核对平台草稿箱，确认未保存后再恢复"
+            self.conn.execute(
+                "INSERT INTO draft_save_verifications "
+                "(draft_id, status, attempted_at, platform_draft_id, error_msg) "
+                "VALUES (?, 'pending_verify', ?, NULL, ?) "
+                "ON CONFLICT(draft_id) DO UPDATE SET "
+                "status='pending_verify', attempted_at=excluded.attempted_at, "
+                "verified_at=NULL, platform_draft_id=NULL, "
+                "error_msg=excluded.error_msg, note=NULL",
+                (row["draft_id"], attempt_started_at, interrupted_message),
+            )
+            self.conn.commit()
             try:
                 result = await adapter.save_draft(payload)
             except Exception:  # noqa: BLE001 — 调用期间异常时，平台侧结果可能不确定
@@ -1739,7 +1756,8 @@ class RoundExecutor:
                 from src.core.timezone import business_now, storage_now
                 self.conn.execute(
                     "UPDATE draft_save_verifications SET status='verified_saved', verified_at=?, "
-                    "platform_draft_id=?, error_msg=NULL WHERE draft_id=? AND status='verified_missing'",
+                    "platform_draft_id=?, error_msg=NULL WHERE draft_id=? "
+                    "AND status IN ('pending_verify','verified_missing')",
                     (
                         storage_now().isoformat(timespec="seconds"),
                         result.platform_draft_id, row["draft_id"],
@@ -1784,6 +1802,19 @@ class RoundExecutor:
                         f"{platform.display_name} 存草稿结果不确定（需人工核实）：{row['title'][:30]}",
                     )
             else:
+                # The adapter returned a definitive negative result (e.g. the
+                # platform explicitly rejected the save). It is now safe to clear
+                # the preflight uncertainty marker and expose a normal failure.
+                self.conn.execute(
+                    "UPDATE draft_save_verifications SET status='verified_missing', "
+                    "verified_at=?, error_msg=? WHERE draft_id=? AND status='pending_verify'",
+                    (
+                        storage_now().isoformat(timespec="seconds"),
+                        result.error_msg or "平台明确反馈未保存",
+                        row["draft_id"],
+                    ),
+                )
+                self.conn.commit()
                 # R6：页面信号 / 登录态失效 → 真正触发熔断（此前只记日志，熔断器形同虚设）
                 self._report_circuit_signal(platform, result)
                 report["drafts_failed"] += 1
