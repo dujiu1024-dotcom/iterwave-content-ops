@@ -89,6 +89,7 @@ def test_subgoal_store_writes_append_only_actor_context():
         CREATE TABLE sub_plan_stages(id INTEGER PRIMARY KEY,sub_plan_version_id INTEGER);
         CREATE TABLE production_tasks(id TEXT PRIMARY KEY);
         CREATE TABLE content_production_line_events(id INTEGER PRIMARY KEY);
+        CREATE TABLE production_context_waivers(id TEXT PRIMARY KEY);
         INSERT INTO sub_plan_versions VALUES(1,'sub-1','draft');
         INSERT INTO sub_plans VALUES('sub-1',1);
     """)
