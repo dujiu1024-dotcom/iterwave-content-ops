@@ -61,6 +61,8 @@ export default function PlanCenter() {
   const [children, setChildren] = useState<Child[]>([]);
   const [selectedChildId, setSelectedChildId] = useState("");
   const [masterVersionId, setMasterVersionId] = useState<number | null>(null);
+  const [masterNorthStarVersionId, setMasterNorthStarVersionId] = useState<number | null>(null);
+  const [masterResourceBaseline, setMasterResourceBaseline] = useState<{ captured_at: string; captured_by: string; snapshot: Record<string, unknown> } | null>(null);
   const [masterDraftVersionId, setMasterDraftVersionId] = useState<number | null>(null);
   const [diagnosis, setDiagnosis] = useState<BusinessDiagnosisReport | null>(null);
   const [aiGeneration, setAiGeneration] = useState<MasterPlanGenerationMetadata | null>(null);
@@ -113,6 +115,13 @@ export default function PlanCenter() {
       const pendingMaster = versionResult.items.find((item) => item.status === "draft");
       const pendingPlan = parseMasterPlan(pendingMaster?.plan_snapshot);
       setMasterDraftVersionId(pendingMaster?.id ?? null);
+      setMasterNorthStarVersionId(effectiveMaster?.north_star_version_id ?? null);
+      if (effectiveMaster?.id) {
+        try { setMasterResourceBaseline(await api.masterPlanResourceBaseline(effectiveMaster.id)); }
+        catch { setMasterResourceBaseline(null); }
+      } else {
+        setMasterResourceBaseline(null);
+      }
       setDiagnosis(diagnosisResult.report);
       setAiGeneration(parseGenerationMetadata(pendingMaster) ?? null);
       setData(planResult); setGoals(goalResult);
@@ -539,7 +548,8 @@ export default function PlanCenter() {
         {aiGenerationError && <div className="note" role="alert" style={{ marginTop: 10, color: "var(--red)" }}>生成失败：{aiGenerationError}。当前编辑内容和已生效计划未被覆盖，可修复依据或配置后重试。</div>}
         {aiGeneration && <div className="plan-version-detail" style={{ marginTop: 14 }}>
           <div className="panel-head"><b>本次 AI 生成依据与待确认事项</b><span className="tag gray">仅草稿 · 待人工审核</span></div>
-          <div className="tiny">关联经营诊断：报告 v{aiGeneration.diagnosis_version_no}（记录 ID {aiGeneration.diagnosis_report_id}） · 模型：{aiGeneration.model} · 生成时间：{aiGeneration.generated_at}</div>
+          <div className="tiny">关联经营诊断：报告 v{aiGeneration.diagnosis_version_no}（记录 ID {aiGeneration.diagnosis_report_id}） · 账号组北极星 V{aiGeneration.north_star_version_no}（版本 ID {aiGeneration.north_star_version_id}） · 模型：{aiGeneration.model} · 生成时间：{aiGeneration.generated_at}</div>
+          <div className="tiny">资源基线：{String((aiGeneration.resource_baseline.summary as Record<string, number> | undefined)?.confirmed ?? 0)} 项已确认 / {String((aiGeneration.resource_baseline.summary as Record<string, number> | undefined)?.total ?? 0)} 项 · 版本指纹 {aiGeneration.strategy_fingerprint.slice(0, 12)}…</div>
           <div style={{ marginTop: 10 }}><b>制定摘要</b><p>{aiGeneration.summary}</p></div>
           <div className="grid two">
             <div><b>业务资料与素材依据</b><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.resource_basis, null, 2)}</pre></div>
@@ -551,7 +561,7 @@ export default function PlanCenter() {
       </div>
       <div className="panel">
         <div className="panel-head"><div><div className="panel-title">当前主计划</div><div className="panel-sub">现有 API 只维护一份当前母计划；历史签名作为版本记录，不代表多个独立主计划。</div></div><span className={"tag " + (data.source === "plan_settings" ? "green" : "gray")}>{data.source === "plan_settings" ? "服务器已保存" : "由最近轮次推导"}</span></div>
-        <div className="grid two"><div className="plan-summary-card"><div className="tiny">当前版本签名</div><div className="plan-signature">{data.signature}</div><div className="tiny">最后更新：{data.updated_at ?? "尚未保存"}</div></div><div className="plan-summary-card"><div className="tiny">目标与范围</div><b>{goals.find((g) => g.id === data.plan.cadence?.goal_id)?.goal_text ?? "尚未关联目标"}</b><div className="tiny">启用平台 {platforms.length} 个 · 每平台默认 {data.plan.topic_count_per_platform} 篇/轮</div></div></div>
+        <div className="grid two"><div className="plan-summary-card"><div className="tiny">当前版本签名</div><div className="plan-signature">{data.signature}</div><div className="tiny">最后更新：{data.updated_at ?? "尚未保存"}</div></div><div className="plan-summary-card"><div className="tiny">目标与范围</div><b>{goals.find((g) => g.id === data.plan.cadence?.goal_id)?.goal_text ?? "尚未关联目标"}</b><div className="tiny">启用平台 {platforms.length} 个 · 每平台默认 {data.plan.topic_count_per_platform} 篇/轮</div></div><div className="plan-summary-card"><div className="tiny">战略版本绑定</div><b>{masterNorthStarVersionId ? `账号组北极星 V${masterNorthStarVersionId}` : "未归属北极星版本"}</b><div className="tiny">{masterResourceBaseline ? `资源基线已固化 · ${masterResourceBaseline.captured_at}` : "该母计划没有资源基线快照"}</div><div className="tiny">{masterResourceBaseline ? `确认资源 ${String((masterResourceBaseline.snapshot.summary as Record<string, number> | undefined)?.confirmed ?? 0)} / ${String((masterResourceBaseline.snapshot.summary as Record<string, number> | undefined)?.total ?? 0)}` : "旧版本可能尚未建立版本绑定"}</div></div></div>
         <div className="panel" style={{ marginTop: 14 }}>
           <div className="panel-head"><div><div className="panel-title">复盘建议与版本关系</div><div className="panel-sub">仅用户可采纳的覆盖缺口可以写回母计划；采纳后会生成新签名，并标记基于旧版本的活跃轮次。</div></div><button className="btn sm" onClick={() => { window.location.search = "?page=gaps"; }}>查看完整复盘</button></div>
           {adoption && <div className="note" style={{ marginBottom: 10 }}>最近采纳：{adoption.adopted_dimensions.join("、")} → 已创建 {adoption.drafts.length} 个平台子计划草稿版本；需逐项审核</div>}
