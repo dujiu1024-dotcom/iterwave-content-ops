@@ -1408,17 +1408,6 @@ def test_plan_store_audit_persists_bound_worker_identity():
     from src.core.task_context import bind_task_identity
 
     conn = _db()
-    conn.execute(
-        """CREATE TABLE plan_change_audit (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, event_type TEXT NOT NULL,
-            from_version_id INTEGER, to_version_id INTEGER NOT NULL, change_reason TEXT NOT NULL,
-            before_snapshot_json TEXT, after_snapshot_json TEXT NOT NULL,
-            affected_tasks_json TEXT NOT NULL, actor TEXT NOT NULL,
-            initiating_actor TEXT, executing_actor TEXT, tenant_id TEXT, queue_task_id TEXT,
-            created_at TEXT NOT NULL
-        )"""
-    )
     store = PlanVersionStore(conn)
     with bind_task_identity(
         initiating_actor="session:plan-initiator",
