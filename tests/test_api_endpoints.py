@@ -3529,7 +3529,7 @@ def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client
     assert reviewed.status_code == 200, reviewed.text
     assert reviewed.json()["authorization"] == "active"
     stage = conn.execute(
-        "SELECT stage_key,target_count FROM sub_plan_stages WHERE sub_plan_version_id=?",
+        "SELECT id,stage_key,target_count FROM sub_plan_stages WHERE sub_plan_version_id=?",
         (version_id,),
     ).fetchone()
     line_draft = tc.post(f"/api/subplans/{sub_id}/production-line/draft", json={
