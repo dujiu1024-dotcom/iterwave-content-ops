@@ -149,11 +149,13 @@ class ContentProductionLineStore:
         now = _now()
         self.conn.execute(
             """INSERT INTO production_context_waivers(
-                id,round_id,platform,waived_items_json,reason,actor,evidence_json,created_at
-            ) VALUES(?,?,?,?,?,?,?,?)""",
+                id,round_id,platform,waived_items_json,reason,actor,evidence_json,created_at,
+                actor_type,actor_id,tenant_id,initiating_actor,executing_actor,task_id
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (waiver_id, round_id, platform, json.dumps(normalized),
              str(reason).strip()[:2000], str(actor or "operator")[:120],
-             json.dumps(evidence or {}, ensure_ascii=False, sort_keys=True), now),
+             json.dumps(evidence or {}, ensure_ascii=False, sort_keys=True), now,
+             *self._audit_identity(actor)),
         )
         self.conn.commit()
         return {
