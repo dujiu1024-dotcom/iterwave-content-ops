@@ -73,3 +73,34 @@ def test_child_strategy_context_uses_master_bound_versions_not_current(monkeypat
     assert result["north_star"] == {"version_id": 5, "snapshot": {"positioning": "绑定的历史定位"}}
     assert result["resource_baseline"] == baseline
     assert result["resource_baseline_available"] is True
+
+
+
+def test_strategy_governance_is_scoped_to_the_supplied_tenant_connection(monkeypatch):
+    first = sqlite3.connect(":memory:")
+    second = sqlite3.connect(":memory:")
+    for conn, version, label in [(first, 1, "tenant-a"), (second, 9, "tenant-b")]:
+        conn.execute("CREATE TABLE account_group_north_star_versions (id INTEGER)")
+        conn.execute("CREATE TABLE tenant_marker (label TEXT)")
+        conn.execute("INSERT INTO tenant_marker VALUES (?)", (label,))
+        conn.execute("INSERT INTO account_group_north_star_versions VALUES (?)", (version,))
+
+    def read_north_star(conn):
+        row = conn.execute("SELECT id FROM account_group_north_star_versions").fetchone()
+        label = conn.execute("SELECT label FROM tenant_marker").fetchone()[0]
+        return {"id": row[0], "version_no": row[0], "snapshot": {"positioning": label}}
+
+    def read_baseline(conn):
+        label = conn.execute("SELECT label FROM tenant_marker").fetchone()[0]
+        return {"resources": [{"category": "business_profile", "status": "confirmed", "details": {"tenant": label}}], "gaps": []}
+
+    monkeypatch.setattr("src.core.north_star_repository.get_current", read_north_star)
+    monkeypatch.setattr("src.core.resource_baseline_repository.build_resource_baseline", read_baseline)
+    first_context = strategy_governance.collect_strategy_governance(first)
+    second_context = strategy_governance.collect_strategy_governance(second)
+    first.close()
+    second.close()
+
+    assert first_context["north_star"]["snapshot"]["positioning"] == "tenant-a"
+    assert second_context["north_star"]["snapshot"]["positioning"] == "tenant-b"
+    assert strategy_governance.strategy_governance_fingerprint(first_context) != strategy_governance.strategy_governance_fingerprint(second_context)
