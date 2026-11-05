@@ -21,12 +21,17 @@ def collect_strategy_governance(conn) -> dict[str, Any]:
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     north_star = get_current(conn) if "account_group_north_star_versions" in tables else None
     baseline = build_resource_baseline(conn)
+    # Whitelist stable decision fields. updated_at is intentionally omitted:
+    # asset usage and other production writes can touch it without changing the
+    # underlying permission, privacy, quality, business or capacity decision.
     resources = [
-        item for item in baseline.get("resources", [])
+        {key: value for key, value in item.items() if key != "updated_at"}
+        for item in baseline.get("resources", [])
         if item.get("category") not in _VOLATILE_RESOURCE_CATEGORIES
     ]
     gaps = [
-        item for item in baseline.get("gaps", [])
+        {key: value for key, value in item.items() if key != "updated_at"}
+        for item in baseline.get("gaps", [])
         if item.get("category") not in _VOLATILE_RESOURCE_CATEGORIES
     ]
     summary = {
