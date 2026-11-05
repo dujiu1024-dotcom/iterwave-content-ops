@@ -71,3 +71,44 @@ def test_subgoal_actor_migration_marks_history_and_adds_author_columns():
     event_columns = {row[1] for row in conn.execute("PRAGMA table_info(content_production_line_events)")}
     assert {"tenant_id", "actor_type", "actor_id", "initiating_actor", "executing_actor", "task_id"} <= event_columns
     conn.close()
+
+
+
+def test_subgoal_store_writes_append_only_actor_context():
+    from src.core.subgoal_store import SubGoalStore
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.executescript("""
+        CREATE TABLE sub_plan_versions(id INTEGER PRIMARY KEY,sub_plan_id TEXT,status TEXT);
+        CREATE TABLE sub_plans(id TEXT PRIMARY KEY,current_version_id INTEGER);
+        CREATE TABLE sub_plan_stages(id INTEGER PRIMARY KEY,sub_plan_version_id INTEGER);
+        CREATE TABLE production_tasks(id TEXT PRIMARY KEY);
+        CREATE TABLE content_production_line_events(id INTEGER PRIMARY KEY);
+        INSERT INTO sub_plan_versions VALUES(1,'sub-1','draft');
+        INSERT INTO sub_plans VALUES('sub-1',1);
+    """)
+    root = Path(__file__).resolve().parents[1] / "migrations"
+    conn.executescript((root / "149_subgoal_tree_dependency_gates.sql").read_text(encoding="utf-8"))
+    conn.executescript((root / "157_subgoal_author_audit.sql").read_text(encoding="utf-8"))
+
+    store = SubGoalStore(conn, tenant_id="tenant-a")
+    goal = store.create_goal(
+        "sub-1", 1,
+        {"goal_type": "business", "title": "审核目标", "acceptance_criteria": "提交业务证据"},
+        actor="session:0123456789abcdef0123",
+    )
+    assert goal["created_by"] == "session:0123456789abcdef0123"
+    event = conn.execute(
+        "SELECT tenant_id,action,actor_type,actor_id,initiating_actor,executing_actor,task_id "
+        "FROM sub_goal_audit_events WHERE goal_id=?",
+        (goal["id"],),
+    ).fetchone()
+    assert tuple(event) == (
+        "tenant-a", "goal_created", "session", "0123456789abcdef0123",
+        "session:0123456789abcdef0123", "service:api", None,
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute("UPDATE sub_goal_audit_events SET action='rewritten' WHERE goal_id=?", (goal["id"],))
+    conn.close()
