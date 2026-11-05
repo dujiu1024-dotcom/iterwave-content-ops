@@ -281,7 +281,7 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
         output = Path(output_dir)
         output.mkdir(parents=True, exist_ok=True)
         image = output / "t8-e-full-api-card.png"
-        image.write_bytes(b"\\x89PNG\\r\\n\\x1a\\n" + b"deterministic-image")
+        image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"deterministic-image")
         return [str(image)], []
 
     monkeypatch.setattr(executor_module, "load_pool", lambda *_: ([topic], {}))
@@ -385,6 +385,17 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
     ).fetchone()
     assert draft is not None and draft["status"] == "draft_pending"
 
+    rejected_content = client.post(
+        f"/api/contents/{content['id']}/reject",
+        json={"reason": "首次审核要求补充证据"},
+    )
+    assert rejected_content.status_code == 200, rejected_content.text
+    resubmitted_content = client.post(
+        f"/api/contents/{content['id']}/resubmit",
+        json={"reason": "已补充证据并重新提交"},
+    )
+    assert resubmitted_content.status_code == 200, resubmitted_content.text
+
     approved_content = client.post(
         f"/api/contents/{content['id']}/approve",
         json={"reason": "T9-C 真实 Worker 成品审核通过"},
@@ -483,6 +494,14 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
     assert provenance["id"] == feedback.json()["id"]
     assert provenance["stage_id"] == stage_id
     assert provenance["evidence"]["manual_metrics"]["views"] == 120.0
+
+    adopted_version_id = adopted.json()["drafts"][0]["draft_version"]["id"]
+    approved_adoption = client.post(
+        f"/api/subplans/{subplan_id}/review",
+        json={"version_id": adopted_version_id, "action": "approve"},
+    )
+    assert approved_adoption.status_code == 200, approved_adoption.text
+    assert approved_adoption.json()["effective"] is True
 
     diagnosis = client.get("/api/business-diagnosis")
     assert diagnosis.status_code == 200
