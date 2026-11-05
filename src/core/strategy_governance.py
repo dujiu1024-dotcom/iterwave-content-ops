@@ -62,3 +62,22 @@ def strategy_governance_from_diagnosis_snapshot(source_snapshot: Any) -> dict[st
         return None
     value = source_snapshot.get("strategy_governance")
     return value if isinstance(value, dict) else None
+
+
+def load_master_strategy_context(conn, master_row) -> dict[str, Any]:
+    """Read the exact North Star and resource-baseline snapshots bound to a master version."""
+    north_star = None
+    north_star_id = master_row["north_star_version_id"] if "north_star_version_id" in master_row.keys() else None
+    north_star_json = master_row["north_star_snapshot_json"] if "north_star_snapshot_json" in master_row.keys() else None
+    if north_star_id is not None and north_star_json:
+        try:
+            north_star = {"version_id": int(north_star_id), "snapshot": json.loads(north_star_json)}
+        except (TypeError, ValueError):
+            north_star = {"version_id": int(north_star_id), "snapshot": None, "invalid": True}
+    from src.core.resource_baseline_repository import get_plan_resource_baseline
+    baseline = get_plan_resource_baseline(conn, int(master_row["id"]))
+    return {
+        "north_star": north_star,
+        "resource_baseline": baseline,
+        "resource_baseline_available": baseline is not None,
+    }
