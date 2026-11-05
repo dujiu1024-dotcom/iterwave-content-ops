@@ -19,7 +19,11 @@ def test_tenant_scheduler_platform_jobs_are_enqueued_globally(tmp_path):
     assert task.task_type == "scheduler_job"
     assert task.tenant_id == "tenant-b"
     assert task.aggregate_id == "_job_daily_ops"
-    assert task.payload == {"method": "_job_daily_ops", "args": []}
+    assert task.payload == {
+        "method": "_job_daily_ops",
+        "args": [],
+        "initiating_actor": "service:scheduler",
+    }
 
 
 def test_one_time_data_fetch_jobs_keep_draft_and_attempt_identity(tmp_path):
@@ -37,6 +41,7 @@ def test_one_time_data_fetch_jobs_keep_draft_and_attempt_identity(tmp_path):
     assert task.payload == {
         "method": "_job_data_fetch",
         "args": ["draft-123", 2],
+        "initiating_actor": "service:scheduler",
     }
 
 
@@ -63,6 +68,7 @@ def test_delayed_metrics_fetch_is_persisted_in_global_queue(tmp_path):
     assert task.payload == {
         "method": "_job_data_fetch",
         "args": ["draft-xyz", 2],
+        "initiating_actor": "service:scheduler",
     }
     conn = queue._connect()
     try:

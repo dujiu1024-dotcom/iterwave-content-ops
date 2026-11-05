@@ -404,6 +404,7 @@ class SchedulerEngine:
                 payload={
                     "method": "_job_data_fetch",
                     "args": [draft_id, attempt],
+                    "initiating_actor": "service:scheduler",
                 },
                 available_at=run_at,
             )
@@ -1651,7 +1652,11 @@ async def _invoke(engine, method_name: str, *args) -> None:
     }
     if queue is not None and tenant_id and method_name in queued_methods:
         aggregate_id = method_name + (":" + ":".join(map(str, args)) if args else "")
-        payload = {"method": method_name, "args": list(args)}
+        payload = {
+            "method": method_name,
+            "args": list(args),
+            "initiating_actor": "service:scheduler",
+        }
         engine_cfg = getattr(engine, "cfg", None)
         if engine_cfg is not None:
             from ..task_snapshot import config_fingerprint
