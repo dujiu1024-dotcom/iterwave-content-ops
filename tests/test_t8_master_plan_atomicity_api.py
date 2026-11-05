@@ -60,9 +60,22 @@ async def _async_fake_diagnosis(conn, cfg):
     return _fake_diagnosis(conn, cfg)
 
 
-def _confirm_diagnosis(client, monkeypatch):
+def _confirm_diagnosis(client, monkeypatch, conn):
     from src.api import business_diagnosis
 
+    if conn.execute("SELECT 1 FROM account_group_north_star_versions WHERE status='effective' LIMIT 1").fetchone() is None:
+        conn.execute(
+            """INSERT INTO account_group_north_star_versions(
+                version_no,snapshot_json,status,change_reason,created_by,created_at,effective_at
+            ) VALUES(1,?,'effective','T8 AI generation prerequisite','t8-test','now','now')""",
+            (json.dumps({
+                "positioning": "T8 测试定位", "business_direction": "T8 测试方向",
+                "target_users": "T8 测试用户", "core_value": "T8 测试价值",
+                "long_term_content_direction": "T8 测试内容方向", "business_model": "T8 测试模式",
+                "platform_relationships": "", "long_term_goals": "T8 测试目标",
+            }, ensure_ascii=False),),
+        )
+        conn.commit()
     monkeypatch.setattr(business_diagnosis, "generate_diagnosis", _async_fake_diagnosis)
     analyzed = client.post("/api/business-diagnosis/analyze")
     assert analyzed.status_code == 201, analyzed.text
@@ -176,7 +189,7 @@ def test_ai_master_plan_api_failure_is_atomic_and_retryable(
     # Seed all business inputs before confirming the diagnosis: the source
     # fingerprint intentionally invalidates when business context changes.
     previous_master_id = _seed_effective_plan_graph(conn) if existing_effective else None
-    _confirm_diagnosis(client, monkeypatch)
+    _confirm_diagnosis(client, monkeypatch, conn)
     before = _plan_graph_snapshot(conn)
 
     async def injected_failure(_cfg, _prompt):
