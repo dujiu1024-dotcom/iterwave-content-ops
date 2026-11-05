@@ -921,6 +921,30 @@ def test_subplan_round_worker_persists_task_content_and_frozen_plan_lineage(
     saved_tenant = api_main._g_ctx.get("runtime_tenant_id")
     api_main._g_ctx["runtime_tenant_id"] = "default"
     store, master, version, stage = _approved_subplan(conn, "worker-provenance-sub")
+    # Candidate asset metadata can contain arbitrary user-supplied values. The
+    # immutable task snapshot keeps only the approved, minimum provenance fields.
+    asset = tc.post("/api/original-assets", json={
+        "asset_type": "product_image", "title": "Worker provenance approved asset",
+        "description": "Approved reference candidate for the worker snapshot test",
+        "source_kind": "manual", "source_version": "fixture-v1",
+        "metadata": {"media_type": "image", "private_contact": "must-not-enter-task-snapshot"},
+    })
+    assert asset.status_code == 201, asset.text
+    asset_id = asset.json()["id"]
+    reviewed_asset = tc.post(f"/api/original-assets/{asset_id}/review", json={
+        "decision": "confirmed", "review_note": "许可与隐私已核验",
+        "quality": {
+            "commercial_use_status": "allowed", "privacy_status": "clear",
+            "readability_status": "readable", "completeness_status": "complete",
+            "duplicate_status": "unique",
+        },
+    })
+    assert reviewed_asset.status_code == 200, reviewed_asset.text
+    linked_asset = tc.post(f"/api/original-assets/{asset_id}/links", json={
+        "entity_type": "plan", "entity_id": "worker-provenance-sub",
+        "relation_type": "reference_candidate",
+    })
+    assert linked_asset.status_code == 201, linked_asset.text
     # The generated content must flow through the real effect-review gate as well.
     conn.execute(
         "UPDATE sub_plan_stages SET effect_required=1,effect_status='pending' WHERE id=?",
@@ -1063,6 +1087,21 @@ def test_subplan_round_worker_persists_task_content_and_frozen_plan_lineage(
         assert production_task["sub_plan_version_id"] == int(version["id"])
         assert production_task["strategy_step_id"] == stage["stage_key"]
         assert production_task["production_line_version_id"] == round_row["production_line_version_id"]
+        asset_candidates = production_task["input_snapshot"]["task_input"]["original_assets"]
+        assert len(asset_candidates) == 1
+        candidate = asset_candidates[0]
+        assert candidate["asset_id"] == asset_id
+        assert candidate["version_no"] == reviewed_asset.json()["version_no"]
+        assert candidate["commercial_use_status"] == "allowed"
+        assert candidate["privacy_status"] == "clear"
+        assert "metadata" not in candidate
+        assert "private_contact" not in json.dumps(production_task["input_snapshot"], ensure_ascii=False)
+        # A linked candidate is not proof of actual consumption; it must not be
+        # recorded as used until an explicit task-assets authorization is made.
+        assert conn.execute(
+            "SELECT COUNT(*) FROM production_task_asset_usages WHERE production_task_id=?",
+            (production_task["id"],),
+        ).fetchone()[0] == 0
         frozen_round = production_task["input_snapshot"]["round"]
         assert frozen_round["master_plan_version_id"] == int(master["id"])
         assert frozen_round["sub_plan_id"] == "worker-provenance-sub"

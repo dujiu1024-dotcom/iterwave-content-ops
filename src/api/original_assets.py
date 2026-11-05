@@ -644,7 +644,7 @@ def build_original_assets_router(get_context, *, route_class=None):
             raise HTTPException(404, "生产任务不存在")
         rows = conn.execute(
             """SELECT u.original_asset_id,u.asset_version_no,u.usage_role,u.permission_snapshot,
-                      u.privacy_snapshot,u.asset_quality_snapshot,v.title,v.description,v.metadata_json
+                      u.privacy_snapshot,u.asset_quality_snapshot,v.title,v.description
                FROM production_task_asset_usages u
                JOIN original_asset_versions v
                  ON v.original_asset_id=u.original_asset_id AND v.version_no=u.asset_version_no
