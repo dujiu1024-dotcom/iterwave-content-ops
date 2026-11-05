@@ -3,7 +3,7 @@ import { useApp } from "../AppContext";
 import EmptyHint from "../components/EmptyHint";
 import { api, ContentPlan, Platform, ScheduleEvent, UnscheduledDraft, ProductionBatch, ProductionBatchDetail } from "../api";
 import { ALL_PLATFORMS, platformMeta } from "../platforms";
-import { formatCalendarDate as _fmt, shiftCalendarDate } from "../calendarDate.mjs";
+import { formatCalendarDate as _fmt, shiftCalendarDate } from "../calendarDate.mjs";\nimport { formatBusinessDateTime } from "../businessTime.mjs";
 import { displayStatusLabel } from "../displayLabels";
 
 const PLAN_STATUS_LABEL: Record<ContentPlan["status"], string> = {
@@ -66,9 +66,13 @@ export default function Calendar() {
     void api.draftById(targetDraftId).then((draft) => {
       if (!active || !draft) return;
       const targetDate = draft.scheduled_publish_at || draft.saved_at || draft.created_at;
-      const parsed = targetDate ? new Date(targetDate) : null;
-      if (parsed && !Number.isNaN(parsed.getTime())) {
-        setCursorDate(new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate()));
+      const assumeNaiveUtc = !draft.scheduled_publish_at;
+      const businessDay = targetDate
+        ? _businessDate(targetDate, assumeNaiveUtc)
+        : "";
+      if (businessDay) {
+        const [year, month, day] = businessDay.split("-").map(Number);
+        setCursorDate(new Date(year, month - 1, day));
         setViewMode("day");
       }
     }).catch((error) => {
@@ -128,7 +132,7 @@ export default function Calendar() {
     for (let d = new Date(visibleStart); d < visibleEndExclusive; d.setDate(d.getDate() + 1)) {
       const date = new Date(d);
       const key = _fmt(date);
-      result.push({ date, key, events: filteredEvents.filter((event) => _eventDate(event) === key && (platformFilter === "all" || event.platform === platformFilter)), plans: filteredPlans.filter((plan) => plan.scheduled_date === key && (platformFilter === "all" || plan.platforms.length === 0 || plan.platforms.includes(platformFilter)) && (showArchivedPlans || (plan.status !== "cancelled" && plan.status !== "archived"))), batches: filteredBatches.filter((batch) => batch.created_at.slice(0, 10) === key), inMonth: date.getMonth() === month });
+      result.push({ date, key, events: filteredEvents.filter((event) => _eventDate(event) === key && (platformFilter === "all" || event.platform === platformFilter)), plans: filteredPlans.filter((plan) => plan.scheduled_date === key && (platformFilter === "all" || plan.platforms.length === 0 || plan.platforms.includes(platformFilter)) && (showArchivedPlans || (plan.status !== "cancelled" && plan.status !== "archived"))), batches: filteredBatches.filter((batch) => _businessDate(batch.created_at, true) === key), inMonth: date.getMonth() === month });
     }
     return result;
   }, [visibleStart, visibleEndExclusive, filteredEvents, filteredPlans, filteredBatches, month, showArchivedPlans, platformFilter]);
@@ -581,16 +585,27 @@ export default function Calendar() {
   );
 }
 
+function _businessDate(raw: string | null | undefined, assumeNaiveUtc = false): string {
+  if (!raw) return "";
+  // Pure calendar dates are business dates already, not UTC instants.
+  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(raw)) return raw;
+  return formatBusinessDateTime(raw, assumeNaiveUtc).slice(0, 10);
+}
+
 function _eventDate(e: ScheduleEvent): string {
-  const raw = e.scheduled || e.saved_at || "";
-  // ISO 含时间部分 —— 只取日期
-  return raw.slice(0, 10);
+  if (e.scheduled) return _businessDate(e.scheduled);
+  return _businessDate(e.saved_at, true);
 }
 
 /** ISO / 日期串 → datetime-local 需要的 "YYYY-MM-DDTHH:MM"；无时间部分补 09:00 */
 function _toLocalInput(raw: string | null): string {
   if (!raw) return "";
+  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(raw)) return `${raw}T09:00`;
+  // Offset-aware timestamps are instants; display them in the business timezone.
+  if (/(?:Z|[+-]\\d{2}:?\\d{2})$/i.test(raw)) {
+    return formatBusinessDateTime(raw).slice(0, 16).replace(" ", "T");
+  }
+  // Legacy naive schedule values are business-local wall time.
   const text = raw.replace(" ", "T");
-  if (text.length >= 16) return text.slice(0, 16);
-  return `${text.slice(0, 10)}T09:00`;
+  return text.length >= 16 ? text.slice(0, 16) : `${text.slice(0, 10)}T09:00`;
 }
