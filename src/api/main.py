@@ -5374,7 +5374,20 @@ def _register_routes(app: FastAPI) -> None:
                 raise HTTPException(422, "实际发布时间必须是有效的 ISO 日期时间")
             if parsed_publish_time > storage_now() + timedelta(minutes=5):
                 raise HTTPException(422, "实际发布时间不能晚于当前时间（允许 5 分钟设备时钟误差）")
-            actual_published_at = parsed_publish_time.isoformat(timespec="seconds")
+            # Preserve the timezone offset explicitly supplied by the user. The
+            # parsed value above is normalized for comparison, but persistence is
+            # an audit record of the user's stated local publication time.
+            try:
+                submitted_publish_time = datetime.fromisoformat(
+                    str(req.published_at).strip().replace("Z", "+00:00")
+                )
+            except ValueError:
+                submitted_publish_time = None
+            actual_published_at = (
+                submitted_publish_time.isoformat(timespec="seconds")
+                if submitted_publish_time is not None and submitted_publish_time.tzinfo is not None
+                else parsed_publish_time.isoformat(timespec="seconds")
+            )
 
         # 重复确认应幂等：不重新注册采集任务，不重复推进轮次；已发布记录保留原状态。
         if row["status"] in ("user_published", "data_fetching", "published"):
