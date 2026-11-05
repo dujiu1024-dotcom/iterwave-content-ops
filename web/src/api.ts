@@ -1897,6 +1897,11 @@ export interface OriginalAssetSummary {
   total: number; by_type: Record<string, number>; by_review_status: Record<string, number>;
   gaps: Record<string, number>; by_product?: Record<string, number>;
 }
+export type PublishVerificationItem = Record<string, any>;
+export type ReviewTaskItem = Record<string, any>;
+export type MetricFactItem = Record<string, any>;
+export type BusinessGapItem = Record<string, any>;
+
 export const api = {
 
   originalAssets: (params: { query?: string; asset_type?: string; review_status?: string } = {}) => {
@@ -2855,4 +2860,35 @@ export const api = {
       `/api/contents/${encodeURIComponent(contentId)}/visual-versions/${versionId}/pages/${pageIndex}/revise`,
       { method: "POST", body: JSON.stringify({ instruction }) },
     ),
+
+  publishVerifications: () => fetchJson<{ items: PublishVerificationItem[] }>("/api/publish-verifications"),
+  createPublishVerification: (draftId: string, payload: Record<string, unknown>) =>
+    fetchJson<{ verification: PublishVerificationItem; closure_event_pending: boolean }>(
+      `/api/drafts/${encodeURIComponent(draftId)}/publish-verification`,
+      { method: "POST", body: JSON.stringify(payload) },
+    ),
+  reviewTasks: (status?: string) =>
+    fetchJson<{ items: ReviewTaskItem[] }>(`/api/review-tasks${status ? `?status=${encodeURIComponent(status)}` : ""}`),
+  reviewTaskDetail: (taskId: string) =>
+    fetchJson<{ task: ReviewTaskItem & { collection_runs: Array<Record<string, unknown>> } }>(
+      `/api/review-tasks/${encodeURIComponent(taskId)}`,
+    ),
+  collectReviewTask: (taskId: string, payload: Record<string, unknown>) =>
+    fetchJson<{ run: Record<string, unknown> }>(`/api/review-tasks/${encodeURIComponent(taskId)}/collect`, { method: "POST", body: JSON.stringify(payload) }),
+  retryProductionLineClose: (eventId: string) =>
+    fetchJson<{ event_id: string; status: string }>(`/api/production-line-close-events/${encodeURIComponent(eventId)}/retry`, { method: "POST" }),
+  retryReviewTask: (taskId: string, scheduledAt?: string) =>
+    fetchJson<{ task: ReviewTaskItem }>(`/api/review-tasks/${encodeURIComponent(taskId)}/retry`, { method: "POST", body: JSON.stringify({ scheduled_at: scheduledAt }) }),
+  saveReviewConclusion: (taskId: string, payload: Record<string, unknown>) =>
+    fetchJson<{ task_id: string; conclusion: Record<string, unknown>; gap_changes_recorded: number }>(`/api/review-tasks/${encodeURIComponent(taskId)}/conclusion`, { method: "POST", body: JSON.stringify(payload) }),
+  metricFacts: (metricKey?: string, contentId?: string, limit = 100) => {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (metricKey) query.set("metric_key", metricKey);
+    if (contentId) query.set("content_id", contentId);
+    return fetchJson<{ items: MetricFactItem[] }>(`/api/metric-facts?${query.toString()}`);
+  },
+  businessGaps: (status: "active" | "resolved" | "all" = "active") =>
+    fetchJson<{ items: BusinessGapItem[] }>(`/api/business-gaps?status=${status}`),
+  businessGapHistory: (gapId: string) =>
+    fetchJson<{ items: Array<Record<string, unknown>> }>(`/api/business-gaps/${encodeURIComponent(gapId)}/history`),
 };
