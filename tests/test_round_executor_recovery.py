@@ -623,3 +623,43 @@ def test_round_failure_classification_preserves_actionable_categories():
     assert _classify_round_failure(ImageGenerationError("model rejected request"))[0] == "image_generation_failed"
     assert _classify_round_failure(BrowserError("browser closed"))[0] == "browser_save_failed"
     assert _classify_round_failure(RuntimeError("unexpected"))[0] == "pipeline_error"
+
+
+def test_interrupted_draft_save_is_marked_before_external_side_effect(cfg, conn, seed, monkeypatch):
+    """Worker cancellation after request dispatch must not leave an auto-retryable draft."""
+    import asyncio
+    from src.adapters.base import Platform
+    from src.core import login_manager
+
+    monkeypatch.setattr(login_manager, "has_login_state", lambda _platform: True)
+    round_id = seed.round(status="producing")
+    draft_id = seed.draft(round_id, platform="xhs", draft_status="draft_pending", fetch_status=None)
+    content_id = conn.execute("SELECT content_id FROM drafts WHERE id=?", (draft_id,)).fetchone()[0]
+
+    class CancelAfterDispatchAdapter:
+        async def save_draft(self, payload):
+            marker = conn.execute(
+                "SELECT status,error_msg FROM draft_save_verifications WHERE draft_id=?", (draft_id,),
+            ).fetchone()
+            assert marker is not None and marker["status"] == "pending_verify"
+            assert "尝试已启动" in marker["error_msg"]
+            raise asyncio.CancelledError()
+
+    executor = _executor(cfg, conn, {Platform.XHS: CancelAfterDispatchAdapter()})
+    rows = [{
+        "content_id": content_id, "draft_id": draft_id, "platform": Platform.XHS,
+        "title": "中断恢复测试", "body": "正文", "tags": [], "image_paths": [],
+    }]
+    try:
+        asyncio.run(executor._save_all_drafts(rows, round_id, {"drafts_failed": 0, "drafts_saved": 0, "steps": []}))
+    except asyncio.CancelledError:
+        pass
+    else:
+        raise AssertionError("simulated worker cancellation must propagate")
+
+    verification = conn.execute(
+        "SELECT status,error_msg FROM draft_save_verifications WHERE draft_id=?", (draft_id,),
+    ).fetchone()
+    assert verification["status"] == "pending_verify"
+    assert "尝试已启动" in verification["error_msg"]
+    assert conn.execute("SELECT status FROM drafts WHERE id=?", (draft_id,)).fetchone()[0] == "draft_pending"
