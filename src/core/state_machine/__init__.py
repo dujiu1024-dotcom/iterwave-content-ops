@@ -18,6 +18,7 @@ import uuid
 from datetime import datetime
 
 from src.core.timezone import business_now, parse_persisted_datetime, parse_server_local_legacy_datetime, storage_now
+from src.core.task_context import current_task_identity
 from typing import Optional
 
 logger = logging.getLogger(__name__)
