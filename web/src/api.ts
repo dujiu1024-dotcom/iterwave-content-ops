@@ -2385,6 +2385,7 @@ export const api = {
     fetchJson<{
       drafts: Array<{ sub_plan_id: string; platform: Platform; draft_version: SubPlanVersionRecord; effective: false }>;
       effective: false; requires_human_review: true; adopted_dimensions: string[]; message: string;
+      status?: "success" | "partial" | "failed"; expected_draft_count?: number;
     }>("/api/plan_adjustments/adopt", {
       method: "POST", body: JSON.stringify({
         dimensions, ...(targetMasterPlanVersionId ? { target_master_plan_version_id: targetMasterPlanVersionId } : {}),
