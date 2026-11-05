@@ -21,9 +21,9 @@ Stable skip reasons:
 | Reason | Meaning |
 | --- | --- |
 | `no_current_version` | Child has no current version pointer. |
-| `no_effective_version` | Current child version is not effective. |
+| `no_effective_version` | Current child version exists but is not effective (for example, an archived/superseded version). This also covers expired version snapshots because the data model represents them as non-effective/archived versions, not a separate `expired` status. |
 | `not_paused_by_target` | Child was not paused by the requested mother-plan switch. Manual pauses are not implicitly rebased. |
-| `terminal_status` | Child is archived, cancelled, completed, or otherwise in a terminal/non-eligible state. |
+| `terminal_status` | Child is archived, cancelled, completed, or otherwise in a terminal/non-eligible state. Archived is the persisted removal/retirement state; `sub_plans` has no separate soft-delete marker. |
 
 The endpoint keeps all-or-nothing transaction semantics for the eligible subset: if any eligible child draft fails validation or persistence, all drafts created by that request are rolled back and the request fails. Skipped children are never mutated. If the cohort exists but every child is ineligible, the endpoint returns a successful response with an empty `drafts` array and explicit `skipped` entries.
 
