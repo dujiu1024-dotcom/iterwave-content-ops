@@ -3528,7 +3528,23 @@ def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client
         (version_id,),
     ).fetchone()
     # Formal subgoals and production plans are part of the immutable draft.
-    # They must be completed before review activates the version.
+    # Create them while the subplan version is still a draft; review freezes it.
+    from src.core.subgoal_store import SubGoalStore
+    subgoals = SubGoalStore(conn)
+    goal = subgoals.create_goal(sub_id, int(version_id), {
+        "goal_type": "quantity", "goal_order": 1, "priority": 3,
+        "title": "完成第一阶段内容生产", "description": "API 验收正式生产目标",
+        "target_count": int(stage["target_count"]),
+        "acceptance_criteria": "达到阶段目标数量并完成业务验收",
+        "requires_production": True, "stage_id": int(stage["id"]),
+    })
+    subgoals.save_production_plan(sub_id, str(goal["id"]), {
+        "content_direction": "围绕已确认业务定位生产内容",
+        "suggested_count": int(stage["target_count"]),
+        "resource_requirements": {}, "priority": 3,
+        "execution_conditions": "母计划、子计划和生产线均已审核生效",
+        "acceptance_relation": "以阶段目标数量和验收证据为准",
+    })
     reviewed = tc.post(f"/api/subplans/{sub_id}/review", json={
         "version_id": version_id, "action": "approve",
     })
@@ -3548,22 +3564,6 @@ def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client
     )
     assert line_review.status_code == 200, line_review.text
 
-    from src.core.subgoal_store import SubGoalStore
-    subgoals = SubGoalStore(conn)
-    goal = subgoals.create_goal(sub_id, int(version_id), {
-        "goal_type": "quantity", "goal_order": 1, "priority": 3,
-        "title": "完成第一阶段内容生产", "description": "API 验收正式生产目标",
-        "target_count": int(stage["target_count"]),
-        "acceptance_criteria": "达到阶段目标数量并完成业务验收",
-        "requires_production": True, "stage_id": int(stage["id"]),
-    })
-    subgoals.save_production_plan(sub_id, str(goal["id"]), {
-        "content_direction": "围绕已确认业务定位生产内容",
-        "suggested_count": int(stage["target_count"]),
-        "resource_requirements": {}, "priority": 3,
-        "execution_conditions": "母计划、子计划和生产线均已审核生效",
-        "acceptance_relation": "以阶段目标数量和验收证据为准",
-    })
     invalid_reorder = tc.post(f"/api/subplans/{sub_id}/stages/reorder", json={
         "based_on_version_id": version_id, "expected_version_no": 1, "stage_ids": [True],
     })
