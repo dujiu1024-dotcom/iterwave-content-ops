@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from src.api import main as api_main
@@ -88,8 +90,9 @@ def test_round_run_api_is_consumed_by_global_worker(
         api_main._task_queue = saved_queue
 
 
+@pytest.mark.parametrize("queue_finalization_fails", [False, True])
 def test_round_run_api_worker_executes_real_round_executor(
-    cfg, conn, seed, test_auth, tmp_path, monkeypatch,
+    cfg, conn, seed, test_auth, tmp_path, monkeypatch, queue_finalization_fails,
 ):
     """The real RoundExecutor lifecycle writes a content and draft through the worker."""
     from pathlib import Path
@@ -220,10 +223,34 @@ def test_round_run_api_worker_executes_real_round_executor(
             queue, build_tenant_context, poll_interval_seconds=0.01,
             lease_seconds=30, heartbeat_seconds=1, reconcile_terminal_rounds=False,
         )
+        if queue_finalization_fails:
+            def unavailable(*_args, **_kwargs):
+                raise OSError("simulated shared queue database outage")
+            monkeypatch.setattr(queue, "finish", unavailable)
+            monkeypatch.setattr(queue, "fail", unavailable)
         asyncio.run(worker.run(stop))
 
         completed = queue.get(task_id)
-        assert completed is not None and completed.status == "succeeded"
+        if queue_finalization_fails:
+            assert completed is not None and completed.status == "running"
+            recovery_conn = queue._connect()
+            try:
+                recovery_conn.execute(
+                    "UPDATE global_task_queue SET lease_expires_at='2000-01-01T00:00:00+00:00' "
+                    "WHERE task_id=?", (task_id,),
+                )
+                recovery_conn.execute(
+                    "UPDATE global_task_worker_leases SET expires_at='2000-01-01T00:00:00+00:00' "
+                    "WHERE owner=?", (worker.owner,),
+                )
+            finally:
+                recovery_conn.close()
+            assert queue.recover_expired()["interrupted"] == 1
+            recovered = queue.get(task_id)
+            assert recovered is not None and recovered.status == "interrupted"
+            assert queue.claim_next("replacement-worker") is None
+        else:
+            assert completed is not None and completed.status == "succeeded"
         content = conn.execute(
             "SELECT id,title,body,visual_status FROM contents WHERE round_id=?",
             (round_id,),
