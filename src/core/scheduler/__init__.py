@@ -282,14 +282,32 @@ class SchedulerEngine:
         for job_id in JOB_RUNNERS:
             self.apply_job_config(job_id)
 
-    def _trigger_for(self, job_id: str):
+    def _trigger_for(self, job_id: str, *, start_date=None):
         sched = self.cfg.scheduler.job(job_id)
         if sched.cron:
             return CronTrigger.from_crontab(sched.cron, timezone=ZoneInfo(self.cfg.business_timezone))
-        return IntervalTrigger(minutes=int(sched.interval_minutes))
+        return IntervalTrigger(minutes=int(sched.interval_minutes), start_date=start_date)
+
+    @staticmethod
+    def _same_schedule(existing_trigger, desired_trigger) -> bool:
+        """Compare configured trigger semantics, excluding CronTrigger's construction-time start_date."""
+        if isinstance(existing_trigger, CronTrigger) and isinstance(desired_trigger, CronTrigger):
+            return (
+                existing_trigger.timezone == desired_trigger.timezone
+                and tuple((field.name, str(field)) for field in existing_trigger.fields)
+                == tuple((field.name, str(field)) for field in desired_trigger.fields)
+            )
+        if isinstance(existing_trigger, IntervalTrigger) and isinstance(desired_trigger, IntervalTrigger):
+            return (
+                existing_trigger.interval == desired_trigger.interval
+                and existing_trigger.start_date == desired_trigger.start_date
+                and existing_trigger.end_date == desired_trigger.end_date
+                and existing_trigger.timezone == desired_trigger.timezone
+            )
+        return False
 
     def apply_job_config(self, job_id: str) -> dict:
-        """按当前配置（重新）排定单个任务：关闭则移除，开启则 replace_existing 重排。
+        """按当前配置同步单个任务；配置未变时保留持久化 next_run_time。
 
         运行时修改配置（PATCH /api/config scheduler.jobs.*）后调用，立即生效，无需重启。
         """
@@ -299,16 +317,29 @@ class SchedulerEngine:
         enabled = sched.enabled
         if job_id == "hot_topics_refresh" and getattr(self.cfg.hot_topics, "enabled", True) is False:
             enabled = False
+        existing = self.scheduler.get_job(job_id)
         if not enabled:
-            if self.scheduler.get_job(job_id) is not None:
+            if existing is not None:
                 self.scheduler.remove_job(job_id)
             logger.info("⏸️ [APS] 定时任务 %s 已关闭", job_id)
             return {"job_id": job_id, "enabled": False}
-        if self.scheduler.get_job(job_id) is not None:
-            self.scheduler.remove_job(job_id)
+
+        start_date = (
+            existing.trigger.start_date
+            if existing is not None and isinstance(existing.trigger, IntervalTrigger)
+            else None
+        )
+        trigger = self._trigger_for(job_id, start_date=start_date)
+        if existing is not None:
+            if not self._same_schedule(existing.trigger, trigger):
+                self.scheduler.reschedule_job(job_id, trigger=trigger)
+            self.scheduler.modify_job(job_id, args=[self.engine_key], max_instances=1, coalesce=True)
+            logger.info("⏰ [APS] 定时任务 %s：%s", job_id, sched.describe())
+            return {"job_id": job_id, "enabled": True, "schedule": sched.describe()}
+
         self.scheduler.add_job(
             JOB_RUNNERS[job_id],
-            self._trigger_for(job_id),
+            trigger,
             id=job_id,
             args=[self.engine_key],
             replace_existing=True,
