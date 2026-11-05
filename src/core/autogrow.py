@@ -21,7 +21,7 @@ import json
 import hashlib
 import logging
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from .timezone import business_now, business_today, business_date_predicate
@@ -351,7 +351,11 @@ class AutogrowController:
             if ag.max_rounds_per_day == 0:
                 return {"can_start": False, "action": "skipped", "reason": "每日自动轮上限为 0（已暂停）"}
             business_day = business_today(self.cfg).isoformat()
-            day_predicate, day_bounds = business_date_predicate("created_at", business_day, self.cfg)
+            # spiral_rounds.created_at historically came from SQLite CURRENT_TIMESTAMP
+            # (naive UTC), unlike legacy business-wall-clock timestamp columns.
+            day_predicate, day_bounds = business_date_predicate(
+                "created_at", business_day, self.cfg, legacy_timezone=timezone.utc,
+            )
             today = self.conn.execute(
                 "SELECT COUNT(*) FROM spiral_rounds WHERE trigger_source='auto' AND " + day_predicate,
                 day_bounds,
