@@ -71,4 +71,4 @@ async def test_xhs_has_no_unverified_stale_prompt_selector():
     page = _Page(visible=True)
 
     assert await saver._has_stale_draft_prompt(page) is False
-    assert saver.selectors.get("draft_prompt_preserve") == []
+    assert "draft_prompt_preserve" not in saver.selectors
