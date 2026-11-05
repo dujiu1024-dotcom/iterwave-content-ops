@@ -146,6 +146,9 @@ def _approved_subplan(conn, sub_id: str = "integration-sub", master_version_id: 
         generation_source="manual", author="test",
     )
     line_store.activate(int(line_draft["id"]), reviewer="test")
+    # API middleware rolls back any transaction left open at request teardown.
+    # This fixture seeds state directly, so commit it before the first TestClient request.
+    conn.commit()
     return store, master, version, stage
 
 
