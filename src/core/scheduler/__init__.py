@@ -288,6 +288,20 @@ class SchedulerEngine:
             return CronTrigger.from_crontab(sched.cron, timezone=business_zone(self.cfg))
         return IntervalTrigger(minutes=int(sched.interval_minutes), start_date=start_date)
 
+    @staticmethod
+    def _trigger_signature(trigger) -> tuple:
+        """Compare configured schedule semantics, excluding generated trigger timestamps."""
+        timezone = getattr(trigger, "timezone", None)
+        zone_key = getattr(timezone, "key", str(timezone))
+        if isinstance(trigger, CronTrigger):
+            return (
+                "cron", zone_key,
+                tuple((field.name, str(field)) for field in trigger.fields),
+            )
+        if isinstance(trigger, IntervalTrigger):
+            return ("interval", zone_key, trigger.interval.total_seconds())
+        return (type(trigger).__qualname__, str(trigger))
+
     def apply_job_config(self, job_id: str) -> dict:
         """按当前配置同步任务；配置未变时保留持久化 next_run_time。
 
@@ -317,7 +331,7 @@ class SchedulerEngine:
         )
         trigger = self._trigger_for(job_id, start_date=start_date)
         if existing is not None:
-            if existing.trigger != trigger:
+            if self._trigger_signature(existing.trigger) != self._trigger_signature(trigger):
                 self.scheduler.reschedule_job(job_id, trigger=trigger)
             self.scheduler.modify_job(
                 job_id, args=[self.engine_key], max_instances=1, coalesce=True,
