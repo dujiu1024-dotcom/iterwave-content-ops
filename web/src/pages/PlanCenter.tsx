@@ -13,9 +13,9 @@ import { businessCalendarDate, formatCalendarDate } from "../calendarDate.mjs";
 type Tab = "master" | "platforms" | "stages" | "goals" | "production-line" | "assets" | "north-star";
 type StageStatus = "pending" | "active" | "completed" | "paused" | "cancelled";
 type Stage = { id: string; name: string; direction: string; count: number; start: string; end: string; rule: string; status: StageStatus; confirmed: number; strategyGoal: string; currentProblem: string; executionStrategy: string; prerequisites: string; inputInfo: string; expectedResult: string; completionCriteria: string; effectEvaluation: string; entryCondition: string; entryConditionMet: boolean; businessCompletionRequired: boolean; businessCompletionStatus: string; effectRequired: boolean; effectStatus: string; dependencies: string[]; latestOutcome?: SubPlanStageRecord["latest_outcome"] };
-type Child = { id: string; platform: Platform; name: string; direction: string; count: number; status: "draft" | "review" | "effective"; signature: string; versionId: number; versionNo: number; masterPlanVersionId: number; masterPlanVersionNo: number; versionHistory: Array<{ id:number; version_no:number; status:string; master_plan_version_id:number; snapshot:Record<string,unknown> }>; stageRecords: SubPlanStageRecord[] };
+type Child = { id: string; platform: Platform; name: string; direction: string; count: number; status: "draft" | "review" | "effective" | "stale"; signature: string; versionId: number; versionNo: number; masterPlanVersionId: number; masterPlanVersionNo: number; versionHistory: Array<{ id:number; version_no:number; status:string; master_plan_version_id:number; snapshot:Record<string,unknown> }>; stageRecords: SubPlanStageRecord[] };
 const stageLabels: Record<StageStatus, string> = { pending: "待执行", active: "执行中", completed: "已完成", paused: "已暂停", cancelled: "已取消" };
-const childLabels = { draft: "草稿", review: "待审核", effective: "已生效" };
+const childLabels = { draft: "草稿", review: "待审核", effective: "已生效", stale: "历史版本 · 需重建" };
 const today = () => formatCalendarDate(businessCalendarDate());
 const dateAfterDays = (days: number) => {
   const date = businessCalendarDate();
@@ -45,7 +45,8 @@ export default function PlanCenter() {
   const [data, setData] = useState<PlanResponse | null>(null);
   const [goals, setGoals] = useState<Goal[]>([]);
   const [review, setReview] = useState<SpiralAnalysis | null>(null);
-  const [adoption, setAdoption] = useState<{ adopted_dimensions: string[]; drafts: Array<{ sub_plan_id: string; platform: string; draft_version: { version_no: number } }>; message: string } | null>(null);
+  const [adoption, setAdoption] = useState<{ adopted_dimensions: string[]; drafts: Array<{ sub_plan_id: string; platform: string; draft_version: { version_no: number } }>; message: string; rebaseStatus?: "awaiting_master_review" | "drafts_created" | "partial" | "failed"; targetMasterPlanVersionId?: number; expectedDraftCount?: number } | null>(null);
+  const [pendingAdoptionDimensions, setPendingAdoptionDimensions] = useState<string[]>([]);
   const [showStageHistory, setShowStageHistory] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -56,6 +57,9 @@ export default function PlanCenter() {
   const [children, setChildren] = useState<Child[]>([]);
   const [selectedChildId, setSelectedChildId] = useState("");
   const [masterVersionId, setMasterVersionId] = useState<number | null>(null);
+  const [masterNorthStarVersionId, setMasterNorthStarVersionId] = useState<number | null>(null);
+  const [masterNorthStarVersionNo, setMasterNorthStarVersionNo] = useState<number | null>(null);
+  const [masterResourceBaseline, setMasterResourceBaseline] = useState<{ captured_at: string; captured_by: string; snapshot: Record<string, unknown> } | null>(null);
   const [masterDraftVersionId, setMasterDraftVersionId] = useState<number | null>(null);
   const [diagnosis, setDiagnosis] = useState<BusinessDiagnosisReport | null>(null);
   const [aiGeneration, setAiGeneration] = useState<MasterPlanGenerationMetadata | null>(null);
@@ -107,7 +111,27 @@ export default function PlanCenter() {
       const effectiveMaster = versionResult.items.find((item) => item.status === "effective");
       const pendingMaster = versionResult.items.find((item) => item.status === "draft");
       const pendingPlan = parseMasterPlan(pendingMaster?.plan_snapshot);
+      const adoptionMaster = pendingMaster ?? effectiveMaster;
+      const adoptionPrefix = "复盘建议采纳母计划草稿：";
+      if (adoptionMaster?.change_note?.startsWith(adoptionPrefix)) {
+        setPendingAdoptionDimensions(adoptionMaster.change_note.slice(adoptionPrefix.length).split("、").map((item) => item.trim()).filter(Boolean));
+      }
       setMasterDraftVersionId(pendingMaster?.id ?? null);
+      setMasterNorthStarVersionId(effectiveMaster?.north_star_version_id ?? null);
+      if (effectiveMaster?.north_star_version_id) {
+        try {
+          const boundNorthStar = await api.northStarVersion(effectiveMaster.north_star_version_id);
+          setMasterNorthStarVersionNo(boundNorthStar.version_no);
+        } catch { setMasterNorthStarVersionNo(null); }
+      } else {
+        setMasterNorthStarVersionNo(null);
+      }
+      if (effectiveMaster?.id) {
+        try { setMasterResourceBaseline(await api.masterPlanResourceBaseline(effectiveMaster.id)); }
+        catch { setMasterResourceBaseline(null); }
+      } else {
+        setMasterResourceBaseline(null);
+      }
       setDiagnosis(diagnosisResult.report);
       setAiGeneration(parseGenerationMetadata(pendingMaster) ?? null);
       setData(planResult); setGoals(goalResult);
@@ -123,15 +147,19 @@ export default function PlanCenter() {
           ?? detail.versions[0];
         const snapshot = current?.snapshot ?? {};
         const stageRecords = current?.stages ?? [];
-        const status = identity.status === "active" && current?.status === "effective"
-          ? "effective" : current?.status === "draft" ? "draft" : "review";
+        const parentVersionId = Number(current?.master_plan_version_id ?? identity.master_plan_version_id ?? 0);
+        const parentMaster = versionResult.items.find((item) => Number(item.id) === parentVersionId);
+        const parentIsCurrent = Boolean(effectiveMaster && parentVersionId === Number(effectiveMaster.id) && parentMaster?.status === "effective");
+        const status = !parentIsCurrent
+          ? "stale"
+          : identity.status === "active" && current?.status === "effective"
+            ? "effective" : current?.status === "draft" ? "draft" : "review";
         const versionHistory = detail.versions.map((item) => ({
           id: Number(item.id), version_no: Number(item.version_no), status: String(item.status),
           master_plan_version_id: Number(item.master_plan_version_id ?? 0),
           snapshot: (item.snapshot ?? {}) as Record<string, unknown>,
         }));
-        const parentVersionId = Number(current?.master_plan_version_id ?? identity.master_plan_version_id ?? 0);
-        const parentVersionNo = Number(versionResult.items.find((item) => Number(item.id) === parentVersionId)?.version_no ?? 0);
+        const parentVersionNo = Number(parentMaster?.version_no ?? 0);
         return {
           id: identity.id, platform: identity.platform,
           name: String(snapshot.title ?? identity.title),
@@ -147,7 +175,8 @@ export default function PlanCenter() {
         };
       });
       setChildren(mapped);
-      setSelectedChildId((current) => mapped.some((item) => item.id === current) ? current : mapped[0]?.id ?? "");
+      setSelectedChildId((current) => mapped.some((item) => item.id === current && item.status !== "stale")
+        ? current : (mapped.find((item) => item.status !== "stale") ?? mapped[0])?.id ?? "");
       const preferred = preferredChildId ?? selectedChildId;
       const selectedId = mapped.some((v) => v.id === preferred) ? preferred : mapped[0]?.id ?? "";
       setSelectedChildId(selectedId);
@@ -210,13 +239,63 @@ export default function PlanCenter() {
       showToast(`母计划草稿 v${result.draft.version_no} 已写入服务器，尚未生效`, "success");
     } catch (e) { showToast("保存母计划草稿失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
   };
+  const inspectRebaseDrafts = async (targetMasterPlanVersionId: number) => {
+    const listed = await api.subplans();
+    const details = await Promise.all(listed.items.map((item) => api.subplan(item.id)));
+    const drafts = details.flatMap((detail) => detail.versions
+      .filter((version) => Number(version.master_plan_version_id) === targetMasterPlanVersionId && version.status === "draft")
+      .map((version) => ({
+        sub_plan_id: detail.subplan.id,
+        platform: detail.subplan.platform,
+        draft_version: { version_no: version.version_no },
+      })));
+    const expected = details.filter((detail) =>
+      detail.subplan.status === "paused"
+      && Number(detail.subplan.paused_by_master_version_id) === targetMasterPlanVersionId
+    ).length;
+    return { drafts, expected };
+  };
   const submitMasterReview = async () => {
     if (!masterDraftVersionId) { showToast("请先保存一个母计划草稿版本", "error"); return; }
     if (!window.confirm("确认审核通过当前母计划草稿？这会切换生效母计划，并暂停基于旧版本的子计划。")) return;
     try {
-      const result = await api.reviewMasterPlan(masterDraftVersionId, "approve");
+      const reviewedVersionId = masterDraftVersionId;
+      const result = await api.reviewMasterPlan(reviewedVersionId, "approve");
       const generated = result.subplan_generation;
-      if (generated?.status === "drafts_created") {
+      if (generated?.status === "rebase_required") {
+        try {
+          const rebased = await api.adoptGaps(pendingAdoptionDimensions, reviewedVersionId);
+          setAdoption({ ...rebased, rebaseStatus: "drafts_created", targetMasterPlanVersionId: reviewedVersionId });
+          showToast(`母计划已生效，已将 ${rebased.drafts.length} 个旧子计划 rebase 为新草稿；需逐项审核`, "success");
+        } catch (rebaseError) {
+          const errorMessage = rebaseError instanceof Error ? rebaseError.message : String(rebaseError);
+          let observed: Awaited<ReturnType<typeof inspectRebaseDrafts>> | null = null;
+          try { observed = await inspectRebaseDrafts(reviewedVersionId); } catch { observed = null; }
+          if (observed && observed.drafts.length > 0) {
+            const partial = observed.drafts.length < observed.expected;
+            setAdoption({
+              adopted_dimensions: pendingAdoptionDimensions,
+              drafts: observed.drafts,
+              message: partial
+                ? `部分成功：已创建 ${observed.drafts.length} / ${observed.expected} 个子计划草稿。剩余平台请在平台子计划页基于当前母计划重建；不要重复提交已成功的平台。`
+                : `所有 ${observed.drafts.length} 个子计划草稿均已落库；接口响应异常：${errorMessage}`,
+              rebaseStatus: partial ? "partial" : "drafts_created",
+              targetMasterPlanVersionId: reviewedVersionId,
+              expectedDraftCount: observed.expected,
+            });
+            showToast(partial ? "母计划已生效，子计划 rebase 部分成功；已保留成功项明细" : "母计划已生效，子计划草稿已全部落库", partial ? "error" : "success");
+          } else {
+            setAdoption((current) => ({
+              adopted_dimensions: pendingAdoptionDimensions,
+              drafts: current?.drafts ?? [],
+              message: errorMessage,
+              rebaseStatus: "failed",
+              targetMasterPlanVersionId: reviewedVersionId,
+            }));
+            showToast("母计划已生效，但旧子计划 rebase 未完成，可重试：" + errorMessage, "error");
+          }
+        }
+      } else if (generated?.status === "drafts_created") {
         showToast(`母计划已生效，AI 自动生成 ${generated.items.length} 个平台子计划草稿，等待审核`, "success");
       } else if (generated?.status === "failed") {
         showToast("母计划已生效，但自动拆解失败；可在平台子计划页手动重试 AI 拆解", "error");
@@ -256,11 +335,44 @@ export default function PlanCenter() {
   const resetDraft = () => { if (data) { setDraft({ ...structuredClone(data.plan), content_format: "image_text" }); setDirty(false); setSaved(false); } };
   const adoptGap = async (dimension: string) => {
     try {
-      const result = await api.adoptGaps([dimension]);
-      setAdoption(result);
-      showToast("已生成平台子计划修订草稿，需逐项审核后生效", "success");
+      const result = await api.adoptMasterPlan([dimension]);
+      setPendingAdoptionDimensions(result.adopted_dimensions);
+      setMasterDraftVersionId(result.draft.id);
+      setAdoption({
+        adopted_dimensions: result.adopted_dimensions, drafts: [], message: result.message,
+        rebaseStatus: "awaiting_master_review", targetMasterPlanVersionId: result.draft.id,
+      });
+      showToast("已创建复盘采纳母计划草稿；审核生效后再将旧子计划 rebase", "success");
       await load();
     } catch (e) { showToast("采纳失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
+  };
+  const retryAdoptionRebase = async () => {
+    if (!masterVersionId || !pendingAdoptionDimensions.length) return;
+    try {
+      const result = await api.adoptGaps(pendingAdoptionDimensions, masterVersionId);
+      setAdoption({ ...result, rebaseStatus: "drafts_created", targetMasterPlanVersionId: masterVersionId });
+      showToast(`已生成 ${result.drafts.length} 个子计划 rebase 草稿，需逐项审核`, "success");
+      await load();
+    } catch (e) {
+      const errorMessage = e instanceof Error ? e.message : String(e);
+      let observed: Awaited<ReturnType<typeof inspectRebaseDrafts>> | null = null;
+      try { observed = await inspectRebaseDrafts(masterVersionId); } catch { observed = null; }
+      if (observed && observed.drafts.length > 0) {
+        const partial = observed.drafts.length < observed.expected;
+        setAdoption((current) => current ? {
+          ...current, drafts: observed!.drafts,
+          rebaseStatus: partial ? "partial" : "drafts_created",
+          expectedDraftCount: observed!.expected,
+          message: partial
+            ? `部分成功：已创建 ${observed!.drafts.length} / ${observed!.expected} 个子计划草稿。未完成的平台请在平台子计划页基于当前母计划重建。`
+            : `所有 ${observed!.drafts.length} 个子计划草稿均已落库；接口响应异常：${errorMessage}`,
+        } : current);
+        showToast(partial ? "子计划 rebase 部分成功" : "子计划草稿已全部落库", partial ? "error" : "success");
+      } else {
+        setAdoption((current) => current ? { ...current, rebaseStatus: "failed", message: errorMessage } : current);
+        showToast("子计划 rebase 失败：" + errorMessage, "error");
+      }
+    }
   };
   const createChild = async () => {
     if (!childName.trim()) { showToast("请填写子计划名称", "error"); return; }
@@ -282,7 +394,7 @@ export default function PlanCenter() {
     } catch (e) { showToast("创建失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
   };
   const saveChild = async () => {
-    if (!editingChild) return;
+    if (!editingChild || editingChild.status === "stale") return;
     const existing = children.find((item) => item.id === editingChild.id);
     if (!existing) return;
     try {
@@ -308,7 +420,7 @@ export default function PlanCenter() {
     } catch (e) { showToast("保存失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
   };
   const reviewChild = async (item: Child) => {
-    if (item.status === "effective") return;
+    if (item.status === "effective" || item.status === "stale") return;
     if (!window.confirm("确认审核通过该子计划版本？通过后该平台子计划将获得生产授权。")) return;
     try {
       await api.reviewSubplan(item.id, item.versionId, "approve");
@@ -495,6 +607,7 @@ export default function PlanCenter() {
     } catch (e) { showToast("删除阶段失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
   };
   const platforms = (data?.plan.enabled_platforms ?? []).filter((p): p is Platform => ALL_PLATFORMS.includes(p as Platform));
+  const diagnosisStrategyCurrent = diagnosis?.strategy_is_current ?? diagnosis?.source_is_current ?? false;
 
   return <div className="page plan-center-page">
     <div className="page-head"><div><div className="eyebrow">内容生产 · 计划体系</div><h1 className="page-title">计划管理</h1><div className="page-desc">主计划确定目标与策略，平台子计划承接平台差异，阶段负责节奏与完成条件，生产轮次按已生效计划执行。</div></div><div className="head-actions"><button className="btn" onClick={() => void load()} disabled={loading}>↻ 刷新</button><button className="btn" onClick={() => navigate("business-diagnosis")}>AI 经营分析</button><button className="btn primary" disabled={!data} onClick={() => { if (data) { setDraft({ ...structuredClone(data.plan), content_format: "image_text" }); setDirty(true); setSaved(false); setTab("master"); } }}>＋ 新建版本草稿</button></div></div>
@@ -509,27 +622,28 @@ export default function PlanCenter() {
     {!loading && !error && tab === "master" && data && draft && <>
       <div className="panel">
         <div className="panel-head">
-          <div><div className="panel-title">AI 制定母计划</div><div className="panel-sub">基于最新已确认且未过期的经营诊断生成不可直接生效的母计划草稿。</div></div>
-          <span className={"tag " + (diagnosis?.status === "confirmed" && diagnosis.source_is_current ? "green" : "orange")}>
-            {diagnosis?.status === "confirmed" && diagnosis.source_is_current ? "诊断已确认 · 依据有效" : diagnosis?.status === "stale" || (diagnosis?.status === "confirmed" && !diagnosis.source_is_current) ? "诊断已过期" : diagnosis ? "诊断待确认" : "尚无诊断报告"}
+          <div><div className="panel-title">AI 制定母计划</div><div className="panel-sub">基于已确认诊断、当前账号组北极星和资源基线生成不可直接生效的母计划草稿；生产期内容变化不会单独使战略依据失效。</div></div>
+          <span className={"tag " + (diagnosis?.status === "confirmed" && diagnosisStrategyCurrent ? "green" : "orange")}>
+            {diagnosis?.status === "confirmed" && diagnosisStrategyCurrent ? "诊断已确认 · 战略依据有效" : diagnosis?.status === "stale" || (diagnosis?.status === "confirmed" && !diagnosisStrategyCurrent) ? "战略依据已变化" : diagnosis ? "诊断待确认" : "尚无诊断报告"}
           </span>
         </div>
         {diagnosis ? <div className="grid two">
           <div className="plan-summary-card"><div className="tiny">当前经营诊断</div><b>报告 v{diagnosis.version_no}</b><div className="tiny">状态：{diagnosis.status === "confirmed" ? "已确认" : diagnosis.status === "stale" ? "已过期" : diagnosis.status === "superseded" ? "已被新版本替代" : "待确认"}</div><div className="tiny">确认时间：{diagnosis.confirmed_at ?? "尚未确认"}</div><div className="tiny">诊断模型：{diagnosis.model_name || "—"}</div></div>
-          <div className="plan-summary-card"><div className="tiny">依据完整性</div><b>{diagnosis.source_is_current ? "当前业务资料与诊断一致" : "业务资料已变化或报告已过期"}</b><div className="tiny">关联资料与素材：{diagnosis.source_snapshot?.source_references?.length ?? 0} 项</div><div className="tiny">依据摘要：{JSON.stringify(diagnosis.source_snapshot?.inventory_summary ?? {})}</div>{(diagnosis.source_snapshot?.source_references ?? []).map((source) => <div className="tiny" key={source.source_type + ":" + source.source_id}>{source.source_type} · {source.label}</div>)}</div>
-        </div> : <div className="note">尚无经营诊断报告。请先完成 AI 经营分析并确认报告，再生成母计划。</div>}
+          <div className="plan-summary-card"><div className="tiny">依据完整性</div><b>{diagnosisStrategyCurrent ? "北极星与资源基线版本一致" : "战略依据已变化或缺少版本快照"}</b><div className="tiny">关联资料与素材：{diagnosis.source_snapshot?.source_references?.length ?? 0} 项</div><div className="tiny">依据摘要：{JSON.stringify(diagnosis.source_snapshot?.inventory_summary ?? {})}</div>{(diagnosis.source_snapshot?.source_references ?? []).map((source) => <div className="tiny" key={source.source_type + ":" + source.source_id}>{source.source_type} · {source.label}</div>)}</div>
+        </div> : <div className="note">尚无经营诊断报告。AI 生成需要先完成并确认经营分析；也可直接编辑下方母计划并保存人工草稿，该路径不依赖 AI 模型，但仍要求账号组北极星已建立并确认。</div>}
         {diagnosis && diagnosis.status !== "confirmed" && <div className="note" style={{ marginTop: 10, color: "var(--orange)" }}>最新诊断报告尚未确认。请返回 AI 经营分析页面完成确认，生成入口会在确认后开放。</div>}
-        {diagnosis?.status === "confirmed" && !diagnosis.source_is_current && <div className="note" style={{ marginTop: 10, color: "var(--orange)" }}>诊断报告所依据的业务资料或素材已变化。请重新分析并确认最新报告，不能使用过期依据生成母计划。</div>}
+        {diagnosis?.status === "confirmed" && !diagnosisStrategyCurrent && <div className="note" style={{ marginTop: 10, color: "var(--orange)" }}>诊断报告绑定的账号组北极星或资源基线已变化，或报告缺少战略版本快照。请重新分析并确认。</div>}
         <div className="plan-form-actions">
           <button className="btn" onClick={() => navigate("business-diagnosis")}>查看经营分析</button>
-          <button className="btn primary" onClick={() => void generateAIMasterPlan()} disabled={aiGenerating || diagnosis?.status !== "confirmed" || !diagnosis.source_is_current}>
+          <button className="btn primary" onClick={() => void generateAIMasterPlan()} disabled={aiGenerating || diagnosis?.status !== "confirmed" || !diagnosisStrategyCurrent}>
             {aiGenerating ? "正在生成母计划…" : "AI 生成母计划草稿"}
           </button>
         </div>
         {aiGenerationError && <div className="note" role="alert" style={{ marginTop: 10, color: "var(--red)" }}>生成失败：{aiGenerationError}。当前编辑内容和已生效计划未被覆盖，可修复依据或配置后重试。</div>}
         {aiGeneration && <div className="plan-version-detail" style={{ marginTop: 14 }}>
           <div className="panel-head"><b>本次 AI 生成依据与待确认事项</b><span className="tag gray">仅草稿 · 待人工审核</span></div>
-          <div className="tiny">关联经营诊断：报告 v{aiGeneration.diagnosis_version_no}（记录 ID {aiGeneration.diagnosis_report_id}） · 模型：{aiGeneration.model} · 生成时间：{aiGeneration.generated_at}</div>
+          <div className="tiny">关联经营诊断：报告 v{aiGeneration.diagnosis_version_no}（记录 ID {aiGeneration.diagnosis_report_id}） · 账号组北极星 V{aiGeneration.north_star_version_no}（版本 ID {aiGeneration.north_star_version_id}） · 模型：{aiGeneration.model} · 生成时间：{aiGeneration.generated_at}</div>
+          <div className="tiny">资源基线：{String((aiGeneration.resource_baseline.summary as Record<string, number> | undefined)?.confirmed ?? 0)} 项已确认 / {String((aiGeneration.resource_baseline.summary as Record<string, number> | undefined)?.total ?? 0)} 项 · 版本指纹 {aiGeneration.strategy_fingerprint.slice(0, 12)}…</div>
           <div style={{ marginTop: 10 }}><b>制定摘要</b><p>{aiGeneration.summary}</p></div>
           <div className="grid two">
             <div><b>业务资料与素材依据</b><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.resource_basis, null, 2)}</pre></div>
@@ -541,10 +655,10 @@ export default function PlanCenter() {
       </div>
       <div className="panel">
         <div className="panel-head"><div><div className="panel-title">当前主计划</div><div className="panel-sub">现有 API 只维护一份当前母计划；历史签名作为版本记录，不代表多个独立主计划。</div></div><span className={"tag " + (data.source === "plan_settings" ? "green" : "gray")}>{data.source === "plan_settings" ? "服务器已保存" : "由最近轮次推导"}</span></div>
-        <div className="grid two"><div className="plan-summary-card"><div className="tiny">当前版本签名</div><div className="plan-signature">{data.signature}</div><div className="tiny">最后更新：{data.updated_at ?? "尚未保存"}</div></div><div className="plan-summary-card"><div className="tiny">目标与范围</div><b>{goals.find((g) => g.id === data.plan.cadence?.goal_id)?.goal_text ?? "尚未关联目标"}</b><div className="tiny">启用平台 {platforms.length} 个 · 每平台默认 {data.plan.topic_count_per_platform} 篇/轮</div></div></div>
+        <div className="grid two"><div className="plan-summary-card"><div className="tiny">当前版本签名</div><div className="plan-signature">{data.signature}</div><div className="tiny">最后更新：{data.updated_at ?? "尚未保存"}</div></div><div className="plan-summary-card"><div className="tiny">目标与范围</div><b>{goals.find((g) => g.id === data.plan.cadence?.goal_id)?.goal_text ?? "尚未关联目标"}</b><div className="tiny">启用平台 {platforms.length} 个 · 每平台默认 {data.plan.topic_count_per_platform} 篇/轮</div></div><div className="plan-summary-card"><div className="tiny">战略版本绑定</div><b>{masterNorthStarVersionId ? `账号组北极星 V${masterNorthStarVersionNo ?? "?"}（记录 ID ${masterNorthStarVersionId}）` : "未归属北极星版本"}</b><div className="tiny">{masterResourceBaseline ? `资源基线已固化 · ${masterResourceBaseline.captured_at}` : "该母计划没有资源基线快照"}</div><div className="tiny">{masterResourceBaseline ? `确认资源 ${String((masterResourceBaseline.snapshot.summary as Record<string, number> | undefined)?.confirmed ?? 0)} / ${String((masterResourceBaseline.snapshot.summary as Record<string, number> | undefined)?.total ?? 0)}` : "旧版本可能尚未建立版本绑定"}</div></div></div>
         <div className="panel" style={{ marginTop: 14 }}>
           <div className="panel-head"><div><div className="panel-title">复盘建议与版本关系</div><div className="panel-sub">仅用户可采纳的覆盖缺口可以写回母计划；采纳后会生成新签名，并标记基于旧版本的活跃轮次。</div></div><button className="btn sm" onClick={() => { window.location.search = "?page=gaps"; }}>查看完整复盘</button></div>
-          {adoption && <div className="note" style={{ marginBottom: 10 }}>最近采纳：{adoption.adopted_dimensions.join("、")} → 已创建 {adoption.drafts.length} 个平台子计划草稿版本；需逐项审核</div>}
+          {adoption && <div className="note" style={{ marginBottom: 10 }}>最近采纳：{adoption.adopted_dimensions.join("、")}。{adoption.rebaseStatus === "awaiting_master_review" ? "母计划草稿待审核；审核生效后才会暂停旧子计划并执行 rebase。" : adoption.rebaseStatus === "drafts_created" ? `已创建 ${adoption.drafts.length} 个子计划 rebase 草稿；需逐项审核后生效。` : adoption.rebaseStatus === "partial" ? adoption.message : adoption.rebaseStatus === "failed" ? `rebase 未完成：${adoption.message}` : adoption.message}{adoption.drafts.length > 0 && <div className="tiny">已落库草稿：{adoption.drafts.map((item) => `${platformMeta(item.platform as Platform).label} V${item.draft_version.version_no}`).join("、")}</div>}{adoption.rebaseStatus === "failed" && masterVersionId && <button className="btn sm" style={{ marginLeft: 8 }} onClick={() => void retryAdoptionRebase()}>重试子计划 rebase</button>}</div>}
           {(review?.gaps ?? []).filter((g) => g.audience === "user" && g.gap_type === "coverage_gap").length === 0 ? <EmptyHint next="完成一轮内容生产和数据采集后，复盘系统会给出可采纳建议">当前没有可采纳的覆盖缺口建议</EmptyHint> : <div className="list">{(review?.gaps ?? []).filter((g) => g.audience === "user" && g.gap_type === "coverage_gap").map((g) => <div className="task-row" key={g.dimension}><div className="task-main"><div className="task-title">{g.dimension}</div><div className="task-desc">{g.suggestion_text} · 当前 {g.current_count} 条 · 建议 {g.target_count ?? "—"} 条 · 样本 {g.sample_count}</div></div><button className="btn sm primary" onClick={() => void adoptGap(g.dimension)}>采纳并生成新版本</button></div>)}</div>}
         </div>
         <div className="panel-head" style={{ marginTop: 16 }}><div><div className="panel-title">主计划草稿编辑</div><div className="panel-sub">保存会创建服务端不可变草稿版本；只有审核通过后才切换生效计划。</div></div><span className={"tag " + (dirty ? "orange" : saved ? "green" : "gray")}>{dirty ? "有未保存修改" : saved ? "草稿已暂存" : "与当前版本一致"}</span></div>
@@ -556,7 +670,7 @@ export default function PlanCenter() {
     </>}
 
     {!loading && !error && tab === "platforms" && data && <>
-      <div className="panel"><div className="panel-head"><div><div className="panel-title">平台子计划</div><div className="panel-sub">各平台独立维护方向、目标篇数与执行授权，并引用来源主计划版本。</div></div><div className="head-actions"><button className="btn" onClick={async () => { if (!masterVersionId) { showToast("请先审核生效母计划", "error"); return; } try { const result = await api.aiDraftSubplans(masterVersionId, platforms); showToast(result.already_exists ? "所选平台均已有子计划，无需重复拆解" : `AI 已生成 ${result.items.length} 个子计划草稿，需人工审核`, result.already_exists ? "info" : "success"); await load(); } catch (e) { showToast("AI 拆解失败：" + (e instanceof Error ? e.message : String(e)), "error"); } }}>AI 拆解</button><button className="btn primary" onClick={() => { setChildForm(true); setChildPlatform(platforms[0] ?? "xhs"); setChildCount(data.plan.topic_count_per_platform); }}>＋ 手工创建</button></div></div><div className="note">来源主计划版本：<code>{data.signature.slice(0, 16)}…</code>。子计划和版本均持久化在当前账号组数据库；草稿不会自动获得生产授权。</div><div className="grid two" style={{ marginTop: 12 }}>{platforms.map((p) => { const child = children.find((c) => c.platform === p); return <div className="plan-child-card" key={p}><div className="panel-head"><b>{platformMeta(p).label}</b><span className="tag gray">{child ? childLabels[child.status] : "尚未创建子计划"}</span></div>{child ? <><h3>{child.name}</h3><p>{child.direction || "未填写方向"}</p><div className="tiny">目标 {child.count} 篇 · 来源母计划 V{child.masterPlanVersionNo || "—"} · 子计划 V{child.versionNo}</div>{child.versionHistory.length > 1 && <div className="tiny">最近版本差异：{Object.keys({ ...child.versionHistory[0].snapshot, ...child.versionHistory[1].snapshot }).filter((key) => JSON.stringify(child.versionHistory[0].snapshot[key]) !== JSON.stringify(child.versionHistory[1].snapshot[key])).join("、") || "无字段变化"}（V{child.versionHistory[1].version_no} → V{child.versionHistory[0].version_no}）</div>}<div className="plan-form-actions"><button className="btn sm" onClick={() => setEditingChild({ ...child })}>编辑</button><button className="btn sm" onClick={() => reviewChild(child)}>{child.status === "draft" ? "提交审核" : child.status === "review" ? "审核并生效" : "已生效"}</button>{child.status === "effective" && <button className="btn sm primary" onClick={() => { setSelectedChildId(child.id); setTab("production-line"); }}>管理生产线 →</button>}</div></> : <><p>继承主计划目标与约束；当前没有独立子计划记录。</p><button className="btn sm" onClick={() => { setChildForm(true); setChildPlatform(p); setChildCount(data.plan.topic_count_per_platform); }}>创建该平台子计划</button></>}</div>; })}</div></div>
+      <div className="panel"><div className="panel-head"><div><div className="panel-title">平台子计划</div><div className="panel-sub">各平台独立维护方向、目标篇数与执行授权，并引用来源主计划版本。</div></div><div className="head-actions"><button className="btn" onClick={async () => { if (!masterVersionId) { showToast("请先审核生效母计划", "error"); return; } try { const result = await api.aiDraftSubplans(masterVersionId, platforms); showToast(result.already_exists ? "所选平台均已有子计划，无需重复拆解" : `AI 已生成 ${result.items.length} 个子计划草稿，需人工审核`, result.already_exists ? "info" : "success"); await load(); } catch (e) { showToast("AI 拆解失败：" + (e instanceof Error ? e.message : String(e)), "error"); } }}>AI 拆解</button><button className="btn primary" onClick={() => { setChildForm(true); setChildPlatform(platforms[0] ?? "xhs"); setChildCount(data.plan.topic_count_per_platform); }}>＋ 手工创建</button></div></div><div className="note">来源主计划版本：<code>{data.signature.slice(0, 16)}…</code>。子计划和版本均持久化在当前账号组数据库；草稿不会自动获得生产授权。</div><div className="grid two" style={{ marginTop: 12 }}>{platforms.map((p) => { const child = children.find((c) => c.platform === p); return <div className="plan-child-card" key={p}><div className="panel-head"><b>{platformMeta(p).label}</b><span className="tag gray">{child ? childLabels[child.status] : "尚未创建子计划"}</span></div>{child ? <><h3>{child.name}</h3><p>{child.direction || "未填写方向"}</p><div className="tiny">目标 {child.count} 篇 · 来源母计划 V{child.masterPlanVersionNo || "—"} · 子计划 V{child.versionNo}</div>{child.status === "stale" && <div className="note" role="status">该子计划绑定的母计划版本已归档，不能继续审核、编辑或生产。请基于当前生效母计划重新创建子计划；历史阶段和生产记录仍保留。</div>}{child.versionHistory.length > 1 && <div className="tiny">最近版本差异：{Object.keys({ ...child.versionHistory[0].snapshot, ...child.versionHistory[1].snapshot }).filter((key) => JSON.stringify(child.versionHistory[0].snapshot[key]) !== JSON.stringify(child.versionHistory[1].snapshot[key])).join("、") || "无字段变化"}（V{child.versionHistory[1].version_no} → V{child.versionHistory[0].version_no}）</div>}<div className="plan-form-actions">{child.status === "stale" ? <button className="btn sm primary" disabled={!masterVersionId} onClick={() => { setChildForm(true); setChildPlatform(child.platform); setChildName(`${child.name}（新母计划）`); setChildDirection(child.direction); setChildCount(Math.max(1, child.count)); }}>基于当前母计划重建</button> : <><button className="btn sm" onClick={() => setEditingChild({ ...child })}>编辑</button><button className="btn sm" onClick={() => reviewChild(child)}>{child.status === "draft" ? "提交审核" : child.status === "review" ? "审核并生效" : "已生效"}</button></>}{child.status === "effective" && <button className="btn sm primary" onClick={() => { setSelectedChildId(child.id); setTab("production-line"); }}>管理生产线 →</button>}</div></> : <><p>继承主计划目标与约束；当前没有独立子计划记录。</p><button className="btn sm" onClick={() => { setChildForm(true); setChildPlatform(p); setChildCount(data.plan.topic_count_per_platform); }}>创建该平台子计划</button></>}</div>; })}</div></div>
       {childForm && <div className="panel"><div className="panel-head"><b>手工创建子计划</b><button className="btn sm" onClick={() => setChildForm(false)}>取消</button></div><div className="grid two"><div><label className="form-label">平台</label><select className="field" value={childPlatform} onChange={(e) => setChildPlatform(e.target.value as Platform)}>{ALL_PLATFORMS.map((p) => <option value={p} key={p}>{platformMeta(p).label}</option>)}</select><label className="form-label" style={{ marginTop: 10 }}>名称</label><input className="field" value={childName} onChange={(e) => setChildName(e.target.value)}/></div><div><label className="form-label">选题方向</label><textarea className="field" rows={3} value={childDirection} onChange={(e) => setChildDirection(e.target.value)}/><label className="form-label" style={{ marginTop: 10 }}>目标篇数</label><input className="field" type="number" min={1} value={childCount} onChange={(e) => setChildCount(Math.max(1, Number(e.target.value) || 1))}/></div></div><div className="plan-form-actions"><button className="btn primary" onClick={createChild}>保存子计划草稿</button></div></div>}
       {editingChild && <div className="panel"><div className="panel-head"><b>编辑子计划 · {platformMeta(editingChild.platform).label}</b><button className="btn sm" onClick={() => setEditingChild(null)}>取消</button></div><label className="form-label">名称</label><input className="field" value={editingChild.name} onChange={(e) => setEditingChild({ ...editingChild, name: e.target.value })}/><label className="form-label" style={{ marginTop: 10 }}>方向</label><textarea className="field" rows={3} value={editingChild.direction} onChange={(e) => setEditingChild({ ...editingChild, direction: e.target.value })}/><div className="note">子计划总目标篇数由各阶段目标合计；请在「阶段管理」中调整阶段篇数。</div><div className="plan-form-actions"><button className="btn primary" onClick={saveChild}>保存修改</button></div></div>}
     </>}
@@ -577,8 +691,8 @@ export default function PlanCenter() {
         return <ProductionLinePanel subPlanId={child.id} platform={child.platform} subplanTitle={child.name}/>;
       })()}
     </>}
-    {!loading && !error && tab === "goals" && <>{selectedChildId ? <SubgoalManager subPlanId={selectedChildId}/> : <div className="panel"><EmptyHint next="先选择一个平台子计划">请先选择平台子计划</EmptyHint></div>}</>}
-    {!loading && !error && tab === "stages" && <div className="panel"><div className="panel-head"><div><div className="panel-title">阶段管理</div><div className="panel-sub">按策略步骤管理目标、问题、执行方法、依赖、进入条件、预期结果与实际效果。</div></div><div className="head-actions"><button className="btn" onClick={() => setShowStageHistory((v) => !v)}>{showStageHistory ? "返回当前阶段" : "查看历史阶段"}</button><button className="btn" disabled={openingRound || children.find((item) => item.id === selectedChildId)?.status !== "effective" || showStageHistory || !canLaunchStageRound} onClick={() => void openStageRound()}>{openingRound ? "正在启动…" : "启动当前阶段生产"}</button><button className="btn primary" onClick={openStageForm}>＋ 新建阶段</button></div></div><div className="note">阶段变更会创建不可变子计划草稿版本；需要重新审核后才生效。已确认发布数来自阶段发布统计。</div>{pendingRoundLaunch && <div className="note" style={{ marginTop: 10 }}>第 {pendingRoundLaunch.roundNumber} 轮已创建，但尚未确认进入队列。<button className="btn sm" style={{ marginLeft: 8 }} disabled={openingRound} onClick={() => void retryPendingRoundLaunch()}>重试入队</button></div>}<div className="form-row"><label className="form-label" htmlFor="stage-subplan-select">所属平台子计划</label><select id="stage-subplan-select" className="field" value={selectedChildId} onChange={(e) => { setSelectedChildId(e.target.value); const child = children.find((item) => item.id === e.target.value); setStages((child?.stageRecords ?? []).map((stage) => ({ id: String(stage.id), name: stage.title, direction: stage.direction ?? "", count: Number(stage.target_count), start: stage.start_date ?? "", end: stage.end_date ?? "", rule: stage.completion_condition ?? "", status: stage.status === "in_progress" ? "active" : stage.status, confirmed: Number(stage.confirmed_published_count ?? 0), strategyGoal: stage.strategy_goal ?? "", currentProblem: stage.current_problem ?? "", executionStrategy: stage.execution_strategy ?? "", prerequisites: stage.prerequisites ?? "", inputInfo: stage.input_info ?? "", expectedResult: stage.expected_result ?? "", completionCriteria: stage.completion_criteria ?? stage.completion_condition ?? "", effectEvaluation: stage.effect_evaluation ?? "", entryCondition: stage.entry_condition ?? "", entryConditionMet: Number(stage.entry_condition_met ?? 1) !== 0, businessCompletionRequired: Boolean(stage.business_completion_required), businessCompletionStatus: String(stage.business_completion_status ?? "not_required"), effectRequired: Boolean(stage.effect_required), effectStatus: String(stage.effect_status ?? "not_required"), dependencies: stage.dependencies ?? [], latestOutcome: stage.latest_outcome }))); setShowStageHistory(false); }}><option value="">请选择子计划</option>{children.map((child) => <option key={child.id} value={child.id}>{platformMeta(child.platform).label} · {child.name}</option>)}</select></div>{stages.filter((s) => showStageHistory ? s.status === "completed" || s.status === "paused" || s.status === "cancelled" : s.status === "pending" || s.status === "active").length === 0 ? <EmptyHint next="新建阶段并配置方向、篇数、时间段和完成条件">{showStageHistory ? "暂无历史阶段" : "暂无当前阶段"}</EmptyHint> : <div className="plan-stage-list">{stages.filter((s) => showStageHistory ? s.status === "completed" || s.status === "paused" || s.status === "cancelled" : s.status === "pending" || s.status === "active").map((s) => <div className="plan-stage-card" key={s.id}><div className="panel-head"><div><b>{s.name}</b><div className="tiny">{s.start} — {s.end}</div></div><span className="tag gray">{stageLabels[s.status]}</span></div><p>{s.direction || "未填写方向"}</p><div className="plan-stage-metrics"><div><b>{s.count}</b><small>计划篇数</small></div><div><b>{s.confirmed}</b><small>已确认发布</small></div><div><b>{Math.min(100, Math.round(s.confirmed / Math.max(1, s.count) * 100))}%</b><small>发布目标进度</small></div></div><div className="tiny">完成条件：{s.rule}</div>{s.strategyGoal && <div className="tiny">策略目标：{s.strategyGoal}</div>}{s.executionStrategy && <p>{s.executionStrategy}</p>}{s.dependencies.length > 0 && <div className="tiny">前置步骤：{s.dependencies.join("、")}</div>}{s.latestOutcome && <div className="note">最近实际结果：{JSON.stringify(s.latestOutcome.result)} · {s.latestOutcome.evaluation}</div>}
+    {!loading && !error && tab === "goals" && <>{selectedChildId && children.find((item) => item.id === selectedChildId)?.status === "stale" ? <div className="panel"><div className="note">当前子计划属于已归档母计划版本，历史目标仅供查看，不可继续编辑。请到「平台子计划」基于当前母计划重建。</div></div> : selectedChildId ? <SubgoalManager subPlanId={selectedChildId}/> : <div className="panel"><EmptyHint next="先选择一个平台子计划">请先选择平台子计划</EmptyHint></div>}</>}
+    {!loading && !error && tab === "stages" && <div className="panel"><div className="panel-head"><div><div className="panel-title">阶段管理</div><div className="panel-sub">按策略步骤管理目标、问题、执行方法、依赖、进入条件、预期结果与实际效果。</div></div><div className="head-actions"><button className="btn" onClick={() => setShowStageHistory((v) => !v)}>{showStageHistory ? "返回当前阶段" : "查看历史阶段"}</button><button className="btn" disabled={openingRound || children.find((item) => item.id === selectedChildId)?.status !== "effective" || showStageHistory || !canLaunchStageRound} onClick={() => void openStageRound()}>{openingRound ? "正在启动…" : "启动当前阶段生产"}</button><button className="btn primary" disabled={!selectedChildId || children.find((item) => item.id === selectedChildId)?.status === "stale"} onClick={openStageForm}>＋ 新建阶段</button></div></div><div className="note">阶段变更会创建不可变子计划草稿版本；需要重新审核后才生效。已确认发布数来自阶段发布统计。</div>{pendingRoundLaunch && <div className="note" style={{ marginTop: 10 }}>第 {pendingRoundLaunch.roundNumber} 轮已创建，但尚未确认进入队列。<button className="btn sm" style={{ marginLeft: 8 }} disabled={openingRound} onClick={() => void retryPendingRoundLaunch()}>重试入队</button></div>}<div className="form-row"><label className="form-label" htmlFor="stage-subplan-select">所属平台子计划</label><select id="stage-subplan-select" className="field" value={selectedChildId} onChange={(e) => { setSelectedChildId(e.target.value); const child = children.find((item) => item.id === e.target.value); setStages((child?.stageRecords ?? []).map((stage) => ({ id: String(stage.id), name: stage.title, direction: stage.direction ?? "", count: Number(stage.target_count), start: stage.start_date ?? "", end: stage.end_date ?? "", rule: stage.completion_condition ?? "", status: stage.status === "in_progress" ? "active" : stage.status, confirmed: Number(stage.confirmed_published_count ?? 0), strategyGoal: stage.strategy_goal ?? "", currentProblem: stage.current_problem ?? "", executionStrategy: stage.execution_strategy ?? "", prerequisites: stage.prerequisites ?? "", inputInfo: stage.input_info ?? "", expectedResult: stage.expected_result ?? "", completionCriteria: stage.completion_criteria ?? stage.completion_condition ?? "", effectEvaluation: stage.effect_evaluation ?? "", entryCondition: stage.entry_condition ?? "", entryConditionMet: Number(stage.entry_condition_met ?? 1) !== 0, businessCompletionRequired: Boolean(stage.business_completion_required), businessCompletionStatus: String(stage.business_completion_status ?? "not_required"), effectRequired: Boolean(stage.effect_required), effectStatus: String(stage.effect_status ?? "not_required"), dependencies: stage.dependencies ?? [], latestOutcome: stage.latest_outcome }))); setShowStageHistory(false); }}><option value="">请选择子计划</option>{children.filter((child) => child.status !== "stale").map((child) => <option key={child.id} value={child.id}>{platformMeta(child.platform).label} · {child.name}</option>)}</select></div>{stages.filter((s) => showStageHistory ? s.status === "completed" || s.status === "paused" || s.status === "cancelled" : s.status === "pending" || s.status === "active").length === 0 ? <EmptyHint next="新建阶段并配置方向、篇数、时间段和完成条件">{showStageHistory ? "暂无历史阶段" : "暂无当前阶段"}</EmptyHint> : <div className="plan-stage-list">{stages.filter((s) => showStageHistory ? s.status === "completed" || s.status === "paused" || s.status === "cancelled" : s.status === "pending" || s.status === "active").map((s) => <div className="plan-stage-card" key={s.id}><div className="panel-head"><div><b>{s.name}</b><div className="tiny">{s.start} — {s.end}</div></div><span className="tag gray">{stageLabels[s.status]}</span></div><p>{s.direction || "未填写方向"}</p><div className="plan-stage-metrics"><div><b>{s.count}</b><small>计划篇数</small></div><div><b>{s.confirmed}</b><small>已确认发布</small></div><div><b>{Math.min(100, Math.round(s.confirmed / Math.max(1, s.count) * 100))}%</b><small>发布目标进度</small></div></div><div className="tiny">完成条件：{s.rule}</div>{s.strategyGoal && <div className="tiny">策略目标：{s.strategyGoal}</div>}{s.executionStrategy && <p>{s.executionStrategy}</p>}{s.dependencies.length > 0 && <div className="tiny">前置步骤：{s.dependencies.join("、")}</div>}{s.latestOutcome && <div className="note">最近实际结果：{JSON.stringify(s.latestOutcome.result)} · {s.latestOutcome.evaluation}</div>}
       {(s.businessCompletionRequired || s.effectRequired) && <div className="note">业务完成确认：{s.businessCompletionRequired ? (s.businessCompletionStatus === "passed" ? "已通过" : s.businessCompletionStatus === "failed" ? "未通过" : s.businessCompletionStatus === "needs_review" ? "待复核" : "待确认") : "不要求"}；效果评估：{s.effectRequired ? (s.effectStatus === "passed" ? "已通过" : s.effectStatus === "failed" ? "未通过" : s.effectStatus === "needs_review" ? "待复核" : "待评估") : "不要求"}</div>}
       {(s.businessCompletionRequired || s.effectRequired) && <div className="plan-form-actions">{s.businessCompletionRequired && <button className="btn sm" onClick={() => setConditionReview({ stageId: Number(s.id), type: "business", decision: "passed", reason: "", evidence: "{}" })}>审核业务完成条件</button>}{s.effectRequired && <button className="btn sm" onClick={() => setConditionReview({ stageId: Number(s.id), type: "effect", decision: "passed", reason: "", evidence: "{}" })}>审核效果</button>}</div>}
       {conditionReview?.stageId === Number(s.id) && <div className="plan-stage-editor"><div className="panel-head"><b>{conditionReview.type === "business" ? "业务完成条件审核" : "效果评估审核"}</b><button className="btn sm" onClick={() => setConditionReview(null)}>取消</button></div><label className="form-label">审核结论</label><select className="field" value={conditionReview.decision} onChange={(e) => setConditionReview({ ...conditionReview, decision: e.target.value as "passed" | "failed" | "needs_review" })}><option value="passed">通过</option><option value="failed">未通过</option><option value="needs_review">需要补充材料/复核</option></select><label className="form-label" style={{ marginTop: 8 }}>原因/建议（未通过或待复核必填）</label><textarea className="field" rows={2} value={conditionReview.reason} onChange={(e) => setConditionReview({ ...conditionReview, reason: e.target.value })}/><label className="form-label" style={{ marginTop: 8 }}>证据 JSON（可填写指标、链接或数据摘要）</label><textarea className="field" rows={3} value={conditionReview.evidence} onChange={(e) => setConditionReview({ ...conditionReview, evidence: e.target.value })}/><div className="plan-form-actions"><button className="btn primary" onClick={() => void submitStageConditionReview()}>提交审核</button></div></div>}
