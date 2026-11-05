@@ -468,6 +468,9 @@ export default function PlanCenter() {
     if (!child) return;
     try {
       const evidence = JSON.parse(conditionReview.evidence || "{}") as Record<string, unknown>;
+      if (!conditionReview.reason.trim() && Object.keys(evidence).length === 0) {
+        showToast("请填写审核原因或提供至少一项证据", "error"); return;
+      }
       await api.reviewSubplanStageCondition(child.id, conditionReview.stageId, {
         condition_type: conditionReview.type, decision: conditionReview.decision,
         reason: conditionReview.reason.trim(), evidence,
