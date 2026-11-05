@@ -24,6 +24,24 @@ class OperatingFeedbackError(ValueError):
     """A publication, review or operating-feedback transition is invalid."""
 
 
+
+def _audit_context(actor: str, *, tenant_id: str | None = None) -> dict[str, str | None]:
+    """Resolve initiating principal and executing service from trusted task context."""
+    from src.core.task_context import current_task_identity
+
+    identity = current_task_identity()
+    initiating = str(identity.get("initiating_actor") or actor or "system:legacy-unattributed")[:160]
+    executing = identity.get("executing_actor")
+    if not executing:
+        executing = "service:api" if initiating.startswith(("session:", "shared-token:", "api-token:")) else "service:operating-feedback"
+    return {
+        "initiating_actor": initiating,
+        "executing_actor": str(executing)[:160],
+        "tenant_id": str(tenant_id or identity.get("tenant_id") or "legacy"),
+        "queue_task_id": identity.get("task_id"),
+    }
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -219,16 +237,19 @@ def create_publish_verification(
     }
     snapshot_json = _json(snapshot)
     snapshot_sha256 = hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest()
+    audit = _audit_context(actor, tenant_id=tenant_id)
     conn.execute(
         """INSERT INTO content_publish_verifications
            (verification_id,tenant_id,draft_id,content_id,production_task_id,production_line_id,
             platform,platform_content_id,content_url,published_at,verified_at,
-            content_snapshot_json,content_snapshot_sha256,evidence_source,evidence_note,idempotency_key,created_at,verified_by)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            content_snapshot_json,content_snapshot_sha256,evidence_source,evidence_note,idempotency_key,created_at,verified_by,
+            verified_executing_actor,verified_queue_task_id)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (verification_id, tenant_id, draft_id, row["content_id"], row["production_task_id"],
          production_line_id, row["platform"], platform_content_id, content_url,
          published_at, now, snapshot_json, snapshot_sha256, evidence_source,
-         str(evidence_note or "")[:1000], idem, now, str(actor or "system:publication-verifier")[:160]),
+         str(evidence_note or "")[:1000], idem, now, audit["initiating_actor"],
+         audit["executing_actor"], audit["queue_task_id"]),
     )
     event_payload = {
         "event_type": "content.publish_verified.v1",
@@ -243,7 +264,7 @@ def create_publish_verification(
         "content_url": content_url,
         "published_at": published_at,
         "verified_at": now,
-        "verified_by": str(actor or "system:publication-verifier")[:160],
+        "verified_by": audit["initiating_actor"],
         "content_snapshot": snapshot,
         "content_snapshot_sha256": snapshot_sha256,
         "idempotency_key": idem,
@@ -251,9 +272,11 @@ def create_publish_verification(
     event_id = uuid.uuid4().hex
     conn.execute(
         """INSERT INTO production_line_close_outbox
-           (event_id,verification_id,event_type,payload_json,status,created_at,updated_at)
-           VALUES(?,?, 'content.publish_verified.v1', ?, 'pending', ?, ?)""",
-        (event_id, verification_id, _json(event_payload), now, now),
+           (event_id,verification_id,event_type,payload_json,status,created_at,updated_at,
+            created_by,created_executing_actor,created_queue_task_id)
+           VALUES(?,?, 'content.publish_verified.v1', ?, 'pending', ?, ?, ?, ?, ?)""",
+        (event_id, verification_id, _json(event_payload), now, now,
+         audit["initiating_actor"], audit["executing_actor"], audit["queue_task_id"]),
     )
     # The line state is in the same tenant database, so apply the verified
     # publication transition atomically while retaining the outbox for downstream consumers.
@@ -268,10 +291,12 @@ def create_publish_verification(
     conn.execute(
         """INSERT INTO review_tasks
            (task_id,verification_id,tenant_id,draft_id,content_id,platform,status,
-            scheduled_at,max_attempts,created_at,updated_at,idempotency_key,created_by)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            scheduled_at,max_attempts,created_at,updated_at,idempotency_key,created_by,
+            created_executing_actor,created_queue_task_id)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (task_id, verification_id, tenant_id, draft_id, row["content_id"], row["platform"],
-         status, due_at, max(1, min(int(max_attempts), 10)), now, now, f"review:{verification_id}", str(actor or "system:publication-verifier")[:160]),
+         status, due_at, max(1, min(int(max_attempts), 10)), now, now, f"review:{verification_id}",
+         audit["initiating_actor"], audit["executing_actor"], audit["queue_task_id"]),
     )
     result = conn.execute(
         "SELECT * FROM content_publish_verifications WHERE verification_id=?", (verification_id,)
@@ -310,7 +335,7 @@ def list_close_events(conn, *, tenant_id: str, limit: int = 50) -> list[dict]:
 
 
 def claim_close_events(conn, *, tenant_id: str, worker_id: str, limit: int = 10,
-                       lease_seconds: int = 120) -> list[dict]:
+                       lease_seconds: int = 120, actor: str = "system:production-line-close-worker") -> list[dict]:
     worker = str(worker_id or "").strip()
     if not worker or len(worker) > 120:
         raise OperatingFeedbackError("worker_id 必须为 1-120 个字符")
@@ -329,11 +354,13 @@ def claim_close_events(conn, *, tenant_id: str, worker_id: str, limit: int = 10,
     for row in rows:
         changed = conn.execute(
             """UPDATE production_line_close_outbox
-               SET status='processing',claimed_by=?,lease_expires_at=?,attempts=attempts+1,
-                   last_error=NULL,updated_at=?
+               SET status='processing',claimed_by=?,claimed_initiating_actor=?,
+                   claimed_executing_actor=?,claimed_queue_task_id=?,
+                   lease_expires_at=?,attempts=attempts+1,last_error=NULL,updated_at=?
                WHERE event_id=? AND (status IN ('pending','failed') OR
                     (status='processing' AND lease_expires_at<?))""",
-            (worker, lease_until, now, row["event_id"], now),
+            (worker, (audit := _audit_context(actor, tenant_id=tenant_id))["initiating_actor"],
+             audit["executing_actor"], audit["queue_task_id"], lease_until, now, row["event_id"], now),
         )
         if changed.rowcount != 1:
             continue
@@ -398,7 +425,9 @@ def _mark_production_line_published(conn, payload: dict, *, verification_id: str
     )
 
 
-def _close_production_line_after_review(conn, task, *, task_id: str, now: str, conclusion: dict) -> None:
+def _close_production_line_after_review(
+    conn, task, *, task_id: str, now: str, conclusion: dict, audit: dict | None = None,
+) -> None:
     if task["status"] != "completed":
         return  # Partial collection is not sufficient to release the next content decision.
     verification = conn.execute(
@@ -443,16 +472,24 @@ def _close_production_line_after_review(conn, task, *, task_id: str, now: str, c
     conn.execute(
         """INSERT INTO content_production_line_events(
             content_production_line_id,event_type,from_status,to_status,
-            actor,reason,evidence_json,created_at
-        ) VALUES(?,?,?,?,?,?,?,?)""",
+            actor,reason,evidence_json,created_at,actor_type,actor_id,tenant_id,
+            initiating_actor,executing_actor,task_id
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (line_id, "review_completed", "published", "closed",
-         "task4-independent-review", "独立复盘已完成，生产线关闭",
-         _json(evidence), now),
+         (audit or {}).get("initiating_actor") or "system:legacy-unattributed",
+         "独立复盘已完成，生产线关闭", _json(evidence), now,
+         str(((audit or {}).get("initiating_actor") or "legacy:unattributed").partition(":")[0]),
+         str(((audit or {}).get("initiating_actor") or "legacy:unattributed").partition(":")[2] or "legacy:unattributed"),
+         str((audit or {}).get("tenant_id") or task["tenant_id"]),
+         (audit or {}).get("initiating_actor") or "system:legacy-unattributed",
+         (audit or {}).get("executing_actor") or "service:operating-feedback",
+         (audit or {}).get("queue_task_id")),
     )
 
 
 def acknowledge_close_event(
     conn, event_id: str, *, succeeded: bool, error: str = "", tenant_id: str | None = None,
+    actor: str = "system:production-line-close-worker",
 ) -> dict:
     row = conn.execute(
         "SELECT * FROM production_line_close_outbox WHERE event_id=?", (event_id,)
@@ -465,13 +502,16 @@ def acknowledge_close_event(
     if row["status"] == "delivered":
         return {"event_id": event_id, "status": "delivered", "already_acknowledged": True}
     now = utc_now()
+    audit = _audit_context(actor, tenant_id=tenant_id or payload.get("tenant_id"))
     if succeeded:
         _mark_production_line_published(
             conn, payload, verification_id=str(row["verification_id"]), now=now
         )
         conn.execute(
-            "UPDATE production_line_close_outbox SET status='delivered',claimed_by=NULL,lease_expires_at=NULL,last_error=NULL,updated_at=? WHERE event_id=?",
-            (now, event_id),
+            """UPDATE production_line_close_outbox SET status='delivered',claimed_by=NULL,lease_expires_at=NULL,
+               acknowledged_by=?,acknowledged_executing_actor=?,acknowledged_queue_task_id=?,
+               last_error=NULL,updated_at=? WHERE event_id=?""",
+            (audit["initiating_actor"], audit["executing_actor"], audit["queue_task_id"], now, event_id),
         )
         conn.execute(
             "UPDATE content_publish_verifications SET closure_status='succeeded',closure_error=NULL WHERE verification_id=?",
@@ -480,8 +520,10 @@ def acknowledge_close_event(
     else:
         message = str(error or "生产线关闭失败")[:1000]
         conn.execute(
-            "UPDATE production_line_close_outbox SET status='failed',claimed_by=NULL,lease_expires_at=NULL,last_error=?,updated_at=? WHERE event_id=?",
-            (message, now, event_id),
+            """UPDATE production_line_close_outbox SET status='failed',claimed_by=NULL,lease_expires_at=NULL,
+               acknowledged_by=?,acknowledged_executing_actor=?,acknowledged_queue_task_id=?,
+               last_error=?,updated_at=? WHERE event_id=?""",
+            (audit["initiating_actor"], audit["executing_actor"], audit["queue_task_id"], message, now, event_id),
         )
         conn.execute(
             "UPDATE content_publish_verifications SET closure_status='failed',closure_error=? WHERE verification_id=?",
@@ -490,7 +532,10 @@ def acknowledge_close_event(
     return {"event_id": event_id, "status": "delivered" if succeeded else "failed"}
 
 
-def retry_close_event(conn, event_id: str, *, tenant_id: str | None = None) -> dict:
+def retry_close_event(
+    conn, event_id: str, *, tenant_id: str | None = None,
+    actor: str = "system:production-line-close-worker",
+) -> dict:
     row = conn.execute(
         "SELECT status FROM production_line_close_outbox WHERE event_id=?", (event_id,)
     ).fetchone()
@@ -506,8 +551,11 @@ def retry_close_event(conn, event_id: str, *, tenant_id: str | None = None) -> d
         raise OperatingFeedbackError("已成功关闭的生产线事件不能重试")
     now = utc_now()
     conn.execute(
-        "UPDATE production_line_close_outbox SET status='pending',claimed_by=NULL,lease_expires_at=NULL,last_error=NULL,updated_at=? WHERE event_id=?",
-        (now, event_id),
+        """UPDATE production_line_close_outbox SET status='pending',claimed_by=NULL,lease_expires_at=NULL,
+           last_retried_by=?,last_retry_executing_actor=?,last_retry_queue_task_id=?,
+           last_error=NULL,updated_at=? WHERE event_id=?""",
+        ((audit := _audit_context(actor, tenant_id=tenant_id))["initiating_actor"],
+         audit["executing_actor"], audit["queue_task_id"], now, event_id),
     )
     conn.execute(
         "UPDATE content_publish_verifications SET closure_status='pending',closure_error=NULL WHERE verification_id=(SELECT verification_id FROM production_line_close_outbox WHERE event_id=?)",
@@ -586,14 +634,16 @@ def create_collection_run(
     run_id = uuid.uuid4().hex
     now = utc_now()
     observed = measured_at or now
+    audit = _audit_context(actor, tenant_id=task["tenant_id"])
     conn.execute(
         """INSERT INTO review_collection_runs
            (run_id,task_id,source,status,window_start,window_end,timezone_name,metrics_json,
-            error_message,idempotency_key,started_at,completed_at,created_at,recorded_by)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            error_message,idempotency_key,started_at,completed_at,created_at,recorded_by,
+            recorded_executing_actor,recorded_queue_task_id)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (run_id, task_id, source, status, window_start, window_end, timezone_name,
          _json(normalized), str(error_message or "")[:1000] if status in {"failed", "partial"} else None,
-         idem, now, now, now, str(actor or "system:review-worker")[:160]),
+         idem, now, now, now, audit["initiating_actor"], audit["executing_actor"], audit["queue_task_id"]),
     )
     if status in {"succeeded", "partial"}:
         for key, value in normalized.items():
@@ -628,12 +678,15 @@ def retry_review_task(conn, task_id: str, *, scheduled_at: str | None = None, ac
         raise OperatingFeedbackError("只有失败或部分完成的复盘任务可以人工重试")
     now = utc_now()
     due = scheduled_at or now
+    audit = _audit_context(actor, tenant_id=row["tenant_id"])
     conn.execute(
         """UPDATE review_tasks SET status='pending',scheduled_at=?,attempt_count=0,
            collection_cycle_id=?,last_error=NULL,last_success_at=NULL,
            last_window_start=NULL,last_window_end=NULL,conclusion_json='{}',
-           last_retried_by=?,updated_at=? WHERE task_id=?""",
-        (due, uuid.uuid4().hex, str(actor or "system:review-worker")[:160], now, task_id),
+           last_retried_by=?,last_retry_executing_actor=?,last_retry_queue_task_id=?,updated_at=?
+           WHERE task_id=?""",
+        (due, uuid.uuid4().hex, audit["initiating_actor"], audit["executing_actor"],
+         audit["queue_task_id"], now, task_id),
     )
     return dict(conn.execute("SELECT * FROM review_tasks WHERE task_id=?", (task_id,)).fetchone())
 
@@ -656,9 +709,12 @@ def save_review_conclusion(
         "recommendations": recommendations if isinstance(recommendations, list) else [],
     }
     now = utc_now()
+    audit = _audit_context(actor, tenant_id=task["tenant_id"])
     conn.execute(
-        "UPDATE review_tasks SET conclusion_json=?,conclusion_by=?,updated_at=? WHERE task_id=?",
-        (_json(payload), str(actor or "system:review-worker")[:160], now, task_id),
+        """UPDATE review_tasks SET conclusion_json=?,conclusion_by=?,
+           conclusion_executing_actor=?,conclusion_queue_task_id=?,updated_at=? WHERE task_id=?""",
+        (_json(payload), audit["initiating_actor"], audit["executing_actor"],
+         audit["queue_task_id"], now, task_id),
     )
     changes = gap_changes if isinstance(gap_changes, list) else []
     for change in changes:
@@ -704,13 +760,15 @@ def save_review_conclusion(
         after = dict(conn.execute("SELECT * FROM business_gaps WHERE gap_id=?", (gap_id,)).fetchone())
         conn.execute(
             """INSERT INTO business_gap_events
-               (gap_id,review_task_id,event_type,reason,before_json,after_json,evidence_json,created_at,actor)
-               VALUES(?,?,?,?,?,?,?,?,?)""",
+               (gap_id,review_task_id,event_type,reason,before_json,after_json,evidence_json,created_at,actor,
+                executing_actor,queue_task_id)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
             (gap_id, task_id, event_type, str(change.get("reason") or "")[:1000],
-             _json(before) if before else None, _json(after), evidence_json, now, str(actor or "system:review-worker")[:160]),
+             _json(before) if before else None, _json(after), evidence_json, now,
+             audit["initiating_actor"], audit["executing_actor"], audit["queue_task_id"]),
         )
     _close_production_line_after_review(
-        conn, task, task_id=task_id, now=now, conclusion=payload
+        conn, task, task_id=task_id, now=now, conclusion=payload, audit=audit
     )
     return {"task_id": task_id, "conclusion": payload, "gap_changes_recorded": len(changes)}
 
