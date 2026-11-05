@@ -565,6 +565,83 @@ def test_worker_reconciles_interrupted_round_tasks_on_startup(tmp_path, monkeypa
     assert len(observed) == 1
 
 
+def test_two_workers_concurrently_reconcile_same_interrupted_round_idempotently(tmp_path):
+    """两个独立 worker 同时扫描同一中断任务时，DB 状态迁移只能生效一次。"""
+    import json
+    import sqlite3
+    from concurrent.futures import ThreadPoolExecutor
+
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    task, _ = queue.enqueue(
+        task_type="round_run", tenant_id="tenant-concurrent", aggregate_id="round-501",
+        payload={"round_id": 501, "operation": "run", "initiating_actor": "session:test"},
+    )
+    claimed = queue.claim_next("worker-before-restart", lease_seconds=30)
+    assert claimed is not None
+    assert queue.interrupt(claimed.task_id, "worker-before-restart")
+
+    tenant_db = tmp_path / "tenant-concurrent.db"
+    setup = sqlite3.connect(tenant_db)
+    setup.executescript("""
+        CREATE TABLE spiral_rounds (
+            id INTEGER PRIMARY KEY, status TEXT NOT NULL, transition_log TEXT,
+            producing_started_at TEXT, collecting_metrics_started_at TEXT
+        );
+        INSERT INTO spiral_rounds(id,status,transition_log)
+        VALUES(501,'producing','[]');
+        CREATE TABLE content_plan_rounds (round_id INTEGER, plan_id TEXT);
+        CREATE TABLE content_plans (
+            id TEXT PRIMARY KEY, status TEXT NOT NULL, version INTEGER NOT NULL,
+            updated_at TEXT
+        );
+        INSERT INTO content_plan_rounds VALUES(501,'plan-501');
+        INSERT INTO content_plans VALUES('plan-501','generating',1,NULL);
+    """)
+    setup.commit()
+    setup.close()
+
+    cfg = SimpleNamespace()
+    def build_context(tenant_id):
+        assert tenant_id == "tenant-concurrent"
+        conn = sqlite3.connect(tenant_db, timeout=10)
+        conn.row_factory = sqlite3.Row
+        return {"cfg": cfg, "conn": conn}
+
+    # Separate worker instances model separate processes: no shared in-memory dedupe set.
+    worker_a = GlobalTaskWorker(queue, build_context)
+    worker_b = GlobalTaskWorker(queue, build_context)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(worker_a._sync_terminal_rounds),
+            pool.submit(worker_b._sync_terminal_rounds),
+        ]
+        for future in futures:
+            future.result(timeout=10)
+
+    verify = sqlite3.connect(tenant_db)
+    verify.row_factory = sqlite3.Row
+    round_row = verify.execute(
+        "SELECT status,transition_log FROM spiral_rounds WHERE id=501"
+    ).fetchone()
+    plan_row = verify.execute(
+        "SELECT status,version FROM content_plans WHERE id='plan-501'"
+    ).fetchone()
+    verify.close()
+
+    assert round_row["status"] == "failed"
+    transitions = json.loads(round_row["transition_log"])
+    assert len(transitions) == 1
+    assert transitions[0]["from"] == "producing"
+    assert transitions[0]["to"] == "failed"
+    assert transitions[0]["executing_actor"] == "service:global-task-recovery"
+    assert transitions[0]["tenant_id"] == "tenant-concurrent"
+    assert transitions[0]["task_id"] == task.task_id
+    assert plan_row["status"] == "failed"
+    assert plan_row["version"] == 2
+
+
+
 def test_worker_reconciles_interrupted_rounds_beyond_first_500_queue_rows():
     from src.core.task_queue import QueuedTask
 
