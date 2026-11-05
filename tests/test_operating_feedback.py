@@ -115,7 +115,12 @@ def test_failed_collection_is_not_zero_and_partial_zero_is_a_fact(conn, seed):
         "SELECT COUNT(*) FROM metric_facts WHERE source_record_type='review_collection_run'"
     ).fetchone()[0] == 0
 
-    retry_review_task(conn, task_id)
+    retry_review_task(conn, task_id, actor="session:review-retry-principal")
+    retry_audit = conn.execute(
+        "SELECT last_retried_by,last_retry_executing_actor FROM review_tasks WHERE task_id=?",
+        (task_id,),
+    ).fetchone()
+    assert tuple(retry_audit) == ("session:review-retry-principal", "service:api")
     partial = create_collection_run(
         conn, task_id=task_id, source="manual", status="partial",
         metrics={"views": 0, "likes": 7}, window_start="2026-11-04T02:00:00+00:00",
@@ -182,6 +187,16 @@ def test_review_conclusion_updates_business_gaps_with_history(conn, seed):
             "evidence": {"views": 10},
         }],
     )
+    audit_row = conn.execute(
+        "SELECT conclusion_by,conclusion_executing_actor FROM review_tasks WHERE task_id=?",
+        (task_id,),
+    ).fetchone()
+    assert tuple(audit_row) == ("system:review-worker", "service:operating-feedback")
+    gap_event = conn.execute(
+        "SELECT actor,executing_actor,queue_task_id FROM business_gap_events WHERE review_task_id=?",
+        (task_id,),
+    ).fetchone()
+    assert tuple(gap_event) == ("system:review-worker", "service:operating-feedback", None)
     conn.commit()
     gap = conn.execute("SELECT * FROM business_gaps WHERE gap_key='audience-awareness'").fetchone()
     assert gap["status"] == "active"
