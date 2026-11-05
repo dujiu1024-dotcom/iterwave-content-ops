@@ -52,6 +52,54 @@ def test_register_jobs_respects_enabled_and_trigger(cfg, tmp_path):
     assert "cron" in str(eng.scheduler.get_job("hot_topics_refresh").trigger)
 
 
+@pytest.mark.asyncio
+async def test_unchanged_startup_schedule_preserves_persisted_cron_next_run(cfg, tmp_path):
+    import asyncio
+    from datetime import timedelta
+
+    eng = SchedulerEngine(cfg, tmp_path / "persistent-jobs.db")
+    eng.scheduler.start(paused=True)
+    try:
+        eng._register_all_jobs()
+        original = eng.scheduler.get_job("daily_ops")
+        assert original is not None
+        expected = datetime.now(original.next_run_time.tzinfo) + timedelta(days=3)
+        eng.scheduler.modify_job("daily_ops", next_run_time=expected)
+
+        result = eng.apply_job_config("daily_ops")
+        current = eng.scheduler.get_job("daily_ops")
+
+        assert result["preserved"] is True
+        assert current.next_run_time == expected
+    finally:
+        eng.scheduler.shutdown(wait=False)
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_unchanged_startup_schedule_preserves_interval_anchor_and_next_run(cfg, tmp_path):
+    import asyncio
+
+    eng = SchedulerEngine(cfg, tmp_path / "persistent-interval-jobs.db")
+    eng.scheduler.start(paused=True)
+    try:
+        eng._register_all_jobs()
+        original = eng.scheduler.get_job("hot_topics_refresh")
+        assert original is not None
+        original_start = original.trigger.start_date
+        original_next = original.next_run_time
+
+        result = eng.apply_job_config("hot_topics_refresh")
+        current = eng.scheduler.get_job("hot_topics_refresh")
+
+        assert result["preserved"] is True
+        assert current.trigger.start_date == original_start
+        assert current.next_run_time == original_next
+    finally:
+        eng.scheduler.shutdown(wait=False)
+        await asyncio.sleep(0)
+
+
 def test_patch_switches_trigger_and_persists(cfg, conn, tmp_path, monkeypatch):
     r = patch_config(cfg, conn, {"scheduler.jobs.daily_ops.interval_minutes": 720})
     job = cfg.scheduler.job("daily_ops")
