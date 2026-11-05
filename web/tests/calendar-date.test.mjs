@@ -53,3 +53,9 @@ test("API timestamps render in fixed Asia/Shanghai time regardless of browser ti
     else process.env.TZ = previousTz;
   }
 });
+
+test("legacy naive UTC timestamps cross into the correct Shanghai calendar day", () => {
+  assert.equal(formatBusinessDateTime("2026-11-04 16:30:00", true), "2026-11-05 00:30:00");
+  assert.equal(formatBusinessDateTime("2026-11-05T00:30:00Z", true), "2026-11-05 08:30:00");
+  assert.equal(formatBusinessDateTime("2026-11-05T00:30:00+08:00", true), "2026-11-05 00:30:00");
+});
