@@ -2466,7 +2466,8 @@ def _register_routes(app: FastAPI) -> None:
             if not idempotency_key or len(idempotency_key) > 200:
                 raise HTTPException(422, "Idempotency-Key 必须为 1 到 200 个字符")
             normalized_payload = json.dumps(
-                {"values": values, "measured_at": measured_at,
+                {"values": values,
+                 "measured_at": measured_dt.isoformat(timespec="seconds") if (req or {}).get("measured_at") else None,
                  "correction_of": str(correction_of) if correction_of else None},
                 ensure_ascii=False, sort_keys=True, separators=(",", ":"),
             )
