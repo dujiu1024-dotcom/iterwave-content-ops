@@ -63,6 +63,29 @@ def client(cfg, conn, seed, test_auth):
 def _approved_subplan(conn, sub_id: str = "integration-sub", master_version_id: int | None = None):
     """建一套生效母计划 + 生效子计划 + 可执行阶段，返回（store, master, version, stage）。"""
     store = PlanVersionStore(conn)
+    # The activation trigger freezes the current business profile/catalog. Seed
+    # them before creating the effective version; later edits cannot rewrite it.
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    conn.execute(
+        """INSERT INTO business_profiles(
+            id,business_name,introduction,industry,business_model,business_stage,
+            operating_goal,field_evidence_json,version_no,updated_at
+        ) VALUES(1,'集成测试企业','提供专业内容服务','教育服务','专业服务','成长阶段',
+                 '获取目标客户','{}',1,?)
+        ON CONFLICT(id) DO UPDATE SET business_name=excluded.business_name,
+            introduction=excluded.introduction,industry=excluded.industry,
+            business_model=excluded.business_model,business_stage=excluded.business_stage,
+            operating_goal=excluded.operating_goal,field_evidence_json=excluded.field_evidence_json,
+            version_no=excluded.version_no,updated_at=excluded.updated_at""",
+        (now,),
+    )
+    conn.execute(
+        """INSERT INTO business_catalog_items(
+            id,entity_type,name,details_json,field_evidence_json,is_active,created_at,updated_at
+        ) VALUES('integration-test-offer','service','专业内容咨询','{}','{}',1,?,?)
+        ON CONFLICT(id) DO UPDATE SET is_active=1,updated_at=excluded.updated_at""",
+        (now, now),
+    )
     if master_version_id is None:
         master = store.create_master_draft(dict(PLAN_BASE), author="test", source="user")
         store.activate_master_version(int(master["id"]), reviewer="test")
