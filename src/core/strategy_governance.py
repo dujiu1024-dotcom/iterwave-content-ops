@@ -11,7 +11,7 @@ import json
 from typing import Any
 
 
-_VOLATILE_RESOURCE_CATEGORIES = {"historical_output", "historical_performance"}
+_VOLATILE_RESOURCE_CATEGORIES = {"historical_output", "historical_performance", "historical_content"}
 
 
 def collect_strategy_governance(conn) -> dict[str, Any]:
