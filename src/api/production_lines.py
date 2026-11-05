@@ -89,8 +89,10 @@ def register_production_line_routes(app: FastAPI, get_runtime) -> None:
         from src.core.content_production_line_store import ContentProductionLineStore, ContentProductionLineError
         conn = get_runtime()["conn"]
         event_type = str(req.get("event_type") or "")
-        if event_type in {"publish_verified", "closed"} and req.get("source") != "work_item_4":
-            raise HTTPException(403, "真实发布核验与发布后关闭事件仅接受工作任务 4 的接口调用")
+        if event_type in {"publish_verified", "closed"}:
+            # A caller-controlled source label is not a service credential. These
+            # transitions are owned by the publication-verification/outbox workflow.
+            raise HTTPException(403, "真实发布核验与生产线关闭只能由受控发布核验及 Outbox 流程执行")
         try:
             return ContentProductionLineStore(conn).transition(
                 line_id, event_type=event_type,
@@ -102,7 +104,7 @@ def register_production_line_routes(app: FastAPI, get_runtime) -> None:
             raise HTTPException(409, str(exc)) from exc
 
     @app.post("/api/subplans/{sub_plan_id}/production-line/ai-draft", status_code=201)
-    async def create_ai_production_line_draft(sub_plan_id: str, req: dict):
+    async def create_ai_production_line_draft(sub_plan_id: str, req: dict, request: Request):
         runtime = get_runtime()
         conn, cfg = runtime["conn"], runtime["cfg"]
         identity = conn.execute(
@@ -203,7 +205,7 @@ def register_production_line_routes(app: FastAPI, get_runtime) -> None:
         try:
             version = store().create_draft(
                 sub_plan_id, int(identity["current_version_id"]), result,
-                generation_source="ai", author="ai", change_note="AI 生成生产线草稿，待人工确认",
+                generation_source="ai", author=auth.audit_actor(request), change_note="AI 生成生产线草稿，待人工确认",
             )
         except (ProductionLineError, sqlite3.Error) as exc:
             raise HTTPException(422 if isinstance(exc, ProductionLineError) else 503, str(exc)) from exc
@@ -214,7 +216,7 @@ def register_production_line_routes(app: FastAPI, get_runtime) -> None:
                 "effective": False, "requires_human_review": True}
 
     @app.post("/api/subplans/{sub_plan_id}/production-line/draft", status_code=201)
-    def create_manual_production_line_draft(sub_plan_id: str, req: dict):
+    def create_manual_production_line_draft(sub_plan_id: str, req: dict, request: Request):
         conn = get_runtime()["conn"]
         identity = conn.execute(
             """SELECT current_version_id FROM sub_plans WHERE id=? AND status='active'""",
@@ -225,7 +227,7 @@ def register_production_line_routes(app: FastAPI, get_runtime) -> None:
         try:
             version = store().create_draft(
                 sub_plan_id, int(identity["current_version_id"]), req.get("definition") or {},
-                generation_source="manual", author="user",
+                generation_source="manual", author=auth.audit_actor(request),
                 change_note=str(req.get("change_note") or "人工编辑生产线草稿"),
                 based_on_version_id=req.get("based_on_version_id"),
             )
