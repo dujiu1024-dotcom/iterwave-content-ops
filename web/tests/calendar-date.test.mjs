@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { formatCalendarDate, shiftCalendarDate } from "../src/calendarDate.mjs";\nimport { formatBusinessDateTime } from "../src/businessTime.mjs";
+import { formatCalendarDate, shiftCalendarDate } from "../src/calendarDate.mjs";
+import { formatBusinessDateTime } from "../src/businessTime.mjs";
 
 test("month navigation clamps to the first day and crosses year boundaries", () => {
   const date = new Date(2026, 0, 31, 12, 30);
