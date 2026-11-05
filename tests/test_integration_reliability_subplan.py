@@ -255,6 +255,12 @@ async def test_round_is_pinned_to_effective_version_and_survives_new_draft(clien
         "operating_goal": "完成图文内容生产",
     })
     assert profile.status_code == 200, profile.text
+    # business_profile_snapshot 触发器在母计划批准瞬间冻结 catalog 状态；必须在批准前 seed
+    offering = tc.post("/api/business-profile/items/service", json={
+        "name": "联调业务内容服务",
+        "details": {"scope": "专业内容生产", "delivery": "四平台图文交付"},
+    })
+    assert offering.status_code == 200, offering.text
     north_star = tc.put("/api/north-star", json={
         "change_reason": "建立版本绑定验收账号组北极星",
         "snapshot": {
