@@ -503,7 +503,7 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
         json={"version_id": adopted_version_id, "action": "approve"},
     )
     assert approved_adoption.status_code == 200, approved_adoption.text
-    assert approved_adoption.json()["effective"] is True
+    assert approved_adoption.json()["authorization"] == "active"
 
     adopted_stage = conn.execute(
         "SELECT stage_key FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order LIMIT 1",
