@@ -66,9 +66,9 @@ def _stage_for_round(conn, round_id: int) -> int:
     stage = conn.execute(
         """INSERT INTO sub_plan_stages(
             sub_plan_version_id,stage_order,title,target_count,status,created_at,updated_at,
-            stage_key,strategy_goal,execution_strategy,effect_required
+            stage_key,strategy_goal,execution_strategy,effect_required,effect_status
         ) VALUES(?,1,'T8-B 内容效果验收',1,'pending',?,?,
-                 't8-b-stage','验证发布效果回流','API 集成验收',1)""",
+                 't8-b-stage','验证发布效果回流','API 集成验收',1,'pending')""",
         (version, now, now),
     ).lastrowid
     conn.execute(
