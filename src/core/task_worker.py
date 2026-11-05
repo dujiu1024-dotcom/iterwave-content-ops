@@ -162,7 +162,7 @@ class GlobalTaskWorker:
                 bind_context_notifier(context.get("notifier")),
                 bind_config(context["cfg"]),
                 bind_task_identity(
-                    initiating_actor=task.payload.get("initiating_actor"),
+                    initiating_actor=task.payload.get("initiating_actor") or "system:legacy-unattributed",
                     executing_actor="service:global-task-worker",
                     tenant_id=task.tenant_id,
                     task_id=task.task_id,
