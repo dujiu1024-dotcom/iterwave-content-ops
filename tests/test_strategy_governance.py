@@ -15,6 +15,7 @@ def test_strategy_fingerprint_ignores_production_history_but_tracks_resource_evi
             {"category": "business_profile", "title": "业务档案", "status": "confirmed", "updated_at": "2026-11-01"},
             {"category": "historical_output", "title": "历史内容", "status": "confirmed", "details": {"content_count": 100}},
             {"category": "historical_performance", "title": "历史表现", "status": "confirmed", "details": {"metric_rows": 20}},
+            {"category": "historical_content", "title": "历史内容素材", "status": "confirmed", "details": {"content_asset_count": 50}},
         ],
         "gaps": [
             {"category": "historical_output", "title": "无历史产出", "status": "open"},
@@ -28,6 +29,7 @@ def test_strategy_fingerprint_ignores_production_history_but_tracks_resource_evi
 
     baseline["resources"][1]["details"]["content_count"] = 101
     baseline["resources"][2]["details"]["metric_rows"] = 21
+    baseline["resources"][3]["details"]["content_asset_count"] = 51
     second = strategy_governance.collect_strategy_governance(conn)
     assert strategy_governance.strategy_governance_fingerprint(first) == strategy_governance.strategy_governance_fingerprint(second)
 
