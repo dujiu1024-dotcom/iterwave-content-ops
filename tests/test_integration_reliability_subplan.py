@@ -74,11 +74,25 @@ def _approved_subplan(conn, sub_id: str = "integration-sub"):
         master_plan_version_id=int(master["id"]),
         stages=[{"title": "阶段一", "target_count": 6}],
     )
-    store.activate_subplan_version(int(version["id"]), reviewer="test")
     stage = conn.execute(
         "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=?",
         (int(version["id"]),),
     ).fetchone()
+    from src.core.subgoal_store import SubGoalStore
+    goals = SubGoalStore(conn)
+    goal = goals.create_goal(sub_id, int(version["id"]), {
+        "stage_id": int(stage["id"]), "goal_type": "quantity",
+        "title": "阶段内容生产目标", "target_count": 6,
+        "acceptance_criteria": "完成本阶段约定内容生产",
+        "requires_production": True,
+    })
+    goals.save_production_plan(sub_id, str(goal["id"]), {
+        "content_direction": "按已审核阶段方向生产内容",
+        "suggested_count": 6,
+        "execution_conditions": "阶段已生效且依赖门禁通过",
+        "acceptance_relation": "以本阶段内容数量及验收证据为准",
+    })
+    store.activate_subplan_version(int(version["id"]), reviewer="test")
     line_store = ProductionLineStore(conn)
     line_draft = line_store.create_draft(
         sub_id, int(version["id"]),
