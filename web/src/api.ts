@@ -827,7 +827,7 @@ export interface BusinessDiagnosisReport {
   report: Record<string, any>;
   source_snapshot: { inventory_summary: Record<string, number>; source_references: Array<{ source_type: string; source_id: string; label: string }> };
   source_fingerprint: string; model_name: string; created_at: string; updated_at: string;
-  confirmed_at: string | null; source_is_current: boolean;
+  confirmed_at: string | null; source_is_current: boolean; strategy_is_current?: boolean;
 }
 export interface BusinessDiagnosisVersion {
   id: number; version_no: number; status: string; model_name: string;
