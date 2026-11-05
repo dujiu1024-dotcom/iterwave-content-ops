@@ -5037,3 +5037,46 @@ def test_review_adoption_batch_rolls_back_all_drafts_when_later_child_fails(clie
         "SELECT COUNT(*) FROM sub_plan_versions WHERE status='draft'"
     ).fetchone()[0])
     assert after == before
+
+
+def test_tenant_context_gate_rejects_cross_tenant_writes_across_api_domains_without_side_effects(client):
+    tc, conn, _seed = client
+    tracked_tables = (
+        "master_plan_versions", "plan_change_audit", "review_tasks",
+        "production_line_close_outbox", "content_publish_verifications", "drafts",
+    )
+
+    def snapshot():
+        result = {}
+        for table in tracked_tables:
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,),
+            ).fetchone()
+            result[table] = (
+                int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                if exists else None
+            )
+        return result
+
+    before = snapshot()
+    writes = [
+        ("/api/plans", {}),
+        ("/api/review-tasks/nonexistent/retry", {}),
+        ("/api/production-line-close-events/claim", {"worker_id": "cross-tenant-probe"}),
+        ("/api/drafts/nonexistent/publish-verification", {}),
+    ]
+    for path, payload in writes:
+        response = tc.post(path, json=payload, headers={"X-Tenant-Id": "another-tenant"})
+        assert response.status_code == 409, (path, response.status_code, response.text)
+        assert response.json()["code"] == "TENANT_CONTEXT_CHANGED"
+        assert snapshot() == before
+
+
+def test_tenant_context_gate_rejects_missing_header_on_non_plan_write_without_side_effects(client):
+    tc, conn, _seed = client
+    before = int(conn.execute("SELECT COUNT(*) FROM review_tasks").fetchone()[0])
+    response = tc.post("/api/review-tasks/nonexistent/retry", json={})
+    assert response.status_code == 409
+    assert response.json()["code"] == "TENANT_CONTEXT_REQUIRED"
+    assert int(conn.execute("SELECT COUNT(*) FROM review_tasks").fetchone()[0]) == before
+
