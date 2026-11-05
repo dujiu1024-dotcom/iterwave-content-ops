@@ -530,6 +530,8 @@ def test_subplan_round_worker_persists_task_content_and_frozen_plan_lineage(
     from src.core.guard.ultimate_goal_checker import CheckOutcome, CheckResult
 
     tc, conn, _seed = client
+    saved_tenant = api_main._g_ctx.get("runtime_tenant_id")
+    api_main._g_ctx["runtime_tenant_id"] = "default"
     store, master, version, stage = _approved_subplan(conn, "worker-provenance-sub")
     opened = tc.post(
         "/api/subplans/worker-provenance-sub/rounds", json={"topic_count": 1},
@@ -552,9 +554,7 @@ def test_subplan_round_worker_persists_task_content_and_frozen_plan_lineage(
     queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
     queue.initialize()
     saved_queue = api_main._task_queue
-    saved_tenant = api_main._g_ctx.get("runtime_tenant_id")
     api_main._task_queue = queue
-    api_main._g_ctx["runtime_tenant_id"] = "default"
     monkeypatch.setattr(api_main, "_build_task_execution_snapshot", lambda *a, **k: {})
     from src.core import task_snapshot
     monkeypatch.setattr(task_snapshot, "validate_execution_snapshot", lambda *a, **k: None)
