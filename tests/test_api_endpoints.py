@@ -3434,7 +3434,7 @@ def test_master_plan_approval_triggers_draft_only_ai_subplan_orchestration(clien
     assert response.json()["subplan_generation"]["status"] == "drafts_created"
 
 
-def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client):
+def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client, monkeypatch):
     from src.core.plan_version_store import PlanVersionStore
 
     tc, conn, _ = client
@@ -3477,6 +3477,36 @@ def test_subplan_api_creates_draft_requires_review_and_binds_manual_round(client
         ON CONFLICT(id) DO UPDATE SET is_active=1,updated_at=excluded.updated_at""",
         (now, now),
     )
+    # Production task creation requires a version-bound North Star and a confirmed
+    # business diagnosis. Seed them through the public API; do not bypass the gate.
+    from src.api import business_diagnosis
+    from src.core.business_diagnosis import collect_business_context
+
+    async def fake_diagnosis(conn, cfg):
+        context = collect_business_context(conn, cfg)
+        return (
+            {"business_summary": {"claim": "API 子计划验收业务", "classification": "fact"},
+             "assumptions": [], "source_references": []},
+            context["context"], "api-subplan-test-model",
+        )
+
+    monkeypatch.setattr(business_diagnosis, "generate_diagnosis", fake_diagnosis)
+    north_star = tc.put("/api/north-star", json={
+        "change_reason": "建立 API 子计划验收北极星",
+        "snapshot": {
+            "positioning": "专业内容服务", "business_direction": "AI 教育内容",
+            "target_users": "目标客户", "core_value": "持续提供高质量内容",
+            "long_term_content_direction": "围绕业务定位持续生产",
+            "business_model": "专业服务", "long_term_goals": "形成稳定内容生产体系",
+        },
+    })
+    assert north_star.status_code == 200, north_star.text
+    diagnosis = tc.post("/api/business-diagnosis/analyze")
+    assert diagnosis.status_code == 201, diagnosis.text
+    diagnosis_id = diagnosis.json()["report"]["id"]
+    confirmed = tc.post(f"/api/business-diagnosis/{diagnosis_id}/confirm")
+    assert confirmed.status_code == 200, confirmed.text
+
     active_plan_row = conn.execute(
         "SELECT plan_snapshot FROM master_plan_versions WHERE id=?", (active_id,)
     ).fetchone()
