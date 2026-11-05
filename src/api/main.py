@@ -5346,9 +5346,8 @@ def _register_routes(app: FastAPI) -> None:
         if saved:
             from src.core.content_version import content_version_hash, parse_json_list
             stored_images = parse_json_list(row["image_paths"])
-            payload_images = [str(stored_images[0])] if stored_images and stored_images[0] else []
             saved_hash = content_version_hash(
-                row["title"], row["body"], parse_json_list(row["tags"]), payload_images,
+                row["title"], row["body"], parse_json_list(row["tags"]), stored_images,
             )
             if not _g()["sm_draft"].transition(
                 draft_id, "draft_saved",
