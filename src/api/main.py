@@ -2557,8 +2557,9 @@ def _register_routes(app: FastAPI) -> None:
 
     @app.get("/api/reports/weekly")
     def weekly_report(week_start: Optional[str] = Query(None), platform: Optional[str] = Query(None)):
-        from datetime import timedelta
+        from datetime import timedelta, timezone
         from src.adapters.base import Platform
+        from src.core.timezone import business_date_range_predicate
         if platform and platform not in {p.value for p in Platform}:
             raise HTTPException(422, "未知平台")
         try:
@@ -2570,15 +2571,25 @@ def _register_routes(app: FastAPI) -> None:
         end = start + timedelta(days=7)
         conn = _g()["conn"]
         tenant_id = _tenant_id()
+        # Both metric_snapshots.measured_at and metrics.fetched_at are persisted as
+        # UTC instants. Historical naive rows in these columns are also UTC (not
+        # Shanghai wall time), so pass that column-specific compatibility policy.
+        snapshot_window, snapshot_bounds = business_date_range_predicate(
+            "ms.measured_at", start.date().isoformat(), end.date().isoformat(),
+            _g().get("cfg"), legacy_timezone=timezone.utc,
+        )
+        readback_window, readback_bounds = business_date_range_predicate(
+            "m.fetched_at", start.date().isoformat(), end.date().isoformat(),
+            _g().get("cfg"), legacy_timezone=timezone.utc,
+        )
         snapshots = conn.execute(
             "SELECT ms.*, c.title, c.body, c.tags, d.user_confirmed_at "
             "FROM metric_snapshots ms JOIN contents c ON c.id=ms.content_id "
             "JOIN drafts d ON d.id=ms.draft_id "
-            "WHERE ms.tenant_id=? AND ms.measured_at>=? AND ms.measured_at<? "
+            "WHERE ms.tenant_id=? AND " + snapshot_window + " "
             + ("AND ms.platform=? " if platform else "")
             + "ORDER BY ms.measured_at DESC",
-            (tenant_id, start.isoformat(sep=" "), end.isoformat(sep=" "),
-             *((platform,) if platform else ())),
+            (tenant_id, *snapshot_bounds, *((platform,) if platform else ())),
         ).fetchall()
         # 自动读回沿用原 metrics 表；来源固定标记为 platform_readback，不改写原记录。
         auto_rows = conn.execute(
@@ -2586,9 +2597,9 @@ def _register_routes(app: FastAPI) -> None:
             "'platform_readback' AS source, m.fetched_at AS measured_at, m.fetched_at AS recorded_at, "
             "c.title, c.body, c.tags "
             "FROM metrics m JOIN contents c ON c.id=m.content_id "
-            "WHERE m.fetch_status IN ('success','partial') AND m.fetched_at>=? AND m.fetched_at<? "
+            "WHERE m.fetch_status IN ('success','partial') AND " + readback_window + " "
             + ("AND m.platform=? " if platform else ""),
-            (start.isoformat(sep=" "), end.isoformat(sep=" "), *((platform,) if platform else ())),
+            (*readback_bounds, *((platform,) if platform else ())),
         ).fetchall()
         merged = []
         superseded_snapshot_ids = {
