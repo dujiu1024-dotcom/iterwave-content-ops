@@ -56,3 +56,20 @@ export function parseBusinessCalendarDate(value) {
   if (Number.isNaN(instant.getTime())) return null;
   return businessCalendarDate(instant);
 }
+
+
+/** Convert an API timestamp to the datetime-local wall clock used by the business calendar. */
+export function formatBusinessDateTimeInput(value) {
+  if (!value) return "";
+  const raw = String(value).trim();
+  const naive = /^(\\d{4}-\\d{2}-\\d{2})[ T](\\d{2}:\\d{2})/.exec(raw);
+  if (naive && !/(?:Z|[+-]\\d{2}:?\\d{2})$/i.test(raw)) return `${naive[1]}T${naive[2]}`;
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return "";
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: BUSINESS_TIME_ZONE, year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(date);
+  const part = (type) => parts.find((item) => item.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}T${part("hour")}:${part("minute")}`;
+}
