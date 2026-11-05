@@ -4849,11 +4849,32 @@ def test_review_adoption_master_draft_is_review_gated_and_rebase_path_is_reachab
     )
     store.activate_subplan_version(child["id"], reviewer="test")
 
+    stage = conn.execute(
+        "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order LIMIT 1",
+        (child["id"],),
+    ).fetchone()
+    feedback = tc.post(f"/api/subplans/stages/{int(stage['id'])}/effect-feedback", json={
+        "assessment": "effective",
+        "recommendation": "保持高表现策略并扩大样本。",
+        "evidence_note": "复盘采纳来源证据集成验收。",
+        "confidence": "high",
+    })
+    assert feedback.status_code == 201, feedback.text
+
     created = tc.post("/api/plan_adjustments/adopt_master", json={
         "dimensions": ["内容结构", "目标用户"],
+        "effect_review_id": feedback.json()["id"],
     })
     assert created.status_code == 200, created.text
     mother_draft = created.json()["draft"]
+    mother_snapshot = json.loads(mother_draft["plan_snapshot"])
+    source_feedback = mother_snapshot["review_adoptions"][-1]["effect_feedback"]
+    assert source_feedback["id"] == feedback.json()["id"]
+    assert source_feedback["stage_id"] == int(stage["id"])
+    assert source_feedback["source_sub_plan_version_id"] == int(child["id"])
+    assert source_feedback["assessment"] == "effective"
+    assert source_feedback["recommendation"] == "保持高表现策略并扩大样本。"
+    assert source_feedback["evidence"]["content_count"] == 0
     new_master_id = int(mother_draft["id"])
     assert mother_draft["source"] == "review_adoption"
     assert int(mother_draft["based_on_version_id"]) == active_id
@@ -4962,3 +4983,57 @@ def test_round_detail_created_at_treats_legacy_naive_value_as_utc(client):
     assert detail.status_code == 200, detail.text
     assert detail.json()["created_at"] == "2026-11-03T16:00:00+00:00"
 
+
+
+
+def test_review_adoption_batch_rolls_back_all_drafts_when_later_child_fails(client, monkeypatch):
+    from src.core.plan_version_store import PlanVersionStore, PlanVersionError
+
+    tc, conn, _ = client
+    store = PlanVersionStore(conn)
+    active = conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective' ORDER BY version_no DESC LIMIT 1"
+    ).fetchone()
+    if active is None:
+        base = {
+            "topic_count_per_platform": 2, "dimension_allocation": {"测试": 2},
+            "enabled_platforms": ["xhs", "douyin"], "content_format": "image_text",
+        }
+        master = store.create_master_draft(base, author="test")
+        active_id = int(store.activate_master_version(master["id"], reviewer="test")["id"])
+    else:
+        active_id = int(active["id"])
+
+    for sub_id, platform in (("adopt-batch-xhs", "xhs"), ("adopt-batch-douyin", "douyin")):
+        store.create_subplan(
+            sub_id, master_plan_version_id=active_id, platform=platform,
+            title="批量采纳原子性验收", author="test",
+        )
+        version = store.create_subplan_version(
+            sub_id, {"title": "批量采纳原子性验收", "platform": platform},
+            master_plan_version_id=active_id, author="test",
+            stages=[{"title": "验证阶段", "target_count": 1}],
+        )
+        store.activate_subplan_version(version["id"], reviewer="test")
+
+    before = int(conn.execute(
+        "SELECT COUNT(*) FROM sub_plan_versions WHERE status='draft'"
+    ).fetchone()[0])
+    original = PlanVersionStore.create_subplan_version
+    calls = {"count": 0}
+
+    def fail_second(self, *args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise PlanVersionError("模拟第二个子计划创建失败")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(PlanVersionStore, "create_subplan_version", fail_second)
+    response = tc.post("/api/plan_adjustments/adopt", json={"dimensions": ["内容结构"]})
+
+    assert response.status_code == 409, response.text
+    assert calls["count"] == 2
+    after = int(conn.execute(
+        "SELECT COUNT(*) FROM sub_plan_versions WHERE status='draft'"
+    ).fetchone()[0])
+    assert after == before
