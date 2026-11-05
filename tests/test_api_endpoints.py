@@ -4865,15 +4865,10 @@ def test_review_adoption_master_draft_is_review_gated_and_rebase_path_is_reachab
         "SELECT status FROM sub_plans WHERE id=?", (sub_id,)
     ).fetchone()[0] == "active"
 
-    async def no_child_generation(*_args, **_kwargs):
-        return {"status": "skipped", "items": []}
-
-    monkeypatch.setattr(
-        "src.core.master_plan_orchestrator.generate_subplan_drafts",
-        no_child_generation,
-    )
     reviewed = tc.post(f"/api/plans/{new_master_id}/review", json={"action": "approve"})
     assert reviewed.status_code == 200, reviewed.text
+    assert reviewed.json()["subplan_generation"]["status"] == "rebase_required"
+    assert reviewed.json()["subplan_generation"]["target_master_plan_version_id"] == new_master_id
     paused = conn.execute(
         "SELECT status,pause_reason,paused_by_master_version_id FROM sub_plans WHERE id=?",
         (sub_id,),
