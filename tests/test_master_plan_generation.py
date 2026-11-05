@@ -85,17 +85,23 @@ def test_generation_model_failure_does_not_create_a_draft(monkeypatch):
         id INTEGER, version_no INTEGER, status TEXT, source_fingerprint TEXT,
         report_json TEXT, source_snapshot_json TEXT
     )""")
+    governance = {
+        "north_star": {"version_id": 1, "version_no": 1, "snapshot": {"positioning": "test"}},
+        "resource_baseline": {"resources": [], "gaps": [], "summary": {}},
+    }
     conn.execute(
-        "INSERT INTO business_diagnosis_reports VALUES (1, 1, 'confirmed', 'fp', '{}', '{}')"
+        "INSERT INTO business_diagnosis_reports VALUES (1, 1, 'confirmed', 'old-production-fingerprint', '{}', ?)",
+        (json.dumps({"strategy_governance": governance}),),
     )
     conn.execute("CREATE TABLE master_plan_versions (id INTEGER, status TEXT, deleted_at TEXT, version_no INTEGER)")
+    # Full diagnosis inputs changed, but the stable strategic projection did not.
     monkeypatch.setattr(
         "src.core.business_diagnosis.collect_business_context",
-        lambda *_: {"fingerprint": "fp", "context": {}},
+        lambda *_: {"fingerprint": "new-production-fingerprint", "context": {}},
     )
     monkeypatch.setattr(
         "src.core.strategy_governance.collect_strategy_governance",
-        lambda *_: {"north_star": {"version_id": 1, "version_no": 1, "snapshot": {"positioning": "test"}}, "resource_baseline": {}},
+        lambda *_: governance,
     )
     monkeypatch.setattr(
         "src.core.plan_version.PlanVersionManager.load_plan",
