@@ -4747,7 +4747,8 @@ def test_master_plan_create_and_review_audit_authenticated_session_actor(client,
     assert reviewed.status_code == 200, reviewed.text
 
     events = conn.execute(
-        """SELECT event_type,actor FROM plan_change_audit
+        """SELECT event_type,actor,initiating_actor,executing_actor,tenant_id,queue_task_id
+           FROM plan_change_audit
            WHERE entity_type='master_plan' AND entity_id=?
            ORDER BY id""",
         (str(version_id),),
@@ -4759,6 +4760,10 @@ def test_master_plan_create_and_review_audit_authenticated_session_actor(client,
     assert event_actors["version_approved"] == event_actors["draft_created"]
     assert event_actors["draft_created"] != "web-ui"
     assert event_actors["version_approved"] != "user"
+    assert all(row["initiating_actor"] == row["actor"] for row in events)
+    assert all(row["executing_actor"] == "service:api" for row in events)
+    assert all(row["tenant_id"] == "default" for row in events)
+    assert all(row["queue_task_id"] is None for row in events)
 
 
 def test_round_run_queue_persists_authenticated_initiating_actor(client, tmp_path, monkeypatch):
