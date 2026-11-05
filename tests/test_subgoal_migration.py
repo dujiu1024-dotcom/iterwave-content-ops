@@ -109,6 +109,26 @@ def test_subgoal_store_writes_append_only_actor_context():
         "tenant-a", "goal_created", "session", "0123456789abcdef0123",
         "session:0123456789abcdef0123", "service:api", None,
     )
+
+    from src.core.task_context import bind_task_identity
+    with bind_task_identity(
+        initiating_actor="session:fedcba98765432100123",
+        executing_actor="service:global-task-worker",
+        tenant_id="tenant-worker",
+        task_id="queue-task-9",
+    ):
+        updated = store.update_goal("sub-1", goal["id"], {"description": "worker update"})
+    assert updated["updated_by"] == "session:fedcba98765432100123"
+    worker_event = conn.execute(
+        "SELECT tenant_id,action,actor_type,actor_id,initiating_actor,executing_actor,task_id "
+        "FROM sub_goal_audit_events WHERE goal_id=? AND action='goal_updated'",
+        (goal["id"],),
+    ).fetchone()
+    assert tuple(worker_event) == (
+        "tenant-worker", "goal_updated", "session", "fedcba98765432100123",
+        "session:fedcba98765432100123", "service:global-task-worker", "queue-task-9",
+    )
+
     with pytest.raises(sqlite3.IntegrityError, match="append-only"):
         conn.execute("UPDATE sub_goal_audit_events SET action='rewritten' WHERE goal_id=?", (goal["id"],))
     conn.close()
