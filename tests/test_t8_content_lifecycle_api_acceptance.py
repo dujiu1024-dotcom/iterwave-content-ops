@@ -186,6 +186,8 @@ def test_content_review_publish_metrics_and_effect_feedback_api_chain(content_cl
     assert evidence["published_count"] == 1
     assert evidence["manual_metrics"]["views"] == 120.0
 
+    # Activate the fixture versions before exercising the effective-version-only review API.
+
     # The human effect-gate decision must reference this exact frozen feedback.
     wrong_source = client.post(
         f"/api/subplans/t8-b-subplan/stages/{stage_id}/condition-review",
