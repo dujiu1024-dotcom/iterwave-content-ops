@@ -2771,6 +2771,14 @@ def test_global_task_resolution_api_records_actor_and_keeps_execution_status_imm
     assert task.status == "failed"
     assert task.resolution_action == "handled"
     assert task.resolution_actor == body["actor"]
+    assert task.resolution_executing_actor == "service:api"
+    assert task.resolution_tenant_id == "tenant-a"
+    assert task.resolution_queue_task_id is None
+    audit = queue.list_admin_audit(original.task_id)
+    assert audit[0]["actor"] == body["actor"]
+    assert audit[0]["executing_actor"] == "service:api"
+    assert audit[0]["tenant_id"] == "tenant-a"
+    assert audit[0]["queue_task_id"] is None
 
     repeated = tc.post(f"/api/task-queue/{original.task_id}/resolve", json={
         "action": "handled", "note": "重复提交不能覆盖原始审计说明",
