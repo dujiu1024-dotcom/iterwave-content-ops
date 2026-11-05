@@ -69,6 +69,7 @@ from src.core.config import PROJECT_ROOT
 from src.api.response_utils import (
     api_datetime as _api_datetime,
     friendly_validation_messages as _friendly_validation_messages,
+    serialize_round_detail_timestamps as _serialize_round_detail_timestamps,
 )
 # Keep NotifyRuleRequest in this module namespace: FastAPI resolves the wrapped route signature here.
 from src.api.notify_rules import NotifyRuleRequest, build_notify_rules_router  # noqa: F401
@@ -4906,20 +4907,14 @@ def _register_routes(app: FastAPI) -> None:
             (round_id,),
         ).fetchall()
         result = dict(row)
-        for timestamp_field in ("created_at", "producing_started_at", "collecting_metrics_started_at"):
-            if result.get(timestamp_field):
-                result[timestamp_field] = _api_business_datetime(result[timestamp_field])
-        round_drafts = []
-        for draft in drafts:
-            item = dict(draft)
-            for field, value in tuple(item.items()):
-                if field.endswith("_at") and value:
-                    item[field] = _api_business_datetime(value)
+        result, round_drafts = _serialize_round_detail_timestamps(
+            result, drafts, business_timezone=business_zone(_g().get("cfg")),
+        )
+        for item in round_drafts:
             if item.get("save_verification_status") == "pending_verify":
                 item["status"] = "pending_verify"
             item.pop("save_verification_status", None)
             item["review_rejected"] = bool(item.get("review_rejected"))
-            round_drafts.append(item)
         result["drafts"] = round_drafts
         return result
 
