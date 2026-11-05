@@ -77,10 +77,11 @@ def macos_available() -> bool:
 class Notifier:
     """多通道通知器 — 单例，由 lifespan 创建后注入 executor / scheduler。"""
 
-    def __init__(self, cfg, conn, dedupe_window_minutes: int = 30):
+    def __init__(self, cfg, conn, dedupe_window_minutes: int = 30, *, tenant_name: str | None = None):
         self.cfg = cfg
         self.conn = conn
         self.dedupe_window_minutes = dedupe_window_minutes
+        self.tenant_name = _redact(str(tenant_name or "").strip()) or None
 
         ncfg = cfg.notifications
         self.channels = ncfg.channels
@@ -154,6 +155,8 @@ class Notifier:
         # R23：正文统一脱敏
         body = _redact(message or "")
         head = _redact(title or default_title)  # R23：标题同样脱敏（手机号/微信号等）
+        if self.tenant_name:
+            head = f"{self.tenant_name} · {head}"
         if platform and not title:
             head = f"{head} · {platform}"
 
