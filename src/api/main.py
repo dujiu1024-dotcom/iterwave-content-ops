@@ -7630,9 +7630,15 @@ def _register_routes(app: FastAPI) -> None:
         ).fetchone()
         if stage is None:
             raise HTTPException(404,"策略步骤不存在")
+        # Stable stage keys are only stable within one sub-plan. Never aggregate
+        # content or feedback from another sub-plan that happens to reuse the key.
         content_filter = (
-            "SELECT c.id FROM sub_plan_stages cs JOIN sub_plan_stages hs ON hs.stage_key=cs.stage_key "
-            "JOIN spiral_rounds r ON r.sub_plan_stage_id=hs.id JOIN contents c ON c.round_id=r.id WHERE cs.id=?"
+            "SELECT c.id FROM sub_plan_stages cs "
+            "JOIN sub_plan_versions cv ON cv.id=cs.sub_plan_version_id "
+            "JOIN sub_plan_stages hs ON hs.stage_key=cs.stage_key "
+            "JOIN sub_plan_versions hv ON hv.id=hs.sub_plan_version_id AND hv.sub_plan_id=cv.sub_plan_id "
+            "JOIN spiral_rounds r ON r.sub_plan_stage_id=hs.id AND r.sub_plan_id=cv.sub_plan_id "
+            "JOIN contents c ON c.round_id=r.id WHERE cs.id=?"
         )
         attribution = conn.execute(
             "SELECT COUNT(DISTINCT c.id) AS content_count,COUNT(DISTINCT CASE WHEN d.publish_status='published' THEN d.id END) AS published_count "
@@ -7660,7 +7666,10 @@ def _register_routes(app: FastAPI) -> None:
         history = conn.execute(
             "SELECT er.id,er.assessment,er.recommendation,er.evidence_note,er.confidence,er.evidence_json,er.created_by,er.created_at "
             "FROM strategy_effect_reviews er JOIN sub_plan_stages reviewed_stage ON reviewed_stage.id=er.stage_id "
-            "WHERE reviewed_stage.stage_key=(SELECT stage_key FROM sub_plan_stages WHERE id=?) "
+            "JOIN sub_plan_versions reviewed_version ON reviewed_version.id=reviewed_stage.sub_plan_version_id "
+            "WHERE reviewed_stage.stage_key=(SELECT current_stage.stage_key FROM sub_plan_stages current_stage "
+            "JOIN sub_plan_versions current_version ON current_version.id=current_stage.sub_plan_version_id "
+            "WHERE current_stage.id=? AND reviewed_version.sub_plan_id=current_version.sub_plan_id) "
             "ORDER BY er.created_at DESC,er.id DESC LIMIT 20",(stage_id,),
         ).fetchall()
         return {"stage":dict(stage),"content_count":int(attribution["content_count"] or 0),
