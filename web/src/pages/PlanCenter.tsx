@@ -8,6 +8,7 @@ import ProductionLinePanel from "../components/ProductionLinePanel";
 import OriginalAssetInventoryPanel from "../components/OriginalAssetInventoryPanel";
 import NorthStarResourcePanel from "../components/NorthStarResourcePanel";
 import SubgoalManager from "../components/SubgoalManager";
+import { businessCalendarDate, formatCalendarDate } from "../calendarDate.mjs";
 
 type Tab = "master" | "platforms" | "stages" | "goals" | "production-line" | "assets" | "north-star";
 type StageStatus = "pending" | "active" | "completed" | "paused" | "cancelled";
@@ -15,17 +16,11 @@ type Stage = { id: string; name: string; direction: string; count: number; start
 type Child = { id: string; platform: Platform; name: string; direction: string; count: number; status: "draft" | "review" | "effective"; signature: string; versionId: number; versionNo: number; masterPlanVersionId: number; masterPlanVersionNo: number; versionHistory: Array<{ id:number; version_no:number; status:string; master_plan_version_id:number; snapshot:Record<string,unknown> }>; stageRecords: SubPlanStageRecord[] };
 const stageLabels: Record<StageStatus, string> = { pending: "待执行", active: "执行中", completed: "已完成", paused: "已暂停", cancelled: "已取消" };
 const childLabels = { draft: "草稿", review: "待审核", effective: "已生效" };
-const localDate = (date: Date) => {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-};
-const today = () => localDate(new Date());
+const today = () => formatCalendarDate(businessCalendarDate());
 const dateAfterDays = (days: number) => {
-  const date = new Date();
+  const date = businessCalendarDate();
   date.setDate(date.getDate() + days);
-  return localDate(date);
+  return formatCalendarDate(date);
 };
 function snapshot(item: PlanSignatureHistory): MasterPlan | null {
   try { return (typeof item.plan_snapshot === "string" ? JSON.parse(item.plan_snapshot) : item.plan_snapshot) as MasterPlan; }
