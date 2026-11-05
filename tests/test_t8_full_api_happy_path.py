@@ -82,13 +82,6 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
     )
     assert reviewed_asset.status_code == 200, reviewed_asset.text
 
-    analyzed = client.post("/api/business-diagnosis/analyze")
-    assert analyzed.status_code == 201, analyzed.text
-    diagnosis_id = analyzed.json()["report"]["id"]
-    confirmed = client.post(f"/api/business-diagnosis/{diagnosis_id}/confirm")
-    assert confirmed.status_code == 200, confirmed.text
-    assert confirmed.json()["report"]["status"] == "confirmed"
-
     north_star = client.put("/api/north-star", json={
         "change_reason": "T8-E 验收建立账号组北极星",
         "snapshot": {
@@ -102,6 +95,13 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
         },
     })
     assert north_star.status_code == 200, north_star.text
+
+    analyzed = client.post("/api/business-diagnosis/analyze")
+    assert analyzed.status_code == 201, analyzed.text
+    diagnosis_id = analyzed.json()["report"]["id"]
+    confirmed = client.post(f"/api/business-diagnosis/{diagnosis_id}/confirm")
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["report"]["status"] == "confirmed"
 
     async def no_ai_provider(*_args, **_kwargs):
         return {"status": "failed", "reason": "t8_e_mocked_provider", "items": []}
