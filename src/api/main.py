@@ -69,6 +69,7 @@ from src.core.config import PROJECT_ROOT
 from src.api.response_utils import (
     api_datetime as _api_datetime,
     friendly_validation_messages as _friendly_validation_messages,
+    serialize_round_detail_timestamps as _serialize_round_detail_timestamps,
 )
 # Keep NotifyRuleRequest in this module namespace: FastAPI resolves the wrapped route signature here.
 from src.api.notify_rules import NotifyRuleRequest, build_notify_rules_router  # noqa: F401
@@ -2557,9 +2558,8 @@ def _register_routes(app: FastAPI) -> None:
 
     @app.get("/api/reports/weekly")
     def weekly_report(week_start: Optional[str] = Query(None), platform: Optional[str] = Query(None)):
-        from datetime import timedelta, timezone
+        from datetime import timedelta
         from src.adapters.base import Platform
-        from src.core.timezone import business_date_range_predicate
         if platform and platform not in {p.value for p in Platform}:
             raise HTTPException(422, "未知平台")
         try:
@@ -2571,25 +2571,15 @@ def _register_routes(app: FastAPI) -> None:
         end = start + timedelta(days=7)
         conn = _g()["conn"]
         tenant_id = _tenant_id()
-        # Both metric_snapshots.measured_at and metrics.fetched_at are persisted as
-        # UTC instants. Historical naive rows in these columns are also UTC (not
-        # Shanghai wall time), so pass that column-specific compatibility policy.
-        snapshot_window, snapshot_bounds = business_date_range_predicate(
-            "ms.measured_at", start.date().isoformat(), end.date().isoformat(),
-            _g().get("cfg"), legacy_timezone=timezone.utc,
-        )
-        readback_window, readback_bounds = business_date_range_predicate(
-            "m.fetched_at", start.date().isoformat(), end.date().isoformat(),
-            _g().get("cfg"), legacy_timezone=timezone.utc,
-        )
         snapshots = conn.execute(
             "SELECT ms.*, c.title, c.body, c.tags, d.user_confirmed_at "
             "FROM metric_snapshots ms JOIN contents c ON c.id=ms.content_id "
             "JOIN drafts d ON d.id=ms.draft_id "
-            "WHERE ms.tenant_id=? AND " + snapshot_window + " "
+            "WHERE ms.tenant_id=? AND ms.measured_at>=? AND ms.measured_at<? "
             + ("AND ms.platform=? " if platform else "")
             + "ORDER BY ms.measured_at DESC",
-            (tenant_id, *snapshot_bounds, *((platform,) if platform else ())),
+            (tenant_id, start.isoformat(sep=" "), end.isoformat(sep=" "),
+             *((platform,) if platform else ())),
         ).fetchall()
         # 自动读回沿用原 metrics 表；来源固定标记为 platform_readback，不改写原记录。
         auto_rows = conn.execute(
@@ -2597,9 +2587,9 @@ def _register_routes(app: FastAPI) -> None:
             "'platform_readback' AS source, m.fetched_at AS measured_at, m.fetched_at AS recorded_at, "
             "c.title, c.body, c.tags "
             "FROM metrics m JOIN contents c ON c.id=m.content_id "
-            "WHERE m.fetch_status IN ('success','partial') AND " + readback_window + " "
+            "WHERE m.fetch_status IN ('success','partial') AND m.fetched_at>=? AND m.fetched_at<? "
             + ("AND m.platform=? " if platform else ""),
-            (*readback_bounds, *((platform,) if platform else ())),
+            (start.isoformat(sep=" "), end.isoformat(sep=" "), *((platform,) if platform else ())),
         ).fetchall()
         merged = []
         superseded_snapshot_ids = {
@@ -4834,7 +4824,7 @@ def _register_routes(app: FastAPI) -> None:
                 params,
             ).fetchall()
             return [
-                {**dict(row), "created_at": _api_datetime(row["created_at"])}
+                {**dict(row), "created_at": _api_business_datetime(row["created_at"])}
                 for row in rows
             ]
         total = conn.execute("SELECT COUNT(*) FROM spiral_rounds" + where, params).fetchone()[0]
@@ -4917,25 +4907,14 @@ def _register_routes(app: FastAPI) -> None:
             (round_id,),
         ).fetchall()
         result = dict(row)
-        for timestamp_field in ("created_at", "producing_started_at", "collecting_metrics_started_at"):
-            if result.get(timestamp_field):
-                # spiral_rounds.created_at uses SQLite CURRENT_TIMESTAMP (legacy naive UTC).
-                # The two state-machine fields retain their historical business-wall-time policy.
-                result[timestamp_field] = (
-                    _api_datetime(result[timestamp_field]) if timestamp_field == "created_at"
-                    else _api_business_datetime(result[timestamp_field])
-                )
-        round_drafts = []
-        for draft in drafts:
-            item = dict(draft)
-            for field, value in tuple(item.items()):
-                if field.endswith("_at") and value:
-                    item[field] = _api_business_datetime(value)
+        result, round_drafts = _serialize_round_detail_timestamps(
+            result, drafts, business_timezone=business_zone(_g().get("cfg")),
+        )
+        for item in round_drafts:
             if item.get("save_verification_status") == "pending_verify":
                 item["status"] = "pending_verify"
             item.pop("save_verification_status", None)
             item["review_rejected"] = bool(item.get("review_rejected"))
-            round_drafts.append(item)
         result["drafts"] = round_drafts
         return result
 
