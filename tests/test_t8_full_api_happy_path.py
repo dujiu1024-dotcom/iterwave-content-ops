@@ -52,7 +52,7 @@ async def _fake_diagnosis(conn, cfg):
 
 
 @pytest.mark.asyncio
-async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_client, monkeypatch, tmp_path):
+async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_client, cfg, monkeypatch, tmp_path):
     from src.api import business_diagnosis
     from src.core import master_plan_orchestrator
 
