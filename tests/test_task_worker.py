@@ -1622,3 +1622,47 @@ def test_legacy_interrupted_round_reconciliation_is_explicitly_unattributed(tmp_
         "task_id": "queue-task-legacy",
     }] * 2
     assert current_task_identity()["executing_actor"] is None
+
+
+def test_worker_rejects_mismatched_trusted_tenant_runtime_before_execution(tmp_path):
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    task, _ = queue.enqueue(
+        task_type="round_run", tenant_id="tenant-a", aggregate_id="cross-tenant",
+        payload={"round_id": 901, "operation": "run"},
+    )
+    claimed = queue.claim_next("worker-cross-tenant")
+    assert claimed is not None
+    observed = {"executed": False, "scheduler_closed": False, "conn_closed": False}
+
+    class Registry:
+        def get(self, tenant_id):
+            return {"id": tenant_id}
+
+    class Executor:
+        async def run(self, round_id, **kwargs):
+            observed["executed"] = True
+            raise AssertionError("cross-tenant task must not execute")
+
+    context = {
+        "tenant_registry": Registry(),
+        "runtime_tenant_id": "tenant-b",
+        "cfg": SimpleNamespace(
+            paths=SimpleNamespace(data_dir=str(tmp_path / "tenant-b" / "data")),
+            resolve_path=lambda value: value,
+        ),
+        "executor": Executor(),
+        "scheduler": SimpleNamespace(shutdown=lambda: observed.update(scheduler_closed=True)),
+        "conn": SimpleNamespace(close=lambda: observed.update(conn_closed=True)),
+    }
+    worker = GlobalTaskWorker(queue, lambda _tenant_id: context)
+
+    try:
+        asyncio.run(worker._run_task(claimed))
+    except PermissionError as exc:
+        assert "runtime tenant" in str(exc)
+    else:
+        raise AssertionError("mismatched runtime tenant must be rejected")
+
+    assert observed == {"executed": False, "scheduler_closed": True, "conn_closed": True}
+
