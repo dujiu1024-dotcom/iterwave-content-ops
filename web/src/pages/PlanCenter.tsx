@@ -337,7 +337,9 @@ export default function PlanCenter() {
       } else if (generated?.status === "drafts_created") {
         showToast(`母计划已生效，AI 自动生成 ${generated.items.length} 个平台子计划草稿，等待审核`, "success");
       } else if (generated?.status === "failed") {
-        showToast("母计划已生效，但自动拆解失败；可在平台子计划页手动重试 AI 拆解", "error");
+        showToast(generated.reason === "master_strategy_snapshot_missing"
+          ? "母计划已生效，但缺少绑定的北极星/资源基线历史快照，无法自动拆解；请重新建立并审核完整版本的母计划。"
+          : "母计划已生效，但自动拆解失败；可在平台子计划页手动重试 AI 拆解", "error");
       } else {
         showToast("母计划已审核生效", "success");
       }
