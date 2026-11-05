@@ -282,7 +282,7 @@ export default function PlanCenter() {
               adopted_dimensions: pendingAdoptionDimensions,
               drafts: observed.drafts,
               message: partial
-                ? `部分成功：已创建 ${observed.drafts.length} / ${observed.expected} 个子计划草稿。失败项未自动重复提交，请检查平台子计划状态。`
+                ? `部分成功：已创建 ${observed.drafts.length} / ${observed.expected} 个子计划草稿。剩余平台请在平台子计划页基于当前母计划重建；不要重复提交已成功的平台。`
                 : `所有 ${observed.drafts.length} 个子计划草稿均已落库；接口响应异常：${errorMessage}`,
               rebaseStatus: partial ? "partial" : "drafts_created",
               targetMasterPlanVersionId: reviewedVersionId,
@@ -369,7 +369,7 @@ export default function PlanCenter() {
           rebaseStatus: partial ? "partial" : "drafts_created",
           expectedDraftCount: observed!.expected,
           message: partial
-            ? `部分成功：已创建 ${observed!.drafts.length} / ${observed!.expected} 个子计划草稿。请检查未完成的平台。`
+            ? `部分成功：已创建 ${observed!.drafts.length} / ${observed!.expected} 个子计划草稿。未完成的平台请在平台子计划页基于当前母计划重建。`
             : `所有 ${observed!.drafts.length} 个子计划草稿均已落库；接口响应异常：${errorMessage}`,
         } : current);
         showToast(partial ? "子计划 rebase 部分成功" : "子计划草稿已全部落库", partial ? "error" : "success");
