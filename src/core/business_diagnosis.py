@@ -46,6 +46,55 @@ def collect_business_context(conn, cfg) -> dict[str, Any]:
         d.status AS draft_status,d.review_status,d.saved_at,d.user_confirmed_at
         FROM contents c LEFT JOIN drafts d ON d.content_id=c.id
         ORDER BY c.created_at DESC LIMIT 300""")
+
+    # 统一指标事实、发布后复盘和经营缺口是经营诊断的真实反馈层。
+    metric_facts = _rows(conn, """
+        SELECT fact_id,tenant_id,draft_id,content_id,platform,metric_key,value,unit,
+               source,source_record_type,source_record_id,measured_at,recorded_at,
+               window_start,window_end,timezone_name,collection_status
+        FROM metric_facts_effective
+        ORDER BY measured_at DESC,recorded_at DESC LIMIT 300
+    """)
+    review_tasks = _rows(conn, """
+        SELECT rt.task_id,rt.verification_id,rt.draft_id,rt.content_id,rt.platform,
+               rt.status,rt.scheduled_at,rt.attempt_count,rt.last_attempt_at,
+               rt.last_success_at,rt.last_window_start,rt.last_window_end,
+               rt.conclusion_json,pv.platform_content_id,pv.content_url,pv.published_at,
+               pv.content_snapshot_sha256
+        FROM review_tasks rt
+        JOIN content_publish_verifications pv ON pv.verification_id=rt.verification_id
+        WHERE rt.status IN ('completed','partial')
+        ORDER BY COALESCE(rt.last_success_at,rt.updated_at) DESC LIMIT 100
+    """)
+    for review in review_tasks:
+        try:
+            review["conclusion"] = json.loads(review.pop("conclusion_json") or "{}")
+        except (TypeError, ValueError):
+            review["conclusion"] = {}
+    active_business_gaps = _rows(conn, """
+        SELECT gap_id,gap_key,title,description,severity,status,source_review_task_id,
+               evidence_json,created_at,updated_at
+        FROM business_gaps WHERE status='active'
+        ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1
+                               WHEN 'medium' THEN 2 ELSE 3 END,updated_at DESC
+        LIMIT 100
+    """)
+    for gap in active_business_gaps:
+        try:
+            gap["evidence"] = json.loads(gap.pop("evidence_json") or "{}")
+        except (TypeError, ValueError):
+            gap["evidence"] = {}
+    business_gap_events = _rows(conn, """
+        SELECT event_id,gap_id,event_type,reason,before_json,after_json,created_at
+        FROM business_gap_events ORDER BY created_at DESC LIMIT 200
+    """)
+    for event in business_gap_events:
+        for source_key,target_key in (("before_json","before"),("after_json","after")):
+            try:
+                event[target_key] = json.loads(event.pop(source_key) or "{}")
+            except (TypeError, ValueError):
+                event[target_key] = {}
+
     platform_accounts = _rows(conn, "SELECT * FROM platform_accounts ORDER BY platform")
     persisted_profiles = _rows(conn, """SELECT business_name,introduction,industry,business_model,business_stage,
         operating_goal,field_evidence_json,version_no,updated_at FROM business_profiles WHERE id=1""")
@@ -84,6 +133,21 @@ def collect_business_context(conn, cfg) -> dict[str, Any]:
         source_refs.append({"source_type": "media_asset", "source_id": str(row["id"]), "label": str(row.get("title") or row["id"])})
     for row in content:
         source_refs.append({"source_type": "content", "source_id": str(row["id"]), "label": str(row.get("title") or row["id"])})
+    for row in metric_facts[:80]:
+        source_refs.append({
+            "source_type": "metric_fact", "source_id": str(row["fact_id"]),
+            "label": f"{row['platform']} {row['metric_key']}={row['value']}",
+        })
+    for row in review_tasks[:50]:
+        source_refs.append({
+            "source_type": "review_task", "source_id": str(row["task_id"]),
+            "label": f"{row['platform']} 发布后复盘：{row['status']}",
+        })
+    for row in active_business_gaps:
+        source_refs.append({
+            "source_type": "business_gap", "source_id": str(row["gap_id"]),
+            "label": str(row["title"]),
+        })
     context = {
         "business_profile": {
             "legacy_config": goal,
@@ -92,6 +156,10 @@ def collect_business_context(conn, cfg) -> dict[str, Any]:
         },
         "business_catalog_items": business_catalog,
         "business_goals": goals,
+        "unified_metric_facts": metric_facts,
+        "post_publish_reviews": review_tasks,
+        "active_business_gaps": active_business_gaps,
+        "business_gap_history": business_gap_events,
         "content_assets": assets,
         "media_assets": media,
         "original_asset_inventory": original_assets,
@@ -102,6 +170,9 @@ def collect_business_context(conn, cfg) -> dict[str, Any]:
         "platform_accounts": platform_accounts,
         "inventory_summary": {
             "business_goal_count": len(goals),
+            "metric_fact_count": len(metric_facts),
+            "completed_review_count": len(review_tasks),
+            "active_business_gap_count": len(active_business_gaps),
             "reference_asset_count": sum(1 for x in assets if x.get("asset_type") == "reference"),
             "voice_asset_count": sum(1 for x in assets if x.get("asset_type") == "voice"),
             "template_asset_count": sum(1 for x in assets if x.get("asset_type") == "template" and x.get("is_active", 1)),
@@ -130,6 +201,7 @@ def collect_business_context(conn, cfg) -> dict[str, Any]:
             "系统没有标准化的客户访谈、竞品库或外部市场规模数据；相关结论必须标记为推测或待验证。",
             "历史内容仅取最近 300 条，不能据此声称覆盖全部历史内容。",
             "原始素材仅以登记信息和审核状态作为证据，不读取或向模型发送原始文件二进制内容。",
+            "经营诊断使用统一指标事实、发布后复盘和当前经营缺口；历史来源保留用于追溯。",
         ],
     }
     canonical = _json(context)
