@@ -51,3 +51,25 @@ def test_strategy_fingerprint_tracks_north_star_version(monkeypatch):
     second = strategy_governance.collect_strategy_governance(conn)
     conn.close()
     assert strategy_governance.strategy_governance_fingerprint(first) != strategy_governance.strategy_governance_fingerprint(second)
+
+
+
+def test_child_strategy_context_uses_master_bound_versions_not_current(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    baseline = {"snapshot": {"resources": [{"category": "business_profile", "status": "confirmed"}]}, "captured_at": "2026-11-05T10:00:00Z", "captured_by": "test"}
+    seen = {}
+    def read_bound_baseline(_conn, master_id):
+        seen["master_id"] = master_id
+        return baseline
+    monkeypatch.setattr("src.core.resource_baseline_repository.get_plan_resource_baseline", read_bound_baseline)
+    master = {
+        "id": 22,
+        "north_star_version_id": 5,
+        "north_star_snapshot_json": '{"positioning":"绑定的历史定位"}',
+    }
+    result = strategy_governance.load_master_strategy_context(conn, master)
+    conn.close()
+    assert seen["master_id"] == 22
+    assert result["north_star"] == {"version_id": 5, "snapshot": {"positioning": "绑定的历史定位"}}
+    assert result["resource_baseline"] == baseline
+    assert result["resource_baseline_available"] is True
