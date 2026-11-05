@@ -183,7 +183,17 @@ async def test_round_is_pinned_to_effective_version_and_survives_new_draft(clien
     # context is complete. Seed the same profile/North-Star/confirmed-diagnosis
     # prerequisites as the full T8 API happy path rather than bypassing the gate.
     from src.api import business_diagnosis
-    monkeypatch.setattr(business_diagnosis, "generate_diagnosis", _fake_diagnosis)
+    from src.core.business_diagnosis import collect_business_context
+
+    async def fake_diagnosis(conn, cfg):
+        context = collect_business_context(conn, cfg)
+        return (
+            {"business_summary": {"claim": "版本绑定测试业务", "classification": "fact"},
+             "assumptions": [], "source_references": []},
+            context["context"], "subplan-version-test-model",
+        )
+
+    monkeypatch.setattr(business_diagnosis, "generate_diagnosis", fake_diagnosis)
     profile = tc.put("/api/business-profile", json={
         "business_name": "子计划版本绑定验收业务", "industry": "测试行业",
         "business_model": "图文内容运营", "business_stage": "测试阶段",
