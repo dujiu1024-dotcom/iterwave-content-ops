@@ -8,7 +8,7 @@ import sqlite3
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 
 from src.core import auth
 from src.core.production_line_store import ProductionLineError, ProductionLineStore
@@ -240,7 +240,7 @@ def register_production_line_routes(app: FastAPI, get_runtime) -> None:
                 "effective": False, "requires_human_review": True}
 
     @app.post("/api/production-lines/{line_id}/versions/{version_id}/review")
-    def review_production_line(line_id: str, version_id: int, req: dict):
+    def review_production_line(line_id: str, version_id: int, req: dict, request: Request):
         action = str(req.get("action") or "")
         conn = get_runtime()["conn"]
         belongs = conn.execute(
@@ -251,9 +251,9 @@ def register_production_line_routes(app: FastAPI, get_runtime) -> None:
             raise HTTPException(404, "生产线版本不存在")
         try:
             if action == "approve":
-                version = store().activate(version_id, reviewer="user")
+                version = store().activate(version_id, reviewer=auth.audit_actor(request))
             elif action == "reject":
-                version = store().reject(version_id, reviewer="user", reason=str(req.get("reason") or ""))
+                version = store().reject(version_id, reviewer=auth.audit_actor(request), reason=str(req.get("reason") or ""))
             else:
                 raise HTTPException(422, "action 必须为 approve 或 reject")
         except ProductionLineError as exc:
@@ -262,11 +262,11 @@ def register_production_line_routes(app: FastAPI, get_runtime) -> None:
                 "effective": action == "approve"}
 
     @app.patch("/api/subplans/{sub_plan_id}/production-line/status")
-    def update_production_line_status(sub_plan_id: str, req: dict):
+    def update_production_line_status(sub_plan_id: str, req: dict, request: Request):
         try:
             line = store().set_status(
                 sub_plan_id, str(req.get("status") or ""),
-                actor="user", reason=str(req.get("reason") or ""),
+                actor=auth.audit_actor(request), reason=str(req.get("reason") or ""),
             )
         except ProductionLineError as exc:
             raise HTTPException(409, str(exc)) from exc
