@@ -60,11 +60,16 @@ def client(cfg, conn, seed, test_auth):
         api_main._g_ctx.update(saved)
 
 
-def _approved_subplan(conn, sub_id: str = "integration-sub"):
+def _approved_subplan(conn, sub_id: str = "integration-sub", master_version_id: int | None = None):
     """建一套生效母计划 + 生效子计划 + 可执行阶段，返回（store, master, version, stage）。"""
     store = PlanVersionStore(conn)
-    master = store.create_master_draft(dict(PLAN_BASE), author="test", source="user")
-    store.activate_master_version(int(master["id"]), reviewer="test")
+    if master_version_id is None:
+        master = store.create_master_draft(dict(PLAN_BASE), author="test", source="user")
+        store.activate_master_version(int(master["id"]), reviewer="test")
+    else:
+        master = dict(conn.execute(
+            "SELECT * FROM master_plan_versions WHERE id=?", (master_version_id,)
+        ).fetchone())
     store.create_subplan(
         sub_id, master_plan_version_id=int(master["id"]),
         platform="xhs", title="联调子计划", author="test",
@@ -215,7 +220,18 @@ async def test_round_is_pinned_to_effective_version_and_survives_new_draft(clien
     diagnosis_id = analyzed.json()["report"]["id"]
     confirmed = tc.post(f"/api/business-diagnosis/{diagnosis_id}/confirm")
     assert confirmed.status_code == 200, confirmed.text
-    store, master, version, stage = _approved_subplan(conn)
+    master_draft = tc.post("/api/plans", json={
+        "topic_count_per_platform": 1, "dimension_allocation": {},
+        "enabled_platforms": ["xhs"], "content_format": "image_text",
+        "per_platform": {"xhs": {"topic_count": 1, "publish_slots": ["20:00"]}},
+        "cadence": {"round_interval_days": 1, "rounds_planned": 1},
+        "change_note": "版本绑定测试母计划",
+    })
+    assert master_draft.status_code == 200, master_draft.text
+    master_id = int(master_draft.json()["draft"]["id"])
+    master_review = tc.post(f"/api/plans/{master_id}/review", json={"action": "approve"})
+    assert master_review.status_code == 200, master_review.text
+    store, master, version, stage = _approved_subplan(conn, master_version_id=master_id)
 
     created = tc.post("/api/subplans/integration-sub/rounds", json={"topic_count": 3})
     assert created.status_code == 201
