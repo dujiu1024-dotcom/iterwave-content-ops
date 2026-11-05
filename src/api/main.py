@@ -1205,7 +1205,6 @@ def _build_app() -> FastAPI:
 
 class MediaGenerationSettingsRequest(BaseModel):
     enabled: bool = False
-    monthly_quota: int = Field(default=20, ge=0, le=1000)
     prompt_prefix: str = Field(default="", max_length=2000)
     model: str = Field(default="gpt-image-1", min_length=1, max_length=120)
     size: str = Field(default="1024x1024", pattern="^(1024x1024|1024x1536|1536x1024)$")
@@ -2919,11 +2918,11 @@ def _register_routes(app: FastAPI) -> None:
         if registry is None:
             raise HTTPException(503, "账号组注册表尚未初始化")
         settings_row = conn.execute(
-            "SELECT enabled, monthly_quota, prompt_prefix, model, size, fallback_enabled "
+            "SELECT enabled, prompt_prefix, model, size, fallback_enabled "
             "FROM media_generation_settings WHERE id = 1"
         ).fetchone()
         settings = dict(settings_row) if settings_row else {
-            "enabled": 0, "monthly_quota": 20, "prompt_prefix": "",
+            "enabled": 0, "prompt_prefix": "",
             "model": os.getenv("ITERWAVE_IMAGE_MODEL", "gpt-image-1"),
             "size": "1024x1024", "fallback_enabled": 1,
         }
@@ -2952,31 +2951,12 @@ def _register_routes(app: FastAPI) -> None:
             source_mime = source["mime_type"]
             source_filename = source["original_filename"]
 
-        # 月度配额按已创建的生成任务计数，失败请求也可能已经产生供应商费用。
+        # Usage is recorded for visibility; generation is not quota-blocked.
         if not _media_generation_lock.acquire(blocking=False):
             raise HTTPException(409, "已有图片生成任务正在执行，请稍后重试")
         try:
             conn.execute("BEGIN IMMEDIATE")
             now = _storage_now().isoformat(timespec="seconds")
-            month_local = _now().replace(
-                day=1, hour=0, minute=0, second=0, microsecond=0,
-            ).replace(tzinfo=business_zone(cfg))
-            month_utc, month_legacy = storage_window_cutoffs(
-                month_local.astimezone(timezone.utc), cfg,
-            )
-            used_this_month = int(conn.execute(
-                "SELECT COUNT(*) FROM media_generation_jobs WHERE "
-                + timestamp_since_sql("created_at"),
-                (month_utc, month_legacy),
-            ).fetchone()[0])
-            monthly_quota = max(0, int(settings.get("monthly_quota") or 0))
-            if used_this_month >= monthly_quota:
-                conn.rollback()
-                raise HTTPException(
-                    429,
-                    f"本月图片生成配额已用完（{used_this_month}/{monthly_quota}），下月自动恢复",
-                )
-            # 每个已创建任务都计入月度配额，失败请求也可能已经产生供应商费用。
             cur = conn.execute(
                 "INSERT INTO media_generation_jobs (prompt, final_prompt, model, status, created_at) "
                 "VALUES (?, ?, ?, 'running', ?)",
@@ -2991,13 +2971,9 @@ def _register_routes(app: FastAPI) -> None:
                 from src.core.media_quality import score_image
                 from src.core.image_generation_budget import image_generation_run, article_budget
                 with image_generation_run(
-                    max_calls=getattr(cfg.media_generation, "max_api_calls_per_run", 30),
-                    timeout_seconds=getattr(cfg.media_generation, "hard_timeout_seconds", 300),
                     max_concurrency=getattr(cfg.media_generation, "max_concurrency", 2),
                 ) as budget:
                     with article_budget(
-                        max_calls=getattr(cfg.media_generation, "max_api_calls_per_article", 27),
-                        page_max_calls=getattr(cfg.media_generation, "max_api_calls_per_page", 3),
                     ):
                         raw, mime_type, suffix, width, height = generate_image_bytes(
                             final_prompt, model=model, size=size, source_path=source_path,
@@ -3097,11 +3073,11 @@ def _register_routes(app: FastAPI) -> None:
     def get_media_generation_settings():
         conn = _g()["conn"]
         row = conn.execute(
-            "SELECT enabled, monthly_quota, prompt_prefix, model, size, fallback_enabled, updated_at "
+            "SELECT enabled, prompt_prefix, model, size, fallback_enabled, updated_at "
             "FROM media_generation_settings WHERE id = 1"
         ).fetchone()
         settings = dict(row) if row else {
-            "enabled": False, "monthly_quota": 20, "prompt_prefix": "",
+            "enabled": False, "prompt_prefix": "",
             "model": os.getenv("ITERWAVE_IMAGE_MODEL", "gpt-image-1"),
             "size": "1024x1024", "updated_at": None, "fallback_enabled": 1,
         }
@@ -3130,11 +3106,11 @@ def _register_routes(app: FastAPI) -> None:
     def put_media_generation_settings(req: MediaGenerationSettingsRequest):
         conn = _g()["conn"]
         conn.execute(
-            "INSERT INTO media_generation_settings (id, enabled, monthly_quota, prompt_prefix, model, size, updated_at) "
-            "VALUES (1, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%f+00:00','now')) "
-            "ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled, monthly_quota=excluded.monthly_quota, "
+            "INSERT INTO media_generation_settings (id, enabled, prompt_prefix, model, size, updated_at) "
+            "VALUES (1, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%f+00:00','now')) "
+            "ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled, "
             "prompt_prefix=excluded.prompt_prefix, model=excluded.model, size=excluded.size, updated_at=strftime('%Y-%m-%dT%H:%M:%f+00:00','now')",
-            (int(req.enabled), req.monthly_quota, req.prompt_prefix.strip(), req.model.strip(), req.size),
+            (int(req.enabled), req.prompt_prefix.strip(), req.model.strip(), req.size),
         )
         conn.commit()
         return get_media_generation_settings()
@@ -6954,26 +6930,6 @@ def _register_routes(app: FastAPI) -> None:
             budget = None
             try:
                 conn.execute("BEGIN IMMEDIATE")
-                month_local = _now().replace(
-                    day=1, hour=0, minute=0, second=0, microsecond=0,
-                ).replace(tzinfo=business_zone(cfg))
-                month_utc, month_legacy = storage_window_cutoffs(
-                    month_local.astimezone(timezone.utc), cfg,
-                )
-                quota_row = conn.execute(
-                    "SELECT monthly_quota FROM media_generation_settings WHERE id=1"
-                ).fetchone()
-                monthly_quota = max(0, int(quota_row["monthly_quota"] if quota_row else 20))
-                used = int(conn.execute(
-                    "SELECT COUNT(*) FROM media_generation_jobs WHERE "
-                    + timestamp_since_sql("created_at"),
-                    (month_utc, month_legacy),
-                ).fetchone()[0])
-                if used >= monthly_quota:
-                    conn.rollback()
-                    raise HTTPException(
-                        429, f"本月图片生成配额已用完（{used}/{monthly_quota}），下月自动恢复",
-                    )
                 prompt = f"manual_visual_page_revision:{content_id}:{version_id}:{page_index}"
                 cur = conn.execute(
                     "INSERT INTO media_generation_jobs (prompt, final_prompt, model, status, created_at) "
@@ -6984,8 +6940,6 @@ def _register_routes(app: FastAPI) -> None:
                 conn.commit()
                 from src.core.image_generation_budget import image_generation_run
                 with image_generation_run(
-                    max_calls=getattr(cfg.media_generation, "max_api_calls_per_run", 30),
-                    timeout_seconds=getattr(cfg.media_generation, "hard_timeout_seconds", 300),
                     max_concurrency=getattr(cfg.media_generation, "max_concurrency", 2),
                 ) as budget:
                     generated = revise_visual_background(
@@ -7544,27 +7498,6 @@ def _register_routes(app: FastAPI) -> None:
         job_id = None
         try:
             conn.execute("BEGIN IMMEDIATE")
-            month_local = _now().replace(
-                day=1, hour=0, minute=0, second=0, microsecond=0,
-            ).replace(tzinfo=business_zone(cfg))
-            month_utc, month_legacy = storage_window_cutoffs(
-                month_local.astimezone(timezone.utc), cfg,
-            )
-            quota_row = conn.execute(
-                "SELECT monthly_quota FROM media_generation_settings WHERE id = 1"
-            ).fetchone()
-            monthly_quota = max(0, int(quota_row["monthly_quota"] if quota_row else 20))
-            used_this_month = int(conn.execute(
-                "SELECT COUNT(*) FROM media_generation_jobs WHERE "
-                + timestamp_since_sql("created_at"),
-                (month_utc, month_legacy),
-            ).fetchone()[0])
-            if used_this_month >= monthly_quota:
-                conn.rollback()
-                raise HTTPException(
-                    429,
-                    f"本月图片生成配额已用完（{used_this_month}/{monthly_quota}），下月自动恢复",
-                )
             job_prompt = f"manual_full_card_regeneration:{content_id}"
             cur = conn.execute(
                 "INSERT INTO media_generation_jobs (prompt, final_prompt, model, status, created_at) "
@@ -7575,8 +7508,6 @@ def _register_routes(app: FastAPI) -> None:
             conn.commit()
             from src.core.image_generation_budget import image_generation_run
             with image_generation_run(
-                max_calls=getattr(cfg.media_generation, "max_api_calls_per_run", 30),
-                timeout_seconds=getattr(cfg.media_generation, "hard_timeout_seconds", 300),
                 max_concurrency=getattr(cfg.media_generation, "max_concurrency", 2),
             ) as budget:
                 paths, pages = generate_ai_card_set(

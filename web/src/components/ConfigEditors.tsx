@@ -553,7 +553,6 @@ export function ImageModelEditor({ onSaved }: { onSaved?: () => void }) {
     if (!settings.model.trim()) { showToast("图片主模型不能为空", "error"); return; }
     const res = await withPending("cfg:image_model", () => api.saveMediaGenerationSettings({
       enabled: settings.enabled,
-      monthly_quota: settings.monthly_quota,
       prompt_prefix: settings.prompt_prefix,
       model: settings.model.trim(),
       size: settings.size,
@@ -576,6 +575,9 @@ export function ImageModelEditor({ onSaved }: { onSaved?: () => void }) {
         </span>
         <span style={{ fontSize: 12, color: "var(--muted)" }}>
           与上方对话模型完全独立；地址与密钥由服务器保管。
+        </span>
+        <span style={{ fontSize: 12, color: "var(--muted)" }}>
+          图片生成用量：本月已调用 {settings.used_this_month} 次（仅统计，不设月度额度）。
         </span>
       </div>
       <Field label="主模型（商汤 SenseNova U1.5，文生图 / 改图）">
