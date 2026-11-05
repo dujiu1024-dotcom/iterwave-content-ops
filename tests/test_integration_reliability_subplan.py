@@ -293,6 +293,30 @@ async def test_round_is_pinned_to_effective_version_and_survives_new_draft(clien
     assert bound["production_line_version_id"] is not None
     assert json.loads(bound["sub_plan_snapshot"])["title"] == "联调子计划"
 
+    # Store-level audit records must retain enqueue-time initiator and actual worker identity.
+    from src.core.content_production_line_store import ContentProductionLineStore
+    from src.core.task_context import bind_task_identity
+    with bind_task_identity(
+        initiating_actor="session:0123456789abcdef0123",
+        executing_actor="service:global-task-worker",
+        tenant_id="tenant-integration",
+        task_id="queue-task-123",
+    ):
+        ContentProductionLineStore(conn, tenant_id="tenant-integration").transition(
+            task_rows[0]["line_id"], event_type="aborted",
+            actor="service:global-task-worker", reason="audit-context regression",
+        )
+    audit = conn.execute(
+        """SELECT actor_type,actor_id,tenant_id,initiating_actor,executing_actor,task_id
+           FROM content_production_line_events
+           WHERE content_production_line_id=? AND event_type='aborted'""",
+        (task_rows[0]["line_id"],),
+    ).fetchone()
+    assert tuple(audit) == (
+        "session", "0123456789abcdef0123", "tenant-integration",
+        "session:0123456789abcdef0123", "service:global-task-worker", "queue-task-123",
+    )
+
     # 修改子计划只产生新的草稿版本，审核生效前不得改写既有轮次。
     revised = tc.patch("/api/subplans/integration-sub", json={
         "based_on_version_id": int(version["id"]),
