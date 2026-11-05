@@ -200,6 +200,19 @@ def test_content_review_publish_metrics_and_effect_feedback_api_chain(content_cl
     assert conn.execute(
         "SELECT effect_status FROM sub_plan_stages WHERE id=?", (stage_id,)
     ).fetchone()["effect_status"] == "pending"
+    mismatched_decision = client.post(
+        f"/api/subplans/t8-b-subplan/stages/{stage_id}/condition-review",
+        json={
+            "condition_type": "effect",
+            "decision": "failed",
+            "reason": "故意验证不一致结论被拒绝",
+            "effect_review_id": recorded.json()["id"],
+        },
+    )
+    assert mismatched_decision.status_code == 409, mismatched_decision.text
+    assert conn.execute(
+        "SELECT effect_status FROM sub_plan_stages WHERE id=?", (stage_id,)
+    ).fetchone()["effect_status"] == "pending"
     confirmed = client.post(
         f"/api/subplans/t8-b-subplan/stages/{stage_id}/condition-review",
         json={
