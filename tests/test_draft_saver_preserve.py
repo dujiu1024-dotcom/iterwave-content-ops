@@ -34,7 +34,6 @@ class _Page:
     [
         (Platform.DOUYIN, "text=你还有上次未发布的图文"),
         (Platform.KUAISHOU, "text=还有上次未发布的图集"),
-        (Platform.XHS, "text=你还有上次未发布的图文"),
     ],
 )
 async def test_stale_draft_prompt_is_detected_without_discarding(platform, expected_selector):
@@ -44,6 +43,17 @@ async def test_stale_draft_prompt_is_detected_without_discarding(platform, expec
     assert await saver._has_stale_draft_prompt(page) is True
     assert expected_selector in page.seen
     # The fake locator intentionally has no click() method: detection must be read-only.
+
+
+@pytest.mark.asyncio
+async def test_xhs_has_no_unverified_stale_prompt_selector():
+    # XHS currently has no confirmed equivalent prompt selector. It must not
+    # fabricate a positive detection; its persistence verification is tracked separately.
+    saver = DraftSaver(Platform.XHS)
+    page = _Page(visible=True)
+
+    assert await saver._has_stale_draft_prompt(page) is False
+    assert page.seen == []
 
 
 @pytest.mark.asyncio
