@@ -473,6 +473,11 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
             master_snapshot = json.loads(master["plan_snapshot"])
         except (TypeError, ValueError):
             raise HTTPException(409, "生效主计划快照损坏")
+        from src.core.strategy_governance import load_master_strategy_context
+        strategy_context = load_master_strategy_context(conn, master)
+        if (not strategy_context.get("north_star") or strategy_context["north_star"].get("invalid")
+                or not strategy_context.get("resource_baseline_available")):
+            raise HTTPException(409, "当前母计划缺少有效的北极星/资源基线版本快照，不能执行 AI 子计划拆解")
         platforms = req.get("platforms") or master_snapshot.get("enabled_platforms") or []
         allowed = {"xhs", "douyin", "kuaishou", "wechat_channels"}
         platforms = list(dict.fromkeys(str(p) for p in platforms))
@@ -542,6 +547,8 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
             + business_today(cfg).strftime("%Y-%m-%d") + "。"
             "\n母计划："
             + json.dumps(master_snapshot, ensure_ascii=False)
+            + "\n该母计划绑定的账号组北极星及版本：" + json.dumps(strategy_context.get("north_star"), ensure_ascii=False)
+            + "\n该母计划审核时固化的资源基线：" + json.dumps(strategy_context.get("resource_baseline"), ensure_ascii=False)
             + "\n目标平台：" + json.dumps(platforms, ensure_ascii=False)
             + "\n历史阶段实际结果：" + json.dumps(outcome_context, ensure_ascii=False)
             + "\n必须基于历史实际结果调整后续策略步骤：未达成预期时明确修正问题和执行策略；"
