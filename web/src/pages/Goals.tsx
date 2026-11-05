@@ -45,9 +45,15 @@ function detectPlatform(text: string): Platform | null {
 }
 
 function todayStr(offsetDays = 0): string {
-  const d = new Date();
-  d.setDate(d.getDate() + offsetDays);
-  return d.toISOString().slice(0, 10);
+  // Business-calendar dates are fixed to Asia/Shanghai; browser timezone must not
+  // shift a date near midnight (e.g. a Tokyo client before 01:00).
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(new Date());
+  const part = (type: string) => parts.find((item) => item.type === type)?.value ?? "";
+  const date = new Date(Date.UTC(Number(part("year")), Number(part("month")) - 1,
+    Number(part("day")) + offsetDays));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
 }
 
 const EMPTY_GOAL = {

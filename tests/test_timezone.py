@@ -10,18 +10,19 @@ from src.core.config import Config
 from src.core.timezone import business_now, business_timestamp, business_zone
 
 
-def test_business_now_uses_configured_timezone_without_changing_legacy_naive_storage(cfg):
+def test_business_now_uses_fixed_shanghai_timezone_without_changing_legacy_naive_storage(cfg):
     cfg.business_timezone = "Asia/Tokyo"
     value = business_now(cfg)
     assert value.tzinfo is None
-    assert business_zone(cfg).key == "Asia/Tokyo"
+    assert business_zone(cfg).key == "Asia/Shanghai"
+    assert value.hour == datetime.now(ZoneInfo("Asia/Shanghai")).hour
 
 
-def test_business_timestamp_uses_configured_timezone(cfg):
-    cfg.business_timezone = "Asia/Tokyo"
-    before = datetime.now(ZoneInfo("Asia/Tokyo")).timestamp()
+def test_business_timestamp_uses_fixed_business_clock(cfg):
+    cfg.business_timezone = "America/Los_Angeles"
+    before = datetime.now(ZoneInfo("Asia/Shanghai")).timestamp()
     value = business_timestamp(cfg)
-    after = datetime.now(ZoneInfo("Asia/Tokyo")).timestamp()
+    after = datetime.now(ZoneInfo("Asia/Shanghai")).timestamp()
     assert before <= value <= after
 
 
@@ -48,44 +49,22 @@ def test_business_now_is_stable_across_day_boundary_for_configured_zone(cfg, mon
     assert business_now(cfg).hour == 0
 
 
-@pytest.mark.parametrize(
-    ("utc_instant", "expected_hour", "expected_fold"),
-    [
-        (datetime(2026, 11, 1, 5, 30, tzinfo=ZoneInfo("UTC")), 1, 0),
-        (datetime(2026, 11, 1, 6, 30, tzinfo=ZoneInfo("UTC")), 1, 1),
-    ],
-)
-def test_business_now_preserves_dst_fall_back_occurrence(
-    cfg, monkeypatch, utc_instant, expected_hour, expected_fold,
-):
-    from src.core import timezone as timezone_module
-
-    class FrozenDateTime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return utc_instant.astimezone(tz) if tz else utc_instant.replace(tzinfo=None)
-
-    cfg.business_timezone = "America/New_York"
-    monkeypatch.setattr(timezone_module, "datetime", FrozenDateTime)
-    value = business_now(cfg)
-    assert value.hour == expected_hour
-    assert value.fold == expected_fold
-
-
-def test_business_now_skips_nonexistent_local_hour_on_dst_spring_forward(cfg, monkeypatch):
+def test_business_now_ignores_configured_dst_timezone(cfg, monkeypatch):
     from datetime import timezone
     from src.core import timezone as timezone_module
 
+    instant = datetime(2026, 11, 1, 5, 30, tzinfo=timezone.utc)
+
     class FrozenDateTime(datetime):
         @classmethod
         def now(cls, tz=None):
-            instant = datetime(2026, 3, 8, 7, 30, tzinfo=timezone.utc)
             return instant.astimezone(tz) if tz else instant.replace(tzinfo=None)
 
     cfg.business_timezone = "America/New_York"
     monkeypatch.setattr(timezone_module, "datetime", FrozenDateTime)
     value = business_now(cfg)
-    assert (value.hour, value.minute) == (3, 30)
+    assert business_zone(cfg).key == "Asia/Shanghai"
+    assert (value.hour, value.minute) == (13, 30)
 
 
 
