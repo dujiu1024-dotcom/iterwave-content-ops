@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, HTTPException, Query
 
+from src.core import auth
 from src.core.production_line_store import ProductionLineError, ProductionLineStore
 
 logger = logging.getLogger(__name__)
