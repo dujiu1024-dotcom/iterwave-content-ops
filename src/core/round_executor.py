@@ -1450,6 +1450,10 @@ class RoundExecutor:
                     else "；OCR 粗检未通过或不可用，需人工复核"
                 )
                 content_id = f"content-{uuid.uuid4().hex[:12]}"
+                # The artifact and its production-task terminal transition are one
+                # database transaction. If task attribution/completion fails, roll
+                # back the content row too; otherwise a committed orphan artifact
+                # could survive beside a still-running task and confuse recovery.
                 with self.conn:
                     self.conn.execute(
                         "INSERT INTO contents (id, round_id, topic_id, platform, title, body, "
@@ -1469,8 +1473,8 @@ class RoundExecutor:
                             production_task_id,
                         ),
                     )
-                if production_task_id:
-                    task_store.complete_task(production_task_id, content_id=content_id)
+                    if production_task_id:
+                        task_store.complete_task(production_task_id, content_id=content_id)
 
                 # 视觉版本与逐页任务留痕。版本绑定最终正文哈希，单页任务可独立追踪。
                 if image_paths:
