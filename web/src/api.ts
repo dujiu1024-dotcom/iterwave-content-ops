@@ -2371,13 +2371,23 @@ export const api = {
       `/api/subplans/${encodeURIComponent(subPlanId)}/production-line/status`,
       { method: "PATCH", body: JSON.stringify({ status, reason }) },
     ),
-  /** 复盘「采纳建议」：把缺口维度写回母计划（后端触发 R18 下游失效） */
-  adoptGaps: (dimensions: string[]) =>
+  /** 第一阶段：将复盘采纳写成母计划草稿，审核通过后才切换母计划。 */
+  adoptMasterPlan: (dimensions: string[]) =>
+    fetchJson<{
+      draft: MasterPlanVersion; effective: false; requires_human_review: true;
+      adopted_dimensions: string[]; message: string;
+    }>("/api/plan_adjustments/adopt_master", {
+      method: "POST", body: JSON.stringify({ dimensions }),
+    }),
+  /** 第二阶段：仅把由本次母计划切换暂停的旧子计划 rebase 为新草稿。 */
+  adoptGaps: (dimensions: string[], targetMasterPlanVersionId?: number) =>
     fetchJson<{
       drafts: Array<{ sub_plan_id: string; platform: Platform; draft_version: SubPlanVersionRecord; effective: false }>;
       effective: false; requires_human_review: true; adopted_dimensions: string[]; message: string;
     }>("/api/plan_adjustments/adopt", {
-      method: "POST", body: JSON.stringify({ dimensions }),
+      method: "POST", body: JSON.stringify({
+        dimensions, ...(targetMasterPlanVersionId ? { target_master_plan_version_id: targetMasterPlanVersionId } : {}),
+      }),
     }),
   /** 热点 → 选题库（R22：必须有 source + 原文链接） */
   importHotTopic: (payload: { title: string; source: string; url: string; dimension?: string; confirmed_by?: string }) =>
