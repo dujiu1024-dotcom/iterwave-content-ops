@@ -94,9 +94,9 @@ def _write_env_unlocked(key: str, value: str) -> Path:
 
 def read_env(key: str) -> Optional[str]:
     """读当前环境变量（.env 已由 load_dotenv 注入；这里兜底直接读文件）。"""
-    value = os.getenv(key)
-    if value:
-        return value
+    # An explicitly empty process value must suppress stale values in the file.
+    if key in os.environ:
+        return os.environ.get(key) or None
     path = env_file()
     if not path.exists():
         return None
