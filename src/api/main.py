@@ -5914,29 +5914,10 @@ def _register_routes(app: FastAPI) -> None:
         if alloc_total > req.topic_count_per_platform:
             raise HTTPException(400, f"维度分配合计 {alloc_total} 条，超过每平台选题数 {req.topic_count_per_platform}")
         conn = _g()["conn"]
-        from src.core.business_diagnosis import collect_business_context
-        from src.core.strategy_governance import (
-            collect_strategy_governance, strategy_governance_fingerprint,
-            strategy_governance_from_diagnosis_snapshot,
-        )
-        latest_diagnosis = conn.execute(
-            "SELECT * FROM business_diagnosis_reports ORDER BY version_no DESC LIMIT 1"
-        ).fetchone()
-        if latest_diagnosis is None or latest_diagnosis["status"] != "confirmed":
-            raise HTTPException(409, "请先完成并确认经营分析报告，再制定母计划")
-        try:
-            diagnosis_snapshot = json.loads(latest_diagnosis["source_snapshot_json"])
-        except (TypeError, ValueError, KeyError) as exc:
-            raise HTTPException(409, "经营分析报告快照损坏，请重新分析并确认") from exc
+        from src.core.strategy_governance import collect_strategy_governance
+        # Manual drafting is the no-model fallback: it does not require an AI
+        # diagnosis, but shares the same North Star and resource-baseline gate.
         current_governance = collect_strategy_governance(conn)
-        diagnosed_governance = strategy_governance_from_diagnosis_snapshot(diagnosis_snapshot)
-        if diagnosed_governance is not None:
-            sources_match = strategy_governance_fingerprint(diagnosed_governance) == strategy_governance_fingerprint(current_governance)
-        else:
-            current_sources = collect_business_context(conn, _g()["cfg"])
-            sources_match = latest_diagnosis["source_fingerprint"] == current_sources["fingerprint"]
-        if not sources_match:
-            raise HTTPException(409, "账号组北极星或资源基线已变化，请重新分析并确认经营分析报告")
         if not current_governance.get("north_star"):
             raise HTTPException(409, "请先在计划管理中建立并确认账号组北极星，再创建母计划")
         pvm = _g()["plan_version_manager"]
