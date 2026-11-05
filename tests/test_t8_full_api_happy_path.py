@@ -137,6 +137,28 @@ async def test_confirmed_diagnosis_to_production_task_api_happy_path(workflow_cl
     assert subplan.status_code == 201, subplan.text
     subplan_id = subplan.json()["subplan"]["id"]
     subplan_version_id = subplan.json()["draft"]["id"]
+    stage_id = subplan.json()["draft"]["stages"][0]["id"]
+    goal = client.post(f"/api/subplans/{subplan_id}/goals", json={
+        "version_id": subplan_version_id,
+        "goal_type": "quantity",
+        "title": "T8-E 图文内容产出",
+        "target_count": 1,
+        "acceptance_criteria": "创建一条完整归属的生产任务",
+        "stage_id": stage_id,
+        "requires_production": True,
+    })
+    assert goal.status_code == 201, goal.text
+    goal_id = goal.json()["goal"]["id"]
+    production_plan = client.put(
+        f"/api/subplans/{subplan_id}/goals/{goal_id}/production-plan",
+        json={
+            "content_direction": "使用已授权图文素材",
+            "suggested_count": 1,
+            "execution_conditions": "素材授权和隐私检查通过",
+            "acceptance_relation": "生产任务绑定当前子目标",
+        },
+    )
+    assert production_plan.status_code == 200, production_plan.text
     approved_subplan = client.post(f"/api/subplans/{subplan_id}/review", json={
         "version_id": subplan_version_id, "action": "approve",
     })
