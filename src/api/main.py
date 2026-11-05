@@ -2971,13 +2971,9 @@ def _register_routes(app: FastAPI) -> None:
                 from src.core.media_quality import score_image
                 from src.core.image_generation_budget import image_generation_run, article_budget
                 with image_generation_run(
-                    max_calls=getattr(cfg.media_generation, "max_api_calls_per_run", 30),
-                    timeout_seconds=getattr(cfg.media_generation, "hard_timeout_seconds", 300),
                     max_concurrency=getattr(cfg.media_generation, "max_concurrency", 2),
                 ) as budget:
                     with article_budget(
-                        max_calls=getattr(cfg.media_generation, "max_api_calls_per_article", 27),
-                        page_max_calls=getattr(cfg.media_generation, "max_api_calls_per_page", 3),
                     ):
                         raw, mime_type, suffix, width, height = generate_image_bytes(
                             final_prompt, model=model, size=size, source_path=source_path,
@@ -6949,8 +6945,6 @@ def _register_routes(app: FastAPI) -> None:
                 conn.commit()
                 from src.core.image_generation_budget import image_generation_run
                 with image_generation_run(
-                    max_calls=getattr(cfg.media_generation, "max_api_calls_per_run", 30),
-                    timeout_seconds=getattr(cfg.media_generation, "hard_timeout_seconds", 300),
                     max_concurrency=getattr(cfg.media_generation, "max_concurrency", 2),
                 ) as budget:
                     generated = revise_visual_background(
@@ -7519,8 +7513,6 @@ def _register_routes(app: FastAPI) -> None:
             conn.commit()
             from src.core.image_generation_budget import image_generation_run
             with image_generation_run(
-                max_calls=getattr(cfg.media_generation, "max_api_calls_per_run", 30),
-                timeout_seconds=getattr(cfg.media_generation, "hard_timeout_seconds", 300),
                 max_concurrency=getattr(cfg.media_generation, "max_concurrency", 2),
             ) as budget:
                 paths, pages = generate_ai_card_set(
