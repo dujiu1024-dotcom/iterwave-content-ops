@@ -108,6 +108,7 @@ def _db(path=None):
             event_type TEXT NOT NULL, from_version_id INTEGER, to_version_id INTEGER NOT NULL,
             change_reason TEXT NOT NULL DEFAULT '', before_snapshot_json TEXT, after_snapshot_json TEXT NOT NULL,
             affected_tasks_json TEXT NOT NULL DEFAULT '{}', actor TEXT NOT NULL DEFAULT 'system',
+            initiating_actor TEXT, executing_actor TEXT, tenant_id TEXT, queue_task_id TEXT,
             created_at TEXT NOT NULL
         );
         CREATE TRIGGER trg_plan_change_audit_no_update
@@ -1357,3 +1358,47 @@ def test_restore_legacy_master_does_not_attach_current_north_star():
     fresh = store.create_master_draft(_plan(6))
     assert fresh["north_star_version_id"] == 1
     assert fresh["north_star_attribution_status"] == "attributed"
+
+
+
+def test_plan_change_audit_persists_trusted_worker_identity():
+    from src.core.task_context import bind_task_identity
+
+    conn = _db()
+    store = PlanVersionStore(conn)
+    with bind_task_identity(
+        initiating_actor="session:plan-author",
+        executing_actor="service:global-task-worker",
+        tenant_id="tenant-plan-a",
+        task_id="queue-plan-123",
+    ):
+        draft = store.create_master_draft(_plan(), author="session:plan-author")
+
+    row = conn.execute(
+        """SELECT actor,initiating_actor,executing_actor,tenant_id,queue_task_id
+           FROM plan_change_audit WHERE entity_type='master_plan' AND to_version_id=?""",
+        (draft["id"],),
+    ).fetchone()
+    assert dict(row) == {
+        "actor": "session:plan-author",
+        "initiating_actor": "session:plan-author",
+        "executing_actor": "service:global-task-worker",
+        "tenant_id": "tenant-plan-a",
+        "queue_task_id": "queue-plan-123",
+    }
+
+
+def test_plan_change_audit_does_not_invent_worker_identity_for_direct_store_calls():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    draft = store.create_master_draft(_plan())
+
+    row = conn.execute(
+        """SELECT actor,initiating_actor,executing_actor,tenant_id,queue_task_id
+           FROM plan_change_audit WHERE entity_type='master_plan' AND to_version_id=?""",
+        (draft["id"],),
+    ).fetchone()
+    assert row["actor"] == "user"
+    assert tuple(row[key] for key in (
+        "initiating_actor", "executing_actor", "tenant_id", "queue_task_id",
+    )) == (None, None, None, None)
