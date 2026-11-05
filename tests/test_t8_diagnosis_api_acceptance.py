@@ -123,7 +123,7 @@ def test_diagnosis_model_failure_does_not_supersede_existing_report(diagnosis_cl
     assert after[0]["status"] == "confirmed"
 
 
-def test_master_plan_api_blocks_unconfirmed_and_stale_diagnosis(diagnosis_client, monkeypatch):
+def test_manual_master_plan_fallback_needs_north_star_but_not_ai_diagnosis(diagnosis_client, monkeypatch):
     from src.api import business_diagnosis
 
     client, conn = diagnosis_client
@@ -135,29 +135,50 @@ def test_master_plan_api_blocks_unconfirmed_and_stale_diagnosis(diagnosis_client
     }
     blocked = client.post("/api/plans", json=payload)
     assert blocked.status_code == 409
-    assert "确认 AI 经营分析报告" in blocked.json()["detail"]
+    assert "账号组北极星" in blocked.json()["detail"]
     assert conn.execute("SELECT COUNT(*) FROM master_plan_versions").fetchone()[0] == 0
 
-    monkeypatch.setattr(
-        business_diagnosis, "generate_diagnosis",
-        _async_fake_diagnosis,
-    )
+    north_star = client.put("/api/north-star", json={
+        "change_reason": "验证无模型人工创建门禁",
+        "snapshot": {
+            "positioning": "专业知识型个人IP",
+            "business_direction": "围绕专业服务建立信任",
+            "target_users": "有明确需求的目标客户",
+            "core_value": "提供可验证的专业解决方案",
+            "long_term_content_direction": "案例、方法论和实操经验",
+            "business_model": "服务型业务",
+            "platform_relationships": "小红书获客，公众号沉淀",
+            "long_term_goals": "建立稳定的专业服务品牌",
+        },
+    })
+    assert north_star.status_code == 200, north_star.text
+
+    # Manual drafting is a real no-model fallback and does not require an AI diagnosis.
+    manual = client.post("/api/plans", json=payload)
+    assert manual.status_code == 200, manual.text
+    assert manual.json()["draft"]["source"] == "user"
+    assert manual.json()["effective"] is False
+
+    # AI generation remains diagnosis-gated and refuses a strategic source change.
+    no_diagnosis = client.post("/api/plans/ai-draft")
+    assert no_diagnosis.status_code == 409
+    assert "经营诊断报告" in no_diagnosis.json()["detail"]
+
+    monkeypatch.setattr(business_diagnosis, "generate_diagnosis", _async_fake_diagnosis)
     analyzed = client.post("/api/business-diagnosis/analyze")
     report_id = analyzed.json()["report"]["id"]
     assert client.post(f"/api/business-diagnosis/{report_id}/confirm").status_code == 200
-
     changed = client.put(
         "/api/business-profile",
-        json={"business_name": "过期诊断测试", "change_note": "invalidate diagnosis"},
+        json={"business_name": "战略资料已变化", "change_note": "invalidate AI diagnosis"},
     )
     assert changed.status_code == 200
-    stale = client.post("/api/plans", json=payload)
+    stale = client.post("/api/plans/ai-draft")
     assert stale.status_code == 409
-    assert "已变化" in stale.json()["detail"]
-    assert conn.execute("SELECT COUNT(*) FROM master_plan_versions").fetchone()[0] == 0
+    assert "北极星或资源基线已变化" in stale.json()["detail"]
     assert conn.execute(
         "SELECT status FROM business_diagnosis_reports WHERE id=?", (report_id,)
-    ).fetchone()["status"] == "stale"
+    ).fetchone()["status"] == "confirmed"
 
 
 def _create_provenance_valid_task(conn):
