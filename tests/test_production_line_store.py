@@ -9,6 +9,7 @@ from src.core.production_line_store import ProductionLineError, ProductionLineSt
 
 MIGRATION = (Path(__file__).resolve().parents[1] / "migrations" / "139_production_line_lifecycle.sql").read_text(encoding="utf-8")
 AUDIT_MIGRATION = (Path(__file__).resolve().parents[1] / "migrations" / "145_plan_change_audit.sql").read_text(encoding="utf-8")
+ACTOR_AUDIT_MIGRATION = (Path(__file__).resolve().parents[1] / "migrations" / "158_plan_change_audit_actor_context.sql").read_text(encoding="utf-8")
 
 
 @pytest.fixture()
@@ -43,6 +44,7 @@ def conn():
     """)
     db.executescript(MIGRATION)
     db.executescript(AUDIT_MIGRATION)
+    db.executescript(ACTOR_AUDIT_MIGRATION)
     db.execute("INSERT INTO master_plan_versions VALUES(1,'effective')")
     db.execute("INSERT INTO sub_plans VALUES('sub-1',1,'xhs','测试子计划','active',10)")
     db.execute("INSERT INTO sub_plan_versions VALUES(10,'sub-1',1,1,'effective')")
