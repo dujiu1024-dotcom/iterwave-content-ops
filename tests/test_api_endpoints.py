@@ -50,6 +50,71 @@ def client(cfg, conn, seed, test_auth):
 
 
 # ---------------------------------------------------------------- R-2 采纳缺口
+def test_failed_metrics_can_be_explicitly_recollected_once(client, monkeypatch):
+    tc, conn, _ = client
+    now = datetime.now().isoformat(sep=" ", timespec="seconds")
+    conn.execute(
+        "INSERT INTO contents (id,title,body,platform,status,created_at) VALUES "
+        "('recollect-content','采集失败内容','正文','xhs','published',?)",
+        (now,),
+    )
+    conn.execute(
+        "INSERT INTO drafts (id,content_id,platform,draft_id,status,user_confirmed_at,created_at) "
+        "VALUES ('recollect-draft','recollect-content','xhs','platform-id','failed',?,?)",
+        (now, now),
+    )
+    conn.commit()
+    scheduled = []
+    class FakeScheduler:
+        task_queue = None
+        tenant_id = None
+        def schedule_data_fetch(self, draft_id, run_at, attempt=1):
+            scheduled.append((draft_id, attempt))
+    api_main._g_ctx["scheduler"] = FakeScheduler()
+
+    response = tc.post("/api/drafts/recollect-draft/metrics/recollect")
+    assert response.status_code == 200, response.text
+    assert response.json()["recollect_scheduled"] is True
+    assert scheduled == [("recollect-draft", 1)]
+    assert conn.execute(
+        "SELECT status FROM drafts WHERE id='recollect-draft'"
+    ).fetchone()[0] == "data_fetching"
+
+    duplicate = tc.post("/api/drafts/recollect-draft/metrics/recollect")
+    assert duplicate.status_code == 409
+    assert scheduled == [("recollect-draft", 1)]
+
+
+def test_failed_metrics_recollection_requires_confirmed_non_wechat_draft(client, monkeypatch):
+    tc, conn, _ = client
+    now = datetime.now().isoformat(sep=" ", timespec="seconds")
+    conn.execute(
+        "INSERT INTO contents (id,title,body,platform,status,created_at) VALUES "
+        "('recollect-unconfirmed','未确认内容','正文','xhs','published',?)",
+        (now,),
+    )
+    conn.execute(
+        "INSERT INTO drafts (id,content_id,platform,draft_id,status,created_at) "
+        "VALUES ('recollect-unconfirmed-draft','recollect-unconfirmed','xhs','platform-id','failed',?)",
+        (now,),
+    )
+    conn.execute(
+        "INSERT INTO contents (id,title,body,platform,status,created_at) VALUES "
+        "('recollect-wechat','视频号内容','正文','wechat_channels','published',?)",
+        (now,),
+    )
+    conn.execute(
+        "INSERT INTO drafts (id,content_id,platform,draft_id,status,user_confirmed_at,created_at) "
+        "VALUES ('recollect-wechat-draft','recollect-wechat','wechat_channels','platform-id','failed',?,?)",
+        (now, now),
+    )
+    conn.commit()
+    response = tc.post("/api/drafts/recollect-unconfirmed-draft/metrics/recollect")
+    assert response.status_code == 409
+    response = tc.post("/api/drafts/recollect-wechat-draft/metrics/recollect")
+    assert response.status_code == 409
+
+
 def test_auth_middleware_runs_password_verification_off_event_loop(client, monkeypatch):
     tc, _, _ = client
     observed = {}
