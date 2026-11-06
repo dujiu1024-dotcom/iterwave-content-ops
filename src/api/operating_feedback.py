@@ -110,7 +110,7 @@ def build_operating_feedback_router(get_runtime) -> APIRouter:
         return {"items": list_close_events(ctx["conn"], tenant_id=tenant_id(ctx), limit=limit)}
 
     @router.post("/api/production-line-close-events/claim")
-    def claim_production_line_close_events(body: dict):
+    def claim_production_line_close_events(body: dict, request: Request):
         ctx = runtime()
         try:
             with ctx["conn"]:
@@ -119,12 +119,13 @@ def build_operating_feedback_router(get_runtime) -> APIRouter:
                     worker_id=str(body.get("worker_id") or ""),
                     limit=int(body.get("limit") or 10),
                     lease_seconds=int(body.get("lease_seconds") or 120),
+                    actor=auth.audit_actor(request),
                 )}
         except OperatingFeedbackError as exc:
             fail(exc)
 
     @router.post("/api/production-line-close-events/{event_id}/ack")
-    def acknowledge_production_line_close(event_id: str, body: dict):
+    def acknowledge_production_line_close(event_id: str, body: dict, request: Request):
         ctx = runtime()
         succeeded = body.get("succeeded")
         if not isinstance(succeeded, bool):
@@ -134,12 +135,13 @@ def build_operating_feedback_router(get_runtime) -> APIRouter:
                 return acknowledge_close_event(
                     ctx["conn"], event_id, succeeded=succeeded,
                     error=str(body.get("error") or ""), tenant_id=tenant_id(ctx),
+                    actor=auth.audit_actor(request),
                 )
         except OperatingFeedbackError as exc:
             fail(exc)
 
     @router.post("/api/production-line-close-events/{event_id}/retry")
-    def retry_production_line_close(event_id: str):
+    def retry_production_line_close(event_id: str, request: Request):
         ctx = runtime()
         event = ctx["conn"].execute(
             "SELECT payload_json FROM production_line_close_outbox WHERE event_id=?",
@@ -149,7 +151,7 @@ def build_operating_feedback_router(get_runtime) -> APIRouter:
             raise HTTPException(404, "发布关闭事件不存在")
         try:
             with ctx["conn"]:
-                return retry_close_event(ctx["conn"], event_id, tenant_id=tenant_id(ctx))
+                return retry_close_event(ctx["conn"], event_id, tenant_id=tenant_id(ctx), actor=auth.audit_actor(request))
         except OperatingFeedbackError as exc:
             fail(exc)
 

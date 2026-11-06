@@ -48,15 +48,32 @@ class QueuedTask:
     retry_of_task_id: str | None = None
     retry_confirmed_by: str | None = None
     retry_confirmation_note: str | None = None
+    retry_confirmation_executing_actor: str | None = None
+    retry_confirmation_queue_task_id: str | None = None
     resolution_action: str | None = None
     resolution_actor: str | None = None
     resolution_note: str | None = None
     resolution_at: str | None = None
+    resolution_executing_actor: str | None = None
+    resolution_tenant_id: str | None = None
+    resolution_queue_task_id: str | None = None
     progress: dict[str, Any] | None = None
 
 
 class TaskQueueError(RuntimeError):
     """任务队列操作失败。"""
+
+
+def _audit_execution_context(actor: str, tenant_id: str | None) -> dict[str, str | None]:
+    from src.core.task_context import current_task_identity
+
+    identity = current_task_identity()
+    return {
+        "actor": str(identity.get("initiating_actor") or actor or "system:legacy-unattributed")[:160],
+        "executing_actor": str(identity.get("executing_actor") or "service:task-queue")[:160],
+        "tenant_id": str(tenant_id or identity.get("tenant_id") or "legacy"),
+        "queue_task_id": identity.get("task_id") or None,
+    }
 
 
 class GlobalTaskQueue:
@@ -174,6 +191,17 @@ class GlobalTaskQueue:
                     conn.execute("ALTER TABLE global_task_queue ADD COLUMN retry_confirmation_note TEXT")
                 if "progress_json" not in columns:
                     conn.execute("ALTER TABLE global_task_queue ADD COLUMN progress_json TEXT")
+                if "retry_confirmation_executing_actor" not in columns:
+                    conn.execute("ALTER TABLE global_task_queue ADD COLUMN retry_confirmation_executing_actor TEXT")
+                if "retry_confirmation_queue_task_id" not in columns:
+                    conn.execute("ALTER TABLE global_task_queue ADD COLUMN retry_confirmation_queue_task_id TEXT")
+                for table in ("global_task_actions", "global_task_admin_audit"):
+                    existing_columns = {
+                        row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+                    }
+                    for column in ("executing_actor", "tenant_id", "queue_task_id"):
+                        if column not in existing_columns:
+                            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
                 conn.execute(
                     "CREATE UNIQUE INDEX IF NOT EXISTS uq_global_task_retry_parent "
                     "ON global_task_queue(retry_of_task_id) WHERE retry_of_task_id IS NOT NULL"
@@ -224,10 +252,15 @@ class GlobalTaskQueue:
             retry_of_task_id=row["retry_of_task_id"],
             retry_confirmed_by=row["retry_confirmed_by"],
             retry_confirmation_note=row["retry_confirmation_note"],
+            retry_confirmation_executing_actor=row["retry_confirmation_executing_actor"] if "retry_confirmation_executing_actor" in row.keys() else None,
+            retry_confirmation_queue_task_id=row["retry_confirmation_queue_task_id"] if "retry_confirmation_queue_task_id" in row.keys() else None,
             resolution_action=row["resolution_action"] if "resolution_action" in row.keys() else None,
             resolution_actor=row["resolution_actor"] if "resolution_actor" in row.keys() else None,
             resolution_note=row["resolution_note"] if "resolution_note" in row.keys() else None,
             resolution_at=row["resolution_at"] if "resolution_at" in row.keys() else None,
+            resolution_executing_actor=row["resolution_executing_actor"] if "resolution_executing_actor" in row.keys() else None,
+            resolution_tenant_id=row["resolution_tenant_id"] if "resolution_tenant_id" in row.keys() else None,
+            resolution_queue_task_id=row["resolution_queue_task_id"] if "resolution_queue_task_id" in row.keys() else None,
             progress=(
                 json.loads(row["progress_json"])
                 if "progress_json" in row.keys() and row["progress_json"]
@@ -540,6 +573,8 @@ class GlobalTaskQueue:
         try:
             conn.execute("BEGIN IMMEDIATE")
             acted_at = _stamp()
+            task = conn.execute("SELECT tenant_id FROM global_task_queue WHERE task_id=?", (task_id,)).fetchone()
+            audit = _audit_execution_context(actor, task["tenant_id"] if task else None)
             cursor = conn.execute(
                 "UPDATE global_task_queue SET status='cancelled',finished_at=? "
                 "WHERE task_id=? AND status='queued'",
@@ -547,9 +582,11 @@ class GlobalTaskQueue:
             )
             if cursor.rowcount == 1:
                 conn.execute(
-                    "INSERT INTO global_task_admin_audit(task_id,action,actor,acted_at,details_json) "
-                    "VALUES(?,?,?,?,?)",
-                    (task_id, "cancel", actor, acted_at, "{}"),
+                    """INSERT INTO global_task_admin_audit(
+                        task_id,action,actor,acted_at,details_json,executing_actor,tenant_id,queue_task_id
+                    ) VALUES(?,?,?,?,?,?,?,?)""",
+                    (task_id, "cancel", audit["actor"], acted_at, "{}", audit["executing_actor"],
+                     audit["tenant_id"], audit["queue_task_id"]),
                 )
             conn.commit()
             return cursor.rowcount == 1
@@ -635,7 +672,9 @@ class GlobalTaskQueue:
         try:
             return self._decode(conn.execute(
                 "SELECT q.*, a.action AS resolution_action, a.actor AS resolution_actor, "
-                "a.note AS resolution_note, a.acted_at AS resolution_at "
+                "a.note AS resolution_note, a.acted_at AS resolution_at, "
+                "a.executing_actor AS resolution_executing_actor, a.tenant_id AS resolution_tenant_id, "
+                "a.queue_task_id AS resolution_queue_task_id "
                 "FROM global_task_queue q LEFT JOIN global_task_actions a ON a.task_id=q.task_id "
                 "WHERE q.task_id=?", (task_id,)
             ).fetchone())
@@ -647,7 +686,7 @@ class GlobalTaskQueue:
         conn = self._connect()
         try:
             rows = conn.execute(
-                "SELECT id, task_id, action, actor, acted_at, details_json "
+                "SELECT id, task_id, action, actor, acted_at, details_json, executing_actor, tenant_id, queue_task_id "
                 "FROM global_task_admin_audit WHERE task_id=? ORDER BY acted_at DESC, id DESC",
                 (task_id,),
             ).fetchall()
@@ -661,6 +700,8 @@ class GlobalTaskQueue:
                     "id": int(row["id"]), "task_id": row["task_id"],
                     "action": row["action"], "actor": row["actor"],
                     "acted_at": row["acted_at"], "details": details,
+                    "executing_actor": row["executing_actor"], "tenant_id": row["tenant_id"],
+                    "queue_task_id": row["queue_task_id"],
                 })
             return result
         finally:
@@ -682,14 +723,16 @@ class GlobalTaskQueue:
         try:
             conn.execute("BEGIN IMMEDIATE")
             task = conn.execute(
-                "SELECT status FROM global_task_queue WHERE task_id=?", (task_id,)
+                "SELECT status,tenant_id FROM global_task_queue WHERE task_id=?", (task_id,)
             ).fetchone()
             if task is None:
                 raise TaskQueueError("任务不存在")
             if task["status"] not in ("failed", "interrupted"):
                 raise TaskQueueError("只有 failed/interrupted 任务可以处理")
+            audit = _audit_execution_context(actor, task["tenant_id"])
             existing = conn.execute(
-                "SELECT action, actor, note, acted_at FROM global_task_actions WHERE task_id=?",
+                "SELECT action, actor, note, acted_at, executing_actor, tenant_id, queue_task_id "
+                "FROM global_task_actions WHERE task_id=?",
                 (task_id,),
             ).fetchone()
             if existing is not None:
@@ -699,17 +742,26 @@ class GlobalTaskQueue:
                 return dict(existing), False
             acted_at = _stamp()
             conn.execute(
-                "INSERT INTO global_task_actions(task_id,action,actor,note,acted_at) VALUES(?,?,?,?,?)",
-                (task_id, action, actor, note, acted_at),
+                """INSERT INTO global_task_actions(
+                    task_id,action,actor,note,acted_at,executing_actor,tenant_id,queue_task_id
+                ) VALUES(?,?,?,?,?,?,?,?)""",
+                (task_id, action, audit["actor"], note, acted_at, audit["executing_actor"],
+                 audit["tenant_id"], audit["queue_task_id"]),
             )
             conn.execute(
-                "INSERT INTO global_task_admin_audit(task_id,action,actor,acted_at,details_json) "
-                "VALUES(?,?,?,?,?)",
-                (task_id, f"resolve_{action}", actor, acted_at,
-                 json.dumps({"note": note}, ensure_ascii=False)),
+                """INSERT INTO global_task_admin_audit(
+                    task_id,action,actor,acted_at,details_json,executing_actor,tenant_id,queue_task_id
+                ) VALUES(?,?,?,?,?,?,?,?)""",
+                (task_id, f"resolve_{action}", audit["actor"], acted_at,
+                 json.dumps({"note": note}, ensure_ascii=False), audit["executing_actor"],
+                 audit["tenant_id"], audit["queue_task_id"]),
             )
             conn.commit()
-            return {"action": action, "actor": actor, "note": note, "acted_at": acted_at}, True
+            return {
+                "action": action, "actor": audit["actor"], "note": note, "acted_at": acted_at,
+                "executing_actor": audit["executing_actor"], "tenant_id": audit["tenant_id"],
+                "queue_task_id": audit["queue_task_id"],
+            }, True
         except Exception:
             conn.rollback()
             raise
@@ -767,6 +819,7 @@ class GlobalTaskQueue:
                 if active is not None:
                     raise TaskQueueError("相同业务对象已有活动任务，拒绝重复恢复")
 
+            audit = _audit_execution_context(actor, parent["tenant_id"])
             now = _stamp()
             queue_order = int(conn.execute(
                 "SELECT COALESCE(MAX(queue_order), 0) + 1 FROM global_task_queue"
@@ -776,22 +829,25 @@ class GlobalTaskQueue:
                 "INSERT INTO global_task_queue("
                 "queue_order,task_id,task_type,tenant_id,aggregate_id,payload_json,available_at,"
                 "status,created_at,max_attempts,retry_of_task_id,retry_confirmed_by,"
-                "retry_confirmation_note) VALUES(?,?,?,?,?,?,?,'queued',?,1,?,?,?)",
+                "retry_confirmation_note,retry_confirmation_executing_actor,retry_confirmation_queue_task_id) "
+                "VALUES(?,?,?,?,?,?,?,'queued',?,1,?,?,?,?,?)",
                 (
                     queue_order, retry_id, parent["task_type"], parent["tenant_id"],
                     parent["aggregate_id"], parent["payload_json"], now, now,
-                    task_id, actor, note,
+                    task_id, audit["actor"], note, audit["executing_actor"], audit["queue_task_id"],
                 ),
             )
             row = conn.execute(
                 "SELECT * FROM global_task_queue WHERE task_id=?", (retry_id,)
             ).fetchone()
             conn.execute(
-                "INSERT INTO global_task_admin_audit(task_id,action,actor,acted_at,details_json) "
-                "VALUES(?,?,?,?,?)",
-                (task_id, "retry", actor, now,
+                """INSERT INTO global_task_admin_audit(
+                    task_id,action,actor,acted_at,details_json,executing_actor,tenant_id,queue_task_id
+                ) VALUES(?,?,?,?,?,?,?,?)""",
+                (task_id, "retry", audit["actor"], now,
                  json.dumps({"retry_task_id": retry_id, "confirmed_not_executed": True,
-                             "confirmation_note": note}, ensure_ascii=False)),
+                             "confirmation_note": note}, ensure_ascii=False),
+                 audit["executing_actor"], audit["tenant_id"], audit["queue_task_id"]),
             )
             conn.commit()
             task = self._decode(row)
@@ -902,7 +958,9 @@ class GlobalTaskQueue:
             ).fetchone()
             rows = conn.execute(
                 f"SELECT q.*, a.action AS resolution_action, a.actor AS resolution_actor, "
-                f"a.note AS resolution_note, a.acted_at AS resolution_at "
+                f"a.note AS resolution_note, a.acted_at AS resolution_at, "
+                f"a.executing_actor AS resolution_executing_actor, a.tenant_id AS resolution_tenant_id, "
+                f"a.queue_task_id AS resolution_queue_task_id "
                 f"FROM global_task_queue q LEFT JOIN global_task_actions a ON a.task_id=q.task_id "
                 f"WHERE {where} ORDER BY q.queue_order {'ASC' if scope == 'active' else 'DESC'} LIMIT ? OFFSET ?",
                 (*params, page_size, offset),

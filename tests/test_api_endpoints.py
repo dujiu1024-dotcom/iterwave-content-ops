@@ -2771,6 +2771,14 @@ def test_global_task_resolution_api_records_actor_and_keeps_execution_status_imm
     assert task.status == "failed"
     assert task.resolution_action == "handled"
     assert task.resolution_actor == body["actor"]
+    assert task.resolution_executing_actor == "service:api"
+    assert task.resolution_tenant_id == "tenant-a"
+    assert task.resolution_queue_task_id is None
+    audit = queue.list_admin_audit(original.task_id)
+    assert audit[0]["actor"] == body["actor"]
+    assert audit[0]["executing_actor"] == "service:api"
+    assert audit[0]["tenant_id"] == "tenant-a"
+    assert audit[0]["queue_task_id"] is None
 
     repeated = tc.post(f"/api/task-queue/{original.task_id}/resolve", json={
         "action": "handled", "note": "重复提交不能覆盖原始审计说明",
@@ -4821,7 +4829,8 @@ def test_master_plan_create_and_review_audit_authenticated_session_actor(client,
     assert reviewed.status_code == 200, reviewed.text
 
     events = conn.execute(
-        """SELECT event_type,actor FROM plan_change_audit
+        """SELECT event_type,actor,initiating_actor,executing_actor,tenant_id,queue_task_id
+           FROM plan_change_audit
            WHERE entity_type='master_plan' AND entity_id=?
            ORDER BY id""",
         (str(version_id),),
@@ -4833,6 +4842,10 @@ def test_master_plan_create_and_review_audit_authenticated_session_actor(client,
     assert event_actors["version_approved"] == event_actors["draft_created"]
     assert event_actors["draft_created"] != "web-ui"
     assert event_actors["version_approved"] != "user"
+    assert all(row["initiating_actor"] == row["actor"] for row in events)
+    assert all(row["executing_actor"] == "service:api" for row in events)
+    assert all(row["tenant_id"] == "default" for row in events)
+    assert all(row["queue_task_id"] is None for row in events)
 
 
 def test_round_run_queue_persists_authenticated_initiating_actor(client, tmp_path, monkeypatch):
