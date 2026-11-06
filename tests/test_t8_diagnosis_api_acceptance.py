@@ -452,3 +452,15 @@ def test_business_summary_includes_manual_metric_facts(diagnosis_client, seed):
     assert submitted.json()["draft_status"] == "published"
     assert conn.execute("SELECT status FROM drafts WHERE id=?", (draft_id,)).fetchone()[0] == "published"
     assert RoundStateMachine(conn).decide_analyzing_exit(round_id) == "completed"
+
+    from src.core.spiral import SpiralEngine
+    spiral = SpiralEngine(seed.cfg if hasattr(seed, "cfg") else None, conn)
+    review_metrics = spiral._fetch_published_metrics(round_id)
+    assert len(review_metrics) == 1
+    assert review_metrics[0]["manual_metrics"] is True
+    assert review_metrics[0]["views"] == 1234
+    assert review_metrics[0]["likes"] == 87
+    evidence = spiral._build_evidence(review_metrics)
+    assert evidence["manual_metric_sample_count"] == 1
+    assert evidence["views_total"] == 1234
+    assert evidence["likes_total"] == 87
