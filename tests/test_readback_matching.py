@@ -52,3 +52,23 @@ def test_readback_failure_message_does_not_expose_internal_path_or_token(cfg, co
     assert snapshot.error_msg == "平台作品列表读取不可用，请检查登录状态或服务状态后重试"
     assert "/srv/iterwave" not in snapshot.error_msg
     assert "secret" not in snapshot.error_msg
+
+def test_snapshot_from_work_preserves_platform_work_identity():
+    from src.adapters.base import Platform
+    from src.adapters.readback import snapshot_from_work
+
+    snapshot = snapshot_from_work(
+        Platform.XHS,
+        {
+            "content_id": "published-work-123",
+            "url": "https://www.xiaohongshu.com/explore/published-work-123",
+            "stats": {
+                "views": 100, "likes": 10, "collects": 5,
+                "comments": 5, "shares": 2,
+            },
+        },
+        "{}",
+    )
+
+    assert snapshot.work_id == "published-work-123"
+    assert snapshot.work_url == "https://www.xiaohongshu.com/explore/published-work-123"
