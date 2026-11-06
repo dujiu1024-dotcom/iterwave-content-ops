@@ -509,12 +509,15 @@ class Database:
     # 验证工具
     # ------------------------------------------------------------------
 
-    def verify_schema(self, full_integrity: bool = False) -> dict:
+    def verify_schema(
+        self, full_integrity: bool = False, include_all_violation_rows: bool = False,
+    ) -> dict:
         """Audit required schema objects and SQLite integrity.
 
         quick_check is the inexpensive default for routine health checks.
         Set full_integrity=True during deployment/upgrade acceptance to run
-        SQLite's full integrity_check.
+        SQLite's full integrity_check. Set include_all_violation_rows=True only
+        for explicit audit export; routine health checks retain five examples.
         """
         conn = self.connect()
         try:
@@ -1734,8 +1737,12 @@ class Database:
             governance_data_violation_examples = {}
             for check_name, example_sql in governance_example_queries.items():
                 if governance_data_violations.get(check_name, 0) > 0:
+                    detail_sql = (
+                        example_sql.replace("LIMIT 5", "")
+                        if include_all_violation_rows else example_sql
+                    )
                     governance_data_violation_examples[check_name] = [
-                        dict(row) for row in conn.execute(example_sql).fetchall()
+                        dict(row) for row in conn.execute(detail_sql).fetchall()
                     ]
             result["governance_data_violation_examples"] = governance_data_violation_examples
 

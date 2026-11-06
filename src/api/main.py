@@ -2920,6 +2920,26 @@ def _register_routes(app: FastAPI) -> None:
         return {"suggestion_key": suggestion_key, **dict(row)}
 
     # --- 健康检查 ---
+    @app.get("/api/health/audit-export")
+    def export_health_audit():
+        """导出当前账号组的完整治理数据违规明细；只读，不执行自动修复。"""
+        cfg = _g().get("cfg")
+        if cfg is None:
+            raise HTTPException(503, "当前账号组数据库配置不可用，无法导出完整审计明细")
+        try:
+            from src.core.db import Database
+            report = Database(cfg).verify_schema(include_all_violation_rows=True)
+        except Exception as exc:
+            raise HTTPException(503, f"完整性审计导出失败：{type(exc).__name__}") from exc
+        return {
+            "scope": "current_account_group",
+            "generated_at": _storage_now().isoformat(),
+            "read_only": True,
+            "repair_applied": False,
+            "report": report,
+        }
+
+
     @app.get("/health")
     @app.get("/api/health")
     def health():
