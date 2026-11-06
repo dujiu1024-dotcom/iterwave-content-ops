@@ -370,7 +370,7 @@ class SchedulerEngine:
         """用户已在平台发布（手动确认 / 只读轮询识别）的统一入口：
 
         1. 草稿 draft_saved → user_published（幂等）
-        2. 回写平台笔记链接（被动评论轮询靠它定位笔记）
+        2. 回写平台作品 ID/链接（作品 ID 用于后续稳定匹配，被动评论轮询使用链接）
         3. 注册发布后 metrics_initial_delay_hours 的一次性数据采集
         4. 首篇确认 → 轮次 awaiting_publish → collecting_metrics
         手动确认和轮询识别都只调它，保证两条路径行为一致。
@@ -642,6 +642,20 @@ class SchedulerEngine:
                 pending += 1
                 continue
             if fetch_status in ("failed", "parse_error"):
+                # 指标解析失败不否定已匹配到的作品身份：先持久化作品 ID，
+                # 后续采集按 ID 重试，避免标题变更/重名导致作品永久失配。
+                work_id = getattr(snap, "work_id", None) or None
+                work_url = getattr(snap, "work_url", None) or None
+                if work_id and self.on_user_published(
+                    row["id"], via="30min 只读轮询已匹配平台作品",
+                    note_url=work_url, platform_work_id=work_id,
+                    platform_work_url=work_url,
+                ):
+                    confirmed += 1
+                    errors.append(
+                        f"{platform.value} 已确认作品身份，但指标解析仍为 {fetch_status}；将按作品 ID 后续补采"
+                    )
+                    continue
                 errors.append(
                     f"{platform.value} 发布状态读取未完成（{fetch_status}）"
                 )
