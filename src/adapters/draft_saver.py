@@ -140,8 +140,14 @@ async def _install_publish_network_guard(target: Page | BrowserContext) -> None:
 
         async def guard(route):
             request = route.request
+            # post_data 在某些 Python/Playwright 版本组合下访问 binary 请求会炸（UnicodeDecodeError），
+            # 用 try/except 兜底；拿不到 body 时只用 URL 判断 publish（对草稿保存路径足够）。
+            try:
+                body = request.post_data
+            except Exception:
+                body = None
             if _is_publish_network_request(
-                request.method, request.url, getattr(request, "post_data", None),
+                request.method, request.url, body,
             ):
                 parsed = urlsplit(request.url)
                 logger.critical(
