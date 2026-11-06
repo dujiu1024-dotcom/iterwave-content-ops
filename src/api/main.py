@@ -5937,6 +5937,27 @@ def _register_routes(app: FastAPI) -> None:
         return {"draft": draft, "impact": impact,
                 "requires_review": True, "effective": False}
 
+    @app.patch("/api/plans/{version_id}/metadata")
+    def edit_master_plan_metadata(version_id: int, req: dict, request: Request):
+        """编辑草稿的有效元数据；AI 原始输出保持不可变，并记录独立修订版本。"""
+        from src.core.plan_version_store import PlanVersionStore, PlanVersionError
+        payload = req or {}
+        try:
+            result = PlanVersionStore(_g()["conn"]).update_master_draft_metadata(
+                version_id, effective_metadata=payload.get("effective_metadata"),
+                editor=auth.audit_actor(request), reason=str(payload.get("reason") or ""),
+            )
+        except PlanVersionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {
+            "version_id": version_id,
+            "metadata_version": result["metadata_version"],
+            "effective_metadata": json.loads(result["effective_metadata_json"] or "{}"),
+            "metadata_updated_at": result["metadata_updated_at"],
+            "metadata_updated_by": result["metadata_updated_by"],
+            "effective": False,
+        }
+
     @app.post("/api/plans/{version_id}/review")
     async def review_master_plan(version_id: int, req: dict, request: Request):
         from src.core.plan_version_store import PlanVersionStore, PlanVersionError
