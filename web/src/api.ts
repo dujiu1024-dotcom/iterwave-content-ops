@@ -2242,6 +2242,18 @@ export const api = {
     ),
   orphanDrafts: () =>
     fetchJson<{ items: OrphanDraft[]; total: number; automatic_cleanup_performed: false }>("/api/drafts/orphans"),
+  recoverOrphanDraft: (draftId: string, targetContentId: string, note: string) =>
+    fetchJson<{ draft_id: string; source_content_id: string; content_id: string; platform: Platform; status: string; verification_status: string }>(
+      `/api/drafts/${encodeURIComponent(draftId)}/recover_orphan`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          target_content_id: targetContentId.trim(),
+          note: note.trim(),
+          platform_missing_confirmed: true,
+        }),
+      },
+    ),
   verifyDraftSave: (draftId: string, saved: boolean, note: string) =>
     fetchJson<{ draft_id: string; status: string; message: string }>(
       `/api/drafts/${draftId}/verify_save`,
