@@ -2059,6 +2059,7 @@ export const api = {
   businessAiProposal: (source_text: string) =>
     fetchJson<{ status: string; message: string; proposals: Array<Record<string, unknown>> }>("/api/business-profile/ai-proposals", { method: "POST", body: JSON.stringify({ source_text }) }),
   health: () => fetchJson<HealthReport>("/api/health"),
+  healthAuditExport: () => fetchJson<Record<string, unknown>>("/api/health/audit-export"),
   status: () => fetchJson<SystemStatus>("/api/status"),
   goals: () => fetchJson<Goal[]>("/api/goals"),
   /** 总体目标进度（后端统一计算等权平均，前端只展示） */
