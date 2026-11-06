@@ -3,12 +3,17 @@ import sqlite3
 from src.core.db import Database
 
 
-def _audit(conn):
-    conn.row_factory = sqlite3.Row
+def _audit(conn, include_all_violation_rows=False):
+    # verify_schema owns and closes its connection; audit a private snapshot so
+    # repeated health/export checks do not reuse a closed in-memory connection.
+    conn.commit()
+    audit_conn = sqlite3.connect(":memory:")
+    conn.backup(audit_conn)
+    audit_conn.row_factory = sqlite3.Row
     database = object.__new__(Database)
-    database.connect = lambda: conn
+    database.connect = lambda: audit_conn
     database._discover_migrations = lambda: []
-    return database.verify_schema()
+    return database.verify_schema(include_all_violation_rows=include_all_violation_rows)
 
 
 def _business_integrity_schema(conn):
@@ -109,6 +114,29 @@ def test_business_integrity_audit_accepts_consistent_historical_data():
 
     assert report["governance_data_integrity_check"] is True
     assert all(value == 0 for value in report["governance_data_violations"].values())
+
+
+def test_audit_export_returns_all_violation_rows_not_only_health_samples():
+    conn = sqlite3.connect(":memory:")
+    _business_integrity_schema(conn)
+    conn.executemany(
+        "INSERT INTO metric_snapshots "
+        "(id,tenant_id,draft_id,content_id,source,correction_of,idempotency_key) "
+        "VALUES (?, 'tenant-1', 'missing-draft', 'missing-content', 'platform', NULL, NULL)",
+        [(f"orphan-{index}",) for index in range(7)],
+    )
+    try:
+        health_report = _audit(conn)
+        export_report = _audit(conn, include_all_violation_rows=True)
+    finally:
+        conn.close()
+
+    assert len(health_report["governance_data_violation_examples"]["metric_snapshot_orphan_draft"]) == 5
+    assert len(export_report["governance_data_violation_examples"]["metric_snapshot_orphan_draft"]) == 7
+    assert {
+        row["record_id"]
+        for row in export_report["governance_data_violation_examples"]["metric_snapshot_orphan_draft"]
+    } == {f"orphan-{index}" for index in range(7)}
 
 
 def test_metric_and_round_integrity_audit_reports_orphans_corrections_and_bad_json():
