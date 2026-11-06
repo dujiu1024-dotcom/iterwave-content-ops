@@ -730,10 +730,12 @@ class PlanVersionStore:
             base_stages_by_key: dict[str, Any] = {}
             if based_on_version_id is not None:
                 base = self.conn.execute(
-                    "SELECT sub_plan_id FROM sub_plan_versions WHERE id=?", (based_on_version_id,)
+                    "SELECT sub_plan_id,master_plan_version_id FROM sub_plan_versions WHERE id=?",
+                    (based_on_version_id,),
                 ).fetchone()
                 if base is None or base["sub_plan_id"] != sub_plan_id:
                     raise PlanVersionError("基准版本不属于当前子计划")
+                base_master_plan_version_id = int(base["master_plan_version_id"])
                 base_stages = self.conn.execute(
                     "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=?",
                     (based_on_version_id,),
@@ -861,6 +863,7 @@ class PlanVersionStore:
                 prior = base_stages_by_key.get(stage_key) if based_on_version_id is not None else None
                 same_contract = bool(
                     prior
+                    and base_master_plan_version_id == int(master_plan_version_id)
                     and int(prior["target_count"]) == target_count
                     and str(prior["entry_condition"] or "") == entry_condition
                     and str(prior["dependencies_json"] or "[]") == dependencies_json
