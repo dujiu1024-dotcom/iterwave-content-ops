@@ -5222,6 +5222,18 @@ def _register_routes(app: FastAPI) -> None:
         return {"round_id": round_id, "new_status": req.target_status}
 
     # --- 草稿 ---
+    @app.get("/api/drafts/orphans")
+    def list_orphan_drafts_endpoint():
+        """只读孤儿草稿清单；不自动删除、取消或重试任何平台副作用。"""
+        from src.core.draft_recovery import list_orphan_drafts as inventory_orphan_drafts
+
+        items = inventory_orphan_drafts(_g()["conn"])
+        return {
+            "items": items,
+            "total": len(items),
+            "automatic_cleanup_performed": False,
+        }
+
     @app.get("/api/drafts")
     def list_drafts(
         status: Optional[str] = Query(None),
