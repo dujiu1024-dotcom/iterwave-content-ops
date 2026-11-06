@@ -149,7 +149,7 @@ export default function Production() {
   const refresh = async () => {
     try {
       const orphanResult = await api.orphanDrafts();
-      setOrphanDrafts(orphanResult.items);
+      setOrphanDrafts(Array.isArray(orphanResult.items) ? orphanResult.items : []);
       setOrphanDraftsLoadFailed(false);
     } catch {
       setOrphanDraftsLoadFailed(true);
