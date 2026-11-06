@@ -5316,6 +5316,37 @@ def _register_routes(app: FastAPI) -> None:
             "automatic_cleanup_performed": False,
         }
 
+    @app.post("/api/drafts/{draft_id}/recover_orphan")
+    def recover_orphan_draft_endpoint(draft_id: str, payload: dict, request: Request):
+        """仅在操作人明确确认平台端不存在后，将孤儿草稿重新关联到同平台内容。"""
+        from src.core.draft_recovery import recover_orphan_draft
+
+        if not isinstance(payload, dict):
+            raise HTTPException(422, "恢复参数格式错误")
+        target_content_id = str(payload.get("target_content_id") or "").strip()
+        note = str(payload.get("note") or "").strip()
+        confirmed = payload.get("platform_missing_confirmed")
+        if not target_content_id:
+            raise HTTPException(422, "必须提供目标内容 ID")
+        conn = _g()["conn"]
+        try:
+            with connection_transaction(conn, immediate=True):
+                result = recover_orphan_draft(
+                    conn,
+                    draft_id=draft_id,
+                    target_content_id=target_content_id,
+                    note=note,
+                    actor=auth.audit_actor(request),
+                    platform_missing_confirmed=confirmed,
+                )
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(409, "恢复关联发生唯一性或完整性冲突，请刷新清单后重试") from exc
+        return result
+
     @app.post("/api/drafts/{draft_id}/metrics/recollect")
     def recollect_failed_metrics(draft_id: str):
         """显式重试已确认发布但采集耗尽的草稿；不适用于视频号人工回填路径。"""
