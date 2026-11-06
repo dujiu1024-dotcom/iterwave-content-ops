@@ -428,7 +428,7 @@ def test_business_summary_includes_manual_metric_facts(diagnosis_client, seed, c
     """经营汇总必须合并人工回填指标，而不是只读取自动采集 metrics。"""
     client, conn = diagnosis_client
     round_id = seed.round(status="collecting_metrics")
-    draft_id = seed.draft(round_id, draft_status="user_published", fetch_status=None)
+    draft_id = seed.draft(round_id, draft_status="failed", fetch_status=None)
     conn.execute(
         "UPDATE drafts SET user_confirmed_at=CURRENT_TIMESTAMP,published_at=CURRENT_TIMESTAMP WHERE id=?",
         (draft_id,),
