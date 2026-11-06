@@ -29,7 +29,8 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --upgrade pip && pip install -e ".[dev]"
       - name: Install OCR language data
-        timeout-minutes: 8
+        # CJK font packages can take several minutes on a cold hosted runner.
+        timeout-minutes: 20
         shell: bash
         run: |
           set -euo pipefail
