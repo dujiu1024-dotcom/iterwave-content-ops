@@ -1726,7 +1726,7 @@ class Database:
                     ) LIMIT 5
                 """,
                 "spiral_round_decision_json_invalid": """
-                    SELECT id AS record_id,status
+                    SELECT id AS record_id
                     FROM spiral_rounds
                     WHERE decision IS NOT NULL AND json_valid(decision)=0 LIMIT 5
                 """,
