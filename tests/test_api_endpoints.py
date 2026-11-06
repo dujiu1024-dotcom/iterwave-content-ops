@@ -5364,3 +5364,69 @@ def test_kpi_one_day_window_includes_midnight_through_0800_shanghai(client, monk
     assert summary.json()["contents_created"] == 3
     assert summary.json()["drafts_created"] == 3
     assert summary.json()["confirmed_published"] == 3
+
+
+
+def _insert_api_orphan_draft(conn, draft_id: str, content_id: str, status: str = "draft_pending"):
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute(
+            "INSERT INTO drafts(id,content_id,platform,status) VALUES(?,?,?,?)",
+            (draft_id, content_id, "xhs", status),
+        )
+        conn.commit()
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+
+def test_orphan_draft_api_confirms_saved_platform_state_without_deleting_record(client):
+    tc, conn, _ = client
+    _insert_api_orphan_draft(conn, "api-orphan-saved", "missing-api-content-1")
+    response = tc.post(
+        "/api/drafts/orphans/api-orphan-saved/resolve",
+        json={"saved": True, "note": "已在小红书草稿箱确认该作品存在"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "draft_saved"
+    assert response.json()["verification_status"] == "verified_saved"
+    assert conn.execute(
+        "SELECT status FROM drafts WHERE id='api-orphan-saved'"
+    ).fetchone()[0] == "draft_saved"
+    assert conn.execute(
+        "SELECT status FROM draft_save_verifications WHERE draft_id='api-orphan-saved'"
+    ).fetchone()[0] == "verified_saved"
+
+
+def test_orphan_draft_api_archives_only_after_explicit_missing_confirmation(client):
+    tc, conn, _ = client
+    _insert_api_orphan_draft(conn, "api-orphan-missing", "missing-api-content-2")
+    response = tc.post(
+        "/api/drafts/orphans/api-orphan-missing/resolve",
+        json={"saved": False, "note": "已检查平台草稿箱，确认不存在"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "cancelled"
+    assert "不会自动重试" in response.json()["message"]
+    assert conn.execute(
+        "SELECT status FROM drafts WHERE id='api-orphan-missing'"
+    ).fetchone()[0] == "cancelled"
+    assert conn.execute(
+        "SELECT 1 FROM drafts WHERE id='api-orphan-missing'"
+    ).fetchone() is not None
+    audit = conn.execute(
+        "SELECT override_field,overridden_by FROM user_override "
+        "WHERE override_field='orphan_draft_resolution'"
+    ).fetchone()
+    assert audit["override_field"] == "orphan_draft_resolution"
+    assert audit["overridden_by"]
+
+
+def test_orphan_draft_api_rejects_resolution_when_source_content_exists(client):
+    tc, conn, seed = client
+    round_id = seed.round()
+    draft_id = seed.draft(round_id, platform="xhs", draft_status="draft_pending", fetch_status=None)
+    response = tc.post(
+        f"/api/drafts/orphans/{draft_id}/resolve",
+        json={"saved": False, "note": "误把正常草稿当作孤儿"},
+    )
+    assert response.status_code == 409

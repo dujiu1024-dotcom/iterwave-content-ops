@@ -5316,6 +5316,23 @@ def _register_routes(app: FastAPI) -> None:
             "automatic_cleanup_performed": False,
         }
 
+    @app.post("/api/drafts/orphans/{draft_id}/resolve")
+    def resolve_orphan_draft_endpoint(draft_id: str, payload: dict, request: Request):
+        """人工核实孤儿草稿的平台状态；仅归档/保留，不删除、不自动重试。"""
+        saved = payload.get("saved") if isinstance(payload, dict) else None
+        note = str((payload or {}).get("note") or "").strip() if isinstance(payload, dict) else ""
+        if not isinstance(saved, bool) or len(note) < 3 or len(note) > 500:
+            raise HTTPException(422, "必须提供 saved 布尔值及 3–500 个字符的核实说明")
+        from src.core.draft_recovery import resolve_orphan_draft as resolve_orphan
+
+        try:
+            return resolve_orphan(
+                _g()["conn"], _g()["sm_draft"], draft_id,
+                saved=saved, note=note, actor=auth.audit_actor(request),
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     @app.post("/api/drafts/{draft_id}/metrics/recollect")
     def recollect_failed_metrics(draft_id: str):
         """显式重试已确认发布但采集耗尽的草稿；不适用于视频号人工回填路径。"""

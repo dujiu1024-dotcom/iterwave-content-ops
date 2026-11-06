@@ -451,6 +451,26 @@ export default function Production() {
     }
   };
 
+  const resolveOrphanDraft = async (draftId: string, saved: boolean) => {
+    if (!saved && !window.confirm("确认平台草稿箱中不存在这篇内容？确认后本地孤儿记录会归档为 cancelled，不会删除记录，也不会自动重试。")) return;
+    const promptText = saved
+      ? "请先打开对应平台草稿箱，确认孤儿草稿确实存在。请填写核实说明："
+      : "请填写平台草稿箱核实过程与结论（至少 3 个字符）：";
+    const note = window.prompt(promptText, "");
+    if (note === null) return;
+    if (note.trim().length < 3) {
+      showToast("核实说明至少需要 3 个字符", "error");
+      return;
+    }
+    try {
+      const result = await api.resolveOrphanDraft(draftId, saved, note);
+      showToast(result.message, saved ? "success" : "info");
+      await refresh();
+    } catch (e: any) {
+      showToast(`孤儿草稿处置失败: ${e.message}`, "error");
+    }
+  };
+
   /** 「✕ 不发了」：draft_pending / draft_saved → cancelled（R9：不冻结未发布草稿） */
   const cancelDraft = async (draftId: string) => {
     try {
@@ -735,15 +755,22 @@ export default function Production() {
             <div key={draft.id} className="task-row" style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
               <div>
                 <div style={{ fontWeight: 600 }}>{displayPlatformLabel(draft.platform)} · {draft.id}</div>
-                <div className="tiny">来源内容：{draft.content_id} · 草稿状态：{displayStatusLabel(draft.status)} · 创建：{draft.created_at || "未知"}</div>
+                <div className="tiny">来源内容：{draft.content_id || "未记录"} · 草稿状态：{displayStatusLabel(draft.status)} · 创建：{draft.created_at || "未知"}</div>
                 <div className="tiny">处置建议：{({
                   manual_verification_required: "先人工核实平台是否已保存",
                   platform_state_must_be_preserved: "保留平台状态，不得自动清理",
                   review_before_archive: "人工复核后再决定归档",
                   recovery_candidate: "可评估恢复，但不得自动重试",
+                  resolved_platform_missing: "已确认平台不存在，已归档",
                 } as Record<string, string>)[draft.recovery_disposition] ?? "人工复核"}</div>
+                {draft.manual_resolution_allowed && (
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                    <button className="btn small" onClick={() => resolveOrphanDraft(draft.id, true)}>确认平台已保存</button>
+                    <button className="btn small" onClick={() => resolveOrphanDraft(draft.id, false)}>确认不存在并归档</button>
+                  </div>
+                )}
               </div>
-              <span className="tag gray">禁止自动清理</span>
+              <span className="tag gray">不自动删除或重试</span>
             </div>
           ))}
         </div>
