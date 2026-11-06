@@ -105,3 +105,55 @@ def test_business_diagnosis_collects_t5_original_asset_inventory_and_gaps(conn, 
     assert context["inventory_summary"]["original_asset_open_gap_count"] == 1
     assert any(ref["source_type"] == "original_asset" for ref in context["source_references"])
     assert any(ref["source_type"] == "original_asset_gap" for ref in context["source_references"])
+
+
+def test_business_diagnosis_builds_effect_summary_from_latest_facts_and_account_snapshots(conn, cfg):
+    conn.execute(
+        """INSERT INTO metric_facts(
+            fact_id,tenant_id,draft_id,content_id,platform,metric_key,value,unit,source,
+            source_record_type,source_record_id,measured_at,recorded_at,collection_status,created_at
+        ) VALUES
+            ('effect-views-old','legacy','draft-effect','content-effect','xhs','views',100,
+             'count','platform_readback','review_collection_run','effect-run-old',
+             '2026-11-01T10:00:00+00:00','2026-11-01T10:00:00+00:00','succeeded',CURRENT_TIMESTAMP),
+            ('effect-views-new','legacy','draft-effect','content-effect','xhs','views',250,
+             'count','manual','metric_snapshot','effect-snapshot-new',
+             '2026-11-02T10:00:00+00:00','2026-11-02T10:00:00+00:00','succeeded',CURRENT_TIMESTAMP),
+            ('effect-likes-new','legacy','draft-effect','content-effect','xhs','likes',20,
+             'count','platform_readback','review_collection_run','effect-run-likes',
+             '2026-11-02T10:00:00+00:00','2026-11-02T10:00:00+00:00','succeeded',CURRENT_TIMESTAMP)
+        """
+    )
+    conn.execute(
+        """INSERT INTO account_snapshots(platform,followers,likes_total,captured_at,source)
+           VALUES('xhs',100,300,'2026-11-01T10:00:00+00:00','manual'),
+                 ('xhs',145,360,'2026-11-02T10:00:00+00:00','manual')"""
+    )
+    conn.commit()
+
+    context = collect_business_context(conn, cfg)["context"]
+    effect = context["effect_summary"]
+
+    assert effect["platform_performance"]["xhs"]["content_count"] == 1
+    assert effect["platform_performance"]["xhs"]["metric_totals"]["views"] == 250
+    assert effect["platform_performance"]["xhs"]["metric_totals"]["likes"] == 20
+    assert effect["follower_growth"]["xhs"]["latest_followers"] == 145
+    assert effect["follower_growth"]["xhs"]["net_growth_in_window"] == 45
+    assert effect["goal_completion"]["total"] == len(context["business_goals"])
+    assert any(
+        ref["source_type"] == "account_snapshot"
+        for ref in context["source_references"]
+    )
+
+
+def test_business_diagnosis_feedback_snapshot_does_not_invalidate_source_fingerprint(conn, cfg):
+    before = collect_business_context(conn, cfg)
+    conn.execute(
+        """INSERT INTO account_snapshots(platform,followers,likes_total,captured_at,source)
+           VALUES('xhs',123,456,'2026-11-06T10:00:00+00:00','manual')"""
+    )
+    conn.commit()
+    after = collect_business_context(conn, cfg)
+
+    assert before["fingerprint"] == after["fingerprint"]
+    assert after["context"]["effect_summary"]["follower_growth"]["xhs"]["latest_followers"] == 123

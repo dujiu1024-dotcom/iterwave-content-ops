@@ -36,6 +36,91 @@ def _rows(conn, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
         return []
 
 
+def _build_effect_summary(
+    metric_facts: list[dict[str, Any]],
+    goals: list[dict[str, Any]],
+    review_tasks: list[dict[str, Any]],
+    account_snapshots: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build compact, evidence-backed performance summaries from effective facts."""
+    latest_facts: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for fact in metric_facts:
+        platform = str(fact.get("platform") or "unknown")
+        content_key = str(fact.get("content_id") or fact.get("draft_id") or fact.get("fact_id"))
+        metric_key = str(fact.get("metric_key") or "")
+        if metric_key:
+            latest_facts.setdefault((platform, content_key, metric_key), fact)
+
+    platform_summary: dict[str, dict[str, Any]] = {}
+    for (platform, content_key, metric_key), fact in latest_facts.items():
+        item = platform_summary.setdefault(platform, {
+            "content_ids": set(), "metrics": {}, "sample_fact_ids": [],
+        })
+        item["content_ids"].add(content_key)
+        value = fact.get("value")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            metric_values = item["metrics"].setdefault(metric_key, [])
+            metric_values.append(float(value))
+        if len(item["sample_fact_ids"]) < 10:
+            item["sample_fact_ids"].append(str(fact.get("fact_id")))
+
+    normalized_platforms = {}
+    for platform, item in platform_summary.items():
+        metrics = {}
+        for key, values in item["metrics"].items():
+            total = sum(values)
+            metrics[key] = int(total) if total.is_integer() else round(total, 4)
+        normalized_platforms[platform] = {
+            "content_count": len(item["content_ids"]),
+            "metric_totals": metrics,
+            "sample_fact_ids": item["sample_fact_ids"],
+        }
+
+    followers_by_platform: dict[str, list[dict[str, Any]]] = {}
+    for snapshot in account_snapshots:
+        platform = str(snapshot.get("platform") or "unknown")
+        followers_by_platform.setdefault(platform, []).append(snapshot)
+    follower_summary = {}
+    for platform, rows in followers_by_platform.items():
+        ordered = sorted(rows, key=lambda row: str(row.get("captured_at") or ""))
+        values = [row.get("followers") for row in ordered if isinstance(row.get("followers"), (int, float))]
+        follower_summary[platform] = {
+            "latest_followers": values[-1] if values else None,
+            "net_growth_in_window": values[-1] - values[0] if len(values) >= 2 else None,
+            "snapshot_count": len(rows),
+            "source_snapshot_ids": [row.get("id") for row in ordered[-5:]],
+        }
+
+    goal_status_counts: dict[str, int] = {}
+    for goal in goals:
+        status = str(goal.get("status") or "unknown")
+        goal_status_counts[status] = goal_status_counts.get(status, 0) + 1
+    completed_goal_count = sum(
+        count for status, count in goal_status_counts.items()
+        if status.casefold() in {"completed", "complete", "achieved", "done"}
+    )
+    return {
+        "platform_performance": normalized_platforms,
+        "follower_growth": follower_summary,
+        "goal_completion": {
+            "total": len(goals),
+            "completed": completed_goal_count,
+            "by_status": goal_status_counts,
+            "completion_rate": round(completed_goal_count / len(goals), 4) if goals else None,
+        },
+        "recent_review_conclusions": [
+            {
+                "task_id": row.get("task_id"),
+                "platform": row.get("platform"),
+                "status": row.get("status"),
+                "conclusion": row.get("conclusion") or {},
+                "last_success_at": row.get("last_success_at"),
+            }
+            for row in review_tasks[:10]
+        ],
+    }
+
+
 def collect_business_context(conn, cfg) -> dict[str, Any]:
     """Collect only tenant-local business, asset and historical content evidence."""
     goal = cfg.ultimate_goal.model_dump(mode="json") if hasattr(cfg.ultimate_goal, "model_dump") else {}
@@ -56,6 +141,11 @@ def collect_business_context(conn, cfg) -> dict[str, Any]:
                window_start,window_end,timezone_name,collection_status
         FROM metric_facts_effective
         ORDER BY measured_at DESC,recorded_at DESC LIMIT 300
+    """)
+    account_snapshots = _rows(conn, """
+        SELECT id,platform,followers,likes_total,captured_at,source
+        FROM account_snapshots
+        ORDER BY captured_at DESC,id DESC LIMIT 200
     """)
     review_tasks = _rows(conn, """
         SELECT rt.task_id,rt.verification_id,rt.draft_id,rt.content_id,rt.platform,
@@ -140,6 +230,11 @@ def collect_business_context(conn, cfg) -> dict[str, Any]:
             "source_type": "metric_fact", "source_id": str(row["fact_id"]),
             "label": f"{row['platform']} {row['metric_key']}={row['value']}",
         })
+    for row in account_snapshots[:50]:
+        source_refs.append({
+            "source_type": "account_snapshot", "source_id": str(row["id"]),
+            "label": f"{row['platform']} 粉丝快照：{row.get('followers')}",
+        })
     for row in review_tasks[:50]:
         source_refs.append({
             "source_type": "review_task", "source_id": str(row["task_id"]),
@@ -150,7 +245,10 @@ def collect_business_context(conn, cfg) -> dict[str, Any]:
             "source_type": "business_gap", "source_id": str(row["gap_id"]),
             "label": str(row["title"]),
         })
+    effect_summary = _build_effect_summary(metric_facts, goals, review_tasks, account_snapshots)
     context = {
+        "effect_summary": effect_summary,
+        "account_snapshots": account_snapshots,
         "strategy_governance": strategy_governance,
         "business_profile": {
             "legacy_config": goal,
@@ -207,11 +305,26 @@ def collect_business_context(conn, cfg) -> dict[str, Any]:
             "经营诊断使用统一指标事实、发布后复盘和当前经营缺口；历史来源保留用于追溯。",
         ],
     }
-    # Plan/round history is downstream output of a confirmed diagnosis, not an
-    # upstream business source. Keep it in the model context, but exclude it from
-    # freshness identity so creating plans or opening production rounds cannot
-    # invalidate the diagnosis that authorized those actions.
-    fingerprint_context = {key: value for key, value in context.items() if key != "plan_history"}
+    # Performance feedback is an evidence snapshot for the model, not an upstream
+    # business-definition source. Keep it in the saved diagnosis context, but exclude
+    # volatile metrics/reviews/account snapshots from freshness identity so routine
+    # readbacks and manual metric corrections do not invalidate the confirmed plan basis.
+    freshness_excluded = {
+        "plan_history", "unified_metric_facts", "post_publish_reviews",
+        "effect_summary", "account_snapshots", "active_business_gaps",
+        "business_gap_history",
+    }
+    fingerprint_context = {
+        key: value for key, value in context.items() if key not in freshness_excluded
+    }
+    # Evidence references remain in the report snapshot, but account/metric/review
+    # observations are volatile and must not change the source-definition fingerprint.
+    if isinstance(fingerprint_context.get("source_references"), list):
+        volatile_reference_types = {"account_snapshot", "metric_fact", "review_task", "business_gap"}
+        fingerprint_context["source_references"] = [
+            ref for ref in fingerprint_context["source_references"]
+            if ref.get("source_type") not in volatile_reference_types
+        ]
     canonical = _json(fingerprint_context)
     return {"context": context, "fingerprint": hashlib.sha256(canonical.encode("utf-8")).hexdigest()}
 
