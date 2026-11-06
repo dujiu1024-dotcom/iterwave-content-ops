@@ -2435,6 +2435,8 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(404, "草稿不存在")
         if row["user_confirmed_at"] is None:
             raise HTTPException(409, "请先确认内容已在平台发布，再录入数据")
+        if row["status"] not in {"user_published", "data_fetching", "failed", "published"}:
+            raise HTTPException(409, "当前草稿状态不允许回填发布指标；已取消或过期的草稿不会被自动恢复")
         supported_fields = tuple(_g()["cfg"].platform_metric_fields.get(row["platform"], []))
         known_fields = {"views", "likes", "collects", "comments", "shares"}
         if not supported_fields or any(field not in known_fields for field in supported_fields):
