@@ -130,23 +130,30 @@ class SpiralEngine:
     def _fetch_published_metrics(self, round_id: int) -> list[dict]:
         """取本轮所有已发布且有有效 metrics 的记录。"""
         rows = self.db.execute(
-            "SELECT m.platform, m.interaction_rate, m.likes, m.views, "
-            "       m.fetch_status, t.dimension "
-            "FROM metrics m "
-            "JOIN contents c ON m.content_id = c.id "
-            "JOIN topic_index t ON c.topic_id = t.id "
-            "WHERE c.round_id = ? AND m.fetch_status IN ('success','partial') "
-            "ORDER BY m.platform",
+            """SELECT c.id AS content_id,c.platform,t.dimension,
+                      MAX(CASE WHEN f.metric_key='interaction_rate' THEN f.value END) AS interaction_rate,
+                      MAX(CASE WHEN f.metric_key='likes' THEN f.value END) AS likes,
+                      MAX(CASE WHEN f.metric_key='views' THEN f.value END) AS views,
+                      MAX(CASE WHEN f.source='manual' THEN 1 ELSE 0 END) AS manual_metrics,
+                      MAX(f.collection_status) AS fetch_status
+               FROM metric_facts_latest f
+               JOIN contents c ON f.content_id=c.id
+               JOIN topic_index t ON c.topic_id=t.id
+               WHERE c.round_id=? AND f.collection_status IN ('succeeded','partial')
+               GROUP BY c.id,c.platform,t.dimension
+               ORDER BY c.platform,c.id""",
             (round_id,),
         ).fetchall()
         return [
             {
-                "platform": r[0],
-                "interaction_rate": r[1],
-                "likes": r[2],
-                "views": r[3],
-                "fetch_status": r[4],
-                "dimension": r[5],
+                "content_id": r["content_id"],
+                "platform": r["platform"],
+                "interaction_rate": r["interaction_rate"],
+                "likes": r["likes"],
+                "views": r["views"],
+                "manual_metrics": bool(r["manual_metrics"]),
+                "fetch_status": r["fetch_status"],
+                "dimension": r["dimension"],
             }
             for r in rows
         ]
