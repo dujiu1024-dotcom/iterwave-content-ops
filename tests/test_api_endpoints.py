@@ -4409,6 +4409,29 @@ def test_manual_master_plan_creation_works_without_model_or_ai_diagnosis(client)
     assert response.json()["requires_review"] is True
     assert response.json()["effective"] is False
 
+    # A second manual draft must not bypass the pending-draft guard used by
+    # AI generation. Preserve the first user draft without creating a duplicate.
+    duplicate = tc.post("/api/plans", json={
+        "topic_count_per_platform": 4,
+        "dimension_allocation": {"AI教育": 2},
+        "enabled_platforms": ["xhs"],
+        "content_format": "image_text",
+        "per_platform": {},
+        "cadence": {},
+        "change_note": "重复人工创建不应覆盖已有草稿",
+    })
+    assert duplicate.status_code == 409, duplicate.text
+    assert conn.execute(
+        "SELECT COUNT(*) FROM master_plan_versions WHERE status='draft' AND deleted_at IS NULL"
+    ).fetchone()[0] == 1
+    saved = conn.execute(
+        "SELECT id,change_note,source FROM master_plan_versions WHERE status='draft' AND deleted_at IS NULL"
+    ).fetchone()
+    assert saved["id"] == draft["id"]
+    assert saved["source"] == "user"
+    assert saved["change_note"] == "无模型环境下人工创建母计划"
+    assert conn.in_transaction is False
+
 
 def test_ai_master_plan_generation_api_maps_timeout_without_changing_effective_version(client, monkeypatch):
     from src.core.plan_version_store import PlanVersionStore
