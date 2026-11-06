@@ -175,7 +175,11 @@ class RoundStateMachine:
         - 全部 published 都 fetch_status=failed → failed
         """
         row = self.db.execute(
-            "SELECT d.status, m.fetch_status FROM drafts d "
+            "SELECT d.status, COALESCE(m.fetch_status, "
+            "CASE WHEN EXISTS (SELECT 1 FROM metric_facts_effective f "
+            "WHERE f.draft_id=d.id AND f.source='manual' "
+            "AND f.collection_status IN ('succeeded','partial')) THEN 'success' END) AS fetch_status "
+            "FROM drafts d "
             "LEFT JOIN metrics m ON d.id = m.draft_id AND m.attempt = (SELECT MAX(attempt) FROM metrics m2 WHERE m2.draft_id = d.id) "
             "JOIN contents c ON d.content_id = c.id "
             "WHERE c.round_id = ?",
