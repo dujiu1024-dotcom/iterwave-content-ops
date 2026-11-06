@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -160,7 +160,9 @@ def test_cross_platform_marks_duplicates(cfg, conn):
 
 
 def test_prune_by_days_and_cap(conn):
-    now = datetime.now()
+    # 用 UTC aware 时间，和生产 _utc_now() 格式一致，避免 prune 内部
+    # storage_now()（UTC aware）与本地 naive 时间比较差 8 小时的偏移
+    now = datetime.now(timezone.utc)
     for i in range(10):
         ts = (now - timedelta(days=i, minutes=1 if i else 0)).isoformat(timespec="seconds")
         conn.execute("INSERT INTO hot_topics (id, source, discovered_at, last_seen_at, evidence_status, title) "
