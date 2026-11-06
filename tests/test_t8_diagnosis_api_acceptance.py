@@ -424,7 +424,7 @@ def test_original_asset_permission_and_privacy_gate_production_usage(diagnosis_c
 
 
 
-def test_business_summary_includes_manual_metric_facts(diagnosis_client, seed):
+def test_business_summary_includes_manual_metric_facts(diagnosis_client, seed, cfg):
     """经营汇总必须合并人工回填指标，而不是只读取自动采集 metrics。"""
     client, conn = diagnosis_client
     round_id = seed.round(status="collecting_metrics")
@@ -454,7 +454,7 @@ def test_business_summary_includes_manual_metric_facts(diagnosis_client, seed):
     assert RoundStateMachine(conn).decide_analyzing_exit(round_id) == "completed"
 
     from src.core.spiral import SpiralEngine
-    spiral = SpiralEngine(seed.cfg if hasattr(seed, "cfg") else None, conn)
+    spiral = SpiralEngine(cfg, conn)
     review_metrics = spiral._fetch_published_metrics(round_id)
     assert len(review_metrics) == 1
     assert review_metrics[0]["manual_metrics"] is True
