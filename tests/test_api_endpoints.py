@@ -5099,7 +5099,7 @@ def test_tenant_context_gate_rejects_cross_tenant_writes_across_api_domains_with
 def test_tenant_context_gate_rejects_missing_header_on_non_plan_write_without_side_effects(client):
     tc, conn, _seed = client
     before = int(conn.execute("SELECT COUNT(*) FROM review_tasks").fetchone()[0])
-    response = tc.post("/api/drafts/nonexistent/publish_confirm", json={})
+    response = tc.post("/api/drafts/nonexistent/publish_confirm", json={}, headers={"X-Tenant-Id": ""})
     assert response.status_code == 409
     assert response.json()["code"] == "TENANT_CONTEXT_REQUIRED"
     assert int(conn.execute("SELECT COUNT(*) FROM review_tasks").fetchone()[0]) == before
