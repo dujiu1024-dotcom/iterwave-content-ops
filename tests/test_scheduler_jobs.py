@@ -1007,8 +1007,8 @@ def test_data_fetch_uses_saved_platform_title_after_local_edit(cfg, conn, seed) 
     round_id = seed.round(status="collecting_metrics")
     draft_id = seed.draft(round_id, draft_status="user_published", fetch_status=None)
     conn.execute(
-        "UPDATE drafts SET saved_platform_title = ? WHERE id = ?",
-        ("平台实际存稿标题", draft_id),
+        "UPDATE drafts SET saved_platform_title = ?, platform_work_id = ? WHERE id = ?",
+        ("平台实际存稿标题", "published-work-456", draft_id),
     )
     conn.execute(
         "UPDATE contents SET title = ? WHERE id = (SELECT content_id FROM drafts WHERE id = ?)",
@@ -1018,8 +1018,10 @@ def test_data_fetch_uses_saved_platform_title_after_local_edit(cfg, conn, seed) 
 
     class _Ad:
         seen_title = None
+        seen_work_id = None
 
-        async def fetch_metrics(self, _platform_draft_id, title):
+        async def fetch_metrics(self, platform_work_id, title):
+            self.seen_work_id = platform_work_id
             self.seen_title = title
             return MetricsSnapshot(
                 platform=Platform.XHS, fetch_status=FetchStatus.FAILED, error_msg="测试未执行平台读回",
@@ -1031,6 +1033,7 @@ def test_data_fetch_uses_saved_platform_title_after_local_edit(cfg, conn, seed) 
     asyncio.run(eng._job_data_fetch(draft_id, attempt=1))
 
     assert adapter.seen_title == "平台实际存稿标题"
+    assert adapter.seen_work_id == "published-work-456"
 
 
 def test_wechat_publish_confirmation_waits_for_manual_metrics(cfg, conn, seed, monkeypatch):
@@ -1166,3 +1169,29 @@ def test_manual_metrics_reconcile_draft_and_close_round_with_effective_facts(cfg
     evidence = json.loads(decision)["evidence"]
     assert evidence["sample_count"] == 1
     assert evidence["manual_metric_sample_count"] == 1
+
+def test_publish_confirmation_persists_platform_work_identity(cfg, conn, seed):
+    from src.core.state_machine import DraftStateMachine
+
+    round_id = seed.round(status="awaiting_publish")
+    draft_id = seed.draft(round_id, draft_status="draft_saved", fetch_status=None)
+    engine = _engine(cfg, conn)
+    engine.wire(conn=conn, adapters={}, sm_draft=DraftStateMachine(conn))
+
+    assert engine.on_user_published(
+        draft_id,
+        via="platform-polling",
+        note_url="https://platform.example/work/789",
+        platform_work_id="platform-work-789",
+        platform_work_url="https://platform.example/work/789",
+    ) is True
+
+    row = conn.execute(
+        "SELECT status, platform_work_id, platform_work_url, platform_note_url "
+        "FROM drafts WHERE id=?",
+        (draft_id,),
+    ).fetchone()
+    assert row["status"] == "user_published"
+    assert row["platform_work_id"] == "platform-work-789"
+    assert row["platform_work_url"] == "https://platform.example/work/789"
+    assert row["platform_note_url"] == "https://platform.example/work/789"
