@@ -15,6 +15,35 @@ const PLATFORM_LABELS: Record<string, string> = {
   wechat_channels: "视频号",
 };
 
+const AUDIT_REMEDIATION_GUIDANCE: Record<string, string> = {
+  business_profile_current_version_missing: "核对 business_profile_versions 历史版本与当前 version_no；从可信历史版本恢复缺失版本，保留原始资料和变更记录。",
+  business_profile_history_json_invalid: "导出违规行，优先从数据库备份或原始资料重建版本快照；不得直接覆盖历史版本。",
+  business_catalog_json_invalid: "导出违规行，依据原始资料和字段证据重建 JSON，再通过正常资料编辑流程写入新版本。",
+  effective_master_plan_snapshot_missing: "核对生效计划版本及审核记录；从对应版本证据恢复快照，无法确认时重新审核，不得伪造快照。",
+  master_plan_snapshot_json_invalid: "导出违规行，从对应计划版本和业务资料版本重建快照；保留原始损坏记录供审计。",
+  master_plan_snapshot_profile_version_missing: "核对快照引用的资料版本；恢复缺失版本或将计划重新基于当前有效资料生成并审核。",
+  original_asset_current_version_missing: "核对素材版本历史与文件哈希；确认真实版本后恢复 current_version_no，不确定时先隔离素材。",
+  original_asset_metadata_json_invalid: "从素材原文件、版本记录及导入来源重建元数据；保留损坏记录和恢复依据。",
+  original_asset_version_metadata_json_invalid: "从对应素材版本的原文件及处理记录重建元数据，不得猜测版本内容。",
+  original_asset_analysis_json_invalid: "重新运行素材分析生成新分析记录；旧记录保留，不直接覆盖审计历史。",
+  production_task_asset_usage_version_mismatch: "核对生产任务使用时的素材版本快照与原始版本；确认后创建更正记录，不静默改写任务历史。",
+  plan_change_audit_json_invalid: "从相关计划版本、任务快照和备份重建审计证据；原始审计行只读保留。",
+  north_star_snapshot_json_invalid: "从对应北极星版本及其来源证据重建快照；无法恢复时重新确认北极星版本。",
+  master_plan_north_star_snapshot_invalid: "核对母计划引用的北极星快照与版本归属；修复引用前需重新验证计划审核依据。",
+  master_plan_resource_baseline_json_invalid: "从资源基线来源数据重建 JSON，并核对租户、版本及生效时间。",
+  master_plan_north_star_reference_missing: "核对北极星版本历史；恢复真实引用或重新生成并审核母计划，不得指向任意现存版本。",
+  master_plan_north_star_attribution_invalid: "核对归因状态与对应北极星证据，按计划版本重新执行归因审核。",
+  metric_snapshot_orphan_draft: "导出全部快照行，核对 draft_id、content_id 与租户归属；确认后通过受控迁移修复关联，禁止直接删除快照。",
+  metric_snapshot_orphan_content: "导出全部快照行，核对原内容及草稿归属；仅在找到可信内容来源后恢复关联。",
+  metric_snapshot_correction_chain_broken: "核对 correction_of 指向的原始快照、租户和草稿；通过新更正记录恢复链路，不改写历史指标。",
+  metric_snapshot_duplicate_idempotency_key: "比较 payload_hash、记录时间和来源，确认重复提交关系后制定保留策略；不自动删除任何指标记录。",
+  manual_metric_draft_state_mismatch: "核对 user_confirmed_at、发布证据和人工快照；确认真实发布后通过草稿状态机补齐状态，不能仅按指标记录强制改状态。",
+  metric_fact_orphan_content: "核对事实来源快照与内容归属；确认来源后修复投影/关联，保留原始事实。",
+  metric_fact_orphan_draft: "核对事实来源快照与草稿归属；确认来源后修复投影/关联，不直接删除事实。",
+  metric_fact_correction_chain_broken: "核对事实与源快照的 correction_of 链；通过受控重建或新更正记录修复，保留原链证据。",
+  spiral_round_decision_json_invalid: "从 round transition log、复盘报告和审计记录恢复决策证据；无法恢复时将该轮标记为需人工复核。",
+};
+
 const SCORING_MODE_LABELS: Record<string, string> = {
   cold_start: "冷启动",
   sample_accumulating: "样本积累",
@@ -575,6 +604,12 @@ export default function Settings() {
                           {(health.governance.data_violation_examples[name] ?? []).map((item) =>
                             String(item.record_id ?? item.draft_id ?? item.content_id ?? "记录")
                           ).join("、") || "暂无样例 ID"}
+                        </div>
+                        <div className="task-desc" style={{ marginTop: 4 }}>
+                          修复路径：{AUDIT_REMEDIATION_GUIDANCE[name] ?? "先导出完整违规明细，核对来源记录、租户归属及版本历史后人工制定修复方案。"}
+                        </div>
+                        <div className="task-desc" style={{ marginTop: 2 }}>
+                          自动修复：当前未开放。所有数据修复均需先核对证据并保留原始记录，避免误删或篡改业务事实。
                         </div>
                       </div>
                     </div>
