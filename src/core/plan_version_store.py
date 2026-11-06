@@ -1,6 +1,7 @@
 """Immutable SQLite persistence for master plans, platform subplans and stages."""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -81,6 +82,19 @@ class PlanVersionStore:
             self.conn.rollback()
         self._active_savepoint = None
 
+    @staticmethod
+    def _compute_metadata_signature(
+        plan_signature: str, ai_metadata_json: Optional[str],
+        effective_metadata_json: Optional[str],
+    ) -> str:
+        payload = {
+            "plan_signature": plan_signature,
+            "ai_metadata": json.loads(ai_metadata_json) if ai_metadata_json else None,
+            "effective_metadata": json.loads(effective_metadata_json) if effective_metadata_json else None,
+        }
+        canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
     # ------------------------------------------------------------------
     # Master plan lifecycle
     # ------------------------------------------------------------------
@@ -96,12 +110,27 @@ class PlanVersionStore:
         expected_active_version_id: Optional[int] = None,
         north_star_version_id: Optional[int] = None,
         bind_current_north_star: bool = True,
+        ai_metadata: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         if not isinstance(snapshot, dict):
             raise PlanVersionError("主计划快照必须是对象")
         if source not in {"user", "review_adoption", "legacy_recovery", "system"}:
             raise PlanVersionError("无效的主计划版本来源")
         signature = self._signer.compute_signature(snapshot)
+        if ai_metadata is not None and not isinstance(ai_metadata, dict):
+            raise PlanVersionError("AI 元数据必须是对象")
+        ai_metadata_json = (
+            json.dumps({"schema_version": 1, "original": ai_metadata, "effective": ai_metadata},
+                       ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if ai_metadata is not None else None
+        )
+        effective_metadata_json = (
+            json.dumps(ai_metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if ai_metadata is not None else None
+        )
+        metadata_signature = self._compute_metadata_signature(
+            signature, ai_metadata_json, effective_metadata_json
+        )
         now = _now()
         self._begin()
         try:
@@ -129,10 +158,13 @@ class PlanVersionStore:
             cur = self.conn.execute(
                 """INSERT INTO master_plan_versions(
                     version_no,plan_signature,plan_snapshot,status,source,
-                    based_on_version_id,created_at,created_by,change_note
-                ) VALUES(?,?,?,'draft',?,?,?,?,?)""",
+                    based_on_version_id,created_at,created_by,change_note,
+                    ai_metadata_json,effective_metadata_json,metadata_signature,
+                    metadata_version,metadata_updated_at,metadata_updated_by
+                ) VALUES(?,?,?,'draft',?,?,?,?,?,?,?,?,?,1,?,?)""",
                 (version_no, signature, json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
-                 source, based_on_version_id, now, author, change_note),
+                 source, based_on_version_id, now, author, change_note,
+                 ai_metadata_json, effective_metadata_json, metadata_signature, now, author),
             )
             # Freeze the exact account-group North Star version at draft creation.
             if self.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_group_north_star_versions'").fetchone():
@@ -146,6 +178,15 @@ class PlanVersionStore:
                     north_star = None
                 if north_star is not None:
                     self.conn.execute("UPDATE master_plan_versions SET north_star_version_id=?,north_star_snapshot_json=?,north_star_attribution_status='attributed' WHERE id=?", (north_star["id"],north_star["snapshot_json"],cur.lastrowid))
+            if ai_metadata_json is not None:
+                self.conn.execute(
+                    """INSERT INTO master_plan_metadata_revisions(
+                        master_plan_version_id,metadata_version,ai_metadata_json,
+                        effective_metadata_json,metadata_signature,created_at,created_by,change_reason
+                    ) VALUES(?,1,?,?,?,?,?,?)""",
+                    (cur.lastrowid, ai_metadata_json, effective_metadata_json,
+                     metadata_signature, now, author, "AI 初始生成"),
+                )
             row = dict(self.conn.execute(
                 "SELECT * FROM master_plan_versions WHERE id=?", (cur.lastrowid,)
             ).fetchone())
@@ -157,6 +198,67 @@ class PlanVersionStore:
             )
             self._commit()
             return row
+        except Exception:
+            self._rollback()
+            raise
+
+    def update_master_draft_metadata(
+        self, version_id: int, *, effective_metadata: dict[str, Any],
+        editor: str, reason: str,
+    ) -> dict[str, Any]:
+        if not isinstance(effective_metadata, dict):
+            raise PlanVersionError("有效元数据必须是对象")
+        reason = str(reason or "").strip()
+        if not reason:
+            raise PlanVersionError("编辑元数据必须填写变更原因")
+        now = _now()
+        self._begin()
+        try:
+            row = self.conn.execute(
+                "SELECT * FROM master_plan_versions WHERE id=?", (version_id,)
+            ).fetchone()
+            if row is None:
+                raise PlanVersionError("主计划版本不存在")
+            if row["status"] != "draft" or row["deleted_at"] is not None:
+                raise PlanVersionError("只有未删除的母计划草稿可以编辑元数据")
+            ai_json = row["ai_metadata_json"]
+            if ai_json:
+                parsed_ai = json.loads(ai_json)
+                if not isinstance(parsed_ai, dict) or parsed_ai.get("schema_version") != 1:
+                    raise PlanVersionError("AI 原始元数据结构损坏，拒绝编辑")
+            effective_json = json.dumps(
+                effective_metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+            plan_signature = self._signer.compute_signature(json.loads(row["plan_snapshot"]))
+            metadata_signature = self._compute_metadata_signature(
+                plan_signature, ai_json, effective_json
+            )
+            next_version = int(row["metadata_version"] or 0) + 1
+            cursor = self.conn.execute(
+                """UPDATE master_plan_versions SET effective_metadata_json=?,
+                    metadata_signature=?,metadata_version=?,metadata_updated_at=?,
+                    metadata_updated_by=? WHERE id=? AND status='draft'""",
+                (effective_json, metadata_signature, next_version, now, editor, version_id),
+            )
+            if cursor.rowcount != 1:
+                raise PlanVersionError("母计划草稿状态已变化，请刷新后重试")
+            self.conn.execute(
+                """INSERT INTO master_plan_metadata_revisions(
+                    master_plan_version_id,metadata_version,ai_metadata_json,
+                    effective_metadata_json,metadata_signature,created_at,created_by,change_reason
+                ) VALUES(?,?,?,?,?,?,?,?)""",
+                (version_id, next_version, ai_json, effective_json,
+                 metadata_signature, now, editor, reason[:500]),
+            )
+            record_plan_change(
+                self.conn, entity_type="master_plan", entity_id=str(version_id),
+                event_type="metadata_edited", from_version_id=version_id,
+                to_version_id=version_id, change_reason=reason, actor=editor,
+            )
+            self._commit()
+            return dict(self.conn.execute(
+                "SELECT * FROM master_plan_versions WHERE id=?", (version_id,)
+            ).fetchone())
         except Exception:
             self._rollback()
             raise
@@ -215,6 +317,14 @@ class PlanVersionStore:
             signature = self._signer.compute_signature(snapshot)
             if signature != row["plan_signature"]:
                 raise PlanVersionError("主计划快照与签名不一致，拒绝生效")
+            if row["metadata_signature"]:
+                expected_metadata_signature = self._compute_metadata_signature(
+                    signature, row["ai_metadata_json"], row["effective_metadata_json"]
+                )
+                if expected_metadata_signature != row["metadata_signature"]:
+                    raise PlanVersionError("母计划 AI/有效元数据与签名不一致，拒绝生效")
+            elif str(row["change_note"] or "").startswith("AI 母计划草稿："):
+                raise PlanVersionError("历史 AI 草稿元数据尚未纳入完整签名，请重新生成草稿后再审核")
             previous_effective = self.conn.execute(
                 "SELECT id FROM master_plan_versions WHERE status='effective'"
             ).fetchone()
