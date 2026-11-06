@@ -1503,3 +1503,52 @@ def test_effect_condition_review_persists_status_and_auditable_decision(client):
         (int(stage["id"]),),
     ).fetchone()
     assert tuple(condition_review) == ("effect", "passed", "效果证据达到阶段要求")
+
+
+def test_subplan_revision_preserves_unchanged_stage_gate_state(client):
+    """修订阶段描述但门禁契约不变时，继承审核状态且不信任客户端状态字段。"""
+    _tc, conn, _ = client
+    store, master, version, stage = _approved_subplan(
+        conn, sub_id="preserve-stage-gates-sub",
+    )
+    conn.execute(
+        """UPDATE sub_plan_stages SET status='completed',
+               entry_condition='已满足进入条件',entry_condition_met=1,
+               completion_criteria='发布数量达到目标',
+               business_completion_required=1,business_completion_status='passed',
+               effect_evaluation='互动率达到目标',
+               effect_required=1,effect_status='passed'
+           WHERE id=?""",
+        (int(stage["id"]),),
+    )
+    conn.commit()
+
+    base_stage = dict(conn.execute(
+        "SELECT * FROM sub_plan_stages WHERE id=?", (int(stage["id"]),)
+    ).fetchone())
+    for field in ("id", "sub_plan_version_id", "created_at", "updated_at"):
+        base_stage.pop(field, None)
+    # Simulate a stale/malicious client payload: lifecycle fields must be sourced
+    # from the immutable base version, never accepted from the request body.
+    base_stage["status"] = "pending"
+    base_stage["entry_condition_met"] = False
+    base_stage["business_completion_status"] = "pending"
+    base_stage["effect_status"] = "pending"
+    snapshot = json.loads(version["snapshot_json"])
+    snapshot["description"] = "只调整说明，不改变阶段门禁契约"
+
+    revision = store.create_subplan_version(
+        "preserve-stage-gates-sub", snapshot,
+        master_plan_version_id=int(master["id"]),
+        stages=[base_stage],
+        based_on_version_id=int(version["id"]),
+        author="test",
+        change_note="更新说明",
+    )
+    revised_stage = conn.execute(
+        "SELECT status,entry_condition_met,business_completion_status,effect_status "
+        "FROM sub_plan_stages WHERE sub_plan_version_id=?",
+        (int(revision["id"]),),
+    ).fetchone()
+
+    assert tuple(revised_stage) == ("completed", 1, "passed", "passed")
