@@ -81,6 +81,12 @@ def test_retry_job_id_includes_attempt(cfg) -> None:
     ids = {j.id for j in eng.scheduler.get_jobs()}
     assert {"data_fetch_d1_a1", "data_fetch_d1_a2"} <= ids
 
+def test_pending_poll_sequence_has_distinct_scheduler_job_id(cfg) -> None:
+    """同一失败 attempt 的 pending 轮询必须有独立任务身份。"""
+    eng = SchedulerEngine(cfg, Path(cfg.paths.db_file))
+    eng.schedule_data_fetch("d1", datetime.now(), attempt=2, poll_sequence=1)
+    assert "data_fetch_d1_a2_p1" in {j.id for j in eng.scheduler.get_jobs()}
+
 
 def test_missing_metrics_adapter_records_failure_and_retries(cfg, conn, seed) -> None:
     from datetime import timedelta
@@ -178,6 +184,51 @@ def test_backfill_requeues_when_only_failed_metrics_exist(cfg, conn, seed) -> No
     assert eng.backfill_data_fetch() == 1
     assert f"data_fetch_{draft_id}_a1" in {j.id for j in eng.scheduler.get_jobs()}
     assert eng.backfill_data_fetch() == 0
+
+
+def test_data_fetch_pending_is_not_failure_or_retry_attempt(cfg, conn, seed) -> None:
+    """平台指标仍未就绪属于 pending：不写失败记录、不消耗失败重试次数。"""
+    from src.adapters.base import FetchStatus, MetricsSnapshot
+    from src.core.state_machine import DraftStateMachine
+
+    round_id = seed.round(status="collecting_metrics")
+    draft_id = seed.draft(round_id, draft_status="user_published", fetch_status=None)
+
+    class _PendingAdapter:
+        async def fetch_metrics(self, *_args, **_kwargs):
+            return MetricsSnapshot(
+                platform=Platform.XHS,
+                fetch_status=FetchStatus.PENDING,
+                error_msg="作品数据尚未就绪",
+            )
+
+    scheduled = []
+    eng = SchedulerEngine(cfg, Path(cfg.paths.db_file))
+    eng.wire(
+        conn=conn,
+        adapters={Platform.XHS: _PendingAdapter()},
+        sm_draft=DraftStateMachine(conn),
+    )
+    eng.schedule_data_fetch = lambda draft_id, run_at, attempt=1, poll_sequence=0: scheduled.append(
+        (draft_id, attempt, poll_sequence)
+    )
+
+    report = asyncio.run(eng._job_data_fetch(draft_id, attempt=2))
+
+    assert report == {
+        "final_status": "success",
+        "errors": [],
+        "attempt": 2,
+        "pending": True,
+        "retry_scheduled": True,
+    }
+    assert scheduled == [(draft_id, 2, 1)]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM metrics WHERE draft_id = ?", (draft_id,)
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT status FROM drafts WHERE id = ?", (draft_id,)
+    ).fetchone()[0] == "data_fetching"
 
 
 def test_data_fetch_failure_schedules_retry(cfg, conn, seed) -> None:

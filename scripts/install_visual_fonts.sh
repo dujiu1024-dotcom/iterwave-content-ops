@@ -6,8 +6,8 @@ if ! command -v apt-get >/dev/null 2>&1; then
   exit 2
 fi
 
-sudo apt-get update
-sudo apt-get install -y --no-install-recommends fontconfig fonts-noto-cjk
+sudo timeout 240s apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::ForceIPv4=true update
+sudo timeout 600s env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::ForceIPv4=true install -y --no-install-recommends fontconfig fonts-noto-cjk
 fc-cache -f
 if ! fc-match "Noto Sans CJK SC" | grep -qi "Noto"; then
   echo "Noto Sans CJK SC 未正确安装。" >&2
