@@ -6021,6 +6021,11 @@ def _register_routes(app: FastAPI) -> None:
                 plan, author=auth.audit_actor(request), source="user",
                 based_on_version_id=base_version_id,
                 change_note=req.change_note.strip() or "母计划人工编辑草稿",
+                # Manual and AI drafts share the same single-pending-draft and
+                # active-version compare-and-swap guard; manual fallback still
+                # does not require an AI diagnosis or model invocation.
+                enforce_generation_guard=True,
+                expected_active_version_id=base_version_id,
             )
         except PlanVersionError as exc:
             raise HTTPException(409, str(exc)) from exc
