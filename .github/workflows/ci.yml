@@ -43,15 +43,12 @@ jobs:
               packages+=(tesseract-ocr-eng)
             fi
           fi
-          if ! dpkg-query -W -f='${Status}' fonts-noto-cjk 2>/dev/null | grep -q 'install ok installed'; then
-            packages+=(fonts-noto-cjk)
-          fi
           if (("${#packages[@]}" > 0)); then
             echo "Installing missing OCR packages: ${packages[*]}"
             sudo timeout 240s apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::ForceIPv4=true update
             sudo timeout 360s env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::ForceIPv4=true install -y --no-install-recommends "${packages[@]}"
           else
-            echo "Tesseract language data and CJK fonts are already available; skipping apt installation."
+            echo "Tesseract OCR engine and required language data are already available; skipping apt installation."
           fi
       - name: Install Chromium for visual renderer tests
         timeout-minutes: 10
