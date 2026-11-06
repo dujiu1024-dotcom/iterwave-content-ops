@@ -42,6 +42,12 @@ def _db(path=None):
             change_reason TEXT NOT NULL DEFAULT '',
             UNIQUE(master_plan_version_id, metadata_version)
         );
+        CREATE TRIGGER trg_master_plan_metadata_revisions_no_update
+        BEFORE UPDATE ON master_plan_metadata_revisions
+        BEGIN SELECT RAISE(ABORT, 'master_plan_metadata_revisions is append-only'); END;
+        CREATE TRIGGER trg_master_plan_metadata_revisions_no_delete
+        BEFORE DELETE ON master_plan_metadata_revisions
+        BEGIN SELECT RAISE(ABORT, 'master_plan_metadata_revisions is append-only'); END;
         CREATE TABLE sub_plans (
             id TEXT PRIMARY KEY, master_plan_version_id INTEGER NOT NULL,
             platform TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL,
@@ -1516,3 +1522,32 @@ def test_legacy_ai_draft_without_metadata_signature_fails_closed():
     conn.commit()
     with pytest.raises(PlanVersionError, match="历史 AI 草稿元数据尚未纳入完整签名"):
         store.activate_master_version(draft["id"], reviewer="reviewer")
+
+
+def test_ai_metadata_edits_cannot_rewrite_provenance_or_mutate_history():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    original = {
+        "summary": "摘要", "assumptions": [], "risks": [],
+        "pending_confirmations": [], "resource_basis": {},
+        "diagnosis_report_id": 8, "source_fingerprint": "source-a",
+    }
+    draft = store.create_master_draft(
+        _plan(), author="ai", source="system", ai_metadata=original,
+    )
+    forged = dict(original)
+    forged["source_fingerprint"] = "source-b"
+    with pytest.raises(PlanVersionError, match="标识不可人工改写"):
+        store.update_master_draft_metadata(
+            draft["id"], effective_metadata=forged,
+            editor="reviewer", reason="attempt to rewrite provenance",
+        )
+    store.update_master_draft_metadata(
+        draft["id"], effective_metadata={**original, "summary": "修订摘要"},
+        editor="reviewer", reason="reviewed summary",
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute(
+            "UPDATE master_plan_metadata_revisions SET change_reason='tampered' WHERE master_plan_version_id=?",
+            (draft["id"],),
+        )
