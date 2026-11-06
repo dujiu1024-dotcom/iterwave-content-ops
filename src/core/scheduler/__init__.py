@@ -465,6 +465,7 @@ class SchedulerEngine:
 
     def schedule_data_fetch(
         self, draft_id: str, run_at: datetime, attempt: int = 1,
+        poll_sequence: int = 0,
     ) -> None:
         """安排发布后的数据采集；优先写入全局持久化队列，保证非活动账号组也可恢复。"""
         # business_now() intentionally returns a naive business-wall-clock datetime
@@ -477,10 +478,13 @@ class SchedulerEngine:
             self.task_queue.enqueue(
                 task_type="scheduler_job",
                 tenant_id=self.tenant_id,
-                aggregate_id=f"_job_data_fetch:{draft_id}:{attempt}",
+                aggregate_id=(
+                    f"_job_data_fetch:{draft_id}:{attempt}"
+                    + (f":pending:{poll_sequence}" if poll_sequence else "")
+                ),
                 payload={
                     "method": "_job_data_fetch",
-                    "args": [draft_id, attempt],
+                    "args": [draft_id, attempt, poll_sequence],
                     "initiating_actor": "service:scheduler",
                 },
                 available_at=run_at,
@@ -494,13 +498,17 @@ class SchedulerEngine:
         # 无全局队列的旧版/单元测试替身仍保留 APScheduler 兼容路径。
         active_engine = _ENGINES.get(self.engine_key)
         if active_engine is not None and active_engine is not self:
-            active_engine.schedule_data_fetch(draft_id, run_at, attempt)
+            active_engine.schedule_data_fetch(draft_id, run_at, attempt, poll_sequence)
             return
+        job_suffix = f"_p{poll_sequence}" if poll_sequence else ""
         self.scheduler.add_job(
             _run_data_fetch,
             DateTrigger(run_date=run_at),
-            id=f"data_fetch_{draft_id}_a{attempt}",
-            kwargs={"engine_key": self.engine_key, "draft_id": draft_id, "attempt": attempt},
+            id=f"data_fetch_{draft_id}_a{attempt}{job_suffix}",
+            kwargs={
+                "engine_key": self.engine_key, "draft_id": draft_id,
+                "attempt": attempt, "poll_sequence": poll_sequence,
+            },
             replace_existing=True,
         )
         logger.info("📅 注册 data_fetch: draft=%s attempt=%d run_at=%s",
@@ -723,7 +731,9 @@ class SchedulerEngine:
             "pending": pending,
         }
 
-    async def _job_data_fetch(self, draft_id: str, attempt: int = 1) -> dict:
+    async def _job_data_fetch(
+        self, draft_id: str, attempt: int = 1, poll_sequence: int = 0,
+    ) -> dict:
         """发布后 metrics_initial_delay_hours（默认 24h）拉取平台数据。
 
         失败按 timeouts.metrics_retry_attempts / metrics_retry_interval_minutes 配置重试；
@@ -782,7 +792,9 @@ class SchedulerEngine:
         if snap.fetch_status == FetchStatus.PENDING:
             _retry_times, interval_min = self._metrics_retry_params()
             next_at = storage_now() + timedelta(minutes=max(1, interval_min))
-            self.schedule_data_fetch(draft_id, next_at, attempt=attempt)
+            self.schedule_data_fetch(
+                draft_id, next_at, attempt=attempt, poll_sequence=poll_sequence + 1,
+            )
             logger.info(
                 "[APS] data_fetch 仍 pending，保持 attempt=%d 并延后轮询 draft=%s",
                 attempt, draft_id,
@@ -1973,10 +1985,13 @@ async def _run_publish_polling(engine_key: str | None = None) -> None:
         await _invoke(engine, "_job_publish_polling")
 
 
-async def _run_data_fetch(engine_key: str | None = None, draft_id: str = "", attempt: int = 1) -> None:
+async def _run_data_fetch(
+    engine_key: str | None = None, draft_id: str = "", attempt: int = 1,
+    poll_sequence: int = 0,
+) -> None:
     engine = _engine_for(engine_key)
     if engine is not None and draft_id:
-        await _invoke(engine, "_job_data_fetch", draft_id, attempt)
+        await _invoke(engine, "_job_data_fetch", draft_id, attempt, poll_sequence)
 
 
 async def _run_review_collection(
