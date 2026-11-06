@@ -534,6 +534,24 @@ class Database:
                 logger.info("迁移 %d 已由其他进程完成，跳过", mig.version)
                 return
 
+            # The legacy visual-migration acceptance path deliberately stages
+            # migrations 151/153 after a populated v116 database. Defer this
+            # additive trigger migration until its canonical fact tables exist;
+            # do not record the version, so a later startup applies it normally.
+            if mig.name == "manual_metric_interaction_rate":
+                existing_tables = {
+                    row[0] for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                }
+                if not {"metric_snapshots", "metric_facts"} <= existing_tables:
+                    conn.rollback()
+                    logger.info(
+                        "迁移 %d 等待 metric_snapshots/metric_facts 表创建，暂不登记",
+                        mig.version,
+                    )
+                    return
+
             sql = mig.path.read_text(encoding="utf-8")
             logger.info("执行迁移 %d — %s（%s）", mig.version, mig.name, mig.path)
             # 必须在拿到写锁后读取列结构，避免另一个启动进程刚完成 ALTER。
@@ -813,6 +831,7 @@ class Database:
                 "trg_sub_plan_stages_prevent_task_rekey",
                 "trg_production_line_versions_prevent_task_orphan",
                 "trg_sub_goal_evidence_no_update", "trg_sub_goal_evidence_no_delete",
+                "trg_manual_metric_interaction_rate_to_facts_insert",
             }
             existing_triggers = {
                 row[0] for row in conn.execute(

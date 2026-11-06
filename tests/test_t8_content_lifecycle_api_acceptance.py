@@ -174,6 +174,13 @@ def test_content_review_publish_metrics_and_effect_feedback_api_chain(content_cl
     assert saved_metric["content_id"] == content_id
     assert saved_metric["platform"] == "xhs"
     assert saved_metric["source"] == "manual"
+    manual_interaction_rate = conn.execute(
+        "SELECT value FROM metric_facts_latest WHERE content_id=? "
+        "AND metric_key='interaction_rate'",
+        (content_id,),
+    ).fetchone()
+    assert manual_interaction_rate is not None
+    assert abs(manual_interaction_rate["value"] - (12 + 8 + 3) / 120) < 1e-9
 
     feedback_before = client.get(
         f"/api/subplans/stages/{stage_id}/effect-feedback",
