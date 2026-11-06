@@ -1552,3 +1552,75 @@ def test_subplan_revision_preserves_unchanged_stage_gate_state(client):
     ).fetchone()
 
     assert tuple(revised_stage) == ("completed", 1, "passed", "passed")
+
+
+def test_completed_production_line_can_rebind_after_subplan_adds_stage(client):
+    """完成的生产线只能通过新子计划版本显式重绑后再次运行。"""
+    _tc, conn, _ = client
+    store, master, version, stage = _approved_subplan(
+        conn, sub_id="completed-line-add-stage-sub",
+    )
+    line_store = ProductionLineStore(conn)
+    line = conn.execute(
+        "SELECT id,current_version_id FROM production_lines WHERE sub_plan_id=?",
+        ("completed-line-add-stage-sub",),
+    ).fetchone()
+    old_line_version_id = int(line["current_version_id"])
+    conn.execute(
+        "UPDATE production_lines SET status='completed' WHERE id=?",
+        (line["id"],),
+    )
+    conn.execute(
+        "UPDATE sub_plan_stages SET status='completed' WHERE id=?",
+        (int(stage["id"]),),
+    )
+    conn.commit()
+
+    old_stage = dict(conn.execute(
+        "SELECT * FROM sub_plan_stages WHERE id=?", (int(stage["id"]),)
+    ).fetchone())
+    for field in ("id", "sub_plan_version_id", "created_at", "updated_at"):
+        old_stage.pop(field, None)
+    new_stage_key = "added-after-completion"
+    new_stage = {
+        "stage_key": new_stage_key,
+        "title": "新增阶段",
+        "target_count": 2,
+        "completion_criteria": "完成新增阶段目标",
+    }
+    revision = store.create_subplan_version(
+        "completed-line-add-stage-sub",
+        json.loads(version["snapshot_json"]),
+        master_plan_version_id=int(master["id"]),
+        stages=[old_stage, new_stage],
+        based_on_version_id=int(version["id"]),
+        author="test",
+        change_note="完成后新增阶段",
+    )
+    store.activate_subplan_version(int(revision["id"]), reviewer="test")
+
+    line_draft = line_store.create_draft(
+        "completed-line-add-stage-sub",
+        int(revision["id"]),
+        {"title": "扩展后的生产线", "stages": [
+            {"stage_key": str(stage["stage_key"]), "batch_size": int(stage["target_count"])},
+            {"stage_key": new_stage_key, "batch_size": 2},
+        ]},
+        generation_source="manual",
+        author="test",
+        change_note="绑定新增阶段",
+        based_on_version_id=old_line_version_id,
+    )
+    line_store.activate(int(line_draft["id"]), reviewer="test")
+
+    current_line = conn.execute(
+        "SELECT status,current_version_id FROM production_lines WHERE id=?",
+        (line["id"],),
+    ).fetchone()
+    assert current_line["status"] == "active"
+    current_version = line_store.get_version(int(current_line["current_version_id"]))
+    assert int(current_version["sub_plan_version_id"]) == int(revision["id"])
+    from src.core.subplan_production import active_subplan_stage
+    active = active_subplan_stage(conn)
+    assert active is not None
+    assert active["stage_key"] == new_stage_key
