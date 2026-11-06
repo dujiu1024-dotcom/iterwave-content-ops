@@ -9027,29 +9027,29 @@ def _register_routes(app: FastAPI) -> None:
         # 统一读取有效指标事实：平台读回与人工回填同口径，并由 effective view 排除已修正的旧快照。
         metric_row = conn.execute(
             """WITH ranked AS (
-                   SELECT draft_id, metric_key, value,
+                   SELECT content_id, platform, metric_key, value,
                           ROW_NUMBER() OVER (
-                              PARTITION BY draft_id, metric_key
+                              PARTITION BY tenant_id, content_id, platform, metric_key
                               ORDER BY measured_at DESC, recorded_at DESC, fact_id DESC
                           ) AS rn
                    FROM metric_facts_effective
-                   WHERE draft_id IS NOT NULL
+                   WHERE content_id IS NOT NULL
                      AND tenant_id IN (?, 'legacy')
                      AND """ + timestamp_since_sql("measured_at") + """
                      AND collection_status IN ('succeeded','partial')
                )
-               SELECT COUNT(DISTINCT draft_id) AS sample_count,
+               SELECT COUNT(DISTINCT content_id) AS sample_count,
                       SUM(CASE WHEN metric_key='views' THEN value END) AS views,
                       SUM(CASE WHEN metric_key='likes' THEN value END) AS likes,
                       SUM(CASE WHEN metric_key='collects' THEN value END) AS collects,
                       SUM(CASE WHEN metric_key='comments' THEN value END) AS comments,
                       SUM(CASE WHEN metric_key='shares' THEN value END) AS shares,
                       SUM(CASE WHEN metric_key='new_followers' THEN value END) AS new_followers,
-                      COUNT(DISTINCT CASE WHEN metric_key='views' THEN draft_id END) AS views_samples,
-                      COUNT(DISTINCT CASE WHEN metric_key='likes' THEN draft_id END) AS likes_samples,
-                      COUNT(DISTINCT CASE WHEN metric_key='collects' THEN draft_id END) AS collects_samples,
-                      COUNT(DISTINCT CASE WHEN metric_key='comments' THEN draft_id END) AS comments_samples,
-                      COUNT(DISTINCT CASE WHEN metric_key='shares' THEN draft_id END) AS shares_samples
+                      COUNT(DISTINCT CASE WHEN metric_key='views' THEN content_id END) AS views_samples,
+                      COUNT(DISTINCT CASE WHEN metric_key='likes' THEN content_id END) AS likes_samples,
+                      COUNT(DISTINCT CASE WHEN metric_key='collects' THEN content_id END) AS collects_samples,
+                      COUNT(DISTINCT CASE WHEN metric_key='comments' THEN content_id END) AS comments_samples,
+                      COUNT(DISTINCT CASE WHEN metric_key='shares' THEN content_id END) AS shares_samples
                FROM ranked WHERE rn = 1""",
             (_tenant_id(), since_utc, since_legacy),
         ).fetchone()
