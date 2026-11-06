@@ -234,6 +234,8 @@ class MetricsSnapshot:
         new_followers: Optional[int] = None,
         raw_response: Optional[str] = None,
         error_msg: Optional[str] = None,
+        work_id: Optional[str] = None,
+        work_url: Optional[str] = None,
     ):
         self.platform = platform
         self.fetch_status = fetch_status
@@ -250,6 +252,9 @@ class MetricsSnapshot:
         self.new_followers = new_followers
         self.raw_response = raw_response
         self.error_msg = error_msg
+        # Published work identity is distinct from the platform's saved-draft ID.
+        self.work_id = work_id
+        self.work_url = work_url
 
     # --- 归一化比率（R3：依赖字段任一 NULL → 该比率为 NULL，绝不 `or 0` 造数）---
 
