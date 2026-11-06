@@ -317,6 +317,14 @@ def collect_business_context(conn, cfg) -> dict[str, Any]:
     fingerprint_context = {
         key: value for key, value in context.items() if key not in freshness_excluded
     }
+    # Evidence references remain in the report snapshot, but account/metric/review
+    # observations are volatile and must not change the source-definition fingerprint.
+    if isinstance(fingerprint_context.get("source_references"), list):
+        volatile_reference_types = {"account_snapshot", "metric_fact", "review_task", "business_gap"}
+        fingerprint_context["source_references"] = [
+            ref for ref in fingerprint_context["source_references"]
+            if ref.get("source_type") not in volatile_reference_types
+        ]
     canonical = _json(fingerprint_context)
     return {"context": context, "fingerprint": hashlib.sha256(canonical.encode("utf-8")).hexdigest()}
 
