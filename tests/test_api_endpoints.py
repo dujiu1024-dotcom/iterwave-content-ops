@@ -5331,10 +5331,10 @@ def test_kpi_one_day_window_includes_midnight_through_0800_shanghai(client, monk
     tc, conn, _ = client
     monkeypatch.setattr(api_main, "business_now", lambda _cfg: datetime(2026, 11, 5, 9, 0))
     rows = (
-        ("before-midnight", "2026-11-05T15:59:59+00:00"),
-        ("at-midnight", "2026-11-05T16:00:00+00:00"),
-        ("early-morning", "2026-11-05T20:00:00+00:00"),
-        ("before-0800", "2026-11-05T23:59:59+00:00"),
+        ("before-midnight", "2026-11-04T15:59:59+00:00"),
+        ("at-midnight", "2026-11-04T16:00:00+00:00"),
+        ("early-morning", "2026-11-04T20:00:00+00:00"),
+        ("before-0800", "2026-11-04T23:59:59+00:00"),
     )
     for content_id, timestamp in rows:
         conn.execute(
