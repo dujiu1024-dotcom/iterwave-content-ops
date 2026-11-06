@@ -652,8 +652,10 @@ class SchedulerEngine:
                     platform_work_url=work_url,
                 ):
                     confirmed += 1
-                    errors.append(
-                        f"{platform.value} 已确认作品身份，但指标解析仍为 {fetch_status}；将按作品 ID 后续补采"
+                    pending += 1
+                    logger.warning(
+                        "[APS] 已确认平台作品身份但指标解析未完成，后续按作品 ID 补采 draft=%s status=%s",
+                        row["id"], fetch_status,
                     )
                     continue
                 errors.append(
