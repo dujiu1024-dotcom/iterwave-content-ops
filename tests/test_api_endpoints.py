@@ -5324,3 +5324,43 @@ def test_tenant_context_gate_rejects_missing_header_on_non_plan_write_without_si
     assert response.json()["code"] == "TENANT_CONTEXT_REQUIRED"
     assert int(conn.execute("SELECT COUNT(*) FROM review_tasks").fetchone()[0]) == before
 
+
+
+def test_kpi_one_day_window_includes_midnight_through_0800_shanghai(client, monkeypatch):
+    """days=1 覆盖业务日零点至 08:00 的早间窗口，不把前一日数据带入。"""
+    tc, conn, _ = client
+    monkeypatch.setattr(api_main, "business_now", lambda _cfg: datetime(2026, 11, 5, 9, 0))
+    rows = (
+        ("before-midnight", "2026-11-04T15:59:59+00:00"),
+        ("at-midnight", "2026-11-04T16:00:00+00:00"),
+        ("early-morning", "2026-11-04T20:00:00+00:00"),
+        ("before-0800", "2026-11-04T23:59:59+00:00"),
+    )
+    for content_id, timestamp in rows:
+        conn.execute(
+            "INSERT INTO ops_logs (platform, action_type, content, executed_at, status) "
+            "VALUES ('xhs','browse',?,?, 'success')",
+            (content_id, timestamp),
+        )
+        conn.execute(
+            "INSERT INTO contents(id,platform,title,body,created_at) VALUES(?,?,?,?,?)",
+            (content_id, "xhs", content_id, "business-day boundary", timestamp),
+        )
+        conn.execute(
+            "INSERT INTO drafts(id,content_id,platform,status,user_confirmed_at,created_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (f"draft-{content_id}", content_id, "xhs", "user_published", timestamp, timestamp),
+        )
+    conn.commit()
+
+    ops = tc.get("/api/ops_kpi", params={"days": 1})
+    assert ops.status_code == 200, ops.text
+    assert ops.json()["since_business_date"] == "2026-11-05"
+    assert ops.json()["today_ops"]["browse"]["success"] == 3
+
+    summary = tc.get("/api/analytics/business-summary", params={"days": 1})
+    assert summary.status_code == 200, summary.text
+    assert summary.json()["since_business_date"] == "2026-11-05"
+    assert summary.json()["contents_created"] == 3
+    assert summary.json()["drafts_created"] == 3
+    assert summary.json()["confirmed_published"] == 3
