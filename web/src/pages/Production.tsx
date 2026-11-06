@@ -461,6 +461,18 @@ export default function Production() {
     } catch (e: any) { showToast(`取消失败: ${e.message}`, "error"); }
   };
 
+  const recollectFailedMetrics = async (draft: Draft) => {
+    if (draft.platform === "wechat_channels" || !draft.user_confirmed_at || draft.status !== "failed") return;
+    const confirmed = window.confirm("该草稿已确认发布且指标采集失败。现在重新提交一次指标采集任务？不会自动重复提交。");
+    if (!confirmed) return;
+    try {
+      const result = await api.recollectFailedMetrics(draft.id);
+      showToast(result.recollect_scheduled ? "已提交指标重新采集任务" : "重新采集任务未提交", result.recollect_scheduled ? "success" : "error");
+      await refresh();
+      if (currentRoundId) await loadRoundData(currentRoundId);
+    } catch (e: any) { showToast(`重新采集失败: ${e.message}`, "error"); }
+  };
+
   const handleSavePlan = async () => {
     const alloc: Record<string, number> = {};
     for (const r of allocRows) {
@@ -1694,7 +1706,10 @@ export default function Production() {
                               {(d.status === "draft_saved" || d.status === "draft_pending") && (
                                 <button className="btn sm ghost" style={{ marginLeft: 6 }} onClick={() => cancelDraft(d.id)}>✕ 不发了</button>
                               )}
-                              {d.status !== "draft_saved" && d.status !== "draft_pending" && d.status !== "pending_verify" && <span style={{ color: "var(--subtle)" }}>—</span>}
+                              {d.status === "failed" && d.user_confirmed_at && d.platform !== "wechat_channels" && (
+                                <button className="btn sm primary" onClick={() => recollectFailedMetrics(d)}>↻ 重新采集指标</button>
+                              )}
+                              {d.status !== "draft_saved" && d.status !== "draft_pending" && d.status !== "pending_verify" && !(d.status === "failed" && d.user_confirmed_at && d.platform !== "wechat_channels") && <span style={{ color: "var(--subtle)" }}>—</span>}
                             </td>
                           </tr>
                         ))}
