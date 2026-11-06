@@ -2921,8 +2921,21 @@ def _register_routes(app: FastAPI) -> None:
 
     # --- 健康检查 ---
     @app.get("/health")
+    @app.get("/api/health")
     def health():
-        report = _g().get("schema_report") or {}
+        audit_error = None
+        report = {}
+        cfg = _g().get("cfg")
+        if cfg is not None:
+            try:
+                # Audit the active account-group database, not only the process default DB.
+                from src.core.db import Database
+                report = Database(cfg).verify_schema()
+            except Exception as exc:
+                audit_error = type(exc).__name__
+                report = _g().get("schema_report") or {}
+        else:
+            report = _g().get("schema_report") or {}
         has_report = bool(report)
         missing_objects = (
             len(report.get("missing_tables", []))
@@ -2935,9 +2948,24 @@ def _register_routes(app: FastAPI) -> None:
         )
         violations = len(report.get("foreign_key_violations", []))
         integrity = report.get("integrity_check", "unknown")
-        healthy = not has_report or (
-            missing_objects == 0 and violations == 0 and integrity == "ok"
+        data_violations = report.get("governance_data_violations", {})
+        data_violation_count = sum(int(value or 0) for value in data_violations.values())
+        governance_integrity = report.get("governance_integrity_check")
+        governance_data_integrity = report.get("governance_data_integrity_check")
+        governance_missing = (
+            len(report.get("missing_governance_tables", []))
+            + len(report.get("missing_governance_indexes", []))
+            + len(report.get("missing_governance_triggers", []))
+            + len(report.get("missing_governance_columns", []))
+            + len(report.get("missing_governance_foreign_keys", []))
+            + len(report.get("governance_column_type_mismatches", []))
         )
+        healthy = not audit_error and (not has_report or (
+            missing_objects == 0 and violations == 0 and integrity == "ok"
+            and governance_integrity is not False
+            and governance_data_integrity is not False
+            and governance_missing == 0 and data_violation_count == 0
+        ))
         return {
             "status": "ok" if healthy else "degraded",
             "version": "0.1.0",
@@ -2946,6 +2974,15 @@ def _register_routes(app: FastAPI) -> None:
                 "integrity_check": integrity,
                 "missing_schema_objects": missing_objects,
                 "foreign_key_violation_count": violations,
+            },
+            "governance": {
+                "integrity_check": governance_integrity,
+                "data_integrity_check": governance_data_integrity,
+                "missing_governance_objects": governance_missing,
+                "data_violation_count": data_violation_count,
+                "data_violations": data_violations,
+                "data_violation_examples": report.get("governance_data_violation_examples", {}),
+                "audit_error": audit_error,
             },
         }
 
