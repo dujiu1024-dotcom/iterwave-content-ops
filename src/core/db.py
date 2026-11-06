@@ -1738,7 +1738,7 @@ class Database:
             for check_name, example_sql in governance_example_queries.items():
                 if governance_data_violations.get(check_name, 0) > 0:
                     detail_sql = (
-                        example_sql.replace("LIMIT 5", "LIMIT 10000")
+                        example_sql.replace("LIMIT 5", "")
                         if include_all_violation_rows else example_sql
                     )
                     governance_data_violation_examples[check_name] = [
