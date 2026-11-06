@@ -26,6 +26,7 @@ import mimetypes
 import os
 import re
 import weakref
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -41,6 +42,18 @@ from .base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _count_exact_title_lines(text: str, title: str) -> int:
+    """Count exact normalized title lines; partial/prefix matches are not evidence."""
+    wanted = " ".join(unicodedata.normalize("NFKC", str(title or "")).split()).casefold()
+    if not wanted:
+        return 0
+    lines = (
+        " ".join(unicodedata.normalize("NFKC", line).split()).casefold()
+        for line in str(text or "").splitlines()
+    )
+    return sum(1 for line in lines if line == wanted)
 
 
 # Page.route is the final in-process boundary: a UI regression or a platform button
@@ -900,7 +913,7 @@ class DraftSaver:
         if not got:
             return "标题框未找到或未写入"
         got = str(got).strip()
-        if got == want or want.startswith(got):
+        if got == want:
             return None
         return f"标题回读不一致: {got[:20]}"
 
@@ -1068,7 +1081,6 @@ class DraftSaver:
         raw = (title or "").strip()
         if not raw:
             return None
-        keys = list(dict.fromkeys(raw[:n] for n in (10, 8, 6) if len(raw) >= n))
         try:
             marker = str(self.selectors.get("draft_box_frame_marker") or "")
             if self._find_frame(page, marker) is None:
@@ -1078,6 +1090,7 @@ class DraftSaver:
                     logger.warning("视频号草稿箱列表未加载")
                     return None
             for _ in range(25):
+                exact_matches = 0
                 for f in page.frames:
                     if marker and marker not in (f.url or ""):
                         continue
@@ -1086,8 +1099,10 @@ class DraftSaver:
                         text = await f.evaluate("() => document.body.innerText")
                     except Exception:
                         continue
-                    if text and any(k in text for k in keys):
-                        return f"draftbox:{keys[0]}"
+                    exact_matches += _count_exact_title_lines(text or "", raw)
+                # 必须是唯一的完整标题行；截断标题、相似标题和重复标题均不能证明保存成功。
+                if exact_matches == 1:
+                    return f"draftbox:exact-title"
                 await page.wait_for_timeout(1000)
         except Exception as exc:  # noqa: BLE001 — 核对失败不阻断，如实返回 None
             logger.warning("视频号草稿箱核对失败: %s", exc)
