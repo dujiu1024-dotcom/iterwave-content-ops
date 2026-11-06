@@ -203,8 +203,8 @@ def test_data_fetch_pending_is_not_failure_or_retry_attempt(cfg, conn, seed) -> 
         adapters={Platform.XHS: _PendingAdapter()},
         sm_draft=DraftStateMachine(conn),
     )
-    eng.schedule_data_fetch = lambda draft_id, run_at, attempt=1: scheduled.append(
-        (draft_id, attempt)
+    eng.schedule_data_fetch = lambda draft_id, run_at, attempt=1, poll_sequence=0: scheduled.append(
+        (draft_id, attempt, poll_sequence)
     )
 
     report = asyncio.run(eng._job_data_fetch(draft_id, attempt=2))
@@ -216,7 +216,7 @@ def test_data_fetch_pending_is_not_failure_or_retry_attempt(cfg, conn, seed) -> 
         "pending": True,
         "retry_scheduled": True,
     }
-    assert scheduled == [(draft_id, 2)]
+    assert scheduled == [(draft_id, 2, 1)]
     assert conn.execute(
         "SELECT COUNT(*) FROM metrics WHERE draft_id = ?", (draft_id,)
     ).fetchone()[0] == 0
