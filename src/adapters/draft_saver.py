@@ -918,22 +918,27 @@ class DraftSaver:
         return f"标题回读不一致: {got[:20]}"
 
     async def _wechat_fill_body(self, frame, text: str) -> bool:
-        """写图文描述（失败不阻断存草稿）。"""
+        """写入并回读图文描述；无法确认完整内容时禁止触发保存。"""
         try:
-            return bool(await frame.evaluate(
+            result = await frame.evaluate(
                 """(v) => {
                     const el = document.querySelector("div.input-editor[contenteditable]")
                         || document.querySelector("div[contenteditable]");
-                    if (!el) return false;
+                    if (!el) return { ok: false, text: "" };
                     el.focus();
                     el.innerText = v;
                     el.dispatchEvent(new InputEvent('input', { bubbles: true }));
-                    return true;
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    return { ok: true, text: el.innerText || "" };
                 }""",
                 text,
-            ))
+            )
         except Exception:  # noqa: BLE001
             return False
+        if not isinstance(result, dict) or not result.get("ok"):
+            return False
+        normalize = lambda value: " ".join(str(value or "").split())
+        return normalize(result.get("text")) == normalize(text)
 
     async def _wechat_click_save(self, frame) -> bool:
         """点击「保存草稿」（R1：绝不点「发表」）。"""
@@ -1019,7 +1024,11 @@ class DraftSaver:
         frame = await self._wechat_composer_frame(page, timeout_s=8)
         body_ok = bool(frame) and await self._wechat_fill_body(frame, body_text)
         if not body_ok:
-            logger.warning("视频号描述框未填入（不影响标题与图片存草稿）")
+            # 标题匹配只能证明草稿条目身份；正文未能完整回读时不能保存空壳草稿。
+            return DraftResult(
+                success=False,
+                error_msg="视频号正文未能完整写入并回读，已中止存草稿",
+            )
 
         save_clicked = False
         for _ in range(3):
