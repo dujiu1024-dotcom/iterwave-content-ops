@@ -4,7 +4,7 @@ import { navigate, useUrlTab } from "../nav";
 import {
   api, RunRoundReport, SpiralRound, Draft, Platform, AssetItem,
   PlanResponse, ContentItem, PipelineResponse, RecheckResult, Goal, AutogrowStatus,
-  TaskProgress, VisualGenerationTask,
+  TaskProgress, VisualGenerationTask, OrphanDraft,
 } from "../api";
 import DemoBadge from "../components/DemoBadge";
 import EmptyHint from "../components/EmptyHint";
@@ -142,9 +142,18 @@ export default function Production() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [availableTopicCount, setAvailableTopicCount] = useState<number | null>(null);
   const [autogrowStatus, setAutogrowStatus] = useState<AutogrowStatus | null>(null);
+  const [orphanDrafts, setOrphanDrafts] = useState<OrphanDraft[]>([]);
+  const [orphanDraftsLoadFailed, setOrphanDraftsLoadFailed] = useState(false);
 
   // ---------------------------------------------------------------- 数据加载
   const refresh = async () => {
+    try {
+      const orphanResult = await api.orphanDrafts();
+      setOrphanDrafts(orphanResult.items);
+      setOrphanDraftsLoadFailed(false);
+    } catch {
+      setOrphanDraftsLoadFailed(true);
+    }
     try {
       const pageResult = await api.roundsPage(roundsPage, roundsPageSize, roundStatusFilter || undefined);
       const r = pageResult.items;
@@ -698,6 +707,33 @@ export default function Production() {
           <div className="panel-head"><div><div className="panel-title">自动开轮条件</div><div className="panel-sub">自动闭环是否允许开启下一轮，以及当前阻塞原因。</div></div><span className={`tag ${autogrowStatus.verdict.can_start ? "green" : "orange"}`}>{autogrowStatus.verdict.can_start ? "允许开轮" : "暂不可开轮"}</span></div>
           <div className="note">{autogrowStatus.verdict.reason || (autogrowStatus.verdict.can_start ? "当前满足自动开轮条件。" : "当前不满足自动开轮条件，请检查运行配置。")}</div>
           {autogrowStatus.verdict.next_eligible_at && <div className="tiny" style={{ marginTop: 6 }}>预计下次可开轮：{autogrowStatus.verdict.next_eligible_at}</div>}
+        </div>
+      )}
+      {(orphanDrafts.length > 0 || orphanDraftsLoadFailed) && (
+        <div className="panel" style={{ marginBottom: 14, borderColor: "var(--orange)" }}>
+          <div className="panel-head">
+            <div>
+              <div className="panel-title">孤儿草稿恢复清单</div>
+              <div className="panel-sub">本地草稿记录找不到来源内容。平台状态未知时必须先核实；系统不会自动删除、取消或重试。</div>
+            </div>
+            <span className="tag orange">{orphanDraftsLoadFailed ? "清单读取失败" : `${orphanDrafts.length} 条待处置`}</span>
+          </div>
+          {orphanDraftsLoadFailed && <div className="note">孤儿草稿清单暂时无法读取，请稍后刷新；不要据此判断没有孤儿草稿。</div>}
+          {orphanDrafts.map((draft) => (
+            <div key={draft.id} className="task-row" style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+              <div>
+                <div style={{ fontWeight: 600 }}>{displayPlatformLabel(draft.platform)} · {draft.id}</div>
+                <div className="tiny">来源内容：{draft.content_id} · 草稿状态：{displayStatusLabel(draft.status)} · 创建：{draft.created_at || "未知"}</div>
+                <div className="tiny">处置建议：{({
+                  manual_verification_required: "先人工核实平台是否已保存",
+                  platform_state_must_be_preserved: "保留平台状态，不得自动清理",
+                  review_before_archive: "人工复核后再决定归档",
+                  recovery_candidate: "可评估恢复，但不得自动重试",
+                } as Record<string, string>)[draft.recovery_disposition] ?? "人工复核"}</div>
+              </div>
+              <span className="tag gray">禁止自动清理</span>
+            </div>
+          ))}
         </div>
       )}
       <div className="tabs" style={{ marginBottom: 14 }}>
