@@ -4923,6 +4923,39 @@ def test_review_adoption_master_draft_is_review_gated_and_rebase_path_is_reachab
     )
     store.activate_subplan_version(child["id"], reviewer="test")
 
+    # A manually paused child and a terminal child belong to the same source
+    # cohort, but must be reported as skipped rather than silently filtered.
+    for extra_id, extra_status in (
+        ("review-adoption-manual-pause", "paused"),
+        ("review-adoption-cancelled", "cancelled"),
+        ("review-adoption-archived", "archived"),
+        ("review-adoption-expired-version", "expired_version"),
+    ):
+        store.create_subplan(
+            extra_id, master_plan_version_id=active_id, platform="xhs",
+            title=extra_id, author="test",
+        )
+        extra_version = store.create_subplan_version(
+            extra_id, {"title": extra_id, "platform": "xhs"},
+            master_plan_version_id=active_id, author="test",
+            stages=[{"title": "混合状态验收阶段", "direction": "验收", "target_count": 1}],
+        )
+        store.activate_subplan_version(extra_version["id"], reviewer="test")
+        if extra_status == "paused":
+            conn.execute(
+                "UPDATE sub_plans SET status='paused',pause_reason='user' WHERE id=?",
+                (extra_id,),
+            )
+        elif extra_status == "expired_version":
+            # The child remains active, but its current version has been superseded.
+            conn.execute(
+                "UPDATE sub_plan_versions SET status='archived' WHERE id=?",
+                (extra_version["id"],),
+            )
+        else:
+            conn.execute("UPDATE sub_plans SET status=? WHERE id=?", (extra_status, extra_id))
+    conn.commit()
+
     stage = conn.execute(
         "SELECT id FROM sub_plan_stages WHERE sub_plan_version_id=? ORDER BY stage_order LIMIT 1",
         (child["id"],),
@@ -4977,7 +5010,17 @@ def test_review_adoption_master_draft_is_review_gated_and_rebase_path_is_reachab
         "target_master_plan_version_id": new_master_id,
     })
     assert rebased.status_code == 200, rebased.text
-    draft = rebased.json()["drafts"][0]["draft_version"]
+    rebase_result = rebased.json()
+    assert rebase_result["status"] == "partial"
+    assert rebase_result["eligible_count"] == 1
+    assert rebase_result["skipped_count"] == 4
+    skipped_by_id = {item["sub_plan_id"]: item for item in rebase_result["skipped"]}
+    assert skipped_by_id["review-adoption-manual-pause"]["reason"] == "not_paused_by_target"
+    assert skipped_by_id["review-adoption-cancelled"]["reason"] == "terminal_status"
+    assert skipped_by_id["review-adoption-archived"]["reason"] == "terminal_status"
+    assert skipped_by_id["review-adoption-expired-version"]["reason"] == "no_effective_version"
+    assert [item["sub_plan_id"] for item in rebase_result["drafts"]] == [sub_id]
+    draft = rebase_result["drafts"][0]["draft_version"]
     assert int(draft["master_plan_version_id"]) == new_master_id
     assert draft["status"] == "draft"
     draft_snapshot = json.loads(draft["snapshot_json"])
@@ -4985,6 +5028,21 @@ def test_review_adoption_master_draft_is_review_gated_and_rebase_path_is_reachab
     assert conn.execute(
         "SELECT master_plan_version_id FROM sub_plans WHERE id=?", (sub_id,)
     ).fetchone()[0] == active_id
+
+    # Retrying the same mixed-state adoption reuses the persisted eligible draft
+    # and returns the same explicit skipped-child report without duplication.
+    retried = tc.post("/api/plan_adjustments/adopt", json={
+        "dimensions": ["内容结构"],
+        "target_master_plan_version_id": new_master_id,
+    })
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["status"] == "partial"
+    assert retried.json()["drafts"][0]["reused"] is True
+    assert retried.json()["drafts"][0]["draft_version"]["id"] == draft["id"]
+    assert {item["sub_plan_id"] for item in retried.json()["skipped"]} == {
+        "review-adoption-manual-pause", "review-adoption-cancelled",
+        "review-adoption-archived", "review-adoption-expired-version",
+    }
 
     approved_child = tc.post(f"/api/subplans/{sub_id}/review", json={
         "version_id": int(draft["id"]), "action": "approve",
