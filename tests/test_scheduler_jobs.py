@@ -1105,3 +1105,64 @@ def test_legacy_wechat_data_fetch_task_is_safely_skipped(cfg, conn, seed):
         "SELECT COUNT(*) FROM metrics WHERE draft_id=?", (draft_id,),
     ).fetchone()[0] == 0
     assert not any(job.id.startswith(f"data_fetch_{draft_id}_") for job in engine.scheduler.get_jobs())
+
+
+
+def test_manual_metrics_reconcile_draft_and_close_round_with_effective_facts(cfg, conn, seed):
+    """手工回填应完成单篇草稿，并由统一复盘任务正常收口轮次。"""
+    from src.core.spiral import SpiralEngine
+    from src.core.state_machine import DraftStateMachine, RoundStateMachine
+
+    round_id = seed.round(status="collecting_metrics")
+    draft_id = seed.draft(
+        round_id, platform="xhs", draft_status="user_published",
+        fetch_status=None, topic_id="manual-round-closure",
+    )
+    confirmed_at = datetime.now().isoformat(sep=" ", timespec="seconds")
+    conn.execute(
+        "UPDATE drafts SET user_confirmed_at=?, published_at=? WHERE id=?",
+        (confirmed_at, confirmed_at, draft_id),
+    )
+    content_id = conn.execute(
+        "SELECT content_id FROM drafts WHERE id=?", (draft_id,),
+    ).fetchone()["content_id"]
+    snapshot_id = "manual-round-closure-snapshot"
+    conn.execute(
+        "INSERT INTO metric_snapshots "
+        "(id,tenant_id,draft_id,content_id,platform,source,views,likes,collects,comments,"
+        "measured_at,recorded_at,created_at) "
+        "VALUES(?, 'default', ?, ?, 'xhs', 'manual', 100, 10, 5, 5, ?, ?, ?)",
+        (snapshot_id, draft_id, content_id, confirmed_at, confirmed_at, confirmed_at),
+    )
+    conn.commit()
+
+    draft_machine = DraftStateMachine(conn, cfg)
+    assert draft_machine.transition(
+        draft_id, "published", reason="人工指标回填完成",
+        recovery_source="manual_metrics",
+    ) is True
+    assert conn.execute(
+        "SELECT status FROM drafts WHERE id=?", (draft_id,),
+    ).fetchone()["status"] == "published"
+
+    round_machine = RoundStateMachine(conn, cfg)
+    engine = SchedulerEngine(cfg, Path(cfg.paths.db_file))
+    engine.wire(
+        conn=conn, adapters={}, sm_round=round_machine,
+        sm_draft=draft_machine, spiral=SpiralEngine(cfg, conn),
+    )
+    report = asyncio.run(engine._job_round_review())
+
+    assert report["final_status"] == "success"
+    assert report["rounds_transitioned_to_analyzing"] == 1
+    assert report["rounds_analyzed"] == 1
+    assert conn.execute(
+        "SELECT status FROM spiral_rounds WHERE id=?", (round_id,),
+    ).fetchone()["status"] == "completed"
+    decision = conn.execute(
+        "SELECT decision FROM spiral_rounds WHERE id=?", (round_id,),
+    ).fetchone()["decision"]
+    import json
+    evidence = json.loads(decision)["evidence"]
+    assert evidence["sample_count"] == 1
+    assert evidence["manual_metric_sample_count"] == 1
