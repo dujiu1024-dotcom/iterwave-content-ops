@@ -38,8 +38,8 @@ def test_orphan_drafts_are_reported_without_automatic_cleanup(conn):
 def test_orphan_pending_platform_verification_is_never_classified_as_retryable(conn):
     _insert_legacy_orphan_draft(conn, "orphan-uncertain", "missing-content-2", "douyin", "draft_pending")
     conn.execute(
-        "INSERT INTO draft_save_verifications (draft_id, status) "
-        "VALUES ('orphan-uncertain', 'pending_verify')"
+        "INSERT INTO draft_save_verifications (draft_id, status, attempted_at) "
+        "VALUES ('orphan-uncertain', 'pending_verify', CURRENT_TIMESTAMP)"
     )
     conn.commit()
 
