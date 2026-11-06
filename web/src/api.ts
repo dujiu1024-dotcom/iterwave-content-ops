@@ -2059,6 +2059,12 @@ export const api = {
   businessAiProposal: (source_text: string) =>
     fetchJson<{ status: string; message: string; proposals: Array<Record<string, unknown>> }>("/api/business-profile/ai-proposals", { method: "POST", body: JSON.stringify({ source_text }) }),
   health: () => fetchJson<HealthReport>("/api/health"),
+  /** 仅对已确认发布且采集失败的草稿显式重新采集指标。 */
+  recollectFailedMetrics: (draftId: string) =>
+    fetchJson<{ draft_id: string; status: "data_fetching"; recollect_scheduled: boolean }>(
+      `/api/drafts/${draftId}/metrics/recollect`,
+      { method: "POST" },
+    ),
   status: () => fetchJson<SystemStatus>("/api/status"),
   goals: () => fetchJson<Goal[]>("/api/goals"),
   /** 总体目标进度（后端统一计算等权平均，前端只展示） */
