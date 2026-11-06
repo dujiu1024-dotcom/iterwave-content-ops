@@ -161,7 +161,7 @@ class PlanVersionStore:
                     based_on_version_id,created_at,created_by,change_note,
                     ai_metadata_json,effective_metadata_json,metadata_signature,
                     metadata_version,metadata_updated_at,metadata_updated_by
-                ) VALUES(?,?,?,'draft',?,?,?,?,?,?,?,?,?,1,?,?)""",
+                )VALUES(?,?,?,'draft',?,?,?,?,?,?,?, ?,1,?,?)""",
                 (version_no, signature, json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
                  source, based_on_version_id, now, author, change_note,
                  ai_metadata_json, effective_metadata_json, metadata_signature, now, author),
