@@ -727,19 +727,19 @@ class PlanVersionStore:
             if master["status"] != "effective":
                 raise PlanVersionError("新子计划版本必须关联当前生效的主计划版本")
             base_stage_keys: set[str] = set()
+            base_stages_by_key: dict[str, Any] = {}
             if based_on_version_id is not None:
                 base = self.conn.execute(
                     "SELECT sub_plan_id FROM sub_plan_versions WHERE id=?", (based_on_version_id,)
                 ).fetchone()
                 if base is None or base["sub_plan_id"] != sub_plan_id:
                     raise PlanVersionError("基准版本不属于当前子计划")
-                base_stage_keys = {
-                    str(row["stage_key"])
-                    for row in self.conn.execute(
-                        "SELECT stage_key FROM sub_plan_stages WHERE sub_plan_version_id=?",
-                        (based_on_version_id,),
-                    ).fetchall()
-                }
+                base_stages = self.conn.execute(
+                    "SELECT * FROM sub_plan_stages WHERE sub_plan_version_id=?",
+                    (based_on_version_id,),
+                ).fetchall()
+                base_stages_by_key = {str(row["stage_key"]): dict(row) for row in base_stages}
+                base_stage_keys = set(base_stages_by_key)
 
             # Assign stable keys before validating dependency edges. Existing stages
             # carry their keys forward; newly added stages receive new stable keys.
@@ -837,14 +837,13 @@ class PlanVersionStore:
                             datetime.strptime(str(date_value), "%Y-%m-%d")
                         except ValueError as exc:
                             raise PlanVersionError(f"{field_name} 必须为 YYYY-MM-DD") from exc
-                stage_status = str(stage.get("status") or "pending")
+                # Version revisions must not trust client-supplied lifecycle/gate state.
+                # Preserve state only from the immutable base version when the stage contract is unchanged.
+                stage_status = "pending" if based_on_version_id is not None else str(stage.get("status") or "pending")
                 if stage_status not in {"pending", "in_progress", "completed", "paused", "cancelled"}:
                     raise PlanVersionError("阶段状态无效")
-                entry_met = stage.get("entry_condition_met", True)
-                if isinstance(entry_met, int) and not isinstance(entry_met, bool) and entry_met in (0, 1):
-                    entry_met = bool(entry_met)
-                if not isinstance(entry_met, bool):
-                    raise PlanVersionError("阶段进入条件状态必须是布尔值")
+                entry_condition = str(stage.get("entry_condition") or "")[:4000]
+                entry_met = True if not entry_condition.strip() else False
                 completion_criteria = str(stage.get("completion_criteria") or stage.get("completion_condition") or "")[:4000]
                 business_required = stage.get("business_completion_required", bool(completion_criteria.strip()))
                 effect_required = stage.get("effect_required", bool(str(stage.get("effect_evaluation") or "").strip()))
@@ -857,8 +856,27 @@ class PlanVersionStore:
                             effect_required = bool(value)
                     elif not isinstance(value, bool):
                         raise PlanVersionError(f"{field_name} 必须是布尔值")
-                business_status = "pending" if business_required else "not_required"
-                effect_status = "pending" if effect_required else "not_required"
+                effect_evaluation = str(stage.get("effect_evaluation") or "")[:4000]
+                dependencies_json = json.dumps(stage.get("dependencies") or [], ensure_ascii=False)
+                prior = base_stages_by_key.get(stage_key) if based_on_version_id is not None else None
+                same_contract = bool(
+                    prior
+                    and int(prior["target_count"]) == target_count
+                    and str(prior["entry_condition"] or "") == entry_condition
+                    and str(prior["dependencies_json"] or "[]") == dependencies_json
+                    and bool(prior["business_completion_required"]) == bool(business_required)
+                    and str(prior["completion_criteria"] or "") == completion_criteria
+                    and bool(prior["effect_required"]) == bool(effect_required)
+                    and str(prior["effect_evaluation"] or "") == effect_evaluation
+                )
+                if same_contract:
+                    stage_status = str(prior["status"])
+                    entry_met = bool(prior["entry_condition_met"])
+                    business_status = str(prior["business_completion_status"])
+                    effect_status = str(prior["effect_status"])
+                else:
+                    business_status = "pending" if business_required else "not_required"
+                    effect_status = "pending" if effect_required else "not_required"
                 self.conn.execute(
                     """INSERT INTO sub_plan_stages(
                         sub_plan_version_id,stage_key,stage_order,title,direction,target_count,
@@ -879,10 +897,10 @@ class PlanVersionStore:
                      str(stage.get("input_info") or "")[:4000],
                      str(stage.get("expected_result") or "")[:4000],
                      completion_criteria,
-                     str(stage.get("effect_evaluation") or "")[:4000],
-                     str(stage.get("entry_condition") or "")[:4000],
+                     effect_evaluation,
+                     entry_condition,
                      1 if entry_met else 0,
-                     json.dumps(stage.get("dependencies") or [], ensure_ascii=False),
+                     dependencies_json,
                      1 if business_required else 0, business_status,
                      1 if effect_required else 0, effect_status),
                 )
