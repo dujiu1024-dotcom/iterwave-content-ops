@@ -776,6 +776,25 @@ class SchedulerEngine:
             async with self.platform_locks[platform]:
                 snap = await adapter.fetch_metrics(row["draft_id"], row["fetch_title"] or "")
 
+        # PENDING 表示平台尚未提供可确认的作品/指标，不是采集故障。
+        # 保持 data_fetching，不写 failed metrics、不消耗失败重试次数；
+        # 使用相同 attempt 延后轮询，直到平台数据可读或外层轮次超时治理接管。
+        if snap.fetch_status == FetchStatus.PENDING:
+            _retry_times, interval_min = self._metrics_retry_params()
+            next_at = storage_now() + timedelta(minutes=max(1, interval_min))
+            self.schedule_data_fetch(draft_id, next_at, attempt=attempt)
+            logger.info(
+                "[APS] data_fetch 仍 pending，保持 attempt=%d 并延后轮询 draft=%s",
+                attempt, draft_id,
+            )
+            return {
+                "final_status": "success",
+                "errors": [],
+                "attempt": attempt,
+                "pending": True,
+                "retry_scheduled": True,
+            }
+
         # 落库 metrics（R3：解析不到的字段保持 NULL，绝不补 0）
         # R16 幂等：draft_id + platform + 采集日期当天只覆盖一次（当天已有记录 → UPDATE 而非 INSERT）
         with self.conn:
