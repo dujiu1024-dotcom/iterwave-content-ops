@@ -78,3 +78,90 @@ def test_async_context_does_not_create_state_for_unlogged_platform(tmp_path):
             assert await login_manager.save_context_state_async(FakeAsyncContext(), Platform.DOUYIN) is None
 
     asyncio.run(run())
+
+
+def test_platform_context_reuses_and_persists_login_state_across_worker_restarts(tmp_path, monkeypatch):
+    """两个独立 worker 生命周期使用同一租户登录态，且不串写其他租户。"""
+    import json
+    import playwright.async_api
+    import src.adapters.draft_saver as draft_saver
+    import src.adapters as adapters
+
+    tenant_a = tmp_path / "tenant-a" / "data"
+    tenant_b = tmp_path / "tenant-b" / "data"
+    for tenant in (tenant_a, tenant_b):
+        state_path = tenant / "login_states" / "xhs.json"
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text(
+            json.dumps({"cookies": [{"name": "session", "value": "initial"}], "origins": []}),
+            encoding="utf-8",
+        )
+
+    class FakeContext:
+        def __init__(self, initial_state, worker_label):
+            self.initial_state = initial_state
+            self.worker_label = worker_label
+
+        async def storage_state(self, path=None):
+            Path(path).write_text(json.dumps({
+                "cookies": [{"name": "session", "value": self.worker_label}],
+                "origins": [],
+            }), encoding="utf-8")
+
+        async def close(self):
+            return None
+
+    class FakeBrowser:
+        async def close(self):
+            return None
+
+    class FakeChromium:
+        async def launch(self, **kwargs):
+            return FakeBrowser()
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+    class FakePlaywrightManager:
+        async def __aenter__(self):
+            return FakePlaywright()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(playwright.async_api, "async_playwright", lambda: FakePlaywrightManager())
+    monkeypatch.setattr(draft_saver, "_install_publish_network_guard", _async_noop)
+    observed_loaded = []
+
+    async def fake_get_or_create_context(_browser, platform):
+        assert platform == Platform.XHS
+        state_path = login_manager._platform_state_path(platform)
+        current = json.loads(state_path.read_text(encoding="utf-8"))
+        observed_loaded.append(current["cookies"][0]["value"])
+        return FakeContext(current, f"worker-{len(observed_loaded)}")
+
+    async def run_worker_lifecycle(tenant):
+        with login_manager.tenant_login_dir(tenant):
+            async with adapters.new_context_for_platform(Platform.XHS):
+                pass
+
+    async def run():
+        monkeypatch.setattr(login_manager, "get_or_create_context", fake_get_or_create_context)
+        await run_worker_lifecycle(tenant_a)
+        await run_worker_lifecycle(tenant_a)
+        await run_worker_lifecycle(tenant_b)
+
+    async def _unused():
+        return None
+
+    asyncio.run(run())
+    assert observed_loaded == ["initial", "worker-1", "initial"]
+    state_a = json.loads((tenant_a / "login_states" / "xhs.json").read_text(encoding="utf-8"))
+    state_b = json.loads((tenant_b / "login_states" / "xhs.json").read_text(encoding="utf-8"))
+    assert state_a["cookies"][0]["value"] == "worker-2"
+    assert state_b["cookies"][0]["value"] == "worker-3"
+    assert login_manager._TENANT_LOGIN_DIR.get() is None
+
+
+async def _async_noop(*_args, **_kwargs):
+    return None
