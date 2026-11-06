@@ -1674,6 +1674,70 @@ class Database:
             result["governance_data_integrity_check"] = not any(
                 governance_data_violations.values()
             )
+            governance_example_queries = {
+                "metric_snapshot_orphan_draft": """
+                    SELECT ms.id AS record_id,ms.draft_id,ms.content_id
+                    FROM metric_snapshots ms LEFT JOIN drafts d ON d.id=ms.draft_id
+                    WHERE d.id IS NULL OR d.content_id!=ms.content_id LIMIT 5
+                """,
+                "metric_snapshot_orphan_content": """
+                    SELECT ms.id AS record_id,ms.content_id
+                    FROM metric_snapshots ms LEFT JOIN contents c ON c.id=ms.content_id
+                    WHERE c.id IS NULL LIMIT 5
+                """,
+                "metric_snapshot_correction_chain_broken": """
+                    SELECT ms.id AS record_id,ms.correction_of,ms.draft_id
+                    FROM metric_snapshots ms
+                    WHERE ms.correction_of IS NOT NULL AND NOT EXISTS (
+                        SELECT 1 FROM metric_snapshots original
+                        WHERE original.id=ms.correction_of
+                          AND original.tenant_id=ms.tenant_id
+                          AND original.draft_id=ms.draft_id
+                    ) LIMIT 5
+                """,
+                "metric_snapshot_duplicate_idempotency_key": """
+                    SELECT MIN(id) AS record_id,tenant_id,draft_id,idempotency_key
+                    FROM metric_snapshots WHERE idempotency_key IS NOT NULL
+                    GROUP BY tenant_id,draft_id,idempotency_key HAVING COUNT(*)>1 LIMIT 5
+                """,
+                "manual_metric_draft_state_mismatch": """
+                    SELECT ms.id AS record_id,ms.draft_id,d.status AS draft_status
+                    FROM metric_snapshots ms JOIN drafts d ON d.id=ms.draft_id
+                    WHERE ms.source='manual' AND d.status!='published' LIMIT 5
+                """,
+                "metric_fact_orphan_content": """
+                    SELECT f.fact_id AS record_id,f.content_id
+                    FROM metric_facts f LEFT JOIN contents c ON c.id=f.content_id
+                    WHERE f.content_id IS NOT NULL AND c.id IS NULL LIMIT 5
+                """,
+                "metric_fact_orphan_draft": """
+                    SELECT f.fact_id AS record_id,f.draft_id
+                    FROM metric_facts f LEFT JOIN drafts d ON d.id=f.draft_id
+                    WHERE f.draft_id IS NOT NULL AND d.id IS NULL LIMIT 5
+                """,
+                "metric_fact_correction_chain_broken": """
+                    SELECT f.fact_id AS record_id,f.correction_of,f.draft_id
+                    FROM metric_facts f
+                    WHERE f.correction_of IS NOT NULL AND NOT EXISTS (
+                        SELECT 1 FROM metric_snapshots original
+                        WHERE original.id=f.correction_of
+                          AND original.tenant_id=f.tenant_id
+                          AND original.draft_id=f.draft_id
+                    ) LIMIT 5
+                """,
+                "spiral_round_decision_json_invalid": """
+                    SELECT id AS record_id,status
+                    FROM spiral_rounds
+                    WHERE decision IS NOT NULL AND json_valid(decision)=0 LIMIT 5
+                """,
+            }
+            governance_data_violation_examples = {}
+            for check_name, example_sql in governance_example_queries.items():
+                if governance_data_violations.get(check_name, 0) > 0:
+                    governance_data_violation_examples[check_name] = [
+                        dict(row) for row in conn.execute(example_sql).fetchall()
+                    ]
+            result["governance_data_violation_examples"] = governance_data_violation_examples
 
             governance_column_types = {
                 "business_profiles": {
