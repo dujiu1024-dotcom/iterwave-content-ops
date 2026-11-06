@@ -2474,6 +2474,24 @@ def _register_routes(app: FastAPI) -> None:
         if measured_dt > now_dt + timedelta(minutes=5):
             raise HTTPException(422, "统计时间不能晚于当前时间（允许 5 分钟设备时钟误差）")
         measured_at = measured_dt.isoformat(timespec="seconds")
+
+        def reconcile_manual_metrics(snapshot_id: str) -> str:
+            sm_draft = _g().get("sm_draft")
+            if sm_draft is None:
+                from src.core.state_machine import DraftStateMachine
+                sm_draft = DraftStateMachine(conn, _g().get("cfg"))
+            if not sm_draft.transition(
+                draft_id, "published", reason="人工指标回填完成",
+                recovery_source="manual_metrics",
+            ):
+                raise HTTPException(409, "人工指标已保存，但草稿状态无法安全收口；请检查草稿状态与发布确认记录")
+            try:
+                from src.core.goal_progress import GoalProgressUpdater
+                GoalProgressUpdater(_g()["cfg"], conn).update_all()
+            except Exception:
+                logger.exception("人工指标回填后刷新目标进度失败 draft=%s", draft_id)
+            return "published"
+
         idempotency_key = request.headers.get("Idempotency-Key")
         payload_hash = None
         if idempotency_key is not None:
@@ -2495,9 +2513,11 @@ def _register_routes(app: FastAPI) -> None:
             if existing is not None:
                 if existing["payload_hash"] != payload_hash:
                     raise HTTPException(409, "Idempotency-Key 已用于不同的指标数据")
+                draft_status = reconcile_manual_metrics(str(existing["id"]))
                 return {
                     "snapshot_id": existing["id"], "source": existing["source"],
                     "recorded_at": existing["recorded_at"], "idempotent_replay": True,
+                    "draft_status": draft_status,
                     **{field: existing[field] for field in known_fields},
                 }
 
@@ -2523,16 +2543,19 @@ def _register_routes(app: FastAPI) -> None:
                 raise RuntimeError("Idempotency conflict row disappeared")
             if existing["payload_hash"] != payload_hash:
                 raise HTTPException(409, "Idempotency-Key 已用于不同的指标数据")
+            draft_status = reconcile_manual_metrics(str(existing["id"]))
             return {
                 "snapshot_id": existing["id"], "source": existing["source"],
                 "recorded_at": existing["recorded_at"], "idempotent_replay": True,
+                "draft_status": draft_status,
                 **{field: existing[field] for field in known_fields},
             }
         conn.commit()
+        draft_status = reconcile_manual_metrics(snapshot_id)
         _record_content_event("metrics_submitted", content_id=row["content_id"],
                               metadata={"source": "manual", "snapshot_id": snapshot_id})
         return {"snapshot_id": snapshot_id, "source": "manual", "recorded_at": now,
-                "idempotent_replay": False, **values}
+                "idempotent_replay": False, "draft_status": draft_status, **values}
 
     @app.get("/api/metrics/snapshots")
     def list_metric_snapshots(
