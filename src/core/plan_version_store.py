@@ -131,6 +131,12 @@ class PlanVersionStore:
         metadata_signature = self._compute_metadata_signature(
             signature, ai_metadata_json, effective_metadata_json
         )
+        if ai_metadata is not None:
+            # Keep the historical API provenance reader compatible during rollout;
+            # structured columns remain the authoritative immutable source.
+            change_note = "AI 母计划草稿：" + json.dumps(
+                ai_metadata, ensure_ascii=False, separators=(",", ":"), default=str
+            )
         now = _now()
         self._begin()
         try:
