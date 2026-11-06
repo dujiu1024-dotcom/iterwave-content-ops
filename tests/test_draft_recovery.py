@@ -160,5 +160,6 @@ def test_orphan_recovery_never_overwrites_verified_saved_platform_state(conn):
     with pytest.raises(ValueError, match="平台已确认存在"):
         recover_orphan_draft(
             conn, draft_id="orphan-platform-saved", target_content_id="target-kuaishou-1",
-            note="重新关联", actor="reviewer", platform_missing_confirmed=True,
+            note="已登录快手草稿箱核实该草稿仍然存在", actor="reviewer",
+            platform_missing_confirmed=True,
         )
