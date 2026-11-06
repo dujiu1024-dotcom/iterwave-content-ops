@@ -168,8 +168,28 @@ class ProductionLineStore:
                 )
             else:
                 line_id = str(line_row["id"])
-                if line_row["status"] in {"completed", "cancelled", "archived"}:
-                    raise ProductionLineError("已终止的生产线不能直接创建新版本")
+                if line_row["status"] in {"cancelled", "archived"}:
+                    raise ProductionLineError("已取消或归档的生产线不能创建新版本")
+                if line_row["status"] == "completed":
+                    current_line_binding = self.conn.execute(
+                        "SELECT sub_plan_version_id,definition_json FROM production_line_versions WHERE id=?",
+                        (line_row["current_version_id"],),
+                    ).fetchone()
+                    try:
+                        previous_keys = {
+                            str(item.get("stage_key"))
+                            for item in json.loads(current_line_binding["definition_json"] or "{}").get("stages", [])
+                            if isinstance(item, dict) and item.get("stage_key")
+                        } if current_line_binding else set()
+                        candidate_keys = {str(item["stage_key"]) for item in normalized["stages"]}
+                    except (TypeError, ValueError, AttributeError, KeyError):
+                        raise ProductionLineError("生产线阶段定义损坏，不能自动恢复已完成生产线")
+                    if (
+                        current_line_binding is None
+                        or int(current_line_binding["sub_plan_version_id"]) == int(sub_plan_version_id)
+                        or not (candidate_keys - previous_keys)
+                    ):
+                        raise ProductionLineError("已完成的生产线只有在新增策略阶段后才能创建新版本")
                 current_version_id = (
                     int(line_row["current_version_id"])
                     if line_row["current_version_id"] is not None else None
