@@ -6257,7 +6257,7 @@ def _register_routes(app: FastAPI) -> None:
             ),
         ).fetchall()
         if not cohort_rows:
-            raise HTTPException(409, "当前没有与反馈来源或目标母计划来源匹配的平台子计划")
+            raise HTTPException(409, "当前没有与反馈来源或目标母计划来源匹配的已审核平台子计划；请先确认子计划仍有生效版本")
         rows = []
         skipped = []
         for child in cohort_rows:
