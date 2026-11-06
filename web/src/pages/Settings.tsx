@@ -54,6 +54,24 @@ export default function Settings() {
     heat: "", heatOn: true, hours: "", timeOn: true,
   });
 
+  const exportHealthAudit = async () => {
+    try {
+      const report = await api.healthAuditExport();
+      const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `iterwave-governance-audit-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      showToast("完整审计明细已导出", "success");
+    } catch (e) {
+      showToast(`审计明细导出失败：${e instanceof Error ? e.message : String(e)}`, "error");
+    }
+  };
+
   const load = async () => {
     setErr(null);
     try {
@@ -530,6 +548,7 @@ export default function Settings() {
               <div className="panel-sub">指标快照、修正链、草稿状态与轮次复盘数据；只读审计，不自动改写业务记录</div>
             </div>
             <button className="btn sm" onClick={() => api.health().then(setHealth).catch((e) => setHealthErr(e instanceof Error ? e.message : String(e)))}>↻ 刷新</button>
+            <button className="btn sm ghost" onClick={exportHealthAudit}>↓ 导出完整违规明细</button>
           </div>
           {healthErr ? (
             <div className="note" style={{ color: "var(--red)" }}>审计读取失败：{healthErr}</div>
