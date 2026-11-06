@@ -845,7 +845,15 @@ class PlanVersionStore:
                 if stage_status not in {"pending", "in_progress", "completed", "paused", "cancelled"}:
                     raise PlanVersionError("阶段状态无效")
                 entry_condition = str(stage.get("entry_condition") or "")[:4000]
-                entry_met = True if not entry_condition.strip() else False
+                if based_on_version_id is None:
+                    entry_met = stage.get("entry_condition_met", True)
+                    if isinstance(entry_met, int) and not isinstance(entry_met, bool) and entry_met in (0, 1):
+                        entry_met = bool(entry_met)
+                    if not isinstance(entry_met, bool):
+                        raise PlanVersionError("阶段进入条件状态必须是布尔值")
+                else:
+                    # Revisions never trust client-provided entry-condition state.
+                    entry_met = True if not entry_condition.strip() else False
                 completion_criteria = str(stage.get("completion_criteria") or stage.get("completion_condition") or "")[:4000]
                 business_required = stage.get("business_completion_required", bool(completion_criteria.strip()))
                 effect_required = stage.get("effect_required", bool(str(stage.get("effect_evaluation") or "").strip()))
