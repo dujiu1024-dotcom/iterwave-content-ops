@@ -377,13 +377,22 @@ class SchedulerEngine:
 
         if self.conn is None or self.sm_draft is None:
             return False
+        from ...adapters.base import Platform
+        platform_row = self.conn.execute(
+            "SELECT platform FROM drafts WHERE id = ?", (draft_id,),
+        ).fetchone()
+        if platform_row is None:
+            return False
+        platform = Platform(platform_row["platform"])
         now = parse_persisted_datetime(confirmed_at if confirmed_at is not None else business_now(self.cfg), self.cfg)
         # 原子条件更新：并发的手动确认与平台轮询只能有一个调用赢得状态迁移，
         # 只有赢家才注册一次性采集任务，避免两个请求都读到 draft_saved 后重复排程。
         with self.conn:
             self.conn.execute("BEGIN IMMEDIATE")
             cur = self.conn.execute(
-                "UPDATE drafts SET status='user_published', user_confirmed_at=? "
+                "UPDATE drafts SET status='user_published', user_confirmed_at=?, "
+                "error_msg=CASE WHEN platform='wechat_channels' "
+                "THEN '视频号暂不支持逐篇自动读回，请手工回填作品指标' ELSE error_msg END "
                 "WHERE id=? AND status IN ('draft_saved', 'draft_pending')",
                 (now.isoformat(), draft_id),
             )
@@ -394,8 +403,11 @@ class SchedulerEngine:
                     "UPDATE drafts SET platform_note_url = COALESCE(platform_note_url, ?) WHERE id = ?",
                     (note_url, draft_id),
                 )
-        delay = self.cfg.timeouts.metrics_initial_delay_hours
-        self.schedule_data_fetch(draft_id, now + timedelta(hours=delay))
+        # 视频号当前没有逐篇作品 ID/标题读回能力。发布确认只进入待手工回填，
+        # 不创建必然无法匹配的 data_fetch 任务，也不把缺少读回能力记为采集失败。
+        if platform != Platform.WECHAT_CHANNELS:
+            delay = self.cfg.timeouts.metrics_initial_delay_hours
+            self.schedule_data_fetch(draft_id, now + timedelta(hours=delay))
         row = self.conn.execute(
             "SELECT c.round_id FROM drafts d JOIN contents c ON d.content_id = c.id WHERE d.id = ?",
             (draft_id,),
@@ -421,6 +433,7 @@ class SchedulerEngine:
         cutoff_utc, cutoff_legacy = storage_window_cutoffs(cutoff, self.cfg)
         rows = self.conn.execute(
             "SELECT d.id FROM drafts d WHERE d.status IN ('user_published', 'data_fetching') "
+            "AND d.platform != 'wechat_channels' "
             "AND d.user_confirmed_at IS NOT NULL AND "
             + timestamp_before_sql("d.user_confirmed_at")
             + " AND NOT EXISTS (SELECT 1 FROM metrics m WHERE m.draft_id = d.id "
@@ -733,6 +746,19 @@ class SchedulerEngine:
             return {"final_status": "failed", "errors": ["待采集草稿不存在"], "attempt": attempt}
 
         platform = Platform(row["platform"])
+        if platform == Platform.WECHAT_CHANNELS:
+            # 兼容旧版本遗留的已排队任务：安全跳过，不写 failed metrics、不触发重试。
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE drafts SET error_msg=? WHERE id=? AND status IN ('user_published','data_fetching')",
+                    ("视频号暂不支持逐篇自动读回，请手工回填作品指标", draft_id),
+                )
+            return {
+                "final_status": "success",
+                "skipped": "manual_metrics_required",
+                "errors": [],
+                "attempt": attempt,
+            }
         adapter = self.adapters.get(platform)
         if adapter is None:
             # 禁用/未构造适配器是可恢复的采集失败，不能静默返回并丢掉一次性任务。
