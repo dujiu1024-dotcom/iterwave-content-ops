@@ -5296,6 +5296,63 @@ def _register_routes(app: FastAPI) -> None:
             "automatic_cleanup_performed": False,
         }
 
+    @app.post("/api/drafts/{draft_id}/metrics/recollect")
+    def recollect_failed_metrics(draft_id: str):
+        """显式重试已确认发布但采集耗尽的草稿；不适用于视频号人工回填路径。"""
+        conn = _g()["conn"]
+        row = conn.execute(
+            "SELECT platform,status,user_confirmed_at FROM drafts WHERE id=?",
+            (draft_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, "草稿不存在")
+        if row["platform"] == "wechat_channels":
+            raise HTTPException(409, "视频号当前使用手工指标回填，不支持逐篇自动采集")
+        if row["status"] != "failed":
+            raise HTTPException(409, "只有采集失败且尚未收口的草稿可以重新采集")
+        if not row["user_confirmed_at"]:
+            raise HTTPException(409, "缺少平台发布确认，不能重新采集")
+        successful = conn.execute(
+            "SELECT 1 FROM metrics WHERE draft_id=? AND fetch_status IN ('success','partial') LIMIT 1",
+            (draft_id,),
+        ).fetchone()
+        if successful:
+            raise HTTPException(409, "该草稿已有成功指标，不应重复采集")
+        sched = _g().get("scheduler")
+        if sched is None or not callable(getattr(sched, "schedule_data_fetch", None)):
+            raise HTTPException(503, "数据采集调度器暂不可用")
+        task_queue = getattr(sched, "task_queue", None)
+        tenant_id = getattr(sched, "tenant_id", None)
+        if task_queue is not None and tenant_id:
+            existing = task_queue.find_latest(
+                tenant_id=tenant_id,
+                task_type="scheduler_job",
+                aggregate_id=f"_job_data_fetch:{draft_id}:1",
+            )
+            if existing is not None and existing.status in ("queued", "running"):
+                raise HTTPException(409, "该草稿已有待执行的重新采集任务")
+        sm = _g().get("sm_draft")
+        if sm is None or not sm.transition(
+            draft_id, "data_fetching",
+            reason="用户显式请求重新采集失败指标",
+            extra_updates={"error_msg": None},
+            recovery_source="manual_recollect",
+        ):
+            raise HTTPException(409, "草稿状态不允许重新采集")
+        try:
+            from datetime import timedelta
+            sched.schedule_data_fetch(
+                draft_id, _storage_now() + timedelta(seconds=5), attempt=1,
+            )
+        except Exception as exc:
+            with conn:
+                conn.execute(
+                    "UPDATE drafts SET status='failed',error_msg=? WHERE id=? AND status='data_fetching'",
+                    (f"重新采集任务登记失败：{type(exc).__name__}", draft_id),
+                )
+            raise HTTPException(503, "重新采集任务登记失败，请稍后重试") from exc
+        return {"draft_id": draft_id, "status": "data_fetching", "recollect_scheduled": True}
+
     @app.get("/api/drafts")
     def list_drafts(
         status: Optional[str] = Query(None),

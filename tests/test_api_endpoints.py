@@ -50,6 +50,58 @@ def client(cfg, conn, seed, test_auth):
 
 
 # ---------------------------------------------------------------- R-2 采纳缺口
+def test_failed_metrics_can_be_explicitly_recollected_once(client, monkeypatch):
+    tc, conn, seed = client
+    now = datetime.now().isoformat(sep=" ", timespec="seconds")
+    round_id = seed.round()
+    draft_id = seed.draft(round_id, platform="xhs", draft_status="failed", fetch_status=None)
+    conn.execute(
+        "UPDATE drafts SET draft_id='platform-id',user_confirmed_at=? WHERE id=?",
+        (now, draft_id),
+    )
+    conn.commit()
+    scheduled = []
+    class FakeScheduler:
+        task_queue = None
+        tenant_id = None
+        def schedule_data_fetch(self, draft_id, run_at, attempt=1):
+            scheduled.append((draft_id, attempt))
+    api_main._g_ctx["scheduler"] = FakeScheduler()
+
+    response = tc.post(f"/api/drafts/{draft_id}/metrics/recollect")
+    assert response.status_code == 200, response.text
+    assert response.json()["recollect_scheduled"] is True
+    assert scheduled == [(draft_id, 1)]
+    assert conn.execute(
+        "SELECT status FROM drafts WHERE id=?", (draft_id,)
+    ).fetchone()[0] == "data_fetching"
+
+    duplicate = tc.post(f"/api/drafts/{draft_id}/metrics/recollect")
+    assert duplicate.status_code == 409
+    assert scheduled == [(draft_id, 1)]
+
+
+def test_failed_metrics_recollection_requires_confirmed_non_wechat_draft(client, monkeypatch):
+    tc, conn, seed = client
+    now = datetime.now().isoformat(sep=" ", timespec="seconds")
+    round_id = seed.round()
+    unconfirmed_id = seed.draft(round_id, platform="xhs", draft_status="failed", fetch_status=None)
+    wechat_id = seed.draft(round_id, platform="wechat_channels", draft_status="failed", fetch_status=None)
+    conn.execute(
+        "UPDATE drafts SET draft_id='platform-id' WHERE id=?",
+        (unconfirmed_id,),
+    )
+    conn.execute(
+        "UPDATE drafts SET draft_id='platform-id',user_confirmed_at=? WHERE id=?",
+        (now, wechat_id),
+    )
+    conn.commit()
+    response = tc.post(f"/api/drafts/{unconfirmed_id}/metrics/recollect")
+    assert response.status_code == 409
+    response = tc.post(f"/api/drafts/{wechat_id}/metrics/recollect")
+    assert response.status_code == 409
+
+
 def test_auth_middleware_runs_password_verification_off_event_loop(client, monkeypatch):
     tc, _, _ = client
     observed = {}
