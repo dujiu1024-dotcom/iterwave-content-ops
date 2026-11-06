@@ -180,6 +180,51 @@ def test_backfill_requeues_when_only_failed_metrics_exist(cfg, conn, seed) -> No
     assert eng.backfill_data_fetch() == 0
 
 
+def test_data_fetch_pending_is_not_failure_or_retry_attempt(cfg, conn, seed) -> None:
+    """平台指标仍未就绪属于 pending：不写失败记录、不消耗失败重试次数。"""
+    from src.adapters.base import FetchStatus, MetricsSnapshot
+    from src.core.state_machine import DraftStateMachine
+
+    round_id = seed.round(status="collecting_metrics")
+    draft_id = seed.draft(round_id, draft_status="user_published", fetch_status=None)
+
+    class _PendingAdapter:
+        async def fetch_metrics(self, *_args, **_kwargs):
+            return MetricsSnapshot(
+                platform=Platform.XHS,
+                fetch_status=FetchStatus.PENDING,
+                error_msg="作品数据尚未就绪",
+            )
+
+    scheduled = []
+    eng = SchedulerEngine(cfg, Path(cfg.paths.db_file))
+    eng.wire(
+        conn=conn,
+        adapters={Platform.XHS: _PendingAdapter()},
+        sm_draft=DraftStateMachine(conn),
+    )
+    eng.schedule_data_fetch = lambda draft_id, run_at, attempt=1: scheduled.append(
+        (draft_id, attempt)
+    )
+
+    report = asyncio.run(eng._job_data_fetch(draft_id, attempt=2))
+
+    assert report == {
+        "final_status": "success",
+        "errors": [],
+        "attempt": 2,
+        "pending": True,
+        "retry_scheduled": True,
+    }
+    assert scheduled == [(draft_id, 2)]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM metrics WHERE draft_id = ?", (draft_id,)
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT status FROM drafts WHERE id = ?", (draft_id,)
+    ).fetchone()[0] == "data_fetching"
+
+
 def test_data_fetch_failure_schedules_retry(cfg, conn, seed) -> None:
     """采集失败 → 注册下一次 attempt（此前单次失败直接放弃，重试策略形同虚设）。"""
     from src.adapters.base import FetchStatus, MetricsSnapshot
