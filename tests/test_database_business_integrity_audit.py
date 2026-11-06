@@ -4,9 +4,13 @@ from src.core.db import Database
 
 
 def _audit(conn, include_all_violation_rows=False):
-    conn.row_factory = sqlite3.Row
+    # verify_schema owns and closes its connection; audit a private snapshot so
+    # repeated health/export checks do not reuse a closed in-memory connection.
+    audit_conn = sqlite3.connect(":memory:")
+    conn.backup(audit_conn)
+    audit_conn.row_factory = sqlite3.Row
     database = object.__new__(Database)
-    database.connect = lambda: conn
+    database.connect = lambda: audit_conn
     database._discover_migrations = lambda: []
     return database.verify_schema(include_all_violation_rows=include_all_violation_rows)
 
