@@ -1195,3 +1195,43 @@ def test_publish_confirmation_persists_platform_work_identity(cfg, conn, seed):
     assert row["platform_work_id"] == "platform-work-789"
     assert row["platform_work_url"] == "https://platform.example/work/789"
     assert row["platform_note_url"] == "https://platform.example/work/789"
+
+def test_publish_polling_persists_work_identity_when_metrics_are_unparseable(cfg, conn, seed, monkeypatch):
+    from src.adapters.base import FetchStatus, MetricsSnapshot
+    from src.core.state_machine import DraftStateMachine
+
+    round_id = seed.round(status="awaiting_publish")
+    draft_id = seed.draft(
+        round_id, platform="xhs", draft_status="draft_saved",
+        fetch_status=None, saved_at=datetime.now().isoformat(),
+    )
+
+    class _Adapter:
+        async def fetch_metrics(self, *_args, **_kwargs):
+            return MetricsSnapshot(
+                platform=Platform.XHS,
+                fetch_status=FetchStatus.PARSE_ERROR,
+                error_msg="指标暂未解析",
+                work_id="published-work-parse-error",
+                work_url="https://platform.example/work/parse-error",
+            )
+
+    monkeypatch.setattr("src.core.login_manager.has_login_state", lambda *_args, **_kwargs: True)
+    engine = SchedulerEngine(cfg, Path(cfg.paths.db_file))
+    engine.wire(
+        conn=conn, adapters={Platform.XHS: _Adapter()},
+        sm_draft=DraftStateMachine(conn),
+    )
+
+    report = asyncio.run(engine._job_publish_polling())
+    row = conn.execute(
+        "SELECT status, platform_work_id, platform_work_url FROM drafts WHERE id=?",
+        (draft_id,),
+    ).fetchone()
+
+    assert report["final_status"] == "success"
+    assert report["confirmed"] == 1
+    assert report["pending"] == 1
+    assert row["status"] == "user_published"
+    assert row["platform_work_id"] == "published-work-parse-error"
+    assert row["platform_work_url"] == "https://platform.example/work/parse-error"
