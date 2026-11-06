@@ -447,5 +447,5 @@ def test_business_summary_includes_manual_metric_facts(diagnosis_client, seed):
     interactions = summary.json()["interactions"]
     assert interactions["views"] == 1234
     assert interactions["likes"] == 87
-    assert interactions["views_samples"] == 1
-    assert interactions["likes_samples"] == 1
+    assert interactions["known_samples"]["views"] == 1
+    assert interactions["known_samples"]["likes"] == 1
