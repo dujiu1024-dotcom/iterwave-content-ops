@@ -364,11 +364,13 @@ class SchedulerEngine:
     def on_user_published(
         self, draft_id: str, via: str, note_url: Optional[str] = None,
         confirmed_at: Optional[datetime] = None,
+        platform_work_id: Optional[str] = None,
+        platform_work_url: Optional[str] = None,
     ) -> bool:
         """用户已在平台发布（手动确认 / 只读轮询识别）的统一入口：
 
         1. 草稿 draft_saved → user_published（幂等）
-        2. 回写平台笔记链接（被动评论轮询靠它定位笔记）
+        2. 回写平台作品 ID/链接（作品 ID 用于后续稳定匹配，被动评论轮询使用链接）
         3. 注册发布后 metrics_initial_delay_hours 的一次性数据采集
         4. 首篇确认 → 轮次 awaiting_publish → collecting_metrics
         手动确认和轮询识别都只调它，保证两条路径行为一致。
@@ -392,9 +394,11 @@ class SchedulerEngine:
             cur = self.conn.execute(
                 "UPDATE drafts SET status='user_published', user_confirmed_at=?, "
                 "error_msg=CASE WHEN platform='wechat_channels' "
-                "THEN '视频号暂不支持逐篇自动读回，请手工回填作品指标' ELSE error_msg END "
+                "THEN '视频号暂不支持逐篇自动读回，请手工回填作品指标' ELSE error_msg END, "
+                "platform_work_id=COALESCE(platform_work_id, ?), "
+                "platform_work_url=COALESCE(platform_work_url, ?) "
                 "WHERE id=? AND status IN ('draft_saved', 'draft_pending')",
-                (now.isoformat(), draft_id),
+                (now.isoformat(), platform_work_id, platform_work_url, draft_id),
             )
             if cur.rowcount != 1:
                 return False
@@ -593,7 +597,7 @@ class SchedulerEngine:
 
         errors: list[str] = []
         rows = self.conn.execute(
-            "SELECT d.id, d.platform, d.draft_id, d.saved_at, d.saved_content_hash, "
+            "SELECT d.id, d.platform, d.draft_id, d.platform_work_id, d.saved_at, d.saved_content_hash, "
             "c.round_id AS round_id, COALESCE(d.saved_platform_title, c.title) AS poll_title, "
             "c.title AS local_title, c.body, c.tags, c.image_paths, "
             "c.review_rejected AS review_rejected, "
@@ -628,7 +632,9 @@ class SchedulerEngine:
 
             async with self.platform_locks[platform]:
                 # 标题匹配要使用成功存稿时的快照，而非可能已经被用户本地修改的标题。
-                snap = await adapter.fetch_metrics(row["draft_id"], row["poll_title"] or "")
+                snap = await adapter.fetch_metrics(
+                    row["platform_work_id"] or row["draft_id"], row["poll_title"] or "",
+                )
 
             fetch_status = snap.fetch_status.value
             if fetch_status == "pending":
@@ -636,6 +642,22 @@ class SchedulerEngine:
                 pending += 1
                 continue
             if fetch_status in ("failed", "parse_error"):
+                # 指标解析失败不否定已匹配到的作品身份：先持久化作品 ID，
+                # 后续采集按 ID 重试，避免标题变更/重名导致作品永久失配。
+                work_id = getattr(snap, "work_id", None) or None
+                work_url = getattr(snap, "work_url", None) or None
+                if work_id and self.on_user_published(
+                    row["id"], via="30min 只读轮询已匹配平台作品",
+                    note_url=work_url, platform_work_id=work_id,
+                    platform_work_url=work_url,
+                ):
+                    confirmed += 1
+                    pending += 1
+                    logger.warning(
+                        "[APS] 已确认平台作品身份但指标解析未完成，后续按作品 ID 补采 draft=%s status=%s",
+                        row["id"], fetch_status,
+                    )
+                    continue
                 errors.append(
                     f"{platform.value} 发布状态读取未完成（{fetch_status}）"
                 )
@@ -648,8 +670,10 @@ class SchedulerEngine:
                 # 视频号读回拿不到作品标题，按标题匹配会误判；只接受手动确认
                 continue
             work_url = getattr(snap, "work_url", None) or None
+            work_id = getattr(snap, "work_id", None) or None
             if self.on_user_published(
-                row["id"], via="30min 只读轮询确认平台侧已发布", note_url=work_url,
+                row["id"], via="30min 只读轮询确认平台侧已发布",
+                note_url=work_url, platform_work_id=work_id, platform_work_url=work_url,
             ):
                 confirmed += 1
                 if bool(row["review_rejected"]):
@@ -750,7 +774,9 @@ class SchedulerEngine:
             return {"final_status": "failed", "errors": ["数据采集数据库连接未注入"], "attempt": attempt}
 
         row = self.conn.execute(
-            "SELECT d.id, d.platform, d.draft_id, d.status, c.id AS content_id, c.round_id AS round_id, "
+            "SELECT d.id, d.platform, d.draft_id, d.platform_work_id, d.status, "
+            "c.id AS content_id, c.round_id AS round_id, "
+            "COALESCE(d.platform_work_id, d.draft_id) AS fetch_work_id, "
             "COALESCE(d.saved_platform_title, c.title) AS fetch_title "
             "FROM drafts d JOIN contents c ON d.content_id = c.id WHERE d.id = ?",
             (draft_id,),
@@ -787,7 +813,7 @@ class SchedulerEngine:
             if self.sm_draft:
                 self.sm_draft.transition(draft_id, "data_fetching", reason="定时采集开始")
             async with self.platform_locks[platform]:
-                snap = await adapter.fetch_metrics(row["draft_id"], row["fetch_title"] or "")
+                snap = await adapter.fetch_metrics(row["fetch_work_id"], row["fetch_title"] or "")
 
         # PENDING 表示平台尚未提供可确认的作品/指标，不是采集故障。
         # 保持 data_fetching，不写 failed metrics、不消耗失败重试次数；
