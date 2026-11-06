@@ -2250,6 +2250,12 @@ export const api = {
     fetchJson<{ draft_id: string; status: string }>(`/api/drafts/${draftId}/cancel`, {
       method: "POST",
     }),
+  /** 仅对已确认发布且采集失败的草稿显式重新采集指标。 */
+  recollectFailedMetrics: (draftId: string) =>
+    fetchJson<{ draft_id: string; status: "data_fetching"; recollect_scheduled: boolean }>(
+      `/api/drafts/${draftId}/metrics/recollect`,
+      { method: "POST" },
+    ),
   scoreTopics: (limit = 20) =>
     fetchJson<{ mode: string; topics: ScoredTopic[] }>(`/api/topics/score?limit=${limit}`),
   /** 触发后台采集 + 标签匹配（立即返回，202） */
