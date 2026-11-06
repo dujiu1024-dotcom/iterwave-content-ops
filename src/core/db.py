@@ -1319,6 +1319,7 @@ class Database:
                 "trg_master_plan_business_snapshots_no_delete",
                 "trg_north_star_version_snapshot_immutable", "trg_north_star_version_no_delete",
                 "trg_master_plan_resource_baselines_no_update", "trg_master_plan_resource_baselines_no_delete",
+                "trg_master_plan_metadata_revisions_no_update", "trg_master_plan_metadata_revisions_no_delete",
             }
             result["missing_governance_triggers"] = sorted(
                 governance_triggers - existing_triggers
