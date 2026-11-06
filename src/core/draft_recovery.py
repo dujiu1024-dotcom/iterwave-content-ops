@@ -39,7 +39,7 @@ def list_orphan_drafts(conn: Any) -> list[dict[str, Any]]:
         item["recovery_disposition"] = disposition
         item["automatic_cleanup_allowed"] = False
         item["manual_recovery_allowed"] = (
-            status not in {"user_published", "published", "data_fetching"}
+            status in {"draft_pending", "draft_saved", "failed", "cancelled", "expired"}
             and verification != "verified_saved"
         )
         result.append(item)
@@ -79,8 +79,8 @@ def recover_orphan_draft(
     ).fetchone()
     if row is None:
         raise LookupError("孤儿草稿不存在，或已被其他操作恢复")
-    if row["status"] in {"user_published", "published", "data_fetching"}:
-        raise ValueError("已确认发布或正在采集的草稿不能作为孤儿草稿恢复")
+    if row["status"] not in {"draft_pending", "draft_saved", "failed", "cancelled", "expired"}:
+        raise ValueError("当前草稿状态不允许孤儿恢复；已发布或正在采集的草稿必须保留")
     if row["verification_status"] == "verified_saved":
         raise ValueError("平台已确认存在该草稿，必须保留平台状态")
     target = conn.execute(
