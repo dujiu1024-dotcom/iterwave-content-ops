@@ -464,7 +464,7 @@ export default function Production() {
     }
     try {
       const result = await api.resolveOrphanDraft(draftId, saved, note);
-      showToast(result.message, saved ? "success" : "info");
+      showToast(result.message, "success");
       await refresh();
     } catch (e: any) {
       showToast(`孤儿草稿处置失败: ${e.message}`, "error");
