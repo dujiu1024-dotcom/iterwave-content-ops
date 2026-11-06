@@ -7594,8 +7594,10 @@ def _register_routes(app: FastAPI) -> None:
                 try:
                     created_at = datetime.fromisoformat(str(job["created_at"]))
                     if created_at.tzinfo is None:
-                        created_at = created_at.replace(tzinfo=_storage_now().tzinfo)
-                    startup_stale = (_storage_now() - created_at).total_seconds() > 60
+                        # naive 时间按本地时区解释，避免 replace(tzinfo=utc) 把本地 2min 前
+                        # 错当成 UTC 2min 前，导致 startup_stale 永远算不对
+                        created_at = created_at.astimezone()
+                    startup_stale = (_storage_now().timestamp() - created_at.timestamp()) > 60
                 except (TypeError, ValueError):
                     startup_stale = False
                 if startup_stale:
