@@ -297,9 +297,10 @@ async def generate_master_plan_draft(conn, cfg) -> dict[str, Any]:
             draft = PlanVersionStore(conn).create_master_draft(
                 plan, author="ai", source="system",
                 based_on_version_id=expected_active_version_id,
-                change_note=change_note,
+                change_note="AI 母计划草稿（结构化元数据已保存）",
                 enforce_generation_guard=True,
                 expected_active_version_id=expected_active_version_id,
+                ai_metadata=metadata,
             )
             conn.commit()
         except PlanVersionError as exc:

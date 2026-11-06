@@ -28,8 +28,26 @@ def _db(path=None):
             based_on_version_id INTEGER, created_at TEXT NOT NULL,
             created_by TEXT NOT NULL, reviewed_at TEXT, reviewed_by TEXT,
             effective_at TEXT, superseded_at TEXT, change_note TEXT,
-            deleted_at TEXT, deleted_by TEXT
+            deleted_at TEXT, deleted_by TEXT,
+            ai_metadata_json TEXT, effective_metadata_json TEXT,
+            metadata_signature TEXT, metadata_version INTEGER NOT NULL DEFAULT 0,
+            metadata_updated_at TEXT, metadata_updated_by TEXT
         );
+        CREATE TABLE master_plan_metadata_revisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            master_plan_version_id INTEGER NOT NULL,
+            metadata_version INTEGER NOT NULL, ai_metadata_json TEXT,
+            effective_metadata_json TEXT NOT NULL, metadata_signature TEXT NOT NULL,
+            created_at TEXT NOT NULL, created_by TEXT NOT NULL,
+            change_reason TEXT NOT NULL DEFAULT '',
+            UNIQUE(master_plan_version_id, metadata_version)
+        );
+        CREATE TRIGGER trg_master_plan_metadata_revisions_no_update
+        BEFORE UPDATE ON master_plan_metadata_revisions
+        BEGIN SELECT RAISE(ABORT, 'master_plan_metadata_revisions is append-only'); END;
+        CREATE TRIGGER trg_master_plan_metadata_revisions_no_delete
+        BEFORE DELETE ON master_plan_metadata_revisions
+        BEGIN SELECT RAISE(ABORT, 'master_plan_metadata_revisions is append-only'); END;
         CREATE TABLE sub_plans (
             id TEXT PRIMARY KEY, master_plan_version_id INTEGER NOT NULL,
             platform TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL,
@@ -1434,3 +1452,102 @@ def test_plan_store_audit_persists_bound_worker_identity():
         "queue_task_id": "queue-plan-audit-17",
     }
     conn.close()
+
+
+def test_ai_metadata_is_structured_versioned_and_signature_protected():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    original = {
+        "summary": "依据已确认诊断",
+        "assumptions": ["受众以新手为主"],
+        "risks": ["素材不足"],
+        "pending_confirmations": ["确认预算"],
+        "resource_basis": {"weekly_capacity": 5},
+        "diagnosis_report_id": 12,
+    }
+    draft = store.create_master_draft(
+        _plan(), author="ai", source="system",
+        change_note="AI 母计划草稿：结构化数据",
+        ai_metadata=original,
+    )
+    assert json.loads(draft["ai_metadata_json"])["original"] == original
+    assert json.loads(draft["effective_metadata_json"]) == original
+    assert draft["metadata_signature"]
+
+    edited = dict(original)
+    edited["summary"] = "人工修订后的摘要"
+    revised = store.update_master_draft_metadata(
+        draft["id"], effective_metadata=edited,
+        editor="reviewer", reason="补充人工核实结论",
+    )
+    assert json.loads(revised["ai_metadata_json"])["original"] == original
+    assert json.loads(revised["effective_metadata_json"])["summary"] == "人工修订后的摘要"
+    assert revised["metadata_version"] == 2
+    history = conn.execute(
+        "SELECT COUNT(*) FROM master_plan_metadata_revisions WHERE master_plan_version_id=?",
+        (draft["id"],),
+    ).fetchone()[0]
+    assert history == 2
+
+
+def test_master_plan_activation_rejects_tampered_effective_metadata():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    draft = store.create_master_draft(
+        _plan(), author="ai", source="system",
+        change_note="AI 母计划草稿：结构化数据",
+        ai_metadata={"summary": "原始摘要", "risks": ["风险"]},
+    )
+    conn.execute(
+        "UPDATE master_plan_versions SET effective_metadata_json=? WHERE id=?",
+        (json.dumps({"summary": "被篡改"}), draft["id"]),
+    )
+    conn.commit()
+    with pytest.raises(PlanVersionError, match="元数据与签名不一致"):
+        store.activate_master_version(draft["id"], reviewer="reviewer")
+
+
+def test_legacy_ai_draft_without_metadata_signature_fails_closed():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    draft = store.create_master_draft(_plan(), author="ai", source="system")
+    conn.execute(
+        "UPDATE master_plan_versions SET change_note=? WHERE id=?",
+        ("AI 母计划草稿：{}", draft["id"]),
+    )
+    conn.execute(
+        "UPDATE master_plan_versions SET metadata_signature=NULL WHERE id=?",
+        (draft["id"],),
+    )
+    conn.commit()
+    with pytest.raises(PlanVersionError, match="历史 AI 草稿元数据尚未纳入完整签名"):
+        store.activate_master_version(draft["id"], reviewer="reviewer")
+
+
+def test_ai_metadata_edits_cannot_rewrite_provenance_or_mutate_history():
+    conn = _db()
+    store = PlanVersionStore(conn)
+    original = {
+        "summary": "摘要", "assumptions": [], "risks": [],
+        "pending_confirmations": [], "resource_basis": {},
+        "diagnosis_report_id": 8, "source_fingerprint": "source-a",
+    }
+    draft = store.create_master_draft(
+        _plan(), author="ai", source="system", ai_metadata=original,
+    )
+    forged = dict(original)
+    forged["source_fingerprint"] = "source-b"
+    with pytest.raises(PlanVersionError, match="标识不可人工改写"):
+        store.update_master_draft_metadata(
+            draft["id"], effective_metadata=forged,
+            editor="reviewer", reason="attempt to rewrite provenance",
+        )
+    store.update_master_draft_metadata(
+        draft["id"], effective_metadata={**original, "summary": "修订摘要"},
+        editor="reviewer", reason="reviewed summary",
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute(
+            "UPDATE master_plan_metadata_revisions SET change_reason='tampered' WHERE master_plan_version_id=?",
+            (draft["id"],),
+        )
