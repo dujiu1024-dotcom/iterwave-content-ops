@@ -166,6 +166,9 @@ def test_goal_progress_consumes_corrected_manual_metric_facts(conn, seed, cfg):
         conn, platform="xhs", dimension="AI教育", title="manual goal metric",
         views=100, likes=30, collects=5, comments=5,
         correction_of=original_snapshot_id, content_id=content_id,
+        draft_id=conn.execute(
+            "SELECT id FROM drafts WHERE content_id=?", (content_id,)
+        ).fetchone()[0],
     )
     conn.commit()
 
