@@ -5347,6 +5347,29 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(409, "恢复关联发生唯一性或完整性冲突，请刷新清单后重试") from exc
         return result
 
+    @app.post("/api/drafts/{draft_id}/confirm_orphan_saved")
+    def confirm_orphan_platform_saved_endpoint(draft_id: str, payload: dict, request: Request):
+        """人工确认平台草稿存在；保留平台状态但不伪造缺失的来源内容。"""
+        from src.core.draft_recovery import confirm_orphan_platform_saved
+
+        if not isinstance(payload, dict):
+            raise HTTPException(422, "核实参数格式错误")
+        note = str(payload.get("note") or "").strip()
+        conn = _g()["conn"]
+        try:
+            with connection_transaction(conn, immediate=True):
+                result = confirm_orphan_platform_saved(
+                    conn, draft_id=draft_id, note=note,
+                    actor=auth.audit_actor(request),
+                )
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(409, "平台状态确认审计写入冲突，请刷新后重试") from exc
+        return result
+
     @app.post("/api/drafts/{draft_id}/metrics/recollect")
     def recollect_failed_metrics(draft_id: str):
         """显式重试已确认发布但采集耗尽的草稿；不适用于视频号人工回填路径。"""

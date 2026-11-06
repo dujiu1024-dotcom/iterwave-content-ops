@@ -439,6 +439,7 @@ export interface OrphanDraft {
   recovery_disposition: "manual_verification_required" | "platform_state_must_be_preserved" | "review_before_archive" | "recovery_candidate";
   automatic_cleanup_allowed: false;
   manual_recovery_allowed: boolean;
+  manual_platform_confirmation_allowed: boolean;
 }
 
 export interface DraftPage {
@@ -2243,6 +2244,11 @@ export const api = {
     ),
   orphanDrafts: () =>
     fetchJson<{ items: OrphanDraft[]; total: number; automatic_cleanup_performed: false }>("/api/drafts/orphans"),
+  confirmOrphanPlatformSaved: (draftId: string, note: string) =>
+    fetchJson<{ draft_id: string; status: string; verification_status: string; source_content_missing: boolean; message: string }>(
+      `/api/drafts/${encodeURIComponent(draftId)}/confirm_orphan_saved`,
+      { method: "POST", body: JSON.stringify({ note: note.trim() }) },
+    ),
   recoverOrphanDraft: (draftId: string, targetContentId: string, note: string) =>
     fetchJson<{ draft_id: string; source_content_id: string; content_id: string; platform: Platform; status: string; verification_status: string }>(
       `/api/drafts/${encodeURIComponent(draftId)}/recover_orphan`,
