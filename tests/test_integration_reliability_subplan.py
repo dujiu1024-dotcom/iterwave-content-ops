@@ -1457,3 +1457,49 @@ def test_master_adoption_rejects_effect_feedback_from_superseded_master_version(
     assert int(conn.execute(
         "SELECT COUNT(*) FROM master_plan_versions WHERE status='draft'"
     ).fetchone()[0]) == drafts_before
+
+
+
+def test_effect_condition_review_persists_status_and_auditable_decision(client):
+    """通过效果审核必须更新当前阶段门状态并保留双重审计记录。"""
+    tc, conn, _ = client
+    _store, _master, version, stage = _approved_subplan(
+        conn, sub_id="effect-review-status-sub",
+    )
+    conn.execute(
+        "UPDATE sub_plan_stages SET effect_required=1 WHERE id=?",
+        (int(stage["id"]),),
+    )
+    conn.commit()
+
+    response = tc.post(
+        f"/api/subplans/effect-review-status-sub/stages/{int(stage['id'])}/condition-review",
+        json={
+            "condition_type": "effect",
+            "decision": "passed",
+            "reason": "效果证据达到阶段要求",
+            "evidence": {"source": "integration-regression", "sample_count": 12},
+            "recommendation": "沿用当前策略",
+            "confidence": "high",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    persisted = conn.execute(
+        "SELECT effect_status FROM sub_plan_stages WHERE id=?",
+        (int(stage["id"]),),
+    ).fetchone()
+    assert persisted["effect_status"] == "passed"
+    effect_review = conn.execute(
+        "SELECT assessment,recommendation,confidence,evidence_json FROM strategy_effect_reviews WHERE stage_id=?",
+        (int(stage["id"]),),
+    ).fetchone()
+    assert effect_review["assessment"] == "effective"
+    assert effect_review["recommendation"] == "沿用当前策略"
+    assert effect_review["confidence"] == "high"
+    assert '"sample_count": 12' in effect_review["evidence_json"]
+    condition_review = conn.execute(
+        "SELECT condition_type,decision,reason FROM strategy_step_condition_reviews WHERE stage_id=?",
+        (int(stage["id"]),),
+    ).fetchone()
+    assert tuple(condition_review) == ("effect", "passed", "效果证据达到阶段要求")
