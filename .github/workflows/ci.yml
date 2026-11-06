@@ -16,7 +16,6 @@ jobs:
   backend:
     name: Backend tests
     runs-on: ubuntu-latest
-    # Leave enough room for system packages plus the full backend suite.
     timeout-minutes: 35
     steps:
       - name: Checkout
@@ -29,8 +28,7 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --upgrade pip && pip install -e ".[dev]"
       - name: Install OCR language data
-        # CJK font packages can take several minutes on a cold hosted runner.
-        timeout-minutes: 20
+        timeout-minutes: 10
         shell: bash
         run: |
           set -euo pipefail
@@ -48,10 +46,10 @@ jobs:
           if ! dpkg-query -W -f='${Status}' fonts-noto-cjk 2>/dev/null | grep -q 'install ok installed'; then
             packages+=(fonts-noto-cjk)
           fi
-          if ((${#packages[@]} > 0)); then
+          if (("${#packages[@]}" > 0)); then
             echo "Installing missing OCR packages: ${packages[*]}"
-            sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-            sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends "${packages[@]}"
+            sudo timeout 240s apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::ForceIPv4=true update
+            sudo timeout 360s env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::ForceIPv4=true install -y --no-install-recommends "${packages[@]}"
           else
             echo "Tesseract language data and CJK fonts are already available; skipping apt installation."
           fi
