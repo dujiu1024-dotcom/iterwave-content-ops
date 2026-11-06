@@ -484,7 +484,10 @@ class SchedulerEngine:
                 ),
                 payload={
                     "method": "_job_data_fetch",
-                    "args": [draft_id, attempt, poll_sequence],
+                    "args": (
+                        [draft_id, attempt, poll_sequence]
+                        if poll_sequence else [draft_id, attempt]
+                    ),
                     "initiating_actor": "service:scheduler",
                 },
                 available_at=run_at,
@@ -1991,7 +1994,11 @@ async def _run_data_fetch(
 ) -> None:
     engine = _engine_for(engine_key)
     if engine is not None and draft_id:
-        await _invoke(engine, "_job_data_fetch", draft_id, attempt, poll_sequence)
+        if poll_sequence:
+            await _invoke(engine, "_job_data_fetch", draft_id, attempt, poll_sequence)
+        else:
+            # Preserve the legacy two-argument dispatch contract for ordinary jobs.
+            await _invoke(engine, "_job_data_fetch", draft_id, attempt)
 
 
 async def _run_review_collection(
