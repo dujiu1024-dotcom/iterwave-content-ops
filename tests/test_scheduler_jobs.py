@@ -946,3 +946,37 @@ def test_publish_polling_fingerprint_includes_every_image():
     assert baseline == _draft_payload_content_hash(
         "title", "body", tags, json.dumps(["/assets/cover.png", "/assets/page-1.png"]),
     )
+
+
+def test_data_fetch_uses_saved_platform_title_after_local_edit(cfg, conn, seed) -> None:
+    """采集匹配必须使用平台存稿时的标题快照，不能被后续本地改名破坏。"""
+    from src.adapters.base import FetchStatus, MetricsSnapshot
+    from src.core.state_machine import DraftStateMachine
+
+    round_id = seed.round(status="collecting_metrics")
+    draft_id = seed.draft(round_id, draft_status="user_published", fetch_status=None)
+    conn.execute(
+        "UPDATE drafts SET saved_platform_title = ? WHERE id = ?",
+        ("平台实际存稿标题", draft_id),
+    )
+    conn.execute(
+        "UPDATE contents SET title = ? WHERE id = (SELECT content_id FROM drafts WHERE id = ?)",
+        ("本地后来修改的标题", draft_id),
+    )
+    conn.commit()
+
+    class _Ad:
+        seen_title = None
+
+        async def fetch_metrics(self, _platform_draft_id, title):
+            self.seen_title = title
+            return MetricsSnapshot(
+                platform=Platform.XHS, fetch_status=FetchStatus.FAILED, error_msg="测试未执行平台读回",
+            )
+
+    adapter = _Ad()
+    eng = SchedulerEngine(cfg, Path(cfg.paths.db_file))
+    eng.wire(conn=conn, adapters={Platform.XHS: adapter}, sm_draft=DraftStateMachine(conn))
+    asyncio.run(eng._job_data_fetch(draft_id, attempt=1))
+
+    assert adapter.seen_title == "平台实际存稿标题"

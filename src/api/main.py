@@ -2435,6 +2435,8 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(404, "草稿不存在")
         if row["user_confirmed_at"] is None:
             raise HTTPException(409, "请先确认内容已在平台发布，再录入数据")
+        if row["status"] not in {"user_published", "data_fetching", "failed", "published"}:
+            raise HTTPException(409, "当前草稿状态不允许回填发布指标；已取消或过期的草稿不会被自动恢复")
         supported_fields = tuple(_g()["cfg"].platform_metric_fields.get(row["platform"], []))
         known_fields = {"views", "likes", "collects", "comments", "shares"}
         if not supported_fields or any(field not in known_fields for field in supported_fields):
@@ -2474,6 +2476,24 @@ def _register_routes(app: FastAPI) -> None:
         if measured_dt > now_dt + timedelta(minutes=5):
             raise HTTPException(422, "统计时间不能晚于当前时间（允许 5 分钟设备时钟误差）")
         measured_at = measured_dt.isoformat(timespec="seconds")
+
+        def reconcile_manual_metrics(snapshot_id: str) -> str:
+            sm_draft = _g().get("sm_draft")
+            if sm_draft is None:
+                from src.core.state_machine import DraftStateMachine
+                sm_draft = DraftStateMachine(conn, _g().get("cfg"))
+            if not sm_draft.transition(
+                draft_id, "published", reason="人工指标回填完成",
+                recovery_source="manual_metrics",
+            ):
+                raise HTTPException(409, "人工指标已保存，但草稿状态无法安全收口；请检查草稿状态与发布确认记录")
+            try:
+                from src.core.goal_progress import GoalProgressUpdater
+                GoalProgressUpdater(_g()["cfg"], conn).update_all()
+            except Exception:
+                logger.exception("人工指标回填后刷新目标进度失败 draft=%s", draft_id)
+            return "published"
+
         idempotency_key = request.headers.get("Idempotency-Key")
         payload_hash = None
         if idempotency_key is not None:
@@ -2495,9 +2515,11 @@ def _register_routes(app: FastAPI) -> None:
             if existing is not None:
                 if existing["payload_hash"] != payload_hash:
                     raise HTTPException(409, "Idempotency-Key 已用于不同的指标数据")
+                draft_status = reconcile_manual_metrics(str(existing["id"]))
                 return {
                     "snapshot_id": existing["id"], "source": existing["source"],
                     "recorded_at": existing["recorded_at"], "idempotent_replay": True,
+                    "draft_status": draft_status,
                     **{field: existing[field] for field in known_fields},
                 }
 
@@ -2523,16 +2545,19 @@ def _register_routes(app: FastAPI) -> None:
                 raise RuntimeError("Idempotency conflict row disappeared")
             if existing["payload_hash"] != payload_hash:
                 raise HTTPException(409, "Idempotency-Key 已用于不同的指标数据")
+            draft_status = reconcile_manual_metrics(str(existing["id"]))
             return {
                 "snapshot_id": existing["id"], "source": existing["source"],
                 "recorded_at": existing["recorded_at"], "idempotent_replay": True,
+                "draft_status": draft_status,
                 **{field: existing[field] for field in known_fields},
             }
         conn.commit()
+        draft_status = reconcile_manual_metrics(snapshot_id)
         _record_content_event("metrics_submitted", content_id=row["content_id"],
                               metadata={"source": "manual", "snapshot_id": snapshot_id})
         return {"snapshot_id": snapshot_id, "source": "manual", "recorded_at": now,
-                "idempotent_replay": False, **values}
+                "idempotent_replay": False, "draft_status": draft_status, **values}
 
     @app.get("/api/metrics/snapshots")
     def list_metric_snapshots(
@@ -2896,8 +2921,21 @@ def _register_routes(app: FastAPI) -> None:
 
     # --- 健康检查 ---
     @app.get("/health")
+    @app.get("/api/health")
     def health():
-        report = _g().get("schema_report") or {}
+        audit_error = None
+        report = {}
+        cfg = _g().get("cfg")
+        if cfg is not None:
+            try:
+                # Audit the active account-group database, not only the process default DB.
+                from src.core.db import Database
+                report = Database(cfg).verify_schema()
+            except Exception as exc:
+                audit_error = type(exc).__name__
+                report = _g().get("schema_report") or {}
+        else:
+            report = _g().get("schema_report") or {}
         has_report = bool(report)
         missing_objects = (
             len(report.get("missing_tables", []))
@@ -2910,9 +2948,24 @@ def _register_routes(app: FastAPI) -> None:
         )
         violations = len(report.get("foreign_key_violations", []))
         integrity = report.get("integrity_check", "unknown")
-        healthy = not has_report or (
-            missing_objects == 0 and violations == 0 and integrity == "ok"
+        data_violations = report.get("governance_data_violations", {})
+        data_violation_count = sum(int(value or 0) for value in data_violations.values())
+        governance_integrity = report.get("governance_integrity_check")
+        governance_data_integrity = report.get("governance_data_integrity_check")
+        governance_missing = (
+            len(report.get("missing_governance_tables", []))
+            + len(report.get("missing_governance_indexes", []))
+            + len(report.get("missing_governance_triggers", []))
+            + len(report.get("missing_governance_columns", []))
+            + len(report.get("missing_governance_foreign_keys", []))
+            + len(report.get("governance_column_type_mismatches", []))
         )
+        healthy = not audit_error and (not has_report or (
+            missing_objects == 0 and violations == 0 and integrity == "ok"
+            and governance_integrity is not False
+            and governance_data_integrity is not False
+            and governance_missing == 0 and data_violation_count == 0
+        ))
         return {
             "status": "ok" if healthy else "degraded",
             "version": "0.1.0",
@@ -2921,6 +2974,15 @@ def _register_routes(app: FastAPI) -> None:
                 "integrity_check": integrity,
                 "missing_schema_objects": missing_objects,
                 "foreign_key_violation_count": violations,
+            },
+            "governance": {
+                "integrity_check": governance_integrity,
+                "data_integrity_check": governance_data_integrity,
+                "missing_governance_objects": governance_missing,
+                "data_violation_count": data_violation_count,
+                "data_violations": data_violations,
+                "data_violation_examples": report.get("governance_data_violation_examples", {}),
+                "audit_error": audit_error,
             },
         }
 
@@ -8880,29 +8942,34 @@ def _register_routes(app: FastAPI) -> None:
             (since_utc, since_legacy),
         ).fetchone()[0])
 
-        # 每篇草稿仅取窗口内最新一条成功/部分成功快照，避免重复采集被重复求和。
+        # 统一读取有效指标事实：平台读回与人工回填同口径，并由 effective view 排除已修正的旧快照。
         metric_row = conn.execute(
             """WITH ranked AS (
-                   SELECT draft_id, views, likes, collects, comments, shares, new_followers,
+                   SELECT draft_id, metric_key, value,
                           ROW_NUMBER() OVER (
-                              PARTITION BY draft_id ORDER BY fetched_at DESC, id DESC
+                              PARTITION BY draft_id, metric_key
+                              ORDER BY measured_at DESC, recorded_at DESC, fact_id DESC
                           ) AS rn
-                   FROM metrics
+                   FROM metric_facts_effective
                    WHERE draft_id IS NOT NULL
-                     AND """ + timestamp_since_sql("fetched_at") + """
-                     AND fetch_status IN ('success','partial')
+                     AND tenant_id IN (?, 'legacy')
+                     AND """ + timestamp_since_sql("measured_at") + """
+                     AND collection_status IN ('succeeded','partial')
                )
-               SELECT COUNT(*) AS sample_count,
-                      SUM(views) AS views, SUM(likes) AS likes,
-                      SUM(collects) AS collects, SUM(comments) AS comments,
-                      SUM(shares) AS shares, SUM(new_followers) AS new_followers,
-                      SUM(CASE WHEN views IS NOT NULL THEN 1 ELSE 0 END) AS views_samples,
-                      SUM(CASE WHEN likes IS NOT NULL THEN 1 ELSE 0 END) AS likes_samples,
-                      SUM(CASE WHEN collects IS NOT NULL THEN 1 ELSE 0 END) AS collects_samples,
-                      SUM(CASE WHEN comments IS NOT NULL THEN 1 ELSE 0 END) AS comments_samples,
-                      SUM(CASE WHEN shares IS NOT NULL THEN 1 ELSE 0 END) AS shares_samples
+               SELECT COUNT(DISTINCT draft_id) AS sample_count,
+                      SUM(CASE WHEN metric_key='views' THEN value END) AS views,
+                      SUM(CASE WHEN metric_key='likes' THEN value END) AS likes,
+                      SUM(CASE WHEN metric_key='collects' THEN value END) AS collects,
+                      SUM(CASE WHEN metric_key='comments' THEN value END) AS comments,
+                      SUM(CASE WHEN metric_key='shares' THEN value END) AS shares,
+                      SUM(CASE WHEN metric_key='new_followers' THEN value END) AS new_followers,
+                      COUNT(DISTINCT CASE WHEN metric_key='views' THEN draft_id END) AS views_samples,
+                      COUNT(DISTINCT CASE WHEN metric_key='likes' THEN draft_id END) AS likes_samples,
+                      COUNT(DISTINCT CASE WHEN metric_key='collects' THEN draft_id END) AS collects_samples,
+                      COUNT(DISTINCT CASE WHEN metric_key='comments' THEN draft_id END) AS comments_samples,
+                      COUNT(DISTINCT CASE WHEN metric_key='shares' THEN draft_id END) AS shares_samples
                FROM ranked WHERE rn = 1""",
-            (since_utc, since_legacy),
+            (_tenant_id(), since_utc, since_legacy),
         ).fetchone()
 
         followers_growth: dict[str, dict | None] = {}

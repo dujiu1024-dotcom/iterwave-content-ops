@@ -130,23 +130,30 @@ class SpiralEngine:
     def _fetch_published_metrics(self, round_id: int) -> list[dict]:
         """取本轮所有已发布且有有效 metrics 的记录。"""
         rows = self.db.execute(
-            "SELECT m.platform, m.interaction_rate, m.likes, m.views, "
-            "       m.fetch_status, t.dimension "
-            "FROM metrics m "
-            "JOIN contents c ON m.content_id = c.id "
-            "JOIN topic_index t ON c.topic_id = t.id "
-            "WHERE c.round_id = ? AND m.fetch_status IN ('success','partial') "
-            "ORDER BY m.platform",
+            """SELECT c.id AS content_id,c.platform,t.dimension,
+                      MAX(CASE WHEN f.metric_key='interaction_rate' THEN f.value END) AS interaction_rate,
+                      MAX(CASE WHEN f.metric_key='likes' THEN f.value END) AS likes,
+                      MAX(CASE WHEN f.metric_key='views' THEN f.value END) AS views,
+                      MAX(CASE WHEN f.source='manual' THEN 1 ELSE 0 END) AS manual_metrics,
+                      MAX(f.collection_status) AS fetch_status
+               FROM metric_facts_latest f
+               JOIN contents c ON f.content_id=c.id
+               JOIN topic_index t ON c.topic_id=t.id
+               WHERE c.round_id=? AND f.collection_status IN ('succeeded','partial')
+               GROUP BY c.id,c.platform,t.dimension
+               ORDER BY c.platform,c.id""",
             (round_id,),
         ).fetchall()
         return [
             {
-                "platform": r[0],
-                "interaction_rate": r[1],
-                "likes": r[2],
-                "views": r[3],
-                "fetch_status": r[4],
-                "dimension": r[5],
+                "content_id": r["content_id"],
+                "platform": r["platform"],
+                "interaction_rate": r["interaction_rate"],
+                "likes": r["likes"],
+                "views": r["views"],
+                "manual_metrics": bool(r["manual_metrics"]),
+                "fetch_status": r["fetch_status"],
+                "dimension": r["dimension"],
             }
             for r in rows
         ]
@@ -168,12 +175,19 @@ class SpiralEngine:
             if valid else None
         )
 
+        known_views = [float(m["views"]) for m in metrics if m.get("views") is not None]
+        known_likes = [float(m["likes"]) for m in metrics if m.get("likes") is not None]
         return {
             "trigger": "复盘触发",
             "sample_count": len(metrics),
             "platform_count": len(platforms),
             "platforms": platforms,
             "avg_interaction_rate": avg_ir,
+            "views_total": sum(known_views) if known_views else None,
+            "views_sample_count": len(known_views),
+            "likes_total": sum(known_likes) if known_likes else None,
+            "likes_sample_count": len(known_likes),
+            "manual_metric_sample_count": sum(1 for m in metrics if m.get("manual_metrics")),
         }
 
     def _analyze_gaps(self) -> list[GapSuggestion]:
@@ -194,8 +208,9 @@ class SpiralEngine:
 
         # 全局平均互动率（已发布样本）
         g_row = self.db.execute(
-            "SELECT AVG(interaction_rate) FROM metrics "
-            "WHERE fetch_status IN ('success','partial') AND interaction_rate IS NOT NULL"
+            "SELECT AVG(value) FROM metric_facts_latest "
+            "WHERE metric_key='interaction_rate' AND collection_status IN ('succeeded','partial') "
+            "AND value IS NOT NULL"
         ).fetchone()
         # R3：没有任何有效样本 → NULL（不按 0 参与比较，避免误判覆盖缺口）
         global_avg_ir = g_row[0] if g_row and g_row[0] is not None else None
@@ -205,11 +220,11 @@ class SpiralEngine:
         for dim, count in dim_counts.items():
             # 查该维度已发布样本数
             p_row = self.db.execute(
-                "SELECT COUNT(*), AVG(m.interaction_rate) "
-                "FROM metrics m JOIN contents c ON m.content_id = c.id "
-                "JOIN topic_index t ON c.topic_id = t.id "
-                "WHERE t.dimension = ? AND m.fetch_status IN ('success','partial') "
-                "AND m.interaction_rate IS NOT NULL",
+                "SELECT COUNT(DISTINCT f.content_id), AVG(f.value) "
+                "FROM metric_facts_latest f JOIN contents c ON f.content_id=c.id "
+                "JOIN topic_index t ON c.topic_id=t.id "
+                "WHERE t.dimension=? AND f.metric_key='interaction_rate' "
+                "AND f.collection_status IN ('succeeded','partial') AND f.value IS NOT NULL",
                 (dim,),
             ).fetchone()
             sample_count = p_row[0] if p_row else 0

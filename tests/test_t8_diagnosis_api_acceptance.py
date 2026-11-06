@@ -421,3 +421,46 @@ def test_original_asset_permission_and_privacy_gate_production_usage(diagnosis_c
     snapshot = client.get(f"/api/production-tasks/{task_id}/assets")
     assert snapshot.status_code == 200
     assert snapshot.json()["items"][0]["asset_version_no"] == reviewed.json()["version_no"]
+
+
+
+def test_business_summary_includes_manual_metric_facts(diagnosis_client, seed, cfg):
+    """经营汇总必须合并人工回填指标，而不是只读取自动采集 metrics。"""
+    client, conn = diagnosis_client
+    round_id = seed.round(status="collecting_metrics")
+    draft_id = seed.draft(round_id, draft_status="failed", fetch_status=None)
+    conn.execute(
+        "UPDATE drafts SET user_confirmed_at=CURRENT_TIMESTAMP,published_at=CURRENT_TIMESTAMP WHERE id=?",
+        (draft_id,),
+    )
+    conn.commit()
+
+    submitted = client.post(
+        f"/api/drafts/{draft_id}/metrics/manual",
+        json={"views": 1234, "likes": 87},
+        headers={"Idempotency-Key": "business-summary-manual-facts"},
+    )
+    assert submitted.status_code == 200, submitted.text
+
+    summary = client.get("/api/analytics/business-summary?days=30")
+    assert summary.status_code == 200, summary.text
+    interactions = summary.json()["interactions"]
+    assert interactions["views"] == 1234
+    assert interactions["likes"] == 87
+    assert interactions["known_samples"]["views"] == 1
+    assert interactions["known_samples"]["likes"] == 1
+    assert submitted.json()["draft_status"] == "published"
+    assert conn.execute("SELECT status FROM drafts WHERE id=?", (draft_id,)).fetchone()[0] == "published"
+    assert RoundStateMachine(conn).decide_analyzing_exit(round_id) == "completed"
+
+    from src.core.spiral import SpiralEngine
+    spiral = SpiralEngine(cfg, conn)
+    review_metrics = spiral._fetch_published_metrics(round_id)
+    assert len(review_metrics) == 1
+    assert review_metrics[0]["manual_metrics"] is True
+    assert review_metrics[0]["views"] == 1234
+    assert review_metrics[0]["likes"] == 87
+    evidence = spiral._build_evidence(review_metrics)
+    assert evidence["manual_metric_sample_count"] == 1
+    assert evidence["views_total"] == 1234
+    assert evidence["likes_total"] == 87
