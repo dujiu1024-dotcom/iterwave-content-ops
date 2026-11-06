@@ -281,16 +281,30 @@ class ProductionLineStore:
                 raise ProductionLineError("已取消或归档的生产线不能重新确认")
             if version["line_status"] == "completed":
                 current_line_binding = self.conn.execute(
-                    "SELECT sub_plan_version_id FROM production_line_versions WHERE id=?",
+                    "SELECT sub_plan_version_id,definition_json FROM production_line_versions WHERE id=?",
                     (version["current_version_id"],),
                 ).fetchone()
-                # A completed line may be reactivated only as part of an explicit
-                # rebind to a newer effective subplan version (for newly added stages).
+                try:
+                    previous_keys = {
+                        str(item.get("stage_key"))
+                        for item in json.loads(current_line_binding["definition_json"] or "{}").get("stages", [])
+                        if isinstance(item, dict) and item.get("stage_key")
+                    } if current_line_binding else set()
+                    candidate_keys = {
+                        str(item.get("stage_key"))
+                        for item in json.loads(version["definition_json"] or "{}").get("stages", [])
+                        if isinstance(item, dict) and item.get("stage_key")
+                    }
+                except (TypeError, ValueError, AttributeError):
+                    raise ProductionLineError("生产线阶段定义损坏，不能自动恢复已完成生产线")
+                # A completed line may be reactivated only when the new approved
+                # subplan binding adds at least one previously absent strategy stage.
                 if (
                     current_line_binding is None
                     or int(current_line_binding["sub_plan_version_id"]) == int(version["sub_plan_version_id"])
+                    or not (candidate_keys - previous_keys)
                 ):
-                    raise ProductionLineError("已完成的生产线只有在绑定新增的子计划版本后才能重新确认")
+                    raise ProductionLineError("已完成的生产线只有在绑定新增策略阶段后才能重新确认")
             if version["based_on_version_id"] != version["current_version_id"]:
                 raise ProductionLineError("生产线基准版本已过期，当前草稿不能覆盖更新版本")
             if version["subplan_status"] != "active" or version["master_status"] != "effective":
