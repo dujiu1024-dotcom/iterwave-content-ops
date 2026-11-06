@@ -244,7 +244,7 @@ class DraftStateMachine:
 
     def transition(
         self, draft_id: str, target: str, reason: str = "",
-        extra_updates: Optional[dict] = None,
+        extra_updates: Optional[dict] = None, recovery_source: Optional[str] = None,
     ) -> bool:
         """执行单篇状态变更。同状态幂等（R16）—— 不报错、不写日志。"""
         with self.db:
@@ -260,9 +260,25 @@ class DraftStateMachine:
                 logger.debug("草稿 %s 已是 %s（幂等）", draft_id, target)
                 return True
 
-            if target not in DRAFT_TRANSITIONS.get(current, set()):
+            manual_metrics_recovery = (
+                recovery_source == "manual_metrics"
+                and target == "published"
+                and current in {"user_published", "data_fetching", "failed"}
+            )
+            if target not in DRAFT_TRANSITIONS.get(current, set()) and not manual_metrics_recovery:
                 logger.error("非法迁移: draft %s %s → %s", draft_id, current, target)
                 return False
+            if manual_metrics_recovery:
+                confirmed = self.db.execute(
+                    "SELECT user_confirmed_at FROM drafts WHERE id=?", (draft_id,)
+                ).fetchone()
+                has_manual_snapshot = self.db.execute(
+                    "SELECT 1 FROM metric_snapshots WHERE draft_id=? AND source='manual' LIMIT 1",
+                    (draft_id,),
+                ).fetchone()
+                if not confirmed or not confirmed[0] or not has_manual_snapshot:
+                    logger.error("人工指标恢复缺少发布确认或人工快照: draft=%s", draft_id)
+                    return False
 
             update_fields = {"status": target}
             if target == "draft_saved":
