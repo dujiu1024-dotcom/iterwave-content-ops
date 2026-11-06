@@ -626,3 +626,41 @@ def test_feedback_adoption_requires_formal_version_review_and_preserves_history(
     assert conn.execute(
         "SELECT status FROM sub_plan_versions WHERE id=?", (rejected_version_id,),
     ).fetchone()["status"] == "rejected"
+
+
+def test_business_summary_counts_latest_metric_once_per_content_platform(content_client):
+    """多个 draft 指向同一篇同平台内容时，经营汇总仍按篇取最新指标。"""
+    client, conn, seed = content_client
+    round_id = seed.round(status="awaiting_publish")
+    draft_id = seed.draft(
+        round_id, platform="xhs", draft_status="published", fetch_status=None,
+    )
+    content_id = conn.execute(
+        "SELECT content_id FROM drafts WHERE id=?", (draft_id,),
+    ).fetchone()["content_id"]
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    # 模拟同一内容在历史重试/重建过程中留下两个 draft 关联的指标事实。
+    # 有效事实层按 content + platform + metric 取最新；经营汇总必须与其一致。
+    for fact_id, fact_draft_id, value, measured_at in (
+        ("summary-old", draft_id, 100.0, "2026-11-05T08:00:00+00:00"),
+        ("summary-new", f"{draft_id}-retry", 240.0, now),
+    ):
+        conn.execute(
+            "INSERT INTO metric_facts "
+            "(fact_id,tenant_id,draft_id,content_id,platform,metric_key,value,unit,source,"
+            "source_record_type,source_record_id,measured_at,recorded_at,timezone_name,"
+            "collection_status,created_at) "
+            "VALUES (?,?,?,?,?,'views',?,'count','platform_readback','review_collection_run',"
+            "?,?,?,'UTC','succeeded',?)",
+            (fact_id, "default", fact_draft_id, content_id, "xhs", value,
+             fact_id, measured_at, now, now),
+        )
+    conn.commit()
+
+    response = client.get("/api/analytics/business-summary", params={"days": 365})
+    assert response.status_code == 200, response.text
+    interactions = response.json()["interactions"]
+    assert interactions["sample_count"] == 1
+    assert interactions["views"] == 240
+    assert interactions["known_samples"]["views"] == 1
