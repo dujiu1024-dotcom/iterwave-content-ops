@@ -41,7 +41,7 @@ def _business_integrity_schema(conn):
             fact_id TEXT PRIMARY KEY, tenant_id TEXT, draft_id TEXT, content_id TEXT,
             correction_of TEXT
         );
-        CREATE TABLE spiral_rounds (decision TEXT);
+        CREATE TABLE spiral_rounds (id INTEGER PRIMARY KEY, decision TEXT);
         """
     )
 
@@ -124,7 +124,7 @@ def test_metric_and_round_integrity_audit_reports_orphans_corrections_and_bad_js
             ('snapshot-orphan', 'tenant-1', 'missing-draft', 'missing-content', 'platform', NULL, NULL);
         INSERT INTO metric_facts VALUES
             ('fact-orphan', 'tenant-1', 'missing-draft', 'missing-content', 'missing-snapshot');
-        INSERT INTO spiral_rounds VALUES ('{broken');
+        INSERT INTO spiral_rounds (decision) VALUES ('{broken');
         """
     )
     try:
