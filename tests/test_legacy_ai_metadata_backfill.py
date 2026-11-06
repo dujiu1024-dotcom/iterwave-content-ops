@@ -41,7 +41,8 @@ def test_initialize_backfills_legacy_ai_change_note_into_signed_metadata(cfg, co
         change_note="placeholder legacy note",
     )
     conn.execute(
-        "UPDATE master_plan_versions SET change_note=? WHERE id=?",
+        "UPDATE master_plan_versions SET change_note=?,ai_metadata_json=NULL,"
+        "effective_metadata_json=NULL,metadata_signature=NULL,metadata_version=0 WHERE id=?",
         (legacy_note, draft["id"]),
     )
     conn.commit()
@@ -82,7 +83,8 @@ def test_initialize_preserves_invalid_legacy_ai_note_and_keeps_it_fail_closed(cf
     )
     invalid_note = "AI 母计划草稿：{not-json"
     conn.execute(
-        "UPDATE master_plan_versions SET change_note=? WHERE id=?",
+        "UPDATE master_plan_versions SET change_note=?,ai_metadata_json=NULL,"
+        "effective_metadata_json=NULL,metadata_signature=NULL,metadata_version=0 WHERE id=?",
         (invalid_note, draft["id"]),
     )
     conn.commit()
