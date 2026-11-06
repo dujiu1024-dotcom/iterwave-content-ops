@@ -163,3 +163,63 @@ def test_orphan_recovery_never_overwrites_verified_saved_platform_state(conn):
             note="已登录快手草稿箱核实该草稿仍然存在", actor="reviewer",
             platform_missing_confirmed=True,
         )
+
+
+def test_confirmed_platform_orphan_is_preserved_without_fabricating_source_content(conn):
+    from src.core.draft_recovery import confirm_orphan_platform_saved
+
+    _insert_legacy_orphan_draft(conn, "orphan-platform-present", "missing-content-8", "xhs", "draft_pending")
+    conn.execute(
+        "INSERT INTO draft_save_verifications(draft_id,status,attempted_at,note) "
+        "VALUES('orphan-platform-present','pending_verify',CURRENT_TIMESTAMP,'平台保存结果待核实')"
+    )
+    conn.commit()
+
+    result = confirm_orphan_platform_saved(
+        conn, draft_id="orphan-platform-present",
+        note="已在小红书草稿箱核对标题和封面，确认该草稿存在",
+        actor="operator-1",
+    )
+
+    assert result["status"] == "draft_saved"
+    assert result["verification_status"] == "verified_saved"
+    assert result["source_content_missing"] is True
+    draft = conn.execute(
+        "SELECT content_id,status FROM drafts WHERE id='orphan-platform-present'"
+    ).fetchone()
+    assert draft["content_id"] == "missing-content-8"
+    assert draft["status"] == "draft_saved"
+    verification = conn.execute(
+        "SELECT status,note FROM draft_save_verifications WHERE draft_id='orphan-platform-present'"
+    ).fetchone()
+    assert verification["status"] == "verified_saved"
+    assert "草稿箱" in verification["note"]
+    audit = conn.execute(
+        "SELECT source_content_id,platform,actor,platform_saved_confirmed "
+        "FROM orphan_draft_platform_confirmation_audit WHERE draft_id='orphan-platform-present'"
+    ).fetchone()
+    assert audit["source_content_id"] == "missing-content-8"
+    assert audit["platform"] == "xhs"
+    assert audit["actor"] == "operator-1"
+    assert audit["platform_saved_confirmed"] == 1
+    item = list_orphan_drafts(conn)[0]
+    assert item["manual_platform_confirmation_allowed"] is False
+    assert item["manual_recovery_allowed"] is False
+
+
+def test_confirmed_platform_orphan_rejects_conflicting_missing_decision(conn):
+    from src.core.draft_recovery import confirm_orphan_platform_saved
+    import pytest
+
+    _insert_legacy_orphan_draft(conn, "orphan-platform-conflict", "missing-content-9", "douyin", "draft_pending")
+    conn.execute(
+        "INSERT INTO draft_save_verifications(draft_id,status,attempted_at) "
+        "VALUES('orphan-platform-conflict','verified_missing',CURRENT_TIMESTAMP)"
+    )
+    conn.commit()
+
+    with pytest.raises(ValueError, match="平台不存在的核实结论"):
+        confirm_orphan_platform_saved(
+            conn, draft_id="orphan-platform-conflict",
+            note="在抖音草稿箱确认内容存在", actor="operator-1",
+        )
