@@ -81,6 +81,12 @@ def test_retry_job_id_includes_attempt(cfg) -> None:
     ids = {j.id for j in eng.scheduler.get_jobs()}
     assert {"data_fetch_d1_a1", "data_fetch_d1_a2"} <= ids
 
+def test_pending_poll_sequence_has_distinct_scheduler_job_id(cfg) -> None:
+    """同一失败 attempt 的 pending 轮询必须有独立任务身份。"""
+    eng = SchedulerEngine(cfg, Path(cfg.paths.db_file))
+    eng.schedule_data_fetch("d1", datetime.now(), attempt=2, poll_sequence=1)
+    assert "data_fetch_d1_a2_p1" in {j.id for j in eng.scheduler.get_jobs()}
+
 
 def test_missing_metrics_adapter_records_failure_and_retries(cfg, conn, seed) -> None:
     from datetime import timedelta
