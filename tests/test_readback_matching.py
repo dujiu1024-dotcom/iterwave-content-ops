@@ -53,7 +53,7 @@ def test_readback_failure_message_does_not_expose_internal_path_or_token(cfg, co
     assert "/srv/iterwave" not in snapshot.error_msg
     assert "secret" not in snapshot.error_msg
 
-def test_snapshot_from_work_preserves_platform_work_identity():
+def test_snapshot_from_work_preserves_platform_work_identity(cfg):
     from src.adapters.base import Platform
     from src.adapters.readback import snapshot_from_work
 
@@ -68,6 +68,7 @@ def test_snapshot_from_work_preserves_platform_work_identity():
             },
         },
         "{}",
+        cfg,
     )
 
     assert snapshot.work_id == "published-work-123"
