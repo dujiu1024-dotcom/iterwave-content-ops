@@ -421,3 +421,31 @@ def test_original_asset_permission_and_privacy_gate_production_usage(diagnosis_c
     snapshot = client.get(f"/api/production-tasks/{task_id}/assets")
     assert snapshot.status_code == 200
     assert snapshot.json()["items"][0]["asset_version_no"] == reviewed.json()["version_no"]
+
+
+
+def test_business_summary_includes_manual_metric_facts(diagnosis_client, seed):
+    """经营汇总必须合并人工回填指标，而不是只读取自动采集 metrics。"""
+    client, conn = diagnosis_client
+    round_id = seed.round(status="collecting_metrics")
+    draft_id = seed.draft(round_id, draft_status="user_published", fetch_status=None)
+    conn.execute(
+        "UPDATE drafts SET user_confirmed_at=CURRENT_TIMESTAMP,published_at=CURRENT_TIMESTAMP WHERE id=?",
+        (draft_id,),
+    )
+    conn.commit()
+
+    submitted = client.post(
+        f"/api/drafts/{draft_id}/metrics/manual",
+        json={"views": 1234, "likes": 87},
+        headers={"Idempotency-Key": "business-summary-manual-facts"},
+    )
+    assert submitted.status_code == 200, submitted.text
+
+    summary = client.get("/api/analytics/business-summary?days=30")
+    assert summary.status_code == 200, summary.text
+    interactions = summary.json()["interactions"]
+    assert interactions["views"] == 1234
+    assert interactions["likes"] == 87
+    assert interactions["views_samples"] == 1
+    assert interactions["likes_samples"] == 1
