@@ -22,6 +22,7 @@ def test_visual_migrations_apply_on_populated_116_database(cfg, tmp_path, monkey
     conn = database.connect()
     applied = {row[0] for row in conn.execute("SELECT version FROM schema_version")}
     assert 117 in applied and 121 not in applied and 122 not in applied and 126 not in applied and 130 not in applied
+    assert 163 not in applied  # waits for metric_facts from the deferred visual migration
     conn.execute(
         "INSERT INTO spiral_rounds (round_number, status, topic_ids, content_variants) VALUES (1, 'completed', '[]', '[]')"
     )
@@ -37,7 +38,7 @@ def test_visual_migrations_apply_on_populated_116_database(cfg, tmp_path, monkey
     Database(cfg).initialize()
     conn = Database(cfg).connect()
     applied = {row[0] for row in conn.execute("SELECT version FROM schema_version")}
-    assert {117, 121, 122, 126, 130} <= applied
+    assert {117, 121, 122, 126, 130, 163} <= applied
     assert conn.execute("SELECT title FROM contents WHERE id='c-1'").fetchone()[0] == "标题"
     assert conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='visual_generation_tasks'").fetchone()
     assert conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='visual_generation_pages'").fetchone()
