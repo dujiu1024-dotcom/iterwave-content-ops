@@ -269,9 +269,27 @@ class DraftStateMachine:
                 and target == "published"
                 and current in {"user_published", "data_fetching", "failed"}
             )
-            if target not in DRAFT_TRANSITIONS.get(current, set()) and not manual_metrics_recovery:
+            manual_recollect_recovery = (
+                recovery_source == "manual_recollect"
+                and target == "data_fetching"
+                and current == "failed"
+            )
+            if target not in DRAFT_TRANSITIONS.get(current, set()) and not (
+                manual_metrics_recovery or manual_recollect_recovery
+            ):
                 logger.error("非法迁移: draft %s %s → %s", draft_id, current, target)
                 return False
+            if manual_recollect_recovery:
+                confirmed = self.db.execute(
+                    "SELECT user_confirmed_at FROM drafts WHERE id=?", (draft_id,)
+                ).fetchone()
+                successful_metrics = self.db.execute(
+                    "SELECT 1 FROM metrics WHERE draft_id=? AND fetch_status IN ('success','partial') LIMIT 1",
+                    (draft_id,),
+                ).fetchone()
+                if not confirmed or not confirmed[0] or successful_metrics:
+                    logger.error("重新采集恢复缺少发布确认或已有成功指标: draft=%s", draft_id)
+                    return False
             if manual_metrics_recovery:
                 confirmed = self.db.execute(
                     "SELECT user_confirmed_at FROM drafts WHERE id=?", (draft_id,)
