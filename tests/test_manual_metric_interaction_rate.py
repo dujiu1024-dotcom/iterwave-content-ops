@@ -136,3 +136,45 @@ def test_autogrow_feedback_uses_manual_interaction_rate_facts(cfg, conn, seed):
     assert by_dimension["AI教育"]["interaction_rate"] == 0.4
     assert by_dimension["AI教育"]["manual_metrics"] is True
     assert by_dimension["生活"]["interaction_rate"] == 0.05
+
+
+def test_goal_progress_consumes_corrected_manual_metric_facts(conn, seed, cfg):
+    from src.core.goal_progress import GoalProgressUpdater
+
+    seed.round(status="completed")
+    content_id, original_snapshot_id, _ = _manual_snapshot(
+        conn, platform="xhs", dimension="AI教育", title="manual goal metric",
+        views=100, likes=10, collects=5, comments=5,
+    )
+    conn.execute(
+        """INSERT INTO goals (
+               id,goal_text,target_metric,target_value,target_platform,metric_scope,
+               data_source,baseline_value,baseline_at,metric_period_start,
+               metric_period_end,current_value,status
+           ) VALUES(
+               'manual-ir-goal','人工互动率目标','interaction_rate',4.0,'xhs','total',
+               'account_stats',0.0,'2026-01-01','2026-01-01','2027-12-31',NULL,'active'
+           )"""
+    )
+    conn.commit()
+
+    goal = conn.execute("SELECT * FROM goals WHERE id='manual-ir-goal'").fetchone()
+    first_value = GoalProgressUpdater(cfg, conn).update_goal(goal)
+    assert first_value == 20.0
+
+    _manual_snapshot(
+        conn, platform="xhs", dimension="AI教育", title="manual goal metric",
+        views=100, likes=30, collects=5, comments=5,
+        correction_of=original_snapshot_id, content_id=content_id,
+        draft_id=conn.execute(
+            "SELECT id FROM drafts WHERE content_id=?", (content_id,)
+        ).fetchone()[0],
+    )
+    conn.commit()
+
+    goal = conn.execute("SELECT * FROM goals WHERE id='manual-ir-goal'").fetchone()
+    corrected_value = GoalProgressUpdater(cfg, conn).update_goal(goal)
+    assert corrected_value == 40.0
+    assert conn.execute(
+        "SELECT current_value FROM goals WHERE id='manual-ir-goal'"
+    ).fetchone()[0] == 40.0
