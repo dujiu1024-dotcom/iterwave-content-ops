@@ -980,3 +980,77 @@ def test_data_fetch_uses_saved_platform_title_after_local_edit(cfg, conn, seed) 
     asyncio.run(eng._job_data_fetch(draft_id, attempt=1))
 
     assert adapter.seen_title == "平台实际存稿标题"
+
+
+def test_wechat_publish_confirmation_waits_for_manual_metrics(cfg, conn, seed, monkeypatch):
+    """视频号无逐篇读回时，发布确认不得排入必然失败的数据采集任务。"""
+    from src.core.state_machine import DraftStateMachine
+
+    round_id = seed.round(status="awaiting_publish")
+    draft_id = seed.draft(round_id, draft_status="draft_saved", fetch_status=None)
+    conn.execute("UPDATE drafts SET platform='wechat_channels' WHERE id=?", (draft_id,))
+    conn.commit()
+    engine = _engine(cfg, conn)
+    engine.wire(conn=conn, adapters={}, sm_draft=DraftStateMachine(conn))
+    scheduled = []
+    monkeypatch.setattr(
+        engine, "schedule_data_fetch",
+        lambda *args, **kwargs: scheduled.append((args, kwargs)),
+    )
+
+    assert engine.on_user_published(draft_id, via="manual-confirm") is True
+    row = conn.execute(
+        "SELECT status,user_confirmed_at,error_msg FROM drafts WHERE id=?", (draft_id,),
+    ).fetchone()
+    assert row["status"] == "user_published"
+    assert row["user_confirmed_at"]
+    assert "手工回填" in row["error_msg"]
+    assert scheduled == []
+
+
+def test_wechat_backfill_does_not_enqueue_unsupported_readback(cfg, conn, seed):
+    """启动补登记不能把视频号的人工回填状态重新排成自动采集。"""
+    from datetime import timedelta
+
+    round_id = seed.round(status="collecting_metrics")
+    draft_id = seed.draft(round_id, draft_status="user_published", fetch_status=None)
+    old = (datetime.now() - timedelta(hours=48)).isoformat()
+    conn.execute(
+        "UPDATE drafts SET platform='wechat_channels',user_confirmed_at=? WHERE id=?",
+        (old, draft_id),
+    )
+    conn.commit()
+    engine = _engine(cfg, conn)
+
+    assert engine.backfill_data_fetch() == 0
+    assert not any(job.id.startswith(f"data_fetch_{draft_id}_") for job in engine.scheduler.get_jobs())
+
+
+def test_legacy_wechat_data_fetch_task_is_safely_skipped(cfg, conn, seed):
+    """旧版本遗留的队列任务不得把视频号无读回能力误判为 failed。"""
+    from src.core.state_machine import DraftStateMachine
+
+    round_id = seed.round(status="collecting_metrics")
+    draft_id = seed.draft(round_id, draft_status="user_published", fetch_status=None)
+    conn.execute(
+        "UPDATE drafts SET platform='wechat_channels',user_confirmed_at=? WHERE id=?",
+        (datetime.now().isoformat(), draft_id),
+    )
+    conn.commit()
+    engine = _engine(cfg, conn)
+    engine.wire(conn=conn, adapters={}, sm_draft=DraftStateMachine(conn))
+
+    report = asyncio.run(engine._job_data_fetch(draft_id, attempt=1))
+    row = conn.execute(
+        "SELECT status,error_msg FROM drafts WHERE id=?", (draft_id,),
+    ).fetchone()
+    assert report == {
+        "final_status": "success", "skipped": "manual_metrics_required",
+        "errors": [], "attempt": 1,
+    }
+    assert row["status"] == "user_published"
+    assert "手工回填" in row["error_msg"]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM metrics WHERE draft_id=?", (draft_id,),
+    ).fetchone()[0] == 0
+    assert not any(job.id.startswith(f"data_fetch_{draft_id}_") for job in engine.scheduler.get_jobs())
