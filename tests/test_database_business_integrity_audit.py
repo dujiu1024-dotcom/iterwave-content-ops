@@ -6,6 +6,7 @@ from src.core.db import Database
 def _audit(conn, include_all_violation_rows=False):
     # verify_schema owns and closes its connection; audit a private snapshot so
     # repeated health/export checks do not reuse a closed in-memory connection.
+    conn.commit()
     audit_conn = sqlite3.connect(":memory:")
     conn.backup(audit_conn)
     audit_conn.row_factory = sqlite3.Row
