@@ -16,7 +16,7 @@ jobs:
   backend:
     name: Backend tests
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -53,6 +53,9 @@ jobs:
       - name: Install Chromium for visual renderer tests
         timeout-minutes: 10
         run: python -m playwright install --with-deps chromium
+      - name: Install required CJK visual fonts
+        timeout-minutes: 15
+        run: bash scripts/install_visual_fonts.sh
       - name: Run transaction regression tests
         timeout-minutes: 5
         run: python -m pytest -vv tests/test_request_transaction_nesting.py --durations=20 -o faulthandler_timeout=240
