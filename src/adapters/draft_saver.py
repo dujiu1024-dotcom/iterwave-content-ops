@@ -1220,7 +1220,14 @@ class DraftSaver:
                 if any(token in compact for token in forbidden):
                     logger.error("平台 %s 拒绝点击疑似发布按钮 selector=%s", self.platform, selector)
                     continue
-                if not any(token in compact for token in allowed):
+                # 快手图文编辑器的「取消」是已确认的离开/自动存草稿动作，
+                # 不是删除上一份草稿；只允许快手配置的白名单选择器精确命中该文案。
+                kuaishou_cancel_autosave = (
+                    self.platform == Platform.KUAISHOU
+                    and selector in (self.selectors.get("save_draft_button") or [])
+                    and compact == "取消"
+                )
+                if not any(token in compact for token in allowed) and not kuaishou_cancel_autosave:
                     logger.warning(
                         "平台 %s 保存按钮文案无法确认，按失败关闭 selector=%s",
                         self.platform, selector,
