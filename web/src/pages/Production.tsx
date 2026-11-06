@@ -745,8 +745,7 @@ export default function Production() {
               </div>
               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
                 <span className="tag gray">禁止自动清理</span>
-                {(["draft_pending", "draft_saved", "failed", "cancelled", "expired"].includes(draft.status)) &&
-                  draft.verification_status !== "verified_saved" && (
+                {draft.manual_recovery_allowed && (
                   <button
                     className="btn btn-secondary"
                     disabled={isPending(`recover-orphan-${draft.id}`)}
