@@ -144,3 +144,16 @@ def test_business_diagnosis_builds_effect_summary_from_latest_facts_and_account_
         ref["source_type"] == "account_snapshot"
         for ref in context["source_references"]
     )
+
+
+def test_business_diagnosis_feedback_snapshot_does_not_invalidate_source_fingerprint(conn, cfg):
+    before = collect_business_context(conn, cfg)
+    conn.execute(
+        """INSERT INTO account_snapshots(platform,followers,likes_total,captured_at,source)
+           VALUES('xhs',123,456,'2026-11-06T10:00:00+00:00','manual')"""
+    )
+    conn.commit()
+    after = collect_business_context(conn, cfg)
+
+    assert before["fingerprint"] == after["fingerprint"]
+    assert after["context"]["effect_summary"]["follower_growth"]["xhs"]["latest_followers"] == 123
