@@ -743,7 +743,31 @@ export default function Production() {
                   recovery_candidate: "可评估恢复，但不得自动重试",
                 } as Record<string, string>)[draft.recovery_disposition] ?? "人工复核"}</div>
               </div>
-              <span className="tag gray">禁止自动清理</span>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+                <span className="tag gray">禁止自动清理</span>
+                {draft.manual_recovery_allowed && (
+                  <button
+                    className="btn btn-secondary"
+                    disabled={isPending(`recover-orphan-${draft.id}`)}
+                    onClick={() => {
+                      const targetContentId = window.prompt("输入要重新关联的同平台内容 ID（必须是已存在内容）");
+                      if (!targetContentId?.trim()) return;
+                      const note = window.prompt("填写核实依据（至少 5 个字符，例如已登录平台草稿箱确认该作品不存在）");
+                      if (!note?.trim()) return;
+                      if (!window.confirm("请确认：你已登录对应平台核实该草稿不存在。若平台仍存在，请取消操作；系统不会替你删除或重试平台草稿。")) return;
+                      void withPending(`recover-orphan-${draft.id}`, async () => {
+                        try {
+                          await api.recoverOrphanDraft(draft.id, targetContentId, note);
+                          showToast("孤儿草稿已重新关联，原内容 ID、操作人和核实说明已留审计记录", "success");
+                          await refresh();
+                        } catch (e: any) {
+                          showToast(e?.message || "孤儿草稿恢复失败", "error");
+                        }
+                      });
+                    }}
+                  >人工确认后恢复关联</button>
+                )}
+              </div>
             </div>
           ))}
         </div>
