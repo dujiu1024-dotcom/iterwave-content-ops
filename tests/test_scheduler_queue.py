@@ -101,7 +101,9 @@ def test_user_publish_confirmation_enqueues_naive_business_time_as_utc(tmp_path,
             content_id TEXT,
             platform TEXT NOT NULL DEFAULT 'xhs',
             error_msg TEXT,
-            platform_note_url TEXT
+            platform_note_url TEXT,
+            platform_work_id TEXT,
+            platform_work_url TEXT
         );
         CREATE TABLE contents (
             id TEXT PRIMARY KEY,
