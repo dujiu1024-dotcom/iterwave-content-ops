@@ -840,7 +840,7 @@ class SchedulerEngine:
                     self.notifier.emit(
                         "data_fetch_failed",
                         f"{platform.display_name} 数据拉取未成功（{snap.fetch_status.value}）："
-                        f"{(row['title'] or '')[:30]} — {snap.error_msg or ''}",
+                        f"{(row['fetch_title'] or '')[:30]} — {snap.error_msg or ''}",
                         platform=platform.value, draft_id=draft_id,
                         round_id=row["round_id"],
                     )
