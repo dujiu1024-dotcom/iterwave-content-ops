@@ -438,6 +438,7 @@ export interface OrphanDraft {
   verification_note?: string | null;
   recovery_disposition: "manual_verification_required" | "platform_state_must_be_preserved" | "review_before_archive" | "recovery_candidate";
   automatic_cleanup_allowed: false;
+  manual_recovery_allowed: boolean;
 }
 
 export interface DraftPage {
