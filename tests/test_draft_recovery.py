@@ -1,15 +1,29 @@
-"""Tests for safe orphan-draft inventory."""
+"""Tests for safe orphan-draft inventory.
+
+Legacy orphan rows can predate the current foreign-key guarantees. The fixture
+creates those rows with FK checks temporarily disabled to model that state.
+"""
 from __future__ import annotations
 
 from src.core.draft_recovery import list_orphan_drafts
 
 
+def _insert_legacy_orphan_draft(conn, draft_id: str, content_id: str, platform: str, status: str) -> None:
+    # SQLite only allows changing foreign_keys outside an active transaction.
+    # Restore enforcement immediately after seeding the legacy inconsistent row.
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute(
+            "INSERT INTO drafts (id, content_id, platform, status) VALUES (?, ?, ?, ?)",
+            (draft_id, content_id, platform, status),
+        )
+        conn.commit()
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+
 def test_orphan_drafts_are_reported_without_automatic_cleanup(conn):
-    conn.execute(
-        "INSERT INTO drafts (id, content_id, platform, status) "
-        "VALUES ('orphan-pending', 'missing-content-1', 'xhs', 'draft_pending')"
-    )
-    conn.commit()
+    _insert_legacy_orphan_draft(conn, "orphan-pending", "missing-content-1", "xhs", "draft_pending")
 
     items = list_orphan_drafts(conn)
 
@@ -22,10 +36,7 @@ def test_orphan_drafts_are_reported_without_automatic_cleanup(conn):
 
 
 def test_orphan_pending_platform_verification_is_never_classified_as_retryable(conn):
-    conn.execute(
-        "INSERT INTO drafts (id, content_id, platform, status) "
-        "VALUES ('orphan-uncertain', 'missing-content-2', 'douyin', 'draft_pending')"
-    )
+    _insert_legacy_orphan_draft(conn, "orphan-uncertain", "missing-content-2", "douyin", "draft_pending")
     conn.execute(
         "INSERT INTO draft_save_verifications (draft_id, status) "
         "VALUES ('orphan-uncertain', 'pending_verify')"
@@ -40,11 +51,7 @@ def test_orphan_pending_platform_verification_is_never_classified_as_retryable(c
 
 
 def test_orphan_saved_draft_preserves_possible_platform_side_effect(conn):
-    conn.execute(
-        "INSERT INTO drafts (id, content_id, platform, status) "
-        "VALUES ('orphan-saved', 'missing-content-3', 'kuaishou', 'draft_saved')"
-    )
-    conn.commit()
+    _insert_legacy_orphan_draft(conn, "orphan-saved", "missing-content-3", "kuaishou", "draft_saved")
 
     items = list_orphan_drafts(conn)
 
