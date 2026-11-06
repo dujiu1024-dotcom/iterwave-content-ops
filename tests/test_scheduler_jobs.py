@@ -823,9 +823,11 @@ def test_independent_review_collection_records_platform_facts_and_retries_partia
 
     assert report["final_status"] == "partial"
     run_actor = conn.execute(
-        "SELECT recorded_by FROM review_collection_runs WHERE task_id=?", (task_id,)
-    ).fetchone()["recorded_by"]
-    assert run_actor == "service:global-task-worker"
+        "SELECT recorded_by, recorded_executing_actor, recorded_queue_task_id FROM review_collection_runs WHERE task_id=?", (task_id,)
+    ).fetchone()
+    assert run_actor["recorded_by"] == "session:review-creator"
+    assert run_actor["recorded_executing_actor"] == "service:global-task-worker"
+    assert run_actor["recorded_queue_task_id"] == "queue-review-run-1"
     assert report["retry_scheduled"] is True
     assert f"review_collect_{task_id}_initial_a2" in {job.id for job in eng.scheduler.get_jobs()}
     assert conn.execute("SELECT status FROM drafts WHERE id=?", (draft_id,)).fetchone()[0] == "user_published"

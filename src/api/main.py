@@ -1118,7 +1118,21 @@ def _build_app() -> FastAPI:
                 )
 
         try:
-            response = await call_next(request)
+            if tenant_scoped_api:
+                # Bind the authenticated request principal and the API service as the
+                # trusted execution context. Store-level audit writers (plan changes,
+                # subgoal changes, operating feedback) then receive consistent actor,
+                # tenant and queue-correlation metadata without trusting body fields.
+                from src.core.task_context import bind_task_identity
+                with bind_task_identity(
+                    initiating_actor=auth.audit_actor(request),
+                    executing_actor="service:api",
+                    tenant_id=expected_tenant_id,
+                    task_id=None,
+                ):
+                    response = await call_next(request)
+            else:
+                response = await call_next(request)
             if tracked_request:
                 body_iterator = getattr(response, "body_iterator", None)
                 if body_iterator is not None:
@@ -4853,10 +4867,14 @@ def _register_routes(app: FastAPI) -> None:
                 ).fetchone()
                 goal_id = goal_row[0] if goal_row else None
 
+            # New round timestamps are explicit UTC ISO-8601 values. Historical
+            # SQLite CURRENT_TIMESTAMP rows remain naive UTC and are interpreted
+            # column-by-column by the round detail serializer.
+            created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
             cursor = conn.execute(
-                "INSERT INTO spiral_rounds (goal_id, round_number, status, topic_ids, content_variants) "
-                "VALUES (?, ?, 'created', ?, ?)",
-                (goal_id, round_number, "[]", "[]"),
+                "INSERT INTO spiral_rounds (goal_id, round_number, status, topic_ids, content_variants, created_at) "
+                "VALUES (?, ?, 'created', ?, ?, ?)",
+                (goal_id, round_number, "[]", "[]", created_at),
             )
             # R18 / G-21：创建轮次与母计划签名必须处于同一事务。
             # 签名写入失败时回滚轮次，避免出现 UI 报错但数据库残留的幽灵轮次。
