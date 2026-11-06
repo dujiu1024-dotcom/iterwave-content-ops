@@ -20,3 +20,15 @@ CREATE TABLE IF NOT EXISTS master_plan_metadata_revisions (
 );
 CREATE INDEX IF NOT EXISTS idx_master_plan_metadata_revisions_version
     ON master_plan_metadata_revisions(master_plan_version_id, metadata_version DESC);
+
+CREATE TRIGGER IF NOT EXISTS trg_master_plan_metadata_revisions_no_update
+BEFORE UPDATE ON master_plan_metadata_revisions
+BEGIN
+    SELECT RAISE(ABORT, 'master_plan_metadata_revisions is append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_master_plan_metadata_revisions_no_delete
+BEFORE DELETE ON master_plan_metadata_revisions
+BEGIN
+    SELECT RAISE(ABORT, 'master_plan_metadata_revisions is append-only');
+END;
