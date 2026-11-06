@@ -204,6 +204,7 @@ def read_works(page, platform: Platform, limit: int = 20) -> list[dict]:
             {
                 "content_id": w.platform_content_id,
                 "title": w.title or "",
+                "url": getattr(w, "url", None) or getattr(w, "work_url", None) or "",
                 "published_at_ms": w.published_at_ms,
                 "stats": {
                     "views": _as_int(w.stats.get("play_count")),
@@ -414,6 +415,8 @@ def snapshot_from_work(platform: Platform, work: dict, raw: str, cfg=None) -> Me
         views=views,
         raw_response=raw,
         error_msg=error,
+        work_id=str(work.get("content_id") or "") or None,
+        work_url=str(work.get("url") or "") or None,
     )
 
 
