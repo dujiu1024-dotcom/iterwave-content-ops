@@ -1282,6 +1282,7 @@ class Database:
                 "production_task_asset_usages", "plan_change_audit", "master_plan_versions",
                 "account_group_north_star_versions", "master_plan_resource_baselines",
                 "content_publish_verifications", "review_tasks", "review_collection_runs", "business_gap_events",
+                "master_plan_metadata_revisions",
             }
             result["missing_governance_tables"] = sorted(governance_tables - existing)
 
@@ -1298,6 +1299,7 @@ class Database:
                 "idx_north_star_one_effective", "idx_north_star_history",
                 "idx_publish_verification_actor", "idx_review_tasks_creator",
                 "idx_review_runs_actor", "idx_business_gap_events_actor", "idx_review_tasks_retry_actor",
+                "idx_master_plan_metadata_revisions_version",
             }
             result["missing_governance_indexes"] = sorted(
                 governance_indexes - existing_indexes
@@ -1317,6 +1319,7 @@ class Database:
                 "trg_master_plan_business_snapshots_no_delete",
                 "trg_north_star_version_snapshot_immutable", "trg_north_star_version_no_delete",
                 "trg_master_plan_resource_baselines_no_update", "trg_master_plan_resource_baselines_no_delete",
+                "trg_master_plan_metadata_revisions_no_update", "trg_master_plan_metadata_revisions_no_delete",
             }
             result["missing_governance_triggers"] = sorted(
                 governance_triggers - existing_triggers
@@ -1337,7 +1340,8 @@ class Database:
                 "master_plan_business_snapshots": {
                     "master_plan_version_id", "business_profile_version_no", "snapshot_json", "captured_at",
                 },
-                "master_plan_versions": {"id", "version_no", "plan_signature", "plan_snapshot", "status", "north_star_version_id", "north_star_snapshot_json", "north_star_attribution_status"},
+                "master_plan_versions": {"id", "version_no", "plan_signature", "plan_snapshot", "status", "north_star_version_id", "north_star_snapshot_json", "north_star_attribution_status", "ai_metadata_json", "effective_metadata_json", "metadata_signature", "metadata_version", "metadata_updated_at", "metadata_updated_by"},
+                "master_plan_metadata_revisions": {"id", "master_plan_version_id", "metadata_version", "ai_metadata_json", "effective_metadata_json", "metadata_signature", "created_at", "created_by", "change_reason"},
                 "original_assets": {
                     "id", "asset_type", "title", "description", "source_kind",
                     "source_media_asset_id", "source_content_asset_id", "source_kb_id",
