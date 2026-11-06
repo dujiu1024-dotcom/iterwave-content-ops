@@ -277,8 +277,20 @@ class ProductionLineStore:
                 raise ProductionLineError("生产线版本不存在")
             if version["status"] != "draft":
                 raise ProductionLineError("只有草稿生产线版本可以确认")
-            if version["line_status"] in {"completed", "cancelled", "archived"}:
-                raise ProductionLineError("已终止的生产线不能重新确认")
+            if version["line_status"] in {"cancelled", "archived"}:
+                raise ProductionLineError("已取消或归档的生产线不能重新确认")
+            if version["line_status"] == "completed":
+                current_line_binding = self.conn.execute(
+                    "SELECT sub_plan_version_id FROM production_line_versions WHERE id=?",
+                    (version["current_version_id"],),
+                ).fetchone()
+                # A completed line may be reactivated only as part of an explicit
+                # rebind to a newer effective subplan version (for newly added stages).
+                if (
+                    current_line_binding is None
+                    or int(current_line_binding["sub_plan_version_id"]) == int(version["sub_plan_version_id"])
+                ):
+                    raise ProductionLineError("已完成的生产线只有在绑定新增的子计划版本后才能重新确认")
             if version["based_on_version_id"] != version["current_version_id"]:
                 raise ProductionLineError("生产线基准版本已过期，当前草稿不能覆盖更新版本")
             if version["subplan_status"] != "active" or version["master_status"] != "effective":
