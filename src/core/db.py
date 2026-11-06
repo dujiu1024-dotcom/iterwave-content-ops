@@ -164,6 +164,7 @@ class Database:
                 baseline_conn = self.connect()
                 try:
                     self._backfill_migration_checksums(baseline_conn, migrations)
+                    self._backfill_legacy_master_plan_metadata(baseline_conn)
                 finally:
                     baseline_conn.close()
             logger.info("数据库已对齐最新 schema，无需迁移")
@@ -185,6 +186,7 @@ class Database:
                 self._record_migration_alias(conn, alias)
 
             self._backfill_migration_checksums(conn, migrations)
+            self._backfill_legacy_master_plan_metadata(conn)
 
             latest_version = max(
                 [migration.version for migration in pending + duplicate_aliases],
@@ -201,6 +203,113 @@ class Database:
     # ------------------------------------------------------------------
     # 内部辅助
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _backfill_legacy_master_plan_metadata(conn: sqlite3.Connection) -> int:
+        """Move legacy AI provenance stored in change_note into signed metadata columns.
+
+        Old drafts remain readable through change_note, while their original/effective
+        metadata and immutable revision record are populated exactly once. Invalid
+        legacy JSON is preserved untouched and continues to fail closed at approval.
+        """
+        import json
+
+        tables = {
+            row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if not {"master_plan_versions", "master_plan_metadata_revisions"} <= tables:
+            return 0
+
+        rows = conn.execute(
+            """SELECT id,plan_signature,change_note,created_at,created_by,
+                      ai_metadata_json,effective_metadata_json,metadata_signature
+               FROM master_plan_versions
+               WHERE change_note LIKE 'AI 母计划草稿：%'"""
+        ).fetchall()
+        candidates: list[tuple[sqlite3.Row, dict]] = []
+        decoder = json.JSONDecoder()
+        prefix = "AI 母计划草稿："
+        for row in rows:
+            # A partially populated structured record is not safe to infer or overwrite.
+            if any(row[key] is not None for key in (
+                "ai_metadata_json", "effective_metadata_json", "metadata_signature",
+            )):
+                continue
+            note = str(row["change_note"] or "")
+            try:
+                metadata, _ = decoder.raw_decode(note[len(prefix):].lstrip())
+            except (TypeError, ValueError):
+                logger.warning(
+                    "历史 AI 母计划元数据无法解析，保留 change_note 并阻止自动审核 version_id=%s",
+                    row["id"],
+                )
+                continue
+            if not isinstance(metadata, dict):
+                logger.warning(
+                    "历史 AI 母计划元数据不是对象，保留 change_note version_id=%s",
+                    row["id"],
+                )
+                continue
+            candidates.append((row, metadata))
+
+        if not candidates:
+            return 0
+
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        migrated = 0
+        try:
+            for row, metadata in candidates:
+                wrapper = {
+                    "schema_version": 1,
+                    "original": metadata,
+                    "effective": metadata,
+                }
+                ai_json = json.dumps(
+                    wrapper, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                )
+                effective_json = json.dumps(
+                    metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                )
+                signature_payload = {
+                    "plan_signature": row["plan_signature"],
+                    "ai_metadata": wrapper,
+                    "effective_metadata": metadata,
+                }
+                canonical = json.dumps(
+                    signature_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                )
+                metadata_signature = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+                created_at = str(row["created_at"] or datetime.now().isoformat(timespec="seconds"))
+                created_by = str(row["created_by"] or "schema-migration:legacy-ai-metadata")
+                updated = conn.execute(
+                    """UPDATE master_plan_versions
+                       SET ai_metadata_json=?,effective_metadata_json=?,metadata_signature=?,
+                           metadata_version=1,metadata_updated_at=?,metadata_updated_by=?
+                       WHERE id=? AND ai_metadata_json IS NULL
+                         AND effective_metadata_json IS NULL AND metadata_signature IS NULL""",
+                    (ai_json, effective_json, metadata_signature, created_at, created_by, row["id"]),
+                )
+                if updated.rowcount != 1:
+                    continue
+                conn.execute(
+                    """INSERT OR IGNORE INTO master_plan_metadata_revisions(
+                           master_plan_version_id,metadata_version,ai_metadata_json,
+                           effective_metadata_json,metadata_signature,created_at,created_by,change_reason
+                       ) VALUES(?,1,?,?,?,?,?,?)""",
+                    (row["id"], ai_json, effective_json, metadata_signature, created_at,
+                     created_by, "历史 AI 元数据结构化迁移（保留原 change_note）"),
+                )
+                migrated += 1
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        if migrated:
+            logger.info("历史 AI 母计划元数据结构化迁移完成：%d 条", migrated)
+        return migrated
 
     def _get_current_version(self) -> int:
         """读取 schema_version 表的最大版本；表不存在返回 0。"""
