@@ -31,6 +31,17 @@ def _business_integrity_schema(conn):
         CREATE TABLE plan_change_audit (
             affected_tasks_json TEXT, before_snapshot_json TEXT, after_snapshot_json TEXT
         );
+        CREATE TABLE contents (id TEXT PRIMARY KEY);
+        CREATE TABLE drafts (id TEXT PRIMARY KEY, content_id TEXT, status TEXT);
+        CREATE TABLE metric_snapshots (
+            id TEXT PRIMARY KEY, tenant_id TEXT, draft_id TEXT, content_id TEXT,
+            source TEXT, correction_of TEXT, idempotency_key TEXT
+        );
+        CREATE TABLE metric_facts (
+            fact_id TEXT PRIMARY KEY, tenant_id TEXT, draft_id TEXT, content_id TEXT,
+            correction_of TEXT
+        );
+        CREATE TABLE spiral_rounds (decision TEXT);
         """
     )
 
@@ -98,3 +109,37 @@ def test_business_integrity_audit_accepts_consistent_historical_data():
 
     assert report["governance_data_integrity_check"] is True
     assert all(value == 0 for value in report["governance_data_violations"].values())
+
+
+def test_metric_and_round_integrity_audit_reports_orphans_corrections_and_bad_json():
+    conn = sqlite3.connect(":memory:")
+    _business_integrity_schema(conn)
+    conn.executescript(
+        """
+        INSERT INTO contents VALUES ('content-1');
+        INSERT INTO drafts VALUES ('draft-1', 'content-1', 'failed');
+        INSERT INTO metric_snapshots VALUES
+            ('snapshot-1', 'tenant-1', 'draft-1', 'content-1', 'manual', NULL, 'same-key'),
+            ('snapshot-2', 'tenant-1', 'draft-1', 'content-1', 'manual', 'missing-snapshot', 'same-key'),
+            ('snapshot-orphan', 'tenant-1', 'missing-draft', 'missing-content', 'platform', NULL, NULL);
+        INSERT INTO metric_facts VALUES
+            ('fact-orphan', 'tenant-1', 'missing-draft', 'missing-content', 'missing-snapshot');
+        INSERT INTO spiral_rounds VALUES ('{broken');
+        """
+    )
+    try:
+        report = _audit(conn)
+    finally:
+        conn.close()
+
+    violations = report["governance_data_violations"]
+    assert violations["metric_snapshot_orphan_draft"] == 1
+    assert violations["metric_snapshot_orphan_content"] == 1
+    assert violations["metric_snapshot_correction_chain_broken"] == 1
+    assert violations["metric_snapshot_duplicate_idempotency_key"] == 1
+    assert violations["manual_metric_draft_state_mismatch"] == 2
+    assert violations["metric_fact_orphan_content"] == 1
+    assert violations["metric_fact_orphan_draft"] == 1
+    assert violations["metric_fact_correction_chain_broken"] == 1
+    assert violations["spiral_round_decision_json_invalid"] == 1
+    assert report["governance_data_integrity_check"] is False
