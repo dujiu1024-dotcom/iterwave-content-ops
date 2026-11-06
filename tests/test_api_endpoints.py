@@ -76,7 +76,7 @@ def test_failed_metrics_can_be_explicitly_recollected_once(client, monkeypatch):
         "SELECT status FROM drafts WHERE id=?", (draft_id,)
     ).fetchone()[0] == "data_fetching"
 
-    duplicate = tc.post("/api/drafts/recollect-draft/metrics/recollect")
+    duplicate = tc.post(f"/api/drafts/{draft_id}/metrics/recollect")
     assert duplicate.status_code == 409
     assert scheduled == [(draft_id, 1)]
 
