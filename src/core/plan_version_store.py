@@ -230,8 +230,26 @@ class PlanVersionStore:
             ai_json = row["ai_metadata_json"]
             if ai_json:
                 parsed_ai = json.loads(ai_json)
-                if not isinstance(parsed_ai, dict) or parsed_ai.get("schema_version") != 1:
+                if (not isinstance(parsed_ai, dict) or parsed_ai.get("schema_version") != 1
+                        or not isinstance(parsed_ai.get("original"), dict)):
                     raise PlanVersionError("AI 原始元数据结构损坏，拒绝编辑")
+                original = parsed_ai["original"]
+                editable_fields = {
+                    "summary", "assumptions", "risks",
+                    "pending_confirmations", "resource_basis",
+                }
+                if set(effective_metadata) != set(original):
+                    raise PlanVersionError("有效元数据字段必须与 AI 原始元数据保持一致")
+                for key, original_value in original.items():
+                    if key not in editable_fields and effective_metadata.get(key) != original_value:
+                        raise PlanVersionError("AI 来源、诊断及资源依据标识不可人工改写")
+                if not isinstance(effective_metadata.get("summary"), str) or not effective_metadata["summary"].strip():
+                    raise PlanVersionError("有效 summary 必须为非空字符串")
+                if len(effective_metadata["summary"]) > 4000:
+                    raise PlanVersionError("有效 summary 不能超过 4000 字符")
+                for key in ("assumptions", "risks", "pending_confirmations", "resource_basis"):
+                    if not isinstance(effective_metadata.get(key), (list, dict)):
+                        raise PlanVersionError(f"有效 {key} 必须为数组或对象")
             effective_json = json.dumps(
                 effective_metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")
             )
