@@ -449,3 +449,6 @@ def test_business_summary_includes_manual_metric_facts(diagnosis_client, seed):
     assert interactions["likes"] == 87
     assert interactions["known_samples"]["views"] == 1
     assert interactions["known_samples"]["likes"] == 1
+    assert submitted.json()["draft_status"] == "published"
+    assert conn.execute("SELECT status FROM drafts WHERE id=?", (draft_id,)).fetchone()[0] == "published"
+    assert RoundStateMachine(conn).decide_analyzing_exit(round_id) == "completed"
