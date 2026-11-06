@@ -745,6 +745,26 @@ export default function Production() {
               </div>
               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
                 <span className="tag gray">禁止自动清理</span>
+                {draft.manual_platform_confirmation_allowed && (
+                  <button
+                    className="btn btn-secondary"
+                    disabled={isPending(`confirm-orphan-saved-${draft.id}`)}
+                    onClick={() => {
+                      const note = window.prompt("请先登录对应平台，在草稿箱中确认该草稿确实存在；填写标题/平台草稿 ID 等核实依据：");
+                      if (!note?.trim()) return;
+                      if (!window.confirm("确认平台草稿确实存在？系统将保留平台状态并标记 verified_saved，但缺失的来源内容仍需单独恢复。")) return;
+                      void withPending(`confirm-orphan-saved-${draft.id}`, async () => {
+                        try {
+                          const result = await api.confirmOrphanPlatformSaved(draft.id, note);
+                          showToast(result.message, "success");
+                          await refresh();
+                        } catch (e: any) {
+                          showToast(e?.message || "平台状态确认失败", "error");
+                        }
+                      });
+                    }}
+                  >确认平台存在并保留</button>
+                )}
                 {draft.manual_recovery_allowed && (
                   <button
                     className="btn btn-secondary"

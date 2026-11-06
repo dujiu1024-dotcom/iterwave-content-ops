@@ -42,6 +42,10 @@ def list_orphan_drafts(conn: Any) -> list[dict[str, Any]]:
             status in {"draft_pending", "draft_saved", "failed", "cancelled", "expired"}
             and verification != "verified_saved"
         )
+        item["manual_platform_confirmation_allowed"] = (
+            status in {"draft_pending", "draft_saved"}
+            and verification not in {"verified_saved", "verified_missing"}
+        )
         result.append(item)
     return result
 
@@ -144,4 +148,71 @@ def recover_orphan_draft(
         "platform": row["platform"],
         "status": row["status"],
         "verification_status": "verified_missing",
+    }
+
+ 
+def confirm_orphan_platform_saved(
+    conn: Any, *, draft_id: str, note: str, actor: str,
+) -> dict[str, Any]:
+    """Preserve an orphan whose platform-side draft was explicitly found.
+
+    This records the platform fact without fabricating or relinking missing
+    source content. Caller must hold an IMMEDIATE transaction.
+    """
+    clean_note = str(note or "").strip()
+    if len(clean_note) < 5 or len(clean_note) > 500:
+        raise ValueError("核实说明长度必须为 5–500 个字符")
+    if not str(actor or "").strip():
+        raise ValueError("缺少操作人身份")
+    row = conn.execute(
+        """SELECT d.id,d.content_id,d.platform,d.status,d.draft_id,
+                  c.id AS source_content_id,v.status AS verification_status,
+                  v.attempted_at,v.platform_draft_id
+           FROM drafts d
+           LEFT JOIN contents c ON c.id=d.content_id
+           LEFT JOIN draft_save_verifications v ON v.draft_id=d.id
+           WHERE d.id=? AND c.id IS NULL""",
+        (draft_id,),
+    ).fetchone()
+    if row is None:
+        raise LookupError("孤儿草稿不存在，或已被其他操作恢复")
+    if row["status"] not in {"draft_pending", "draft_saved"}:
+        raise ValueError("当前状态不允许确认平台草稿存在；已发布或终态记录必须保留")
+    if row["verification_status"] == "verified_missing":
+        raise ValueError("该孤儿草稿已有平台不存在的核实结论，禁止覆盖")
+    if row["verification_status"] == "verified_saved":
+        return {"draft_id": draft_id, "status": row["status"],
+                "verification_status": "verified_saved", "already_confirmed": True}
+    from src.core.timezone import storage_now
+    now = storage_now().isoformat(timespec="seconds")
+    platform_draft_id = row["platform_draft_id"] or row["draft_id"]
+    conn.execute(
+        """UPDATE drafts SET status='draft_saved',
+               saved_at=COALESCE(saved_at,?), error_msg=NULL
+           WHERE id=? AND status IN ('draft_pending','draft_saved')""",
+        (now, draft_id),
+    )
+    conn.execute(
+        """INSERT INTO draft_save_verifications(
+               draft_id,status,attempted_at,verified_at,platform_draft_id,note
+           ) VALUES(?,'verified_saved',COALESCE(?,?),?,?,?)
+           ON CONFLICT(draft_id) DO UPDATE SET
+               status='verified_saved',verified_at=excluded.verified_at,
+               platform_draft_id=COALESCE(excluded.platform_draft_id,draft_save_verifications.platform_draft_id),
+               error_msg=NULL,note=excluded.note""",
+        (draft_id,row["attempted_at"],now,now,platform_draft_id,clean_note),
+    )
+    conn.execute(
+        """INSERT INTO orphan_draft_platform_confirmation_audit(
+               draft_id,source_content_id,platform,previous_status,
+               previous_verification_status,actor,note,platform_saved_confirmed
+           ) VALUES(?,?,?,?,?,?,?,1)""",
+        (draft_id,row["content_id"],row["platform"],row["status"],
+         row["verification_status"],actor,clean_note),
+    )
+    return {
+        "draft_id": draft_id, "status": "draft_saved",
+        "verification_status": "verified_saved",
+        "source_content_missing": True,
+        "message": "已确认平台草稿存在并保留平台状态；来源内容仍缺失，需单独恢复，不会伪造正文或素材",
     }
