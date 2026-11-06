@@ -5,7 +5,7 @@ import EmptyHint from "../components/EmptyHint";
 import TenantManagerPane from "../components/TenantManagerPane";
 import RuntimePolicyEditor from "../components/RuntimePolicyEditor";
 import { AdvancedEditor, ImageModelEditor, KbEditor, LlmEditor, PlatformStyleEditor, PlatformToggles, TimeoutEditor } from "../components/ConfigEditors";
-import { api, type SystemStatus, type SystemConfigView } from "../api";
+import { api, type SystemStatus, type SystemConfigView, type HealthReport } from "../api";
 import { displayPlatformLabel } from "../displayLabels";
 
 const PLATFORM_LABELS: Record<string, string> = {
@@ -37,6 +37,8 @@ export default function Settings() {
   const [tab, setTab] = useUrlTab<SettingsTab>(SETTINGS_TABS.map((t) => t.k), "runtime");
   const { showToast, withPending, isPending } = useApp();
   const [status, setStatus] = useState<SystemStatus | null>(null);
+  const [health, setHealth] = useState<HealthReport | null>(null);
+  const [healthErr, setHealthErr] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [cfgView, setCfgView] = useState<SystemConfigView | null>(null);
   const [auditItems, setAuditItems] = useState<SystemConfigView["audit"]>([]);
@@ -58,6 +60,12 @@ export default function Settings() {
       setStatus(await api.status());
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
+    }
+    try {
+      setHealth(await api.health());
+      setHealthErr(null);
+    } catch (e) {
+      setHealthErr(e instanceof Error ? e.message : String(e));
     }
     await loadConfig();
   };
@@ -511,6 +519,50 @@ export default function Settings() {
               <div className="task-row"><i className="task-prio red" /><div className="task-main"><div className="task-title">! 熔断平台</div><div className="task-desc" style={{ color: "var(--danger)" }}>{brokenNames}</div></div></div>
             )}
           </div>
+          )}
+        </div>
+
+        {/* 数据完整性审计 — 按当前账号组实时读取 */}
+        <div className="panel" style={{ gridColumn: "1 / -1" }}>
+          <div className="panel-head">
+            <div>
+              <div className="panel-title"><span className="icon">⌕</span>数据完整性审计</div>
+              <div className="panel-sub">指标快照、修正链、草稿状态与轮次复盘数据；只读审计，不自动改写业务记录</div>
+            </div>
+            <button className="btn sm" onClick={() => api.health().then(setHealth).catch((e) => setHealthErr(e instanceof Error ? e.message : String(e)))}>↻ 刷新</button>
+          </div>
+          {healthErr ? (
+            <div className="note" style={{ color: "var(--red)" }}>审计读取失败：{healthErr}</div>
+          ) : !health ? (
+            <div className="note">审计读取中…</div>
+          ) : (
+            <>
+              <div className="list">
+                <div className="task-row"><i className={`task-prio ${health.status === "ok" ? "green" : "red"}`} /><div className="task-main"><div className="task-title">当前账号组状态</div><div className="task-desc">{health.status === "ok" ? "健康" : "存在完整性问题"}</div></div></div>
+                <div className="task-row"><i className="task-prio blue" /><div className="task-main"><div className="task-title">治理结构缺失</div><div className="task-desc">{health.governance.missing_governance_objects} 项</div></div></div>
+                <div className="task-row"><i className={`task-prio ${health.governance.data_violation_count ? "red" : "green"}`} /><div className="task-main"><div className="task-title">业务数据违规</div><div className="task-desc">{health.governance.data_violation_count} 条</div></div></div>
+              </div>
+              {health.governance.audit_error && <div className="note">完整性审计异常：{health.governance.audit_error}</div>}
+              {health.governance.data_violation_count === 0 ? (
+                <div className="note">当前已配置的业务数据检查未发现违规。</div>
+              ) : (
+                <div className="list">
+                  {Object.entries(health.governance.data_violations).filter(([, count]) => count > 0).map(([name, count]) => (
+                    <div className="task-row" key={name}>
+                      <i className="task-prio red" />
+                      <div className="task-main">
+                        <div className="task-title">{name} · {count} 条</div>
+                        <div className="task-desc">
+                          {(health.governance.data_violation_examples[name] ?? []).map((item) =>
+                            String(item.record_id ?? item.draft_id ?? item.content_id ?? "记录")
+                          ).join("、") || "暂无样例 ID"}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </div>
 

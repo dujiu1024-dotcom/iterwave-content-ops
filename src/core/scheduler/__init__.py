@@ -724,7 +724,8 @@ class SchedulerEngine:
             return {"final_status": "failed", "errors": ["数据采集数据库连接未注入"], "attempt": attempt}
 
         row = self.conn.execute(
-            "SELECT d.id, d.platform, d.draft_id, d.status, c.id AS content_id, c.round_id AS round_id, c.title "
+            "SELECT d.id, d.platform, d.draft_id, d.status, c.id AS content_id, c.round_id AS round_id, "
+            "COALESCE(d.saved_platform_title, c.title) AS fetch_title "
             "FROM drafts d JOIN contents c ON d.content_id = c.id WHERE d.id = ?",
             (draft_id,),
         ).fetchone()
@@ -747,7 +748,7 @@ class SchedulerEngine:
             if self.sm_draft:
                 self.sm_draft.transition(draft_id, "data_fetching", reason="定时采集开始")
             async with self.platform_locks[platform]:
-                snap = await adapter.fetch_metrics(row["draft_id"], row["title"] or "")
+                snap = await adapter.fetch_metrics(row["draft_id"], row["fetch_title"] or "")
 
         # 落库 metrics（R3：解析不到的字段保持 NULL，绝不补 0）
         # R16 幂等：draft_id + platform + 采集日期当天只覆盖一次（当天已有记录 → UPDATE 而非 INSERT）
@@ -839,7 +840,7 @@ class SchedulerEngine:
                     self.notifier.emit(
                         "data_fetch_failed",
                         f"{platform.display_name} 数据拉取未成功（{snap.fetch_status.value}）："
-                        f"{(row['title'] or '')[:30]} — {snap.error_msg or ''}",
+                        f"{(row['fetch_title'] or '')[:30]} — {snap.error_msg or ''}",
                         platform=platform.value, draft_id=draft_id,
                         round_id=row["round_id"],
                     )

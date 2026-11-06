@@ -101,11 +101,12 @@ def build_feedback(cfg, conn, guard=None) -> StrategyFeedback:
 
         # ① 维度表现：本轮维度均值 vs 本轮整体均值（R3：NULL 不计入）
         perf = conn.execute(
-            "SELECT t.dimension, AVG(m.interaction_rate), COUNT(*) "
-            "FROM metrics m JOIN contents c ON m.content_id = c.id "
+            "SELECT t.dimension, AVG(f.value), COUNT(DISTINCT f.content_id) "
+            "FROM metric_facts_latest f JOIN contents c ON f.content_id = c.id "
             "JOIN topic_index t ON c.topic_id = t.id "
-            "WHERE c.round_id = ? AND m.fetch_status IN ('success','partial') "
-            "AND m.interaction_rate IS NOT NULL GROUP BY t.dimension",
+            "WHERE c.round_id = ? AND f.metric_key='interaction_rate' "
+            "AND f.collection_status IN ('succeeded','partial') AND f.value IS NOT NULL "
+            "GROUP BY t.dimension",
             (round_id,),
         ).fetchall()
         total_n = sum(int(p[2]) for p in perf)
@@ -155,10 +156,10 @@ def build_feedback(cfg, conn, guard=None) -> StrategyFeedback:
     if fb.source_round_ids:
         marks = ",".join("?" * len(fb.source_round_ids))
         best = conn.execute(
-            "SELECT c.platform, c.title, MAX(m.interaction_rate) AS ir "
-            "FROM metrics m JOIN contents c ON m.content_id = c.id "
-            f"WHERE c.round_id IN ({marks}) AND m.interaction_rate IS NOT NULL "
-            "AND m.fetch_status IN ('success','partial') "
+            "SELECT c.platform, c.title, MAX(f.value) AS ir "
+            "FROM metric_facts_latest f JOIN contents c ON f.content_id = c.id "
+            f"WHERE c.round_id IN ({marks}) AND f.metric_key='interaction_rate' "
+            "AND f.value IS NOT NULL AND f.collection_status IN ('succeeded','partial') "
             "GROUP BY c.id ORDER BY ir DESC",
             fb.source_round_ids,
         ).fetchall()

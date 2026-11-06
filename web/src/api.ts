@@ -207,6 +207,25 @@ export interface QueueTaskSubmission {
   status: GlobalTaskQueueItem["status"];
 }
 
+export interface HealthReport {
+  status: "ok" | "degraded";
+  timestamp: string;
+  database: {
+    integrity_check: string;
+    missing_schema_objects: number;
+    foreign_key_violation_count: number;
+  };
+  governance: {
+    integrity_check: boolean | null;
+    data_integrity_check: boolean | null;
+    missing_governance_objects: number;
+    data_violation_count: number;
+    data_violations: Record<string, number>;
+    data_violation_examples: Record<string, Array<Record<string, unknown>>>;
+    audit_error: string | null;
+  };
+}
+
 export interface SystemStatus {
   enabled_platforms: Platform[];
   /** 兼容旧字段：实际表示本机登录态文件存在，不代表会话有效 */
@@ -2039,6 +2058,7 @@ export const api = {
   businessVersion: (version: number) => fetchJson<{version_no:number;snapshot:Record<string,unknown>;change_note:string;created_at:string;created_by:string}>(`/api/business-profile/versions/${version}`),
   businessAiProposal: (source_text: string) =>
     fetchJson<{ status: string; message: string; proposals: Array<Record<string, unknown>> }>("/api/business-profile/ai-proposals", { method: "POST", body: JSON.stringify({ source_text }) }),
+  health: () => fetchJson<HealthReport>("/api/health"),
   status: () => fetchJson<SystemStatus>("/api/status"),
   goals: () => fetchJson<Goal[]>("/api/goals"),
   /** 总体目标进度（后端统一计算等权平均，前端只展示） */
