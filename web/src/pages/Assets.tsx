@@ -11,6 +11,7 @@ import { useApp } from "../AppContext";
 import { PersonaEditor } from "../components/ConfigEditors";
 import { navigate, useUrlTab } from "../nav";
 import { displaySourceLabel, displayStatusLabel } from "../displayLabels";
+import { formatBusinessDateTime } from "../businessTime.mjs";
 import {
   api, AssetItem, AssetType, Draft, HotTopicItem, KbInspect, ScoredTopic, SystemConfigView,
 } from "../api";
@@ -315,7 +316,7 @@ export default function Assets() {
                         <td style={{ fontSize: 11 }}>
                           {a.source_url ?? <span style={{ color: "var(--subtle)" }}>—</span>}
                         </td>
-                        <td>{a.created_at ?? <span style={{ color: "var(--subtle)" }}>—</span>}</td>
+                        <td>{a.created_at ? formatBusinessDateTime(a.created_at) : <span style={{ color: "var(--subtle)" }}>—</span>}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -344,7 +345,7 @@ export default function Assets() {
                       <tr key={h.id}>
                         <td>{h.title}</td>
                         <td><span className="tag gray">{displaySourceLabel(h.source)}</span></td>
-                        <td>{h.discovered_at ?? <span style={{ color: "var(--subtle)" }}>—</span>}</td>
+                        <td>{h.discovered_at ? formatBusinessDateTime(h.discovered_at) : <span style={{ color: "var(--subtle)" }}>—</span>}</td>
                         <td>{h.heat == null ? <span style={{ color: "var(--subtle)" }}>—</span> : h.heat.toLocaleString()}</td>
                         <td>
                           <span className={`tag ${h.evidence_status === "collected" ? "green" : h.evidence_status === "demo" ? "orange" : "red"}`}>
@@ -412,7 +413,7 @@ export default function Assets() {
                       <div className="task-title">{v.title}</div>
                       <div className="task-desc">{v.body || <span style={{ color: "var(--subtle)" }}>（无正文）</span>}</div>
                     </div>
-                    <span className="tag gray">{v.created_at?.slice(0, 10) ?? "—"}</span>
+                    <span className="tag gray">{v.created_at ? formatBusinessDateTime(v.created_at) : "—"}</span>
                   </div>
                 ))}
               </div>
@@ -478,7 +479,7 @@ export default function Assets() {
                         <td>v{version.version}</td>
                         <td>{version.title}</td>
                         <td style={{ whiteSpace: "pre-line" }}>{version.body || "—"}</td>
-                        <td>{version.created_at?.slice(0, 16).replace("T", " ") ?? "—"}</td>
+                        <td>{version.created_at ? formatBusinessDateTime(version.created_at) : "—"}</td>
                         <td><button className="btn xs" type="button" onClick={() => void restoreTemplateVersion(viewingTemplateId, version.version)}>恢复此版本</button></td>
                       </tr>
                     ))}
@@ -506,7 +507,7 @@ export default function Assets() {
                     <div className="skill-name">{t.title} {inactive && <span className="tag gray">已停用</span>}</div>
                     <div className="skill-desc" style={{ whiteSpace: "pre-line" }}>{t.body || "（无结构说明）"}</div>
                     <div className="skill-foot">
-                      <span>v{t.version ?? 1} · {t.updated_at?.slice(0, 10) ?? t.created_at?.slice(0, 10) ?? "—"}</span>
+                      <span>v{t.version ?? 1} · {t.updated_at ? formatBusinessDateTime(t.updated_at) : t.created_at ? formatBusinessDateTime(t.created_at) : "—"}</span>
                       <button className="btn xs" type="button" onClick={() => setEditingTemplate(t)}>编辑模板</button>
                       <button className="btn xs" type="button" onClick={() => void openTemplateVersions(t.id)}>版本历史</button>
                       {inactive ? (
