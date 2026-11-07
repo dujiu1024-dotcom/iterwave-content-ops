@@ -139,3 +139,14 @@ def test_consumption_rejects_changed_asset_version_or_hash(tmp_path):
     _database(db)
     with pytest.raises(AssetConsumptionAuditError, match="asset_not_in_immutable_task_snapshot"):
         _record(db, asset={"asset_id": 7, "version_no": 3, "sha256": "a" * 64})
+
+
+def test_different_provider_calls_are_distinct_consumption_events(tmp_path):
+    db = tmp_path / "audit.db"
+    _database(db)
+    primary = _record(db, provider="primary-provider")
+    fallback = _record(db, provider="fallback-provider")
+    assert primary != fallback
+    conn = sqlite3.connect(db)
+    assert conn.execute("SELECT COUNT(*) FROM production_task_asset_usages").fetchone()[0] == 2
+    conn.close()
