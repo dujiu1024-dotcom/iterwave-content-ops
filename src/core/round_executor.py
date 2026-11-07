@@ -1131,6 +1131,7 @@ class RoundExecutor:
 
                 # Persist each strategy-step/topic/platform variant as an independently retryable task.
                 production_task_id = None
+                visual_reference_assets: dict[str, dict] = {}
                 if task_store is not None:
                     stage = self._subplan_context["stage"]
                     strategy_step_id = str(stage.get("stage_key") or "").strip()
@@ -1221,28 +1222,42 @@ class RoundExecutor:
                         registry = TenantRegistry(PROJECT_ROOT, cfg=self.cfg)
                         registry.get(str(tenant_id))
                         tenant_paths = registry.paths(str(tenant_id), create=False)
-                        selected = await asyncio.to_thread(
-                            select_visual_assets,
-                            candidates=image_candidates,
-                            media_dir=tenant_paths.media_dir,
-                            topic=topic.title,
-                            body=topic.summary,
-                            usage_role="cover",
-                            limit=8,
-                            cfg=self.cfg,
-                        )
-                        visual_selection = {
-                            "selection_version": selected["selection_version"],
-                            "candidate_count": selected["candidate_count"],
-                            "verified_count": selected["verified_count"],
-                            "selected": [{
+                        role_selections = {}
+                        rejected_by_role = {}
+                        for usage_role in ("cover", "body", "ending"):
+                            selected = await asyncio.to_thread(
+                                select_visual_assets,
+                                candidates=image_candidates,
+                                media_dir=tenant_paths.media_dir,
+                                topic=topic.title,
+                                body=topic.summary,
+                                usage_role=usage_role,
+                                limit=1,
+                                cfg=self.cfg,
+                            )
+                            role_items = selected["selected"]
+                            role_selections[usage_role] = [{
                                 "asset_id": item["asset_id"],
                                 "version_no": item["version_no"],
                                 "sha256": item["sha256"],
                                 "score": item["score"],
                                 "reasons": item["reasons"],
-                            } for item in selected["selected"]],
-                            "rejected": selected["rejected"],
+                            } for item in role_items]
+                            rejected_by_role[usage_role] = selected["rejected"]
+                            if role_items:
+                                item = role_items[0]
+                                visual_reference_assets[usage_role] = {
+                                    "asset_id": item["asset_id"],
+                                    "version_no": item["version_no"],
+                                    "sha256": item["sha256"],
+                                    "mime_type": item.get("mime_type"),
+                                    "path": str(item["verified_path"]),
+                                }
+                        visual_selection = {
+                            "selection_version": "visual-asset-selection-v1",
+                            "candidate_count": len(image_candidates),
+                            "selected_by_role": role_selections,
+                            "rejected_by_role": rejected_by_role,
                         }
                     task = task_store.create_task(
                         round_id=round_id,
@@ -1374,7 +1389,8 @@ class RoundExecutor:
                             await asyncio.sleep(delay)
                     if card_first:
                         # 编排把出图排在质量门之前；候选版本也必须由图片 API 生成完整卡片。
-                        from .ai_card_generation import generate_ai_card_set
+                        from .ai_card_generation import generate_ai_card_set, _paginate_body
+                        from .visual_planning import build_visual_brief, build_visual_plan
                         image_settings, image_reason = self._image_settings()
                         if not image_settings:
                             raise RuntimeError(f"AI 图片生成未启用，拒绝模板降级：{image_reason}")
@@ -1384,6 +1400,23 @@ class RoundExecutor:
                             cfg=self.cfg, settings=image_settings,
                             allow_fallback=image_settings.get("fallback_enabled"),
                             brand_profile=self._visual_brand_profile(),
+                            visual_plan=build_visual_plan(
+                                brief=build_visual_brief(
+                                    platform=platform.value, topic=topic.title,
+                                    title=title, goal="informational", key_message=title,
+                                    brand_profile=self._visual_brand_profile(),
+                                ),
+                                title=title, subtitle=topic.dimension,
+                                body_pages=["".join(page) for page in _paginate_body(
+                                    body, max_chars=60, segments_per_page=3,
+                                    max_pages=getattr(self.cfg.media_generation, "max_pages_per_article", 9),
+                                )],
+                                reference_asset_ids={
+                                    role: [asset["asset_id"]]
+                                    for role, asset in visual_reference_assets.items()
+                                },
+                            ),
+                            reference_assets=visual_reference_assets,
                             task_id=hashlib.sha256(json.dumps({
                                 "round_id": round_id, "platform": platform.value, "topic_id": topic.id,
                                 "title": title, "subtitle": topic.dimension, "body": body, "image_settings": image_settings,
@@ -1454,7 +1487,8 @@ class RoundExecutor:
                     image_paths = []
                     if make_cards:
                         # 每一页均由图片 API 直接生成完整成品；API/质量门失败即终止本内容，不退回模板。
-                        from .ai_card_generation import generate_ai_card_set
+                        from .ai_card_generation import generate_ai_card_set, _paginate_body
+                        from .visual_planning import build_visual_brief, build_visual_plan
                         image_settings, image_reason = self._image_settings()
                         if not image_settings:
                             raise RuntimeError(f"AI 图片生成未启用，拒绝模板降级：{image_reason}")
@@ -1464,6 +1498,23 @@ class RoundExecutor:
                             cfg=self.cfg, settings=image_settings,
                             allow_fallback=image_settings.get("fallback_enabled"),
                             brand_profile=self._visual_brand_profile(),
+                            visual_plan=build_visual_plan(
+                                brief=build_visual_brief(
+                                    platform=platform.value, topic=topic.title,
+                                    title=title, goal="informational", key_message=title,
+                                    brand_profile=self._visual_brand_profile(),
+                                ),
+                                title=title, subtitle=topic.dimension,
+                                body_pages=["".join(page) for page in _paginate_body(
+                                    body, max_chars=60, segments_per_page=3,
+                                    max_pages=getattr(self.cfg.media_generation, "max_pages_per_article", 9),
+                                )],
+                                reference_asset_ids={
+                                    role: [asset["asset_id"]]
+                                    for role, asset in visual_reference_assets.items()
+                                },
+                            ),
+                            reference_assets=visual_reference_assets,
                             task_id=hashlib.sha256(json.dumps({
                                 "round_id": round_id, "platform": platform.value, "topic_id": topic.id,
                                 "title": title, "body": body, "image_settings": image_settings,
