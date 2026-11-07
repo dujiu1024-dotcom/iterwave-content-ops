@@ -315,3 +315,74 @@ def test_production_visual_task_requires_manual_check_after_timeout():
             browser.close()
     finally:
         _stop_vite(server)
+
+
+
+def test_dashboard_layout_has_no_horizontal_overflow_at_supported_viewports():
+    """Capture the primary dashboard at desktop, tablet and mobile breakpoints."""
+    server, port = _serve_vite()
+    screenshot_dir = ROOT / "artifacts" / "ui-viewport"
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+
+    def handler(route):
+        path = urlparse(route.request.url).path
+        payload = {}
+        if path == "/api/auth/status":
+            payload = {"configured": True, "authenticated": True, "needs_login": False}
+        elif path == "/api/tenants":
+            payload = {
+                "runtime_tenant_id": "default", "selected_tenant_id": "default",
+                "restart_required": False,
+                "items": [{"id": "default", "name": "默认账号组", "created_at": None, "is_active": True}],
+            }
+        elif path == "/api/status":
+            payload = {
+                "enabled_platforms": ["xhs"], "platforms_without_login": [],
+                "logged_in_platforms": ["xhs"], "circuit_broken_platforms": [],
+                "active_rounds": 0,
+            }
+        elif path == "/api/rounds":
+            payload = {"items": [], "total": 0, "page": 1, "page_size": 20, "pages": 0}
+        elif path == "/api/goals":
+            payload = []
+        elif path in {"/api/hot_topics", "/api/insights"}:
+            payload = {"items": []}
+        elif path == "/api/platform_progress":
+            payload = {}
+        elif path == "/api/todos":
+            payload = {"items": [], "total": 0}
+        elif path == "/api/config":
+            payload = {"readonly": {"persona_keywords": [], "forbidden_directions": []}}
+        elif path == "/api/goals/summary":
+            payload = {}
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(payload, ensure_ascii=False))
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 1000}, device_scale_factor=1)
+            page.route("**/api/**", handler)
+            _attach_browser_diagnostics(page, {})
+            page.goto(f"http://127.0.0.1:{port}/?page=dashboard")
+            page.get_by_role("heading", name="运营总览").wait_for(timeout=15000)
+            page.wait_for_timeout(300)
+
+            for width in (1440, 1024, 768, 390):
+                page.set_viewport_size({"width": width, "height": 1000})
+                page.wait_for_timeout(150)
+                metrics = page.evaluate("""() => ({
+                    viewport: document.documentElement.clientWidth,
+                    document: document.documentElement.scrollWidth,
+                    body: document.body.scrollWidth,
+                    main: document.querySelector('#main-content')?.scrollWidth ?? 0
+                })""")
+                assert metrics["document"] <= metrics["viewport"] + 1, (
+                    f"horizontal overflow at {width}px: {metrics}"
+                )
+                assert metrics["body"] <= metrics["viewport"] + 1, (
+                    f"body overflow at {width}px: {metrics}"
+                )
+                page.screenshot(path=str(screenshot_dir / f"dashboard-{width}.png"), full_page=True)
+            browser.close()
+    finally:
+        _stop_vite(server)
