@@ -133,3 +133,10 @@ jobs:
           python -m playwright install --with-deps chromium
       - name: Run real-browser task recovery scenarios
         run: python -m pytest -vv --override-ini python_files=visual_generation_browser.py web/browser_tests/visual_generation_browser.py
+      - name: Upload responsive UI screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-viewport-screenshots
+          path: artifacts/ui-viewport/*.png
+          if-no-files-found: warn
