@@ -93,17 +93,18 @@ def test_consumption_is_appended_only_after_accepted_provider_result_and_is_idem
 
     conn = sqlite3.connect(db)
     row = conn.execute("""
-        SELECT usage_role,permission_snapshot,privacy_snapshot,provider,model,
+        SELECT usage_role,page_role,page_index,permission_snapshot,privacy_snapshot,provider,model,
                source_sha256,result_sha256,generation_event_id,consumed_at
         FROM production_task_asset_usages
     """).fetchone()
     assert row[0].startswith("consumed:cover:0:")
-    assert row[1:3] == ("allowed", "clear")
-    assert row[3:5] == ("test-provider", "test-model")
-    assert row[5] == "a" * 64
-    assert row[6] == hashlib.sha256(b"generated-image").hexdigest()
-    assert row[7] == first
-    assert row[8]
+    assert row[1:3] == ("cover", 0)
+    assert row[3:5] == ("allowed", "clear")
+    assert row[5:7] == ("test-provider", "test-model")
+    assert row[7] == "a" * 64
+    assert row[8] == hashlib.sha256(b"generated-image").hexdigest()
+    assert row[9] == first
+    assert row[10]
     assert conn.execute("SELECT COUNT(*) FROM production_task_asset_usages").fetchone()[0] == 1
     with pytest.raises(sqlite3.IntegrityError, match="immutable"):
         conn.execute("UPDATE production_task_asset_usages SET model='changed'")
