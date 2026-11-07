@@ -5054,7 +5054,6 @@ def _register_routes(app: FastAPI) -> None:
             if scope == "active":
                 active_stats = _task_queue.status_counts(scope="active")
                 response["status_counts"] = active_stats["by_status"]
-            elif scope == "failed":
         return response
 
     @app.get("/api/task-queue/summary")

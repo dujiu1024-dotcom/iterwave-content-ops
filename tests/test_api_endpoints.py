@@ -5682,7 +5682,7 @@ def test_global_task_queue_detail_and_audit_use_public_safe_contract(client, tmp
     audit_response = tc.get(f"/api/task-queue/{task.task_id}/audit")
     assert audit_response.status_code == 200, audit_response.text
     audit = audit_response.json()["items"][0]
-    assert set(audit) == {"id", "action", "actor", "acted_at", "details"}
+    assert set(audit) == {"action", "actor", "acted_at", "details"}
     assert "tenant_id" not in audit
     assert "queue_task_id" not in audit
     assert "private-user" not in audit_response.text
