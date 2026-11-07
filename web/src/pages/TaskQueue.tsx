@@ -411,7 +411,7 @@ export default function TaskQueue() {
           >
             <h2 id="task-retry-title">人工核验后恢复任务</h2>
             <p className="muted" style={{ marginTop: 8 }}>
-              原任务：{retryTask.task_id} · 账号组：{retryTask.tenant_name}
+              待恢复任务 · 账号组：{retryTask.tenant_name}
             </p>
             <div role="alert" style={{ margin: "14px 0", padding: 12, borderRadius: 10, border: "1px solid var(--red)", background: "var(--red-weak)", color: "var(--text)", fontSize: 13, lineHeight: 1.6 }}>
               仅当你已在对应平台核实“该操作没有执行、没有创建草稿或发布记录”时才能恢复。
@@ -534,7 +534,7 @@ export default function TaskQueue() {
           >
             <h2 id="task-resolution-title">{resolutionAction === "handled" ? "标记任务已处理" : "忽略此任务"}</h2>
             <p className="muted" style={{ marginTop: 8 }}>
-              原任务：{resolutionTask.task_id} · 账号组：{resolutionTask.tenant_name}
+              待处理任务 · 账号组：{resolutionTask.tenant_name}
             </p>
             <div role="alert" className="notice" style={{ margin: "14px 0" }}>
               此操作只关闭待办，不会修改原始失败状态，也不会重新执行任务。处理记录会永久保留。
