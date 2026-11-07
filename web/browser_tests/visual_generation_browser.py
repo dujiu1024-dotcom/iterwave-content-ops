@@ -236,6 +236,8 @@ def test_production_visual_task_survives_reload_and_resumes_from_checkpoints():
             # Page labels also appear in image-card download metadata, so
             # avoid locating their parent rows by the non-unique label.
             assert page.get_by_text("已完成", exact=False).count() >= 3
+            # Let transient success notifications disappear before capturing layout.
+            page.wait_for_timeout(4000)
 
             for width in (1440, 1024, 768, 390):
                 page.set_viewport_size({"width": width, "height": 1000})
@@ -244,13 +246,18 @@ def test_production_visual_task_survives_reload_and_resumes_from_checkpoints():
                     viewport: document.documentElement.clientWidth,
                     document: document.documentElement.scrollWidth,
                     main: document.querySelector('#main-content')?.scrollWidth ?? 0,
-                    mainClient: document.querySelector('#main-content')?.clientWidth ?? 0
+                    mainClient: document.querySelector('#main-content')?.clientWidth ?? 0,
+                    topbar: document.querySelector('.topbar')?.scrollWidth ?? 0,
+                    topbarClient: document.querySelector('.topbar')?.clientWidth ?? 0
                 })""")
                 assert metrics["document"] <= metrics["viewport"] + 1, (
                     f"production document overflow at {width}px: {metrics}"
                 )
                 assert metrics["main"] <= metrics["mainClient"] + 1, (
                     f"production content overflow at {width}px: {metrics}"
+                )
+                assert metrics["topbar"] <= metrics["topbarClient"] + 1, (
+                    f"production topbar overflow at {width}px: {metrics}"
                 )
                 page.screenshot(path=str(screenshot_dir / f"production-{width}.png"), full_page=True)
             browser.close()
@@ -394,7 +401,9 @@ def test_dashboard_layout_has_no_horizontal_overflow_at_supported_viewports():
                     document: document.documentElement.scrollWidth,
                     body: document.body.scrollWidth,
                     main: document.querySelector('#main-content')?.scrollWidth ?? 0,
-                    mainClient: document.querySelector('#main-content')?.clientWidth ?? 0
+                    mainClient: document.querySelector('#main-content')?.clientWidth ?? 0,
+                    topbar: document.querySelector('.topbar')?.scrollWidth ?? 0,
+                    topbarClient: document.querySelector('.topbar')?.clientWidth ?? 0
                 })""")
                 assert metrics["document"] <= metrics["viewport"] + 1, (
                     f"horizontal overflow at {width}px: {metrics}"
@@ -404,6 +413,9 @@ def test_dashboard_layout_has_no_horizontal_overflow_at_supported_viewports():
                 )
                 assert metrics["main"] <= metrics["mainClient"] + 1, (
                     f"main content overflow at {width}px: {metrics}"
+                )
+                assert metrics["topbar"] <= metrics["topbarClient"] + 1, (
+                    f"dashboard topbar overflow at {width}px: {metrics}"
                 )
                 page.screenshot(path=str(screenshot_dir / f"dashboard-{width}.png"), full_page=True)
             browser.close()
