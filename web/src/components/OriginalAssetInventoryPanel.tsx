@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import StructuredDataView from "./StructuredDataView";
 import { api, OriginalAsset, OriginalAssetGap, OriginalAssetSummary } from "../api";
 import { useApp } from "../AppContext";
 

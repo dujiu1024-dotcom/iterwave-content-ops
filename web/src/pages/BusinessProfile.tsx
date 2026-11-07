@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import StructuredDataView from "../components/StructuredDataView";
 import { api, BusinessCatalogItem, BusinessProfile } from "../api";
 import { useApp } from "../AppContext";
 
