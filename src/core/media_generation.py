@@ -291,9 +291,17 @@ def _request_endpoint(
             follow_redirects=False,
         ) as client:
             if source_path or source_bytes is not None:
-                image_bytes = source_bytes if source_bytes is not None else source_path.read_bytes()
+                max_reference_bytes = int(getattr(policy, "max_reference_bytes", 12 * 1024 * 1024))
+                if source_bytes is not None:
+                    image_bytes = source_bytes
+                else:
+                    if source_path.stat().st_size > max_reference_bytes:
+                        raise ImageGenerationError("参考图片超过允许大小，拒绝调用图片编辑接口")
+                    image_bytes = source_path.read_bytes()
                 if not image_bytes:
                     raise ImageGenerationError("参考图片为空，拒绝调用图片编辑接口")
+                if len(image_bytes) > max_reference_bytes:
+                    raise ImageGenerationError("参考图片超过允许大小，拒绝调用图片编辑接口")
                 if sensenova:
                     mime_type = source_mime_type or "image/png"
                     data_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode()}"
