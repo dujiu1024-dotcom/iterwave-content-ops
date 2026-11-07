@@ -10135,10 +10135,21 @@ def _register_routes(app: FastAPI) -> None:
             elif item.get("round_id") is not None:
                 target_type, target_id = "round", item["round_id"]
                 target_page, target_tab = "operations", "tasks"
-            item["target_page"] = target_page
-            item["target_tab"] = target_tab
-            item["target_type"] = target_type
-            item["target_id"] = target_id
+            # 明确投影公开字段：数据库关联 ID 仅用于上面的服务端深链计算，
+            # 不随 SELECT * 的结果返回给浏览器；未来新增列也不会自动暴露。
+            public_item = {
+                key: item.get(key)
+                for key in (
+                    "id", "level", "type", "platform", "title", "body",
+                    "channel", "sent_at", "read_at",
+                )
+            }
+            public_item["target_page"] = target_page
+            public_item["target_tab"] = target_tab
+            public_item["target_type"] = target_type
+            public_item["target_id"] = target_id
+            item.clear()
+            item.update(public_item)
         if page is None:
             return items
         return {

@@ -5364,3 +5364,37 @@ def test_kpi_one_day_window_includes_midnight_through_0800_shanghai(client, monk
     assert summary.json()["contents_created"] == 3
     assert summary.json()["drafts_created"] == 3
     assert summary.json()["confirmed_published"] == 3
+
+
+def test_notifications_api_projects_public_fields_and_keeps_deep_links(client):
+    tc, conn, _seed = client
+    now = datetime.now().isoformat(sep=" ", timespec="seconds")
+    cur = conn.execute(
+        "INSERT INTO notifications "
+        "(level,type,platform,title,body,channel,sent_at,task_run_id,ops_log_id,round_id,draft_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        ("warning", "round_timeout", "xhs", "轮次阶段超时", "阶段执行超时，请检查任务。",
+         "wecom", now, 321, 654, 987, "private-draft-id"),
+    )
+    conn.commit()
+
+    response = tc.get("/api/notifications?page=1&page_size=20")
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    item = next(row for row in payload["items"] if row["id"] == cur.lastrowid)
+    assert item["target_type"] == "round"
+    assert item["target_id"] == 987
+    assert item["target_page"] == "operations"
+    assert item["target_tab"] == "tasks"
+    for internal_key in ("task_run_id", "ops_log_id", "round_id", "draft_id"):
+        assert internal_key not in item
+    assert set(item) == {
+        "id", "level", "type", "platform", "title", "body", "channel",
+        "sent_at", "read_at", "target_page", "target_tab", "target_type", "target_id",
+    }
+
+    legacy = tc.get("/api/notifications?limit=20")
+    assert legacy.status_code == 200, legacy.text
+    legacy_item = next(row for row in legacy.json() if row["id"] == cur.lastrowid)
+    assert "round_id" not in legacy_item
+    assert legacy_item["target_id"] == 987
