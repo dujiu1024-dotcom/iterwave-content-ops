@@ -226,7 +226,7 @@ export default function PlanCenter() {
       })));
       try { setReview(await api.gaps()); } catch { setReview(null); }
       setDirty(false); setSaved(false); setError("");
-    } catch (e) { setError(e instanceof Error ? e.message : "计划数据加载失败"); }
+    } catch { setError("计划数据加载失败，请稍后重试。"); }
     finally { setLoading(false); }
   };
   useEffect(() => { void load(); }, []);
