@@ -1316,7 +1316,7 @@ class RoundExecutor:
                         if not persisted_roles:
                             visual_reference_assets = {}
                         elif persisted_selection != visual_selection:
-                            visual_reference_assets = {};
+                            visual_reference_assets = {}
                             if not tenant_id:
                                 raise RoundPreconditionError(
                                     "任务快照包含已选视觉素材，但当前 Worker 缺少可信租户身份；拒绝跨租户恢复"
