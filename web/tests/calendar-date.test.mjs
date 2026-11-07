@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { businessCalendarDate, formatBusinessDateTimeInput, formatCalendarDate, parseBusinessCalendarDate, shiftCalendarDate } from "../src/calendarDate.mjs";
-import { formatBusinessDateTime } from "../src/businessTime.mjs";
+import { formatBusinessDateTime, formatBusinessRelativeDateTime } from "../src/businessTime.mjs";
 
 test("month navigation clamps to the first day and crosses year boundaries", () => {
   const date = new Date(2026, 0, 31, 12, 30);
@@ -73,4 +73,25 @@ test("offset-aware API timestamps are grouped by their Shanghai business date", 
 test("datetime-local editing uses Shanghai wall time for offset-aware API timestamps", () => {
   assert.equal(formatBusinessDateTimeInput("2026-11-04T16:30:00Z"), "2026-11-05T00:30");
   assert.equal(formatBusinessDateTimeInput("2026-11-05 09:15:00"), "2026-11-05T09:15");
+});
+
+test("relative topic timestamps use Shanghai business day for naive API values", () => {
+  const previousTz = process.env.TZ;
+  process.env.TZ = "Asia/Tokyo";
+  try {
+    const now = new Date("2026-11-05T00:30:00+08:00");
+    assert.equal(formatBusinessRelativeDateTime("2026-11-05 00:20:00", now), "今天 00:20");
+    assert.equal(formatBusinessRelativeDateTime("2026-11-04 23:50:00", now), "11-04 23:50");
+  } finally {
+    if (previousTz === undefined) delete process.env.TZ;
+    else process.env.TZ = previousTz;
+  }
+});
+
+test("relative topic timestamps convert offset-aware values to Shanghai business time", () => {
+  const now = new Date("2026-11-05T00:30:00+08:00");
+  assert.equal(formatBusinessRelativeDateTime("2026-11-04T16:20:00Z", now), "今天 00:20");
+  assert.equal(formatBusinessRelativeDateTime("2026-11-04T15:50:00Z", now), "11-04 23:50");
+  assert.equal(formatBusinessRelativeDateTime("not-a-date", now), "not-a-date");
+  assert.equal(formatBusinessRelativeDateTime(null, now), "—");
 });
