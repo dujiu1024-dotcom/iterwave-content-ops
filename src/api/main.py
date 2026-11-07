@@ -4889,6 +4889,9 @@ def _register_routes(app: FastAPI) -> None:
             except TenantError:
                 tenant_name = task.tenant_id
             round_id = _round_id_from_aggregate(task.task_type, task.aggregate_id)
+            safe_task_error = safe_error_summary(
+                task.error_message, "任务执行失败，请进入任务详情核对。",
+            ) if task.error_message else None
             items.append({
                 "queue_order": task.queue_order,
                 "task_id": task.task_id, "task_type": task.task_type,

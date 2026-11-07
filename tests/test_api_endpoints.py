@@ -5503,3 +5503,36 @@ def test_global_task_detail_sanitizes_step_and_task_errors(client, tmp_path, mon
     assert "/home/ubuntu" not in response.text
     assert "sqlite3.OperationalError" not in response.text
     assert "Traceback" not in response.text
+
+
+def test_global_task_queue_list_sanitizes_task_errors_and_keeps_list_working(client, tmp_path, monkeypatch):
+    from src.core.task_queue import GlobalTaskQueue
+
+    tc, _conn, _seed = client
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    monkeypatch.setattr(api_main, "_task_queue", queue)
+    task, _ = queue.enqueue(
+        task_type="round_run", tenant_id="default", aggregate_id="list-probe", payload={},
+    )
+    internal = (
+        "sqlite3.OperationalError: unable to open /home/ubuntu/iterwave/data/private.db\\n"
+        "Traceback (most recent call last):"
+    )
+    conn = queue._connect()
+    try:
+        conn.execute(
+            "UPDATE global_task_queue SET status='failed', error_code=?, error_message=? WHERE task_id=?",
+            ("sqlite3.OperationalError", internal, task.task_id),
+        )
+    finally:
+        conn.close()
+
+    response = tc.get("/api/task-queue?scope=failed")
+    assert response.status_code == 200, response.text
+    item = next(row for row in response.json()["items"] if row["task_id"] == task.task_id)
+    assert item["error_code"] == "任务异常"
+    assert item["error_message"] == "任务执行失败，请进入任务详情核对。"
+    assert "/home/ubuntu" not in response.text
+    assert "sqlite3.OperationalError" not in response.text
+    assert "Traceback" not in response.text
