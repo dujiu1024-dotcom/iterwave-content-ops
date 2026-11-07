@@ -425,7 +425,9 @@ def test_visual_generation_audits_each_provider_accepted_reference_page(monkeypa
     )
     monkeypatch.setattr(visual_ocr, "preflight_ocr", lambda **_kwargs: {"status": "available"})
 
+    provider_calls = []
     def accepted_provider(prompt, **kwargs):
+        provider_calls.append(prompt)
         raw = _valid_generated_image(prompt)
         callback = kwargs.get("on_provider_accepted")
         if callback is not None:
@@ -455,3 +457,17 @@ def test_visual_generation_audits_each_provider_accepted_reference_page(monkeypa
     assert all(event["production_task_id"] == "pt-audit" for event in events)
     assert all(event["provider"] == "actual-provider" for event in events)
     assert all(event["model"] == "actual-model" for event in events)
+    assert len(provider_calls) == 3
+
+    # A validated cross-run cache hit is not a new provider consumption event.
+    cached_paths, _cached_pages = cards.generate_ai_card_set(
+        title="标题", subtitle="栏目", body="正文内容。",
+        output_dir=tmp_path / "output", platform=type("P", (), {"value": "xhs"})(),
+        cfg=_Cfg(tmp_path), settings={"model": "requested-model", "size": "1024x1536"},
+        visual_plan=plan,
+        reference_assets={"cover": reference, "body": reference, "ending": reference},
+        production_task_id="pt-audit",
+    )
+    assert len(cached_paths) == 3
+    assert len(provider_calls) == 3
+    assert len(events) == 3
