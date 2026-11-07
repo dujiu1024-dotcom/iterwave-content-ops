@@ -5570,6 +5570,7 @@ def test_round_run_status_sanitizes_nested_report_and_progress(client, tmp_path,
         "round_id": round_id, "final_status": "failed",
         "errors": [internal], "failure_message": internal,
         "task_id": "internal-task-123", "tenant_id": "default",
+        "content": "第一段完整业务正文\\n第二段仍应完整保留，包含正常换行。",
         "steps": [{"step": "save_drafts", "detail": internal, "draft_id": 987}],
     }
     progress = {"steps": [{"id": "save", "label": "存草稿", "status": "failed", "detail": internal}], "detail": internal, "percent": 80}
@@ -5588,6 +5589,7 @@ def test_round_run_status_sanitizes_nested_report_and_progress(client, tmp_path,
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["report"]["errors"] == ["详细诊断已隐藏，请联系管理员。"]
+    assert payload["report"]["content"] == "第一段完整业务正文\\n第二段仍应完整保留，包含正常换行。"
     assert payload["report"]["steps"][0]["detail"] == "详细诊断已隐藏，请联系管理员。"
     assert "task_id" not in payload
     assert "task_type" not in payload

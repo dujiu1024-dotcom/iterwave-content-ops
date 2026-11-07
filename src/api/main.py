@@ -1901,10 +1901,15 @@ def _register_routes(app: FastAPI) -> None:
             "updated_at": value.get("updated_at"),
         }
 
-    def _safe_round_report(value, depth=0):
-        """递归安全化轮次报告，限制嵌套规模并移除内部关联键。"""
+    def _safe_round_report(value, depth=0, field_name=""):
+        """按字段语义安全化轮次报告；保留业务正文，只摘要异常字段。"""
         if depth > 8:
             return None
+        error_fields = {
+            "error", "errors", "error_code", "error_message", "failure",
+            "failure_message", "exception", "exceptions", "traceback",
+            "stack_trace", "diagnostic", "diagnostics",
+        }
         if isinstance(value, dict):
             result = {}
             for key, item in list(value.items())[:300]:
@@ -1916,15 +1921,25 @@ def _register_routes(app: FastAPI) -> None:
                     continue
                 if lowered.endswith("_id") and lowered not in {"round_id"}:
                     continue
-                result[name] = _safe_round_report(item, depth + 1)
+                result[name] = _safe_round_report(item, depth + 1, lowered)
             return result
         if isinstance(value, list):
-            return [_safe_round_report(item, depth + 1) for item in value[:200]]
+            return [_safe_round_report(item, depth + 1, field_name) for item in value[:200]]
         if isinstance(value, str):
-            return safe_error_summary(value, "详细诊断已隐藏，请联系管理员。")[:2000]
+            if field_name in error_fields or field_name == "detail":
+                return safe_error_summary(value, "详细诊断已隐藏，请联系管理员。")[:2000]
+            # 普通业务文案、标题、正文和多行内容保持完整；只清理凭据与内部路径。
+            safe_text = redact(value)
+            safe_text = re.sub(
+                r"(?<![A-Za-z0-9:])/(?:home|root|tmp|var|opt|srv|app|Users|workspace|usr|etc|mnt)/[^\\s\"']+",
+                "服务器内部路径",
+                safe_text,
+            )
+            safe_text = re.sub(r"[A-Za-z]:\\\\[^\\s\"']+", "本地内部路径", safe_text)
+            return safe_text[:20000]
         if isinstance(value, (int, float, bool)) or value is None:
             return value
-        return safe_error_summary(str(value), "详细诊断已隐藏，请联系管理员。")[:500]
+        return redact(str(value))[:500]
 
     def _elapsed_seconds(value):
         """从持久化时间戳算出已运行秒数；无法解析时返回 None，不伪造 0。"""
