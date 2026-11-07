@@ -628,11 +628,12 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 /* Mobile 390px containment and compact workspace */
 
 @media (max-width: 620px) {
-  /* 手机端保留图标导航，但缩窄占位；导航文字已在平板断点隐藏。 */
+  /* Compact icon rail: hide text-only chrome instead of clipping it in the 48px sidebar. */
   .sidebar { width: 48px; flex-basis: 48px; padding: 10px 3px; }
-  .brand { padding: 0 7px 16px; }
-  .nav { padding: 10px 3px; }
-  .nav .ni { font-size: 16px; }
+  .brand { justify-content: center; padding: 0 0 16px; }
+  .brand > div:not(.brand-mark), .group-label, .nav .label, .nav .count, .side-bottom { display: none; }
+  .nav { justify-content: center; gap: 0; padding: 10px 3px; }
+  .nav .ni { width: auto; font-size: 16px; }
   .topbar { padding: 8px 9px; }
   .top-actions { gap: 5px; }
   .tenant-switcher select { max-width: 108px; min-width: 76px; }
