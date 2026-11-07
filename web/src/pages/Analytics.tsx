@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import EmptyHint from "../components/EmptyHint";
 import OperatingFeedbackPane from "../components/OperatingFeedbackPane";
 import { api, MetricsResponse, MetricRow, Platform, SpiralAnalysis, Draft, WeeklyReport, ActivationStatus, GoalSummary, BusinessAnalyticsSummary } from "../api";
-import { displayMetricLabel, displaySourceLabel, displayPlatformLabel } from "../displayLabels";
+import { displayMetricLabel, displaySourceLabel, displayPlatformLabel, displayStatusLabel } from "../displayLabels";
 
 const PLATFORM_NAME: Record<Platform, string> = {
   xhs: "小红书", douyin: "抖音",
@@ -276,7 +276,7 @@ export default function Analytics() {
               <tbody>
                 {Object.entries(businessSummary?.followers_growth_by_platform ?? {}).map(([platform, growth]) => (
                   <tr key={platform}>
-                    <td>{PLATFORM_NAME[platform as Platform] ?? platform}</td>
+                    <td>{PLATFORM_NAME[platform as Platform] ?? displayPlatformLabel(platform)}</td>
                     <td>{growth == null ? "—" : `${growth.growth > 0 ? "+" : ""}${growth.growth}`}</td>
                     <td>{growth?.baseline_at ?? "—"}</td>
                     <td>{growth?.latest_at ?? "—"}</td>
@@ -344,7 +344,7 @@ export default function Analytics() {
                   {(snapshotHistory[draft.id] || []).length === 0 ? <div className="panel-sub">暂无历史指标快照</div> :
                     (snapshotHistory[draft.id] || []).map((item) => <div className="panel-sub" key={item.id} style={{ padding: "6px 0" }}>
                       {item.measured_at} · {displaySourceLabel(item.source)}
-                      · {(activationStatus?.platform_metric_fields?.[draft.platform] || []).map((field) => `${({views:"曝光",likes:"点赞",collects:"收藏",comments:"评论",shares:"分享"} as Record<string,string>)[field] || field} ${item[field as keyof typeof item] ?? "—"}`).join(" · ")}
+                      · {(activationStatus?.platform_metric_fields?.[draft.platform] || []).map((field) => `${({views:"曝光",likes:"点赞",collects:"收藏",comments:"评论",shares:"分享"} as Record<string,string>)[field] || displayMetricLabel(field)} ${item[field as keyof typeof item] ?? "—"}`).join(" · ")}
                       {item.correction_of ? " · 修正记录" : ""}
                       {item.source === "manual" && <button type="button" className="btn sm" style={{ marginLeft: 8 }} onClick={() => setBackfillValues((prev) => ({
                         ...prev, [draft.id]: {
@@ -485,7 +485,7 @@ export default function Analytics() {
                         m.fetch_status === "failed" ? "red" :
                         m.fetch_status === "parse_error" ? "red" :
                         "gray"  // pending / 其他：中性色
-                      }`}>{({ success: "已采集", partial: "部分采集", failed: "失败", parse_error: "解析失败", pending: "待采集" } as Record<string, string>)[m.fetch_status] ?? m.fetch_status}</span>
+                      }`}>{({ success: "已采集", partial: "部分采集", failed: "失败", parse_error: "解析失败", pending: "待采集" } as Record<string, string>)[m.fetch_status] ?? displayStatusLabel(m.fetch_status)}</span>
                     </td>
                     {/* P1-8 修复：失败态显示 error_msg（来自 metrics.error_msg 字段） */}
                     <td style={{ maxWidth: 180, fontSize: 11, color: (m.fetch_status === "failed" || m.fetch_status === "parse_error") ? "var(--red)" : "var(--subtle)" }}>
