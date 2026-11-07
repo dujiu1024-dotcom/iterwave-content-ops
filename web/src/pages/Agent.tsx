@@ -795,15 +795,14 @@ function AuditPane() {
               <div className="table-wrap">
                 <table>
                   <thead><tr>
-                    <th>时间</th><th>Step</th><th>模型</th><th>Prompt Ver</th>
+                    <th>时间</th><th>Step</th><th>Prompt Ver</th>
                     <th>Tokens In</th><th>Tokens Out</th><th>延迟</th><th>结果</th>
                   </tr></thead>
                   <tbody>
                     {aiCalls.slice((auditPage - 1) * auditPageSize, auditPage * auditPageSize).map((r) => (
                       <tr key={r.id}>
-                        <td style={{ fontSize: 11, fontFamily: "monospace", color: "var(--subtle)" }}>{r.called_at}</td>
-                        <td style={{ fontSize: 12, fontFamily: "monospace" }}>{displayStepLabel(r.step)}</td>
-                        <td>{r.model}</td>
+                        <td style={{ fontSize: 12, color: "var(--subtle)" }}>{formatBusinessDateTime(r.called_at)}</td>
+                        <td>{displayStepLabel(r.step)}</td>
                         <td style={{ fontSize: 11, fontFamily: "monospace" }}>{r.prompt_version}</td>
                         <td>{r.tokens_in ?? <span style={{ color: "var(--subtle)" }}>—</span>}</td>
                         <td>{r.tokens_out ?? <span style={{ color: "var(--subtle)" }}>—</span>}</td>
