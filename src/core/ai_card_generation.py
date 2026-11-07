@@ -278,7 +278,10 @@ def _generate_ai_card_set(
             if reference is not None:
                 if not isinstance(reference, dict):
                     raise ValueError("reference_asset_descriptor_invalid")
-                reference_path = Path(str(reference.get("path") or "")).resolve()
+                reference_input_path = Path(str(reference.get("path") or ""))
+                if reference_input_path.is_symlink():
+                    raise ValueError("reference_asset_symlink_not_allowed")
+                reference_path = reference_input_path.resolve()
                 expected_reference_hash = str(reference.get("sha256") or "").strip().lower()
                 if not reference_path.is_file() or not re.fullmatch(r"[0-9a-f]{64}", expected_reference_hash):
                     raise ValueError("reference_asset_missing_or_unverified")
