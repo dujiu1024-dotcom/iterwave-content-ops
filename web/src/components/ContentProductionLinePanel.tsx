@@ -3,6 +3,7 @@ import { api, type ContentProductionLineRecord } from "../api";
 import { useApp } from "../AppContext";
 import { displayStatusLabel, displayErrorLabel, displayPlatformLabel } from "../displayLabels";
 import { navigate } from "../nav";
+import { formatBusinessDateTime } from "../businessTime.mjs";
 
 const LINE_STATUS: Record<string, string> = {
   pending: "待生产", producing: "生产中", review_pending: "待审核",
@@ -13,9 +14,7 @@ const LINE_STATUS: Record<string, string> = {
 };
 const ACTIVE = new Set(["pending","producing","review_pending","awaiting_save","awaiting_publish","verification_pending","published","failed","recovering"]);
 function dateLabel(value?: string | null) {
-  if (!value) return "—";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN");
+  return formatBusinessDateTime(value);
 }
 
 export default function ContentProductionLinePanel() {
