@@ -1209,11 +1209,14 @@ class RoundExecutor:
                         "rejected": [],
                         "candidate_count": len(image_candidates),
                     }
-                    if image_candidates:
-                        if not tenant_id:
-                            raise RoundPreconditionError(
-                                "当前生产任务缺少可信账号组身份，拒绝读取视觉素材"
-                            )
+                    if image_candidates and not tenant_id:
+                        # Missing trusted identity means no asset may be read. Keep the
+                        # task running without reference assets rather than guessing a tenant.
+                        visual_selection["rejected"] = [{
+                            "asset_id": item.get("asset_id"),
+                            "reason": "trusted_tenant_identity_unavailable",
+                        } for item in image_candidates]
+                    elif image_candidates:
                         registry = TenantRegistry(PROJECT_ROOT, cfg=self.cfg)
                         registry.get(str(tenant_id))
                         tenant_paths = registry.paths(str(tenant_id), create=False)
