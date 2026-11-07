@@ -1143,9 +1143,9 @@ class RoundExecutor:
                     linked_assets = self.conn.execute(
                         """SELECT DISTINCT a.id,a.current_version_no,v.title,v.description,
                                   v.metadata_json,a.source_kind,a.source_media_asset_id,
-                                  a.source_content_asset_id,a.source_kb_id,a.commercial_use_status,
-                                  a.privacy_status,a.readability_status,a.completeness_status,
-                                  a.duplicate_status
+                                  a.source_content_asset_id,a.source_kb_id,a.review_status,
+                                  a.archived_at,a.commercial_use_status,a.privacy_status,
+                                  a.readability_status,a.completeness_status,a.duplicate_status
                            FROM original_assets a
                            JOIN original_asset_versions v
                              ON v.original_asset_id=a.id AND v.version_no=a.current_version_no
@@ -1166,6 +1166,9 @@ class RoundExecutor:
                         "asset_id": int(row["id"]),
                         "version_no": int(row["current_version_no"]),
                         "title": row["title"],
+                        "review_status": row["review_status"],
+                        "archived_at": row["archived_at"],
+                        "metadata_json": row["metadata_json"],
                         "description": row["description"],
                         "source_kind": row["source_kind"],
                         "source_media_asset_id": row["source_media_asset_id"],
@@ -1177,6 +1180,65 @@ class RoundExecutor:
                         "completeness_status": row["completeness_status"],
                         "duplicate_status": row["duplicate_status"],
                     } for row in linked_assets]
+                    # Run the WP1 visual selector against this task's immutable,
+                    # already-authorized candidates. Resolve storage only through the
+                    # worker's trusted tenant identity; never fall back to active tenant.
+                    from .task_context import current_task_identity
+                    from .tenant_registry import TenantRegistry
+                    from .visual_asset_selection import select_visual_assets
+                    tenant_id = current_task_identity().get("tenant_id")
+                    image_candidates = []
+                    for asset in original_asset_snapshot:
+                        if asset.get("source_kind") != "media_asset":
+                            continue
+                        try:
+                            metadata = json.loads(asset.get("metadata_json") or "{}")
+                        except (TypeError, ValueError):
+                            metadata = {}
+                        image_candidates.append({
+                            **asset,
+                            "stored_filename": metadata.get("stored_filename"),
+                            "mime_type": metadata.get("mime_type"),
+                            "sha256": metadata.get("sha256"),
+                            "alt_text": metadata.get("alt_text"),
+                            "tags": metadata.get("tags"),
+                        })
+                    visual_selection = {
+                        "selection_version": "visual-asset-selection-v1",
+                        "selected": [],
+                        "rejected": [],
+                        "candidate_count": len(image_candidates),
+                    }
+                    if image_candidates:
+                        if not tenant_id:
+                            raise RoundPreconditionError(
+                                "当前生产任务缺少可信账号组身份，拒绝读取视觉素材"
+                            )
+                        registry = TenantRegistry(PROJECT_ROOT, cfg=self.cfg)
+                        registry.get(str(tenant_id))
+                        tenant_paths = registry.paths(str(tenant_id), create=False)
+                        selected = select_visual_assets(
+                            candidates=image_candidates,
+                            media_dir=tenant_paths.media_dir,
+                            topic=topic.title,
+                            body=topic.summary,
+                            usage_role="cover",
+                            limit=8,
+                            cfg=self.cfg,
+                        )
+                        visual_selection = {
+                            "selection_version": selected["selection_version"],
+                            "candidate_count": selected["candidate_count"],
+                            "verified_count": selected["verified_count"],
+                            "selected": [{
+                                "asset_id": item["asset_id"],
+                                "version_no": item["version_no"],
+                                "sha256": item["sha256"],
+                                "score": item["score"],
+                                "reasons": item["reasons"],
+                            } for item in selected["selected"]],
+                            "rejected": selected["rejected"],
+                        }
                     task = task_store.create_task(
                         round_id=round_id,
                         master_plan_version_id=int(self._subplan_context["master_plan_version_id"]),
@@ -1204,6 +1266,7 @@ class RoundExecutor:
                             },
                             "template": template_data,
                             "original_assets": original_asset_snapshot,
+                            "visual_asset_selection": visual_selection,
                         },
                     )
                     # original_assets in the immutable task input are eligible reference
