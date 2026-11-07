@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState } from "react";
 import { useApp } from "../AppContext";
 import { navigate, useUrlTab } from "../nav";
+import { formatBusinessDateTime } from "../businessTime.mjs";
 import {
   api, RunRoundReport, SpiralRound, Draft, Platform, AssetItem,
   PlanResponse, ContentItem, PipelineResponse, RecheckResult, Goal, AutogrowStatus,
@@ -207,7 +208,7 @@ export default function Production() {
         goal_id: p.plan.cadence?.goal_id ?? "",
       });
     } catch (e: any) {
-      setLoadError(`加载母计划失败：${e.message}`);
+      setLoadError(`加载母计划失败：请稍后重试`);
     }
   };
 
@@ -237,7 +238,7 @@ export default function Production() {
       .catch(() => { /* 用默认四平台 */ });
   }, []);
   useEffect(() => {
-    refresh().catch((e) => showToast(`加载轮次失败: ${e.message}`, "error"));
+    refresh().catch((e) => showToast(`加载轮次失败: 请稍后重试`, "error"));
   }, [roundsPage, roundStatusFilter]);
 
   useEffect(() => {
@@ -418,7 +419,7 @@ export default function Production() {
       await loadRoundData(currentRoundId);
     } catch (e: any) {
       setRunError(e.message);
-      showToast(`运行失败: ${e.message}`, "error");
+      showToast(`运行失败: 请稍后重试`, "error");
     } finally {
       setRunning(false);
       setRunQueued(false);
@@ -432,7 +433,7 @@ export default function Production() {
       showToast(`↻ 状态已变更为 ${target}`);
       await refresh();
       await loadRoundData(currentRoundId);
-    } catch (e: any) { showToast(`变更失败: ${e.message}`, "error"); }
+    } catch (e: any) { showToast(`变更失败: 请稍后重试`, "error"); }
   };
 
   const confirmPublish = async (draftId: string) => {
@@ -444,7 +445,7 @@ export default function Production() {
       showToast(noteUrl.trim() ? "✓ 已确认发布并保存链接" : "✓ 已确认发布；发布时间已记录或标记为确认时间");
       await refresh();
       if (currentRoundId) await loadRoundData(currentRoundId);
-    } catch (e: any) { showToast(`确认失败: ${e.message}`, "error"); }
+    } catch (e: any) { showToast(`确认失败: 请稍后重试`, "error"); }
   };
 
   const verifyDraftSave = async (draftId: string, saved: boolean) => {
@@ -463,7 +464,7 @@ export default function Production() {
       await refresh();
       if (currentRoundId) await loadRoundData(currentRoundId);
     } catch (e: any) {
-      showToast(`核实失败: ${e.message}`, "error");
+      showToast(`核实失败: 请稍后重试`, "error");
     }
   };
 
@@ -474,7 +475,7 @@ export default function Production() {
       showToast("已取消该草稿");
       await refresh();
       if (currentRoundId) await loadRoundData(currentRoundId);
-    } catch (e: any) { showToast(`取消失败: ${e.message}`, "error"); }
+    } catch (e: any) { showToast(`取消失败: 请稍后重试`, "error"); }
   };
 
   const recollectFailedMetrics = async (draft: Draft) => {
@@ -486,7 +487,7 @@ export default function Production() {
       showToast(result.recollect_scheduled ? "已提交指标重新采集任务" : "重新采集任务未提交", result.recollect_scheduled ? "success" : "error");
       await refresh();
       if (currentRoundId) await loadRoundData(currentRoundId);
-    } catch (e: any) { showToast(`重新采集失败: ${e.message}`, "error"); }
+    } catch (e: any) { showToast(`重新采集失败: 请稍后重试`, "error"); }
   };
 
   const handleSavePlan = async () => {
@@ -538,7 +539,7 @@ export default function Production() {
         await loadPlan();
         await refresh();
       } catch (e: any) {
-        showToast(`保存母计划失败: ${e.message}`, "error");
+        showToast(`保存母计划失败: 请稍后重试`, "error");
       }
     });
   };
@@ -554,7 +555,7 @@ export default function Production() {
         showToast(res.changed ? "✓ 文案已保存（user_override 已留痕）" : "内容无变化", "success");
         await loadRoundData(currentRoundId!);
       } catch (e: any) {
-        showToast(`保存失败: ${e.message}`, "error");
+        showToast(`保存失败: 请稍后重试`, "error");
       }
     });
   };
@@ -619,7 +620,7 @@ export default function Production() {
         );
         await loadRoundData(currentRoundId!);
       } catch (e: any) {
-        showToast(`重检失败: ${e.message}`, "error");
+        showToast(`重检失败: 请稍后重试`, "error");
       }
     });
   };
@@ -634,7 +635,7 @@ export default function Production() {
         setRejectReason("");
         await loadRoundData(currentRoundId!);
       } catch (e: any) {
-        showToast(`驳回失败: ${e.message}`, "error");
+        showToast(`驳回失败: 请稍后重试`, "error");
       }
     });
   };
@@ -653,7 +654,7 @@ export default function Production() {
         }));
         setSuggestNotes(r.notes);
         showToast("已按目标填好建议，确认后点「保存母计划」生效", "success");
-      } catch (e: any) { showToast(`拆分失败：${e.message}`, "error"); }
+      } catch (e: any) { showToast(`拆分失败：请稍后重试`, "error"); }
     });
   };
 
@@ -669,7 +670,7 @@ export default function Production() {
         showToast("已删除这篇内容", "success");
         setSelectedContentId(null);
         if (currentRoundId) await loadRoundData(currentRoundId);
-      } catch (e: any) { showToast(`删除失败：${e.message}`, "error"); }
+      } catch (e: any) { showToast(`删除失败：请稍后重试`, "error"); }
     });
   };
 
@@ -683,7 +684,7 @@ export default function Production() {
         setCurrentRoundId(null);
         setRoundDetail(null);
         await refresh();
-      } catch (e: any) { showToast(`删除失败：${e.message}`, "error"); }
+      } catch (e: any) { showToast(`删除失败：请稍后重试`, "error"); }
     });
   };
 
@@ -1053,7 +1054,7 @@ export default function Production() {
                           <td style={{ fontFamily: "monospace", fontSize: 11 }}>{h.plan_signature.slice(0, 16)}…</td>
                           <td>{h.round_number != null ? `第 ${h.round_number} 轮` : h.round_id != null ? "关联轮次已归档" : "母计划"}</td>
                           <td>{AUTHOR_LABEL[(h.author ?? "").split(":")[0]] ?? displaySourceLabel(h.author)}</td>
-                          <td style={{ fontSize: 11 }}>{h.created_at}</td>
+                          <td style={{ fontSize: 11 }}>{formatBusinessDateTime(h.created_at)}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -1451,7 +1452,7 @@ export default function Production() {
                     not_found: "",
                   }[visualTask.status]}
                 </div>
-                <div>{visualTask.message}</div>
+                <div>{visualTask.message ? "视觉任务执行未完成，请查看任务状态。" : ""}</div>
                 {visualTask.pages.length > 0 && (
                   <div style={{ display: "grid", gap: 4, marginTop: 8 }}>
                     {visualTask.pages.map((page) => {
@@ -1465,7 +1466,7 @@ export default function Production() {
                       return (
                         <div key={page.page_index} style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
                           <span>第 {page.page_index + 1} 张</span>
-                          <span>{labels[page.status]}{page.attempts ? ` · 尝试 ${page.attempts} 次` : ""}{page.message ? ` · ${page.message}` : ""}</span>
+                          <span>{labels[page.status]}{page.attempts ? ` · 尝试 ${page.attempts} 次` : ""}{page.message ? " · 执行遇到问题" : ""}</span>
                         </div>
                       );
                     })}
@@ -1762,7 +1763,7 @@ export default function Production() {
                   <i className={`task-prio ${STATUS_CLS[r.status]}`} />
                   <div className="task-main">
                     <div className="task-title">第 {r.round_number} 轮</div>
-                    <div className="task-desc">创建于 {new Date(r.created_at).toLocaleString("zh-CN")}</div>
+                    <div className="task-desc">创建于 {formatBusinessDateTime(r.created_at)}</div>
                   </div>
                   <span className={`tag ${STATUS_CLS[r.status]}`}>{ROUND_STATUS_LABEL[r.status] ?? displayStatusLabel(r.status)}</span>
                 </div>

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, ReviewQueueItem } from "../api";
+import { formatBusinessDateTime } from "../businessTime.mjs";
 import { ALL_PLATFORMS, platformMeta, Platform } from "../platforms";
 
 const PAGE_SIZE = 30;
@@ -304,7 +305,7 @@ export default function Review() {
                   <label>下一步调整建议<textarea value={effectRecommendation} onChange={(e) => setEffectRecommendation(e.target.value)} rows={3} maxLength={2000} placeholder="说明保留、调整或停止哪些策略动作" /></label>
                   <label>评估依据<textarea value={effectEvidence} onChange={(e) => setEffectEvidence(e.target.value)} rows={2} maxLength={2000} placeholder="补充样本范围、异常情况和判断理由" /></label>
                   <button className="btn primary" type="button" disabled={!effectRecommendation.trim()} onClick={() => void saveEffectReview()}>保存策略评估</button>
-                  {effectFeedback.reviews.length > 0 && <ol className="review-effect-history">{effectFeedback.reviews.map((entry) => <li key={entry.id}><strong>{entry.assessment}</strong> · {entry.recommendation}<small>{entry.created_at} · 置信度 {entry.confidence}</small></li>)}</ol>}
+                  {effectFeedback.reviews.length > 0 && <ol className="review-effect-history">{effectFeedback.reviews.map((entry) => <li key={entry.id}><strong>{entry.assessment}</strong> · {entry.recommendation}<small>{formatBusinessDateTime(entry.created_at)} · 置信度 {entry.confidence}</small></li>)}</ol>}
                 </> : <p className="muted">正在加载策略效果数据…</p>}
               </section>}
               {selected.guard_reason && <p className="muted">质量检查说明：{selected.guard_reason}</p>}
