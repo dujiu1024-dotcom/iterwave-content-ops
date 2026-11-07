@@ -1382,3 +1382,106 @@ def test_analytics_realistic_business_metrics_has_no_overflow_at_supported_viewp
             browser.close()
     finally:
         _stop_vite(server)
+
+
+
+def test_business_profile_realistic_data_layout_has_no_overflow_at_supported_viewports():
+    """Render a populated business profile and catalog with real-shaped API responses."""
+    server, port = _serve_vite()
+    screenshot_dir = ROOT / "artifacts" / "ui-viewport"
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    now = "2026-11-07T10:30:00+08:00"
+
+    def handler(route):
+        path = urlparse(route.request.url).path
+        if path == "/api/auth/status":
+            payload = {"configured": True, "authenticated": True, "needs_login": False}
+        elif path == "/api/business-profile":
+            payload = {
+                "business_name": "山岚户外装备",
+                "introduction": "面向城市轻户外人群提供轻量化露营装备与实用指南。",
+                "industry": "户外用品",
+                "business_model": "电商零售与内容种草",
+                "business_stage": "增长期",
+                "operating_goal": "提升高意向用户转化",
+                "field_evidence": {},
+                "version_no": 4,
+                "updated_at": now,
+            }
+        elif path == "/api/business-profile/items":
+            payload = {"items": [{
+                "id": "catalog-product-1", "entity_type": "product",
+                "name": "轻量化双人帐篷",
+                "details": {"price_range": "899-1299 元", "weight": "1.8kg", "selling_points": ["快速搭建", "防雨"]},
+                "field_evidence": {}, "is_active": 1, "created_at": now, "updated_at": now,
+            }]}
+        elif path == "/api/business-profile/analysis":
+            payload = {"missing": [], "completeness": 92}
+        elif path == "/api/business-profile/versions":
+            payload = {"items": [{"version_no": 4, "change_note": "补充产品参数", "created_at": now, "created_by": "operator"}]}
+        else:
+            payload = {}
+        return route.fulfill(status=200, content_type="application/json",
+                             body=json.dumps(payload, ensure_ascii=False))
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 1000}, device_scale_factor=1)
+            page_errors = []
+            page.on("pageerror", lambda error: page_errors.append(str(error)))
+            page.route("**/api/**", handler)
+            page.goto(f"http://127.0.0.1:{port}/?page=business-profile")
+            page.get_by_role("heading", name="经营资料").wait_for(timeout=15000)
+            page.get_by_text("山岚户外装备", exact=True).wait_for(timeout=15000)
+            page.get_by_text("轻量化双人帐篷", exact=True).wait_for(timeout=15000)
+            page.get_by_text("资料完整性检查", exact=True).wait_for(timeout=15000)
+            _assert_supported_viewports(page, screenshot_dir, "business-profile-real-data")
+            assert not page_errors, "business-profile real-data raised browser errors: {}".format(page_errors)
+            browser.close()
+    finally:
+        _stop_vite(server)
+
+
+def test_business_diagnosis_history_does_not_expose_model_names_or_overflow():
+    """Render a diagnosis history record and assert provider/model metadata stays internal."""
+    server, port = _serve_vite()
+    screenshot_dir = ROOT / "artifacts" / "ui-viewport"
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    now = "2026-11-07T10:30:00+08:00"
+
+    def handler(route):
+        path = urlparse(route.request.url).path
+        if path == "/api/auth/status":
+            payload = {"configured": True, "authenticated": True, "needs_login": False}
+        elif path == "/api/business-diagnosis":
+            payload = {"report": None}
+        elif path == "/api/business-diagnosis/versions":
+            payload = {"items": [{
+                "id": 21, "version_no": 3, "status": "confirmed",
+                "model_name": "internal-provider-model-secret",
+                "created_at": now, "updated_at": now, "confirmed_at": now,
+                "change_note": "补充目标客群证据",
+            }]}
+        else:
+            payload = {}
+        return route.fulfill(status=200, content_type="application/json",
+                             body=json.dumps(payload, ensure_ascii=False))
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 1000}, device_scale_factor=1)
+            page_errors = []
+            page.on("pageerror", lambda error: page_errors.append(str(error)))
+            page.route("**/api/**", handler)
+            page.goto(f"http://127.0.0.1:{port}/?page=business-diagnosis")
+            page.get_by_role("heading", name="AI 经营分析").wait_for(timeout=15000)
+            page.get_by_text("历史版本", exact=True).wait_for(timeout=15000)
+            page.get_by_text("V3", exact=True).wait_for(timeout=15000)
+            assert "internal-provider-model-secret" not in page.locator("body").inner_text()
+            _assert_supported_viewports(page, screenshot_dir, "business-diagnosis-real-data")
+            assert not page_errors, "business-diagnosis real-data raised browser errors: {}".format(page_errors)
+            browser.close()
+    finally:
+        _stop_vite(server)
