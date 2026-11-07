@@ -100,6 +100,7 @@ def record_visual_asset_consumption(
             "version_no": version_no, "page_role": role,
             "page_index": int(page_index), "source_sha256": source_sha,
             "result_sha256": result_sha, "prompt_fingerprint": str(prompt_fingerprint or ""),
+            "provider": str(provider or ""), "model": str(model or ""),
         }
         event_id = hashlib.sha256(
             json.dumps(event_material, sort_keys=True, separators=(",", ":")).encode("utf-8")
