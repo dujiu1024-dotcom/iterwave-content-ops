@@ -358,7 +358,7 @@ export function LlmEditor({ view, onSaved }: {
           const byTenant = new Map<string, { name: string; count: number }>();
           for (const task of queued) {
             const current = byTenant.get(task.tenant_id) ?? {
-              name: task.tenant_name || task.tenant_id, count: 0,
+              name: task.tenant_name || "未命名账号组", count: 0,
             };
             current.count += 1;
             byTenant.set(task.tenant_id, current);
