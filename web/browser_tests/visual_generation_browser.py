@@ -546,11 +546,8 @@ def test_review_realistic_content_layout_has_no_overflow_at_supported_viewports(
         "review_status": "pending", "review_history": [],
     }
 
-    seen_paths = []
-
     def handler(route):
         path = urlparse(route.request.url).path
-        seen_paths.append(path)
         if path == "/api/auth/status":
             payload = {"configured": True, "authenticated": True, "needs_login": False}
         elif path == "/api/tenants":
@@ -1395,8 +1392,11 @@ def test_business_profile_realistic_data_layout_has_no_overflow_at_supported_vie
     screenshot_dir.mkdir(parents=True, exist_ok=True)
     now = "2026-11-07T10:30:00+08:00"
 
+    seen_paths = []
+
     def handler(route):
         path = urlparse(route.request.url).path
+        seen_paths.append(path)
         if path == "/api/auth/status":
             payload = {"configured": True, "authenticated": True, "needs_login": False}
         elif path == "/api/business-profile":
@@ -1458,8 +1458,11 @@ def test_business_diagnosis_history_does_not_expose_model_names_or_overflow():
     screenshot_dir.mkdir(parents=True, exist_ok=True)
     now = "2026-11-07T10:30:00+08:00"
 
+    seen_paths = []
+
     def handler(route):
         path = urlparse(route.request.url).path
+        seen_paths.append(path)
         if path == "/api/auth/status":
             payload = {"configured": True, "authenticated": True, "needs_login": False}
         elif path == "/api/business-diagnosis":
