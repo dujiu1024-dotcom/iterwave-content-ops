@@ -68,8 +68,11 @@ def _read_verified_image(
         raise VisualAssetSelectionError("unsupported_file_extension")
 
     root = media_dir.resolve()
-    path = (root / stored).resolve()
-    if not path.is_relative_to(root) or path.is_symlink() or not path.is_file():
+    unresolved_path = root / stored
+    if unresolved_path.is_symlink():
+        raise VisualAssetSelectionError("symbolic_link_not_allowed")
+    path = unresolved_path.resolve()
+    if not path.is_relative_to(root) or not path.is_file():
         raise VisualAssetSelectionError("file_missing_or_outside_media_root")
     size = path.stat().st_size
     if size <= 0 or size > max_image_bytes:
