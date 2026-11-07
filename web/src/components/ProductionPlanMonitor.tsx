@@ -168,7 +168,7 @@ export default function ProductionPlanMonitor() {
         return <div className="panel" style={{ padding: 12, marginTop: 12 }} key={subplan.id}>
         <div className="panel-head">
           <div><div className="panel-title">{PLATFORM_LABEL[subplan.platform] ?? subplan.platform} · {subplan.title}</div>
-            <div className="panel-sub">子计划 {subplan.id} · V{subplan.version_no ?? "—"} · {STATUS_LABEL[subplan.status] ?? subplan.status} · {subplan.stage_count} 个策略步骤 · {subplan.round_count} 轮 · 当前执行：{currentStage?.title ?? "暂无待执行步骤"}</div>
+            <div className="panel-sub">版本 V{subplan.version_no ?? "—"} · {STATUS_LABEL[subplan.status] ?? displayStatusLabel(subplan.status)} · {subplan.stage_count} 个策略步骤 · {subplan.round_count} 轮 · 当前执行：{currentStage?.title ?? "暂无待执行步骤"}</div>
           </div>
           <button className="btn sm" onClick={() => navigate("production", "pipeline")}>查看生产线</button>
         </div>
