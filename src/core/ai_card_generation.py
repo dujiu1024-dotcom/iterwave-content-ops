@@ -296,7 +296,11 @@ def _generate_ai_card_set(
                 actual_reference_hash = hashlib.sha256(reference_bytes).hexdigest()
                 if actual_reference_hash != expected_reference_hash:
                     raise ValueError("reference_asset_hash_mismatch")
-                validate_image_bytes(reference_bytes, cfg=cfg)
+                actual_reference_mime, _reference_suffix, _reference_width, _reference_height = validate_image_bytes(
+                    reference_bytes, cfg=cfg,
+                )
+                if actual_reference_mime != str(reference.get("mime_type") or "").lower():
+                    raise ValueError("reference_asset_mime_mismatch")
                 reference_identity = {
                     "asset_id": reference.get("asset_id"),
                     "version_no": reference.get("version_no"),
