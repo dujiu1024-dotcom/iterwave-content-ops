@@ -3,6 +3,7 @@ import StructuredDataView from "./StructuredDataView";
 import { api, VisualBrandProfile, VisualCatalog, VisualVersionHistory } from "../api";
 import { useApp } from "../AppContext";
 import { displayStatusLabel, displayPlatformLabel } from "../displayLabels";
+import { formatBusinessDateTime } from "../businessTime.mjs";
 
 // 风格、字体、组件样式的可选项全部来自 GET /api/visual/catalog（后端 visual_catalog.json 单一来源）。
 export default function VisualBrandPane() {
