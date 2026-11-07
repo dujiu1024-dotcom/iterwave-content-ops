@@ -134,7 +134,7 @@ export default function GlobalOperations() {
           <div className="eyebrow">GLOBAL OPERATIONS</div>
           <h1 className="page-title">全局运营中心</h1>
           <p className="page-desc">跨账号组独立总览，不受当前账号组切换影响。任务状态来自全局队列，内容统计来自各账号组数据库。</p>
-          {updatedAt && <div className="tiny">更新于 {updatedAt.toLocaleTimeString("zh-CN")}</div>}
+          {updatedAt && <div className="tiny">更新于 {formatBusinessDateTime(updatedAt)}</div>}
         </div>
         <div className="head-actions">
           <button className="btn sm" onClick={() => void refresh()} disabled={loading}>{loading ? "刷新中…" : "↻ 刷新"}</button>
