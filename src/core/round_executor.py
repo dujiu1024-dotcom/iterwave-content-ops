@@ -1623,11 +1623,19 @@ class RoundExecutor:
                 visual_review = {"status": "not_evaluated", "reason": "no_images", "score": None}
                 if image_paths:
                     try:
-                        from .visual_review import assess_visual_pages
-                        visual_review = await asyncio.to_thread(assess_visual_pages, image_paths)
+                        group_report_path = Path(image_paths[0]).parent / "visual_group_quality.json"
+                        if group_report_path.is_file():
+                            group_report = json.loads(group_report_path.read_text(encoding="utf-8"))
+                            visual_review = group_report.get("semantic_review") or {
+                                "status": "not_evaluated", "reason": "semantic_review_missing", "score": None,
+                            }
+                        else:
+                            # Compatibility for legacy visual sets created before WP4.
+                            from .visual_review import assess_visual_pages
+                            visual_review = await asyncio.to_thread(assess_visual_pages, image_paths)
                     except Exception:
-                        logger.exception("AI 视觉审美评估失败 platform=%s", platform.value)
-                        visual_review = {"status": "not_evaluated", "reason": "review_adapter_error", "score": None}
+                        logger.exception("读取整组视觉质量报告失败 platform=%s", platform.value)
+                        visual_review = {"status": "not_evaluated", "reason": "group_quality_report_unavailable", "score": None}
                 # AI 审美评估仅记录结果；禁止旧的“修改背景图 + Chromium 重新叠字”返工路径。
                 report.setdefault("visual_usage", []).append({
                     "topic_id": topic.id, "platform": platform.value,
