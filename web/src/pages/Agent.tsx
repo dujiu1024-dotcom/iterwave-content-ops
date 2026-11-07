@@ -742,9 +742,9 @@ function AuditPane() {
 
   const loadAudit = async () => {
     setAiCallsError(null); setOverridesError(null); setRedlinesError(null);
-    try { setAiCalls(await api.aiCalls(2000)); } catch (e: any) { setAiCallsError(e.message); }
-    try { setOverrides(await api.userOverride(2000)); } catch (e: any) { setOverridesError(e.message); }
-    try { setRedlines(await api.redlineHistory(2000)); } catch (e: any) { setRedlinesError(e.message); }
+    try { setAiCalls(await api.aiCalls(2000)); } catch { setAiCallsError("调用记录加载失败，请稍后重试。"); }
+    try { setOverrides(await api.userOverride(2000)); } catch { setOverridesError("人工干预记录加载失败，请稍后重试。"); }
+    try { setRedlines(await api.redlineHistory(2000)); } catch { setRedlinesError("红线记录加载失败，请稍后重试。"); }
   };
   useEffect(() => { loadAudit(); }, []);
 
