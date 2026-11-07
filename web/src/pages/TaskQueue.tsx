@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, GlobalTaskQueueItem } from "../api";
 import { useApp } from "../AppContext";
+import { formatBusinessDateTime } from "../businessTime.mjs";
 import { roundTaskLabel } from "../roundLabel";
 import TaskDispatchMetrics from "../components/TaskDispatchMetrics";
 import TaskProgressPanel from "../components/TaskProgressPanel";
@@ -52,7 +53,7 @@ function aggregateLabel(task: GlobalTaskQueueItem) {
 function timeLabel(value: string | null) {
   if (!value) return "—";
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  return formatBusinessDateTime(value);
 }
 
 function TaskRow({
@@ -493,7 +494,7 @@ export default function TaskQueue() {
                       <div className="task-main">
                         <strong>{displayStepLabel(entry.step)}</strong>
                         <div className="tiny">{displayStatusLabel(entry.status)}</div>
-                        {entry.detail && <div className="tiny" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{entry.detail}</div>}
+                        {entry.detail && <div className="tiny">步骤已记录；详细诊断请联系管理员。</div>}
                       </div>
                     </div>)}
                   </div> : <div className="empty-state">该任务没有步骤明细（历史任务或尚未开始执行）。</div>}

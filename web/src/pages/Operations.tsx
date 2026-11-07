@@ -479,7 +479,7 @@ function LogsPane({ logs, total, page, pages, onPageChange, onResolved, targetId
             {logs.map((l) => (
               <tr key={l.id} style={targetId === l.id ? { background: "var(--surface-2)", outline: "2px solid var(--primary)" } : undefined}>
                 <td style={{ fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>
-                  {l.executed_at ? new Date(l.executed_at).toLocaleString("zh-CN") : l.schedule_time ? "待执行" : "-"}
+                  {l.executed_at ? formatBusinessDateTime(l.executed_at) : l.schedule_time ? "待执行" : "-"}
                 </td>
                 <td>{PLATFORM_NAME[l.platform]}</td>
                 <td><span className="tag gray">{ACTION_LABEL[l.action_type] ?? l.action_type}</span></td>
@@ -490,7 +490,7 @@ function LogsPane({ logs, total, page, pages, onPageChange, onResolved, targetId
                 <td>{l.status === "pending_verify" ? <div style={{ display: "flex", gap: 6 }}>
                   <button className="btn sm" disabled={busyId === l.id} onClick={() => void resolve(l.id, "sent")}>已发出</button>
                   <button className="btn sm ghost" disabled={busyId === l.id} onClick={() => void resolve(l.id, "not_sent")}>未发出</button>
-                </div> : l.resolution_action ? <span className="muted" title={l.resolution_note ?? ""}>已核实 · {l.resolved_at ? new Date(l.resolved_at).toLocaleString("zh-CN") : ""}</span> : "—"}</td>
+                </div> : l.resolution_action ? <span className="muted" title={l.resolution_note ?? ""}>已核实 · {l.resolved_at ? formatBusinessDateTime(l.resolved_at) : ""}</span> : "—"}</td>
               </tr>
             ))}
           </tbody>
@@ -628,7 +628,7 @@ function PublishPane() {
                   状态：<strong>{displayStatusLabel(d.status)}</strong>
                   {d.status === "draft_pending"
                     ? " · 仅保存在 IterWave，本内容尚未存入平台"
-                    : d.saved_at ? ` · 存草稿 ${new Date(d.saved_at).toLocaleString("zh-CN")}` : ""}
+                    : d.saved_at ? ` · 存草稿 ${formatBusinessDateTime(d.saved_at)}` : ""}
                 </div>
                 {d.status === "pending_verify" && (
                   <div className="note" style={{ marginTop: 6, color: "var(--orange)" }}>
@@ -785,9 +785,9 @@ function BreakerPane({
                   <div style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.7 }}>
                     触发：{evt.reason_label ?? evt.reason}
                     <span style={{ opacity: .6 }}>（{evt.reason}）</span><br />
-                    检测：{new Date(evt.detected_at).toLocaleString("zh-CN")}<br />
+                    检测：{formatBusinessDateTime(evt.detected_at)}<br />
                     {evt.cooldown_until && (
-                      <>冷却到期：{new Date(evt.cooldown_until).toLocaleString("zh-CN")}
+                      <>冷却到期：{formatBusinessDateTime(evt.cooldown_until)}
                         {evt.cooldown_expired
                           ? <span className="tag green" style={{ marginLeft: 6 }}>已到期</span>
                           : <span className="tag orange" style={{ marginLeft: 6 }}>冷却中</span>}
@@ -824,7 +824,7 @@ function BreakerPane({
               )}
               {cb?.events.map((e) => (
                 <tr key={e.id}>
-                  <td style={{ fontSize: 12, color: "var(--muted)" }}>{new Date(e.detected_at).toLocaleString("zh-CN")}</td>
+                  <td style={{ fontSize: 12, color: "var(--muted)" }}>{formatBusinessDateTime(e.detected_at)}</td>
                   <td>{displayPlatformLabel(e.platform)}</td>
                   <td><span className="tag orange">{e.reason_label ?? e.reason}</span></td>
                   <td>{e.resolved_at ? <span className="tag green">已恢复</span> : <span className="tag red">熔断中</span>}</td>
@@ -861,7 +861,7 @@ function TasksPane({ tasks, total, page, pages, onPageChange, onResolved, target
       await api.resolveTaskRun(id, action);
       onResolved?.();
     } catch (e: any) {
-      setErr(`核实失败: ${e.message}`);
+      setErr(`核实失败: 请稍后重试`);
     } finally {
       setBusyId(null);
     }
@@ -948,7 +948,7 @@ function SchedulerPane({ jobs, onTriggered }: {
       setMsg(`已触发「${j.name}」，可到「任务追踪」查看结果`);
       onTriggered?.();
     } catch (e: any) {
-      setMsg(`触发失败: ${e.message}`);
+      setMsg(`触发失败: 请稍后重试`);
     } finally {
       setBusyId(null);
     }
@@ -985,7 +985,7 @@ function SchedulerPane({ jobs, onTriggered }: {
       setEditing(null);
       onTriggered?.();
     } catch (e: any) {
-      setMsg(`保存失败: ${e.message}`);
+      setMsg(`保存失败: 请稍后重试`);
     } finally {
       setBusyId(null);
     }
@@ -1036,7 +1036,7 @@ function SchedulerPane({ jobs, onTriggered }: {
                 </div>
                 <div className="task-desc">
                   {j.schedule}
-                  {j.enabled && j.next_run_time && <> · 下次 {new Date(j.next_run_time).toLocaleString("zh-CN")}</>}
+                  {j.enabled && j.next_run_time && <> · 下次 {formatBusinessDateTime(j.next_run_time)}</>}
                   {j.enabled && !j.next_run_time && <> · 未排定</>}
                 </div>
               </div>
@@ -1387,7 +1387,7 @@ function NotificationsPane({ items, rules, total, page, pages, onPageChange, onC
               )}
               {items.map((n) => (
                 <tr key={n.id}>
-                  <td style={{ fontSize: 11, color: "var(--muted)", whiteSpace: "nowrap" }}>{new Date(n.sent_at).toLocaleString("zh-CN")}</td>
+                  <td style={{ fontSize: 11, color: "var(--muted)", whiteSpace: "nowrap" }}>{formatBusinessDateTime(n.sent_at)}</td>
                   <td><span className={`tag ${LEVEL_CLS[n.level] ?? ""}`}>{displayLevelLabel(n.level)}</span></td>
                   <td>{TYPE_LABEL[n.type] ?? displayCodeLabel(n.type)}</td>
                   <td>{n.platform ? PLATFORM_NAME[n.platform] ?? displayPlatformLabel(n.platform) : "-"}</td>
