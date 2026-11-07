@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { formatBusinessDateTime } from "../businessTime.mjs";
 import { api, GlobalTaskQueueItem, TenantItem } from "../api";
 import { useApp } from "../AppContext";
 import { roundTaskLabel } from "../roundLabel";
@@ -51,8 +52,7 @@ function aggregateLabel(task: GlobalTaskQueueItem) {
 
 function timeLabel(value: string | null) {
   if (!value) return "—";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  return formatBusinessDateTime(value);
 }
 
 function TaskRow({
