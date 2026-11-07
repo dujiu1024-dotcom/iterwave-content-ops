@@ -170,7 +170,7 @@ def _generate_ai_card_set(
     cfg, settings: dict, allow_fallback: bool | None = None,
     brand_profile: dict | None = None, task_id: str | None = None,
     account_group: str | None = None, visual_plan=None,
-    reference_assets: dict | None = None,
+    reference_assets: dict | None = None, production_task_id: str | None = None,
 ) -> tuple[list[Path], list[str]]:
     """Generate validated AI pages with durable task checkpoints and atomic delivery."""
     from .visual_ocr import preflight_ocr, validate_rendered_pages
@@ -337,6 +337,16 @@ def _generate_ai_card_set(
                     raise RuntimeError("图片生成任务租约已失效，停止继续图片处理")
                 store.start_page(task_id, index)
                 store.complete_page(task_id, index, str(cached))
+                if reference is not None and production_task_id:
+                    from .asset_consumption_audit import record_visual_asset_consumption
+                    record_visual_asset_consumption(
+                        db_path=db_path, production_task_id=production_task_id,
+                        asset=reference_identity, page_role=page_role, page_index=index,
+                        provider=getattr(policy, "provider", ""),
+                        model=settings["model"],
+                        result_sha256=hashlib.sha256(cached.read_bytes()).hexdigest(),
+                        prompt_fingerprint=fingerprint,
+                    )
                 accepted_cache.append(cached)
                 continue
 
@@ -365,6 +375,16 @@ def _generate_ai_card_set(
                     )
                     check_deadline(page_deadline, "图片单页")
                     validate_target_image_spec(width, height, settings["size"], cfg=cfg)
+                    if reference is not None and production_task_id:
+                        from .asset_consumption_audit import record_visual_asset_consumption
+                        record_visual_asset_consumption(
+                            db_path=db_path, production_task_id=production_task_id,
+                            asset=reference_identity, page_role=page_role, page_index=index,
+                            provider=getattr(policy, "provider", ""),
+                            model=settings["model"],
+                            result_sha256=hashlib.sha256(raw).hexdigest(),
+                            prompt_fingerprint=fingerprint,
+                        )
                     staged_image = staging_dir / f"page_{index:03d}_{attempt}{suffix}"
                     staged_image.write_bytes(raw)
                     try:
@@ -525,7 +545,7 @@ def generate_ai_card_set(
     cfg, settings: dict, allow_fallback: bool | None = None,
     brand_profile: dict | None = None, task_id: str | None = None,
     account_group: str | None = None, visual_plan=None,
-    reference_assets: dict | None = None,
+    reference_assets: dict | None = None, production_task_id: str | None = None,
 ) -> tuple[list[Path], list[str]]:
     """Run durable article generation under the configured shared API budget."""
     policy = getattr(cfg, "media_generation", None)
@@ -544,4 +564,5 @@ def generate_ai_card_set(
                 allow_fallback=allow_fallback, brand_profile=brand_profile,
                 task_id=task_id, account_group=account_group,
                 visual_plan=visual_plan, reference_assets=reference_assets,
+                production_task_id=production_task_id,
             )
