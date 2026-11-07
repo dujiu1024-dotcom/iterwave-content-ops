@@ -76,21 +76,21 @@ function TaskRow({
 }) {
   const active = task.status === "queued" || task.status === "running";
   return (
-    <div className="panel-row" style={{ display: "grid", gridTemplateColumns: "minmax(180px, 1.5fr) minmax(100px, .8fr) minmax(100px, .8fr) minmax(150px, 1fr) auto", gap: 14, alignItems: "center", padding: "14px 16px" }}>
-      <div style={{ minWidth: 0 }}>
+    <div className="panel-row task-queue-row">
+      <div className="task-queue-main" style={{ minWidth: 0 }}>
         <div style={{ fontWeight: 650 }}>{TASK_LABEL[task.task_type] || displayTaskTypeLabel(task.task_type)}</div>
         <div className="muted" style={{ fontSize: 12, marginTop: 4, overflowWrap: "anywhere" }}>
           {task.tenant_name} · {aggregateLabel(task)}
         </div>
         <button className="btn sm ghost" type="button" style={{ marginTop: 6 }} onClick={() => onDetails(task)}>查看详情</button>
       </div>
-      <div>
+      <div className="task-queue-status">
         <span className={`status-pill ${task.status === "failed" || task.status === "interrupted" ? "failed" : task.status === "running" ? "producing" : task.status === "succeeded" ? "completed" : task.status === "cancelled" ? "cancelled" : "creating"}`}>
           {STATUS_LABEL[task.status]}
         </span>
       </div>
-      <div className="muted" style={{ fontSize: 12 }}>{timeLabel(task.created_at)}</div>
-      <div className="muted" style={{ fontSize: 12 }}>
+      <div className="task-queue-time muted" style={{ fontSize: 12 }}>{timeLabel(task.created_at)}</div>
+      <div className="task-queue-execution muted" style={{ fontSize: 12 }}>
         {task.error_message ? "任务执行未完成，请查看详情中的诊断提示。" : (
           task.status === "queued" && new Date(task.available_at).getTime() > Date.now()
             ? `计划执行：${timeLabel(task.available_at)}`
@@ -100,7 +100,7 @@ function TaskRow({
         {task.started_at && task.finished_at && <div>耗时：{Math.max(0, (new Date(task.finished_at).getTime() - new Date(task.started_at).getTime()) / 1000).toFixed(1)} 秒</div>}
         {task.status === "running" && task.started_at && <div>已运行：{Math.max(0, (Date.now() - new Date(task.started_at).getTime()) / 1000).toFixed(1)} 秒</div>}
       </div>
-      <div>
+      <div className="task-queue-actions">
         {task.status === "queued" && (
           <button className="btn sm soft" type="button" disabled={cancelling} onClick={() => onCancel(task)}>
             {cancelling ? "取消中…" : "取消"}

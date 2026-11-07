@@ -1089,3 +1089,41 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
   min-width: 0;
   overflow-wrap: anywhere;
 }
+
+
+/* Global task queue: reflow task rows before their five-column minimum exceeds the content width. */
+.task-queue-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.5fr) minmax(100px, .8fr) minmax(100px, .8fr) minmax(150px, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  padding: 14px 16px;
+}
+.task-queue-row > * { min-width: 0; }
+.task-queue-execution, .task-queue-actions { overflow-wrap: anywhere; }
+@media (max-width: 1100px) {
+  .task-queue-row {
+    grid-template-columns: minmax(0, 1fr) minmax(120px, auto);
+    gap: 10px 14px;
+    align-items: start;
+  }
+  .task-queue-main { grid-column: 1; }
+  .task-queue-status { grid-column: 2; justify-self: end; }
+  .task-queue-time { grid-column: 1; }
+  .task-queue-execution { grid-column: 2; }
+  .task-queue-actions { grid-column: 1 / -1; }
+}
+@media (max-width: 680px) {
+  .task-queue-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+    padding: 12px;
+  }
+  .task-queue-main, .task-queue-status, .task-queue-time,
+  .task-queue-execution, .task-queue-actions {
+    grid-column: 1;
+    justify-self: stretch;
+  }
+  .task-queue-status { justify-self: start; }
+  .task-queue-actions .btn { white-space: normal; }
+}
