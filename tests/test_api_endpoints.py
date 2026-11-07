@@ -5589,6 +5589,8 @@ def test_round_run_status_sanitizes_nested_report_and_progress(client, tmp_path,
     payload = response.json()
     assert payload["report"]["errors"] == ["详细诊断已隐藏，请联系管理员。"]
     assert payload["report"]["steps"][0]["detail"] == "详细诊断已隐藏，请联系管理员。"
+    assert "task_id" not in payload
+    assert "task_type" not in payload
     assert "task_id" not in payload["report"]
     assert "tenant_id" not in payload["report"]
     assert "draft_id" not in payload["report"]["steps"][0]

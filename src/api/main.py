@@ -5468,8 +5468,7 @@ def _register_routes(app: FastAPI) -> None:
             )
             if task is not None:
                 return {
-                    "round_id": round_id, "task_id": task.task_id,
-                    "task_type": task.payload.get("operation", "run"),
+                    "round_id": round_id,
                     "status": task.status,
                     "running": task.status in ("queued", "running"),
                     "queued": task.status == "queued",

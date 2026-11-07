@@ -2182,7 +2182,7 @@ export const api = {
       method: "POST", body: JSON.stringify(data),
     }),
   roundRunStatus: (id: number) =>
-    fetchJson<{ round_id: number; task_id?: string; status?: GlobalTaskQueueItem["status"]; queued?: boolean; running: boolean; report: RunRoundReport | null; error: string | null; error_code?: string | null; progress?: TaskProgress | null; started_at?: string | null; elapsed_seconds?: number | null }>(
+    fetchJson<{ round_id: number; status?: GlobalTaskQueueItem["status"]; queued?: boolean; running: boolean; report: RunRoundReport | null; error: string | null; error_code?: string | null; progress?: TaskProgress | null; started_at?: string | null; elapsed_seconds?: number | null }>(
       `/api/rounds/${id}/run_status`,
     ),
   /** 恢复已生成、尚未存平台草稿的内容；不会重新生成或发布。 */
