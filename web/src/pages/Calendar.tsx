@@ -132,7 +132,7 @@ export default function Calendar() {
   const openPlanDetails = async (planId: string) => {
     setPlanDetailLoading(true);
     try { setPlanDetail(await api.contentPlan(planId)); }
-    catch (e: any) { showToast(`加载历史批次详情失败：${e?.message ?? e}`, "error"); }
+    catch (e: any) { showToast(`加载历史批次详情失败：请稍后重试`, "error"); }
     finally { setPlanDetailLoading(false); }
   };
 
@@ -178,7 +178,7 @@ export default function Calendar() {
       setUnscheduledPage(result.page);
       setUnscheduledTotal(result.total);
     } catch (e) {
-      showToast(`加载更多待排期草稿失败：${e instanceof Error ? e.message : String(e)}`, "error");
+      showToast(`加载更多待排期草稿失败：请稍后重试`, "error");
     } finally {
       setLoadingMoreUnscheduled(false);
     }
@@ -213,7 +213,7 @@ export default function Calendar() {
       setPendingDraft((prev) => { const n = { ...prev }; delete n[draftId]; return n; });
       await load();
     } catch (e: any) {
-      showToast(`排期保存失败: ${e?.message ?? e}`, "error");
+      showToast(`排期保存失败: 请稍后重试`, "error");
     }
   };
 
@@ -224,7 +224,7 @@ export default function Calendar() {
       setSelected(null);
       await load();
     } catch (e: any) {
-      showToast(`取消失败: ${e?.message ?? e}`, "error");
+      showToast(`取消失败: 请稍后重试`, "error");
     }
   };
 
