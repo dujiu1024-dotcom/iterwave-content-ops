@@ -156,7 +156,7 @@ export default function IndustryPresetPicker({ onApplied }: { onApplied: () => v
             <label>合规红线（每行一项）<textarea className="field" rows={3} value={redlines} onChange={(e) => setRedlines(e.target.value)} /></label>
             <label>建议内容维度（每行一项）<textarea className="field" rows={3} value={dimensions} onChange={(e) => setDimensions(e.target.value)} /></label>
           </div>
-          <label>平台说明 JSON（可留空）<textarea className="field" rows={2} value={platformNotes} onChange={(e) => setPlatformNotes(e.target.value)} spellCheck={false} /></label>
+          <details className="advanced-report-editor"><summary>高级编辑：平台说明结构（可选）</summary><textarea aria-label="平台说明结构 JSON" className="field" rows={3} value={platformNotes} onChange={(e) => setPlatformNotes(e.target.value)} spellCheck={false} /></details>
           <div className="flex wrap" style={{ gap: 8, justifyContent: "flex-end" }}>
             <button className="btn sm" type="button" onClick={resetEditor}>取消</button>
             <button className="btn sm primary" type="button" disabled={busy === "save"} onClick={() => void saveCustom()}>{busy === "save" ? "保存中…" : "保存模板"}</button>
