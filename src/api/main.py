@@ -9888,11 +9888,27 @@ def _register_routes(app: FastAPI) -> None:
         total = conn.execute("SELECT COUNT(*) FROM ops_logs" + where_sql, params).fetchone()[0]
         effective_limit = page_size if page is not None else limit
         effective_offset = (page - 1) * page_size if page is not None else 0
-        rows = [dict(r) for r in conn.execute(
+        source_rows = conn.execute(
             "SELECT * FROM ops_logs" + where_sql +
             " ORDER BY COALESCE(executed_at, schedule_time) DESC, id DESC LIMIT ? OFFSET ?",
             [*params, effective_limit, effective_offset],
-        ).fetchall()]
+        ).fetchall()
+        # task_run_id 等关联键仅用于服务端审计同步，不属于运营日志展示契约。
+        public_log_fields = (
+            "id", "round_id", "platform", "action_type", "target_url",
+            "target_author", "content", "schedule_time", "executed_at",
+            "status", "error_msg", "resolved_at", "resolved_by",
+            "resolution_action", "resolution_note", "rhythm_wait_seconds",
+        )
+        rows = []
+        for source_row in source_rows:
+            source = dict(source_row)
+            item = {key: source.get(key) for key in public_log_fields}
+            if item.get("error_msg"):
+                item["error_msg"] = safe_error_summary(
+                    item["error_msg"], "运营操作执行失败，请核对平台状态。",
+                )
+            rows.append(item)
         return {
             "items": rows, "total": total, "limit": effective_limit, "offset": effective_offset,
             **({

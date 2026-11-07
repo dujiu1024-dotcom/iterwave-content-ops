@@ -5433,3 +5433,36 @@ def test_task_runs_api_projects_public_fields_and_sanitizes_internal_errors(clie
     legacy_item = next(row for row in legacy.json() if row["id"] == cur.lastrowid)
     assert legacy_item["error_msg"] == "任务执行失败，请进入任务详情核对。"
     assert "worker_id" not in legacy_item
+
+
+def test_ops_logs_api_hides_task_run_fk_and_sanitizes_error_details(client):
+    tc, conn, _seed = client
+    now = datetime.now().isoformat(sep=" ", timespec="seconds")
+    internal_error = (
+        "sqlite3.OperationalError: unable to open /home/ubuntu/iterwave/data/private.db\\n"
+        "Traceback (most recent call last):"
+    )
+    cur = conn.execute(
+        "INSERT INTO ops_logs "
+        "(platform,action_type,content,executed_at,status,task_run_id,error_msg) "
+        "VALUES (?,?,?,?,?,?,?)",
+        ("xhs", "active_comment", "业务操作说明", now, "failed", 987, internal_error),
+    )
+    conn.commit()
+
+    response = tc.get("/api/ops_logs?page=1&page_size=20")
+    assert response.status_code == 200, response.text
+    item = next(row for row in response.json()["items"] if row["id"] == cur.lastrowid)
+    assert item["content"] == "业务操作说明"
+    assert item["error_msg"] == "运营操作执行失败，请核对平台状态。"
+    assert "task_run_id" not in item
+    assert "987" not in item.get("error_msg", "")
+    assert "/home/ubuntu" not in response.text
+    assert "sqlite3.OperationalError" not in response.text
+    assert "Traceback" not in response.text
+    assert set(item) == {
+        "id", "round_id", "platform", "action_type", "target_url",
+        "target_author", "content", "schedule_time", "executed_at",
+        "status", "error_msg", "resolved_at", "resolved_by",
+        "resolution_action", "resolution_note", "rhythm_wait_seconds",
+    }
