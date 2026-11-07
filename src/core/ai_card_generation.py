@@ -170,7 +170,7 @@ def _generate_ai_card_set(
     cfg, settings: dict, allow_fallback: bool | None = None,
     brand_profile: dict | None = None, task_id: str | None = None,
     account_group: str | None = None, visual_plan=None,
-    reference_assets: dict | None = None,
+    reference_assets: dict | None = None, production_task_id: str | None = None,
 ) -> tuple[list[Path], list[str]]:
     """Generate validated AI pages with durable task checkpoints and atomic delivery."""
     from .visual_ocr import preflight_ocr, validate_rendered_pages
@@ -355,6 +355,17 @@ def _generate_ai_card_set(
                         prompt + "\n上一版文字识别未通过。请优先保证所有指定中文逐字准确、清晰、完整，"
                         "减少装饰和文字数量，增大字号，重新设计整页成品。"
                     )
+                    acceptance_callback = None
+                    if reference is not None and production_task_id:
+                        from .asset_consumption_audit import record_visual_asset_consumption
+                        def acceptance_callback(*, provider, model, result_bytes):
+                            record_visual_asset_consumption(
+                                db_path=db_path, production_task_id=production_task_id,
+                                asset=reference_identity, page_role=page_role, page_index=index,
+                                provider=provider, model=model,
+                                result_sha256=hashlib.sha256(result_bytes).hexdigest(),
+                                prompt_fingerprint=fingerprint,
+                            )
                     raw, _mime, suffix, width, height = generate_image_bytes(
                         retry_prompt, model=settings["model"], size=settings["size"],
                         source_path=reference_path,
@@ -362,6 +373,7 @@ def _generate_ai_card_set(
                         source_filename=reference_path.name if reference_path else None,
                         source_bytes=reference_bytes if reference else None,
                         cfg=cfg, allow_fallback=allow_fallback,
+                        on_provider_accepted=acceptance_callback,
                     )
                     check_deadline(page_deadline, "图片单页")
                     validate_target_image_spec(width, height, settings["size"], cfg=cfg)
@@ -525,7 +537,7 @@ def generate_ai_card_set(
     cfg, settings: dict, allow_fallback: bool | None = None,
     brand_profile: dict | None = None, task_id: str | None = None,
     account_group: str | None = None, visual_plan=None,
-    reference_assets: dict | None = None,
+    reference_assets: dict | None = None, production_task_id: str | None = None,
 ) -> tuple[list[Path], list[str]]:
     """Run durable article generation under the configured shared API budget."""
     policy = getattr(cfg, "media_generation", None)
@@ -544,4 +556,5 @@ def generate_ai_card_set(
                 allow_fallback=allow_fallback, brand_profile=brand_profile,
                 task_id=task_id, account_group=account_group,
                 visual_plan=visual_plan, reference_assets=reference_assets,
+                production_task_id=production_task_id,
             )

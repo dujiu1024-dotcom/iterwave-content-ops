@@ -362,6 +362,7 @@ def generate_image_bytes(
     source_bytes: bytes | None = None,
     cfg=None,
     allow_fallback: bool | None = None,
+    on_provider_accepted=None,
 ) -> tuple[bytes, str, str, int, int]:
     """按主模型 → 兜底模型顺序调用图片生成/编辑接口，返回校验后的图片与元数据。
 
@@ -373,7 +374,7 @@ def generate_image_bytes(
         policy = cfg.media_generation
         with image_generation_run(max_calls=int(getattr(policy, "max_api_calls_per_run", 30)), timeout_seconds=int(getattr(policy, "hard_timeout_seconds", 300)), max_concurrency=int(getattr(policy, "max_concurrency", 2))):
             with article_budget(max_calls=int(getattr(policy, "max_api_calls_per_article", 27)), page_max_calls=int(getattr(policy, "max_api_calls_per_page", 3))):
-                return generate_image_bytes(prompt, model=model, size=size, source_path=source_path, source_mime_type=source_mime_type, source_filename=source_filename, source_bytes=source_bytes, cfg=cfg, allow_fallback=allow_fallback)
+                return generate_image_bytes(prompt, model=model, size=size, source_path=source_path, source_mime_type=source_mime_type, source_filename=source_filename, source_bytes=source_bytes, cfg=cfg, allow_fallback=allow_fallback, on_provider_accepted=on_provider_accepted)
     if not has_active_article():
         policy = cfg.media_generation
         with article_budget(max_calls=int(getattr(policy, "max_api_calls_per_article", 27)), page_max_calls=int(getattr(policy, "max_api_calls_per_page", 3))):
@@ -405,6 +406,10 @@ def generate_image_bytes(
                     source_bytes=source_bytes, budget_timeout_seconds=remaining_seconds,
                 )
             validate_target_image_spec(result[3], result[4], size, cfg=cfg)
+            if on_provider_accepted is not None:
+                on_provider_accepted(
+                    provider=endpoint.provider, model=endpoint.model, result_bytes=result[0],
+                )
             return result
         except ImageGenerationError as exc:
             errors.append(f"{endpoint.label} {endpoint.model}: {exc}")
