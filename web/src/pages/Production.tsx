@@ -425,7 +425,7 @@ export default function Production() {
       setReport(res);
       const isDryRun = res.steps.some((s) => s.step === "dry_run");
       if (res.final_status === "failed") {
-        showToast(`✕ 本轮执行失败：${res.errors.join("；") || "未知原因"}`, "error");
+        showToast(`本轮执行失败，发现 ${res.errors.length} 条错误。请查看轮次诊断信息。`, "error");
       } else if (isDryRun) {
         showToast(`✓ 已产出 ${res.contents_created} 篇内容（本次未执行存草稿）`, "success");
       } else {
@@ -434,7 +434,7 @@ export default function Production() {
       await refresh();
       await loadRoundData(currentRoundId);
     } catch (e: any) {
-      setRunError(e.message);
+      setRunError("本轮执行未能完成，请检查轮次状态并查看管理员诊断日志。");
       showToast(`运行失败: 请稍后重试`, "error");
     } finally {
       setRunning(false);
@@ -682,7 +682,7 @@ export default function Production() {
     await withPending("delete-content", async () => {
       try {
         const r = await api.deleteContents([selectedContentId]);
-        if (r.blocked.length) { showToast(r.blocked[0].reason, "error"); return; }
+        if (r.blocked.length) { showToast(`有 ${r.blocked.length} 条内容因状态或规则限制无法删除，请检查内容状态。`, "error"); return; }
         showToast("已删除这篇内容", "success");
         setSelectedContentId(null);
         if (currentRoundId) await loadRoundData(currentRoundId);
@@ -1293,7 +1293,7 @@ export default function Production() {
                                 {s.step === "produce" && `产出 ${s.contents} 篇内容 · 目标检查拦截 ${s.guard_rejected} 次`}
                                 {s.step === "dry_run" && `${s.note}`}
                                 {s.step === "save_drafts" && `成功 ${s.saved} · 失败 ${s.failed}`}
-                                {s.step === "guard_reject" && `${displayPlatformLabel(String(s.platform))} / ${s.topic_id} · ${displayCodeLabel(String(s.result))} · ${s.reason}`}
+                                {s.step === "guard_reject" && `${displayPlatformLabel(String(s.platform))} · ${displayCodeLabel(String(s.result))} · 已被目标规则拦截`}
                                 {s.step === "plan_signature" && `签名 ${s.signature}`}
                                 {s.step === "draft_save" && `${displayPlatformLabel(String(s.platform))} · ${displayStatusLabel(s.status == null ? null : String(s.status))}${s.error ? " · 保存失败，查看轮次错误汇总" : ""}`}
                                 {s.step === "apply_feedback" && `吃进复盘结论：${Object.keys((s.dimension_bias as object) ?? {}).length} 个维度调整 · ${s.copy_hint_count} 条文案要点`}
@@ -1558,8 +1558,8 @@ export default function Production() {
                     }}
                   >
                     重检结果：<b>{recheck.result}</b> · {recheck.passes ? "通过" : "未通过"}
-                    {recheck.reason && <> · 原因：{recheck.reason}</>}
-                    {recheck.redline_hits.length > 0 && <> · 红线命中：{recheck.redline_hits.join("、")}</>}
+                    {recheck.reason && <> · 目标检查未通过，请按检查规则调整内容。</>}
+                    {recheck.redline_hits.length > 0 && <> · 红线命中：{recheck.redline_hits.map((code) => displayCodeLabel(String(code))).join("、")}</>}
                   </div>
                 )}
 
