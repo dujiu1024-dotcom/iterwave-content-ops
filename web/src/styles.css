@@ -1012,12 +1012,24 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
   .calendar-load-more { align-items: stretch; flex-direction: column; }
 }
 
-/* Batch 2 structured business data presentation */
-.structured-data-view{min-width:0;margin-top:8px}.structured-data-title{margin:0 0 8px;font-size:13px;font-weight:650}
-.structured-data-grid,.structured-data-nested{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0}.structured-data-nested{grid-template-columns:1fr}
-.structured-data-field{min-width:0;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
-.structured-data-field dt{margin-bottom:4px;color:var(--muted);font-size:12px;font-weight:600}.structured-data-field dd{min-width:0;margin:0;font-size:13px;line-height:1.45;overflow-wrap:anywhere}
-.structured-data-value{white-space:pre-wrap;overflow-wrap:anywhere}.structured-data-empty{color:var(--subtle)}.structured-data-list{display:grid;gap:6px}
-.structured-data-item{min-width:0;padding:8px 10px;border:1px solid var(--line);border-radius:7px;background:var(--surface)}
-.structured-data-diagnostics{margin-top:10px;padding-top:8px;border-top:1px solid var(--line)}.structured-data-diagnostics summary{color:var(--muted);font-size:12px;font-weight:600;cursor:pointer}.structured-data-diagnostics code{overflow-wrap:anywhere;font-size:12px}
-@media(max-width:700px){.structured-data-grid{grid-template-columns:minmax(0,1fr)}}
+
+/* Structured business data: readable defaults, technical details on demand. */
+.structured-data-view { min-width: 0; margin-top: 8px; }
+.structured-data-title { margin: 0 0 8px; font-size: 13px; font-weight: 650; }
+.structured-data-grid, .structured-data-nested { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.structured-data-nested { grid-template-columns: 1fr; }
+.structured-data-field { min-width: 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.structured-data-field dt { margin-bottom: 4px; color: var(--muted); font-size: 12px; font-weight: 600; }
+.structured-data-field dd { min-width: 0; margin: 0; font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
+.structured-data-value { white-space: pre-wrap; overflow-wrap: anywhere; }
+.structured-data-empty { color: var(--subtle); }
+.structured-data-list { display: grid; gap: 6px; }
+.structured-data-item { min-width: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+.structured-data-diagnostics { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+.structured-data-diagnostics summary, .advanced-report-editor > summary { color: var(--muted); font-size: 12px; font-weight: 600; cursor: pointer; }
+.structured-data-diagnostics code { overflow-wrap: anywhere; font-size: 12px; }
+.advanced-report-editor { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.advanced-report-editor[open] > summary { margin-bottom: 9px; }
+@media (max-width: 700px) {
+  .structured-data-grid { grid-template-columns: minmax(0, 1fr); }
+}
