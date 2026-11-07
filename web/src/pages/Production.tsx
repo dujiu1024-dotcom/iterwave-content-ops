@@ -818,7 +818,7 @@ export default function Production() {
             <div key={draft.id} className="task-row" style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
               <div>
                 <div style={{ fontWeight: 600 }}>{displayPlatformLabel(draft.platform)} · 待核实草稿</div>
-                <div className="tiny">草稿状态：{displayStatusLabel(draft.status)} · 创建：{draft.created_at || "未知"}</div>
+                <div className="tiny">草稿状态：{displayStatusLabel(draft.status)} · 创建：{draft.created_at ? formatBusinessDateTime(draft.created_at) : "未知"}</div>
                 <div className="tiny">处置建议：{({
                   manual_verification_required: "先人工核实平台是否已保存",
                   platform_state_must_be_preserved: "保留平台状态，不得自动清理",
@@ -1043,7 +1043,7 @@ export default function Production() {
                   {isPending("save-plan") ? "提交中…" : "✓ 保存母计划"}
                 </button>
                 <span className="note">
-                  {plan.updated_at ? `上次保存 ${plan.updated_at}` : "尚未在 UI 保存过（当前为推导值）"}
+                  {plan.updated_at ? `上次保存 ${formatBusinessDateTime(plan.updated_at)}` : "尚未在 UI 保存过（当前为推导值）"}
                 </span>
               </div>
 
