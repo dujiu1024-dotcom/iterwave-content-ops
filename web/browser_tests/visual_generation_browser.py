@@ -546,8 +546,11 @@ def test_review_realistic_content_layout_has_no_overflow_at_supported_viewports(
         "review_status": "pending", "review_history": [],
     }
 
+    seen_paths = []
+
     def handler(route):
         path = urlparse(route.request.url).path
+        seen_paths.append(path)
         if path == "/api/auth/status":
             payload = {"configured": True, "authenticated": True, "needs_login": False}
         elif path == "/api/tenants":
@@ -1432,9 +1435,12 @@ def test_business_profile_realistic_data_layout_has_no_overflow_at_supported_vie
             page.on("pageerror", lambda error: page_errors.append(str(error)))
             page.route("**/api/**", handler)
             page.goto(f"http://127.0.0.1:{port}/?page=business-profile")
-            page.get_by_role("heading", name="经营资料").wait_for(timeout=15000)
-            business_name = page.locator(".form-grid input").nth(0)
-            business_name.wait_for(timeout=15000)
+            page.get_by_text("业务概况", exact=True).wait_for(timeout=15000)
+            business_name = page.locator(".form-grid label").filter(has_text="业务名称").locator("input")
+            try:
+                business_name.wait_for(timeout=15000)
+            except Exception as error:
+                raise AssertionError(f"经营资料未完成渲染；已请求 API：{seen_paths}") from error
             assert business_name.input_value() == "山岚户外装备"
             page.get_by_text("轻量化双人帐篷", exact=True).wait_for(timeout=15000)
             page.get_by_text("资料完整性检查", exact=True).wait_for(timeout=15000)
@@ -1478,9 +1484,12 @@ def test_business_diagnosis_history_does_not_expose_model_names_or_overflow():
             page.on("pageerror", lambda error: page_errors.append(str(error)))
             page.route("**/api/**", handler)
             page.goto(f"http://127.0.0.1:{port}/?page=business-diagnosis")
-            page.get_by_role("heading", name="AI 经营分析").wait_for(timeout=15000)
-            history_row = page.locator(".table-wrap tbody tr").filter(has_text="V3")
-            history_row.wait_for(timeout=15000)
+            page.get_by_text("历史版本", exact=True).wait_for(timeout=15000)
+            history_row = page.locator("tbody tr").filter(has_text="V3")
+            try:
+                history_row.wait_for(timeout=15000)
+            except Exception as error:
+                raise AssertionError(f"经营分析历史版本未渲染；已请求 API：{seen_paths}") from error
             assert "已确认" in history_row.inner_text()
             assert "internal-provider-model-secret" not in page.locator("body").inner_text()
             _assert_supported_viewports(page, screenshot_dir, "business-diagnosis-real-data")
