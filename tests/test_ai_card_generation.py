@@ -16,21 +16,21 @@ class _Cfg:
         db_path = tmp_path / "visual.db"
         conn = sqlite3.connect(db_path)
         conn.executescript("""
-            CREATE TABLE visual_generation_tasks (
+            CREATE TABLE IF NOT EXISTS visual_generation_tasks (
                 task_id TEXT PRIMARY KEY, account_group TEXT NOT NULL, status TEXT NOT NULL,
                 owner TEXT, lease_expires_at REAL, started_at REAL, heartbeat_at REAL,
                 finished_at REAL, error TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL
             );
-            CREATE TABLE visual_generation_pages (
+            CREATE TABLE IF NOT EXISTS visual_generation_pages (
                 task_id TEXT NOT NULL, page_index INTEGER NOT NULL, status TEXT NOT NULL,
                 output_path TEXT, attempts INTEGER NOT NULL DEFAULT 0, error TEXT,
                 updated_at REAL NOT NULL, PRIMARY KEY(task_id, page_index)
             );
-            CREATE TABLE visual_generation_task_events (
+            CREATE TABLE IF NOT EXISTS visual_generation_task_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL,
                 from_status TEXT, to_status TEXT NOT NULL, reason TEXT, created_at REAL NOT NULL
             );
-            CREATE TABLE visual_generation_account_leases (
+            CREATE TABLE IF NOT EXISTS visual_generation_account_leases (
                 account_group TEXT PRIMARY KEY, task_id TEXT NOT NULL,
                 owner TEXT NOT NULL, expires_at REAL NOT NULL, updated_at REAL NOT NULL
             );
