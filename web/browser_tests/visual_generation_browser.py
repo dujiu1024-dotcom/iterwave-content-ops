@@ -1492,7 +1492,7 @@ def test_business_diagnosis_history_does_not_expose_model_names_or_overflow():
             try:
                 history_row.wait_for(timeout=15000)
             except Exception as error:
-                raise AssertionError(f"经营分析历史版本未渲染；已请求 API：{seen_paths}") from error
+                raise AssertionError("经营分析历史版本未渲染；已请求 API：{}；页面错误：{}；页面内容：{}".format(seen_paths, page_errors, page.locator("body").inner_text()[:3000])) from error
             assert "已确认" in history_row.inner_text()
             assert "internal-provider-model-secret" not in page.locator("body").inner_text()
             _assert_supported_viewports(page, screenshot_dir, "business-diagnosis-real-data")
