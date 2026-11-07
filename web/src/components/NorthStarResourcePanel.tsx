@@ -34,7 +34,7 @@ export default function NorthStarResourcePanel({ onOpenAssets }: { onOpenAssets?
       setResources(baseline.resources);
       setGaps(baseline.gaps);
       setSummary(baseline.summary);
-    } catch(e) { setError(e instanceof Error ? e.message : String(e)); }
+    } catch(e) { setError("北极星数据操作失败，请稍后重试"); }
   };
   useEffect(() => { void load(); }, []);
 
@@ -44,7 +44,7 @@ export default function NorthStarResourcePanel({ onOpenAssets }: { onOpenAssets?
       await api.saveNorthStar({...snapshot,change_reason:reason});
       setReason("");
       await load();
-    } catch(e) { setError(e instanceof Error ? e.message : String(e)); }
+    } catch(e) { setError("北极星数据操作失败，请稍后重试"); }
     finally { setBusy(false); }
   };
 

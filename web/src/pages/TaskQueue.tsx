@@ -52,7 +52,6 @@ function aggregateLabel(task: GlobalTaskQueueItem) {
 
 function timeLabel(value: string | null) {
   if (!value) return "—";
-  const date = new Date(value);
   return formatBusinessDateTime(value);
 }
 
@@ -208,7 +207,7 @@ export default function TaskQueue() {
       if (historyPage > nextHistoryPages) setHistoryPage(nextHistoryPages);
       setError("");
     } catch (err) {
-      setError((err as Error).message || "任务队列读取失败");
+      setError("任务队列读取失败，请稍后重试");
     } finally {
       setLoading(false);
     }
@@ -245,7 +244,7 @@ export default function TaskQueue() {
       setDetailTask(detail);
       setDetailAudit(audit.items ?? []);
     } catch (err) {
-      setDetailError((err as Error).message || "任务详情读取失败");
+      setDetailError("任务详情读取失败，请稍后重试");
     } finally {
       setDetailLoading(false);
     }
@@ -268,7 +267,7 @@ export default function TaskQueue() {
       showToast("排队任务已取消", "success");
       await refresh();
     } catch (err) {
-      showToast((err as Error).message || "取消失败", "error");
+      showToast("取消失败，请稍后重试", "error");
     } finally {
       setCancellingId(null);
     }
@@ -293,7 +292,7 @@ export default function TaskQueue() {
       setResolutionNote("");
       await refresh();
     } catch (err) {
-      showToast((err as Error).message || "任务处理失败", "error");
+      showToast("任务处理失败，请稍后重试", "error");
     } finally {
       setResolvingId(null);
     }
@@ -322,7 +321,7 @@ export default function TaskQueue() {
       setRetryConfirmed(false);
       await refresh();
     } catch (err) {
-      showToast((err as Error).message || "恢复任务创建失败", "error");
+      showToast("恢复任务创建失败，请稍后重试", "error");
     } finally {
       setRetryingId(null);
     }

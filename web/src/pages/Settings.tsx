@@ -33,7 +33,7 @@ const AUDIT_REMEDIATION_GUIDANCE: Record<string, string> = {
   master_plan_resource_baseline_json_invalid: "从资源基线来源数据重建 JSON，并核对租户、版本及生效时间。",
   master_plan_north_star_reference_missing: "核对北极星版本历史；恢复真实引用或重新生成并审核母计划，不得指向任意现存版本。",
   master_plan_north_star_attribution_invalid: "核对归因状态与对应北极星证据，按计划版本重新执行归因审核。",
-  metric_snapshot_orphan_draft: "导出全部快照行，核对 draft_id、content_id 与租户归属；确认后通过受控迁移修复关联，禁止直接删除快照。",
+  metric_snapshot_orphan_draft: "导出全部快照行，核对业务记录关联与账号组归属；确认后通过受控迁移修复关联，禁止直接删除快照。",
   metric_snapshot_orphan_content: "导出全部快照行，核对原内容及草稿归属；仅在找到可信内容来源后恢复关联。",
   metric_snapshot_correction_chain_broken: "核对 correction_of 指向的原始快照、租户和草稿；通过新更正记录恢复链路，不改写历史指标。",
   metric_snapshot_duplicate_idempotency_key: "比较 payload_hash、记录时间和来源，确认重复提交关系后制定保留策略；不自动删除任何指标记录。",
@@ -97,7 +97,7 @@ export default function Settings() {
       URL.revokeObjectURL(url);
       showToast("完整审计明细已导出", "success");
     } catch (e) {
-      showToast(`审计明细导出失败：${e instanceof Error ? e.message : String(e)}`, "error");
+      showToast("审计明细导出失败，请稍后重试。", "error");
     }
   };
 
@@ -106,13 +106,13 @@ export default function Settings() {
     try {
       setStatus(await api.status());
     } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
+      setErr("设置读取失败，请稍后重试。");
     }
     try {
       setHealth(await api.health());
       setHealthErr(null);
     } catch (e) {
-      setHealthErr(e instanceof Error ? e.message : String(e));
+      setHealthErr("健康状态读取失败，请稍后重试。");
     }
     await loadConfig();
   };
@@ -150,7 +150,7 @@ export default function Settings() {
         timeOn: v.editable.hot_topics.time_filter_enabled ?? true,
       });
     } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
+      setErr("设置读取失败，请稍后重试。");
     }
   };
 
@@ -160,7 +160,7 @@ export default function Settings() {
       setAuditItems(result.items);
       setAuditTotal(result.total);
       setAuditPages(result.pages);
-    }).catch((e) => setErr(e instanceof Error ? e.message : String(e)));
+    }).catch(() => setErr("审计记录读取失败，请稍后重试。"));
   }, [auditPage]);
 
   /** 只提交真正改动的字段（后端按白名单校验，越权 400） */
@@ -213,7 +213,7 @@ export default function Settings() {
         : `✓ 已保存 ${res.changed.length} 项配置`, res.restart_required ? "info" : "success");
       await loadConfig();
     } catch (e: any) {
-      showToast(`保存失败: ${e?.message ?? e}`, "error");
+      showToast("配置保存失败，请检查填写内容后重试。", "error");
     }
   };
 
@@ -576,7 +576,7 @@ export default function Settings() {
               <div className="panel-title"><span className="icon">⌕</span>数据完整性审计</div>
               <div className="panel-sub">指标快照、修正链、草稿状态与轮次复盘数据；只读审计，不自动改写业务记录</div>
             </div>
-            <button className="btn sm" onClick={() => api.health().then(setHealth).catch((e) => setHealthErr(e instanceof Error ? e.message : String(e)))}>↻ 刷新</button>
+            <button className="btn sm" onClick={() => api.health().then(setHealth).catch(() => setHealthErr("健康状态读取失败，请稍后重试。"))}>↻ 刷新</button>
             <button className="btn sm ghost" onClick={exportHealthAudit}>↓ 导出完整违规明细</button>
           </div>
           {healthErr ? (
@@ -590,7 +590,7 @@ export default function Settings() {
                 <div className="task-row"><i className="task-prio blue" /><div className="task-main"><div className="task-title">治理结构缺失</div><div className="task-desc">{health.governance.missing_governance_objects} 项</div></div></div>
                 <div className="task-row"><i className={`task-prio ${health.governance.data_violation_count ? "red" : "green"}`} /><div className="task-main"><div className="task-title">业务数据违规</div><div className="task-desc">{health.governance.data_violation_count} 条</div></div></div>
               </div>
-              {health.governance.audit_error && <div className="note">完整性审计异常：{health.governance.audit_error}</div>}
+              {health.governance.audit_error && <div className="note">完整性审计未能完成，请导出审计明细并稍后重试。</div>}
               {health.governance.data_violation_count === 0 ? (
                 <div className="note">当前已配置的业务数据检查未发现违规。</div>
               ) : (
@@ -602,7 +602,7 @@ export default function Settings() {
                         <div className="task-title">{name} · {count} 条</div>
                         <div className="task-desc">
                           {(health.governance.data_violation_examples[name] ?? []).map((item) =>
-                            String(item.record_id ?? item.draft_id ?? item.content_id ?? "记录")
+                            "存在待核查记录"
                           ).join("、") || "暂无样例 ID"}
                         </div>
                         <div className="task-desc" style={{ marginTop: 4 }}>
@@ -718,7 +718,7 @@ function AccessNotifyPanel({ view, onSaved }: { view: SystemConfigView; onSaved:
       showToast("访问口令已更新，请重新登录", "success");
       await refreshAuth();
     } catch (e) {
-      showToast((e as Error).message, "error");
+      showToast("操作失败，请稍后重试。", "error");
     } finally {
       setBusy(null);
     }
@@ -742,7 +742,7 @@ function AccessNotifyPanel({ view, onSaved }: { view: SystemConfigView; onSaved:
       showToast(`${channel === "wecom" ? "企微" : "飞书"} Webhook 已保存到 .env`, "success");
       onSaved();
     } catch (e) {
-      showToast((e as Error).message, "error");
+      showToast("操作失败，请稍后重试。", "error");
     } finally {
       setBusy(null);
     }

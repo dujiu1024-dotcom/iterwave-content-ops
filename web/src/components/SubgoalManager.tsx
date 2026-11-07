@@ -56,14 +56,14 @@ export default function SubgoalManager({ subPlanId }: { subPlanId: string }) {
         effective ? api.subplanGoals(subPlanId,effective.id) : Promise.resolve({items:[]}),
       ]);
       setDraftGoals(d.items); setEffectiveGoals(e.items); setError("");
-    } catch(e) { setError(e instanceof Error ? e.message : "读取目标失败"); }
+    } catch(e) { setError("读取目标失败，请稍后重试"); }
   }
   useEffect(() => { void load(); }, [subPlanId]);
 
   async function run(action: () => Promise<unknown>) {
     setBusy(true); setError("");
     try { await action(); await load(); }
-    catch(e) { setError(e instanceof Error ? e.message : String(e)); }
+    catch(e) { setError("操作失败，请稍后重试"); }
     finally { setBusy(false); }
   }
   async function createGoal() {
