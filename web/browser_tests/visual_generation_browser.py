@@ -932,9 +932,11 @@ def test_agent_realistic_orchestration_data_layout_has_no_overflow_at_supported_
             page.locator(".agent-flow button").filter(has_text="内容质量门").click()
             page.get_by_text("有 1 篇内容缺少可核验事实依据", exact=False).wait_for(timeout=15000)
             page.get_by_role("button", name="AI 审计链").click()
+            page.locator("button").filter(has_text="LLM 调用记录").click()
             page.get_by_text("Prompt Ver", exact=True).wait_for(timeout=15000)
-            assert page.get_by_text("internal-provider-model-secret", exact=True).count() == 0
-            assert page.get_by_text("模型", exact=True).count() == 0
+            audit_table = page.locator(".table-wrap table")
+            assert "internal-provider-model-secret" not in audit_table.inner_text()
+            assert "模型" not in audit_table.locator("thead").inner_text()
 
             for width in (1440, 1024, 768, 390):
                 page.set_viewport_size({"width": width, "height": 1000})
