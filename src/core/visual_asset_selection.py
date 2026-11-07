@@ -25,9 +25,9 @@ _ALLOWED_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _TOKEN = re.compile(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]+", re.UNICODE)
 
+
 class VisualAssetSelectionError(ValueError):
     """Raised when a visual asset candidate cannot be safely selected."""
-
 
 
 def _tokens(value: object) -> set[str]:
@@ -104,9 +104,13 @@ def _read_verified_image(
     if width < 1 or height < 1 or width * height > max_pixels:
         raise VisualAssetSelectionError("image_dimensions_out_of_range")
 
-    expected_hash = str(asset.get("sha256") or asset.get("source_version") or "").lower()
+    # A file is eligible only when the immutable asset-version hash is present,
+    # well-formed, and matches the bytes read from the tenant-scoped media store.
+    expected_hash = str(asset.get("sha256") or asset.get("source_version") or "").strip().lower()
+    if not _HEX_SHA256.fullmatch(expected_hash):
+        raise VisualAssetSelectionError("source_version_hash_missing_or_invalid")
     actual_hash = hashlib.sha256(raw).hexdigest()
-    if _HEX_SHA256.fullmatch(expected_hash) and expected_hash != actual_hash:
+    if expected_hash != actual_hash:
         raise VisualAssetSelectionError("source_version_hash_mismatch")
     return path, raw, actual_hash, width, height
 
