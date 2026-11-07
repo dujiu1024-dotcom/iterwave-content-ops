@@ -1307,14 +1307,16 @@ class RoundExecutor:
                     self.conn.commit()
                     existing = task_store.get_content_for_task(task["id"])
                     if existing is None:
-                        # Rehydrate references from the immutable task snapshot, not from
-                        # newly discovered live candidates on an idempotent replay. Re-verify
-                        # exact selected versions under the same trusted tenant directory.
+                        # Reuse freshly verified paths only when this run selected exactly
+                        # the same IDs/versions/hashes as the immutable task snapshot.
+                        # Otherwise rehydrate the snapshot's exact selections on replay.
                         task_input_snapshot = (task.get("input_snapshot") or {}).get("task_input") or {}
                         persisted_selection = task_input_snapshot.get("visual_asset_selection") or {}
                         persisted_roles = persisted_selection.get("selected_by_role") or {}
-                        visual_reference_assets = {}
-                        if persisted_roles:
+                        if not persisted_roles:
+                            visual_reference_assets = {}
+                        elif persisted_selection != visual_selection:
+                            visual_reference_assets = {};
                             if not tenant_id:
                                 raise RoundPreconditionError(
                                     "任务快照包含已选视觉素材，但当前 Worker 缺少可信租户身份；拒绝跨租户恢复"
