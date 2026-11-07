@@ -1050,3 +1050,9 @@ th, td { padding: 8px 9px; }
   .panel { padding: 13px; }
   .page-head { gap: 12px; margin-bottom: 15px; }
 }
+
+
+.advanced-report-editor { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.advanced-report-editor > summary { color: var(--muted); font-size: 12px; font-weight: 600; cursor: pointer; }
+.advanced-report-editor[open] > summary { margin-bottom: 9px; }
+.report-content { margin: 14px 0; }
