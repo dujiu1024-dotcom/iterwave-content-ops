@@ -34,6 +34,16 @@ function labelFor(key: string): string {
   return LABELS[normalized] ?? normalized.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+function sanitizeDiagnosticValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sanitizeDiagnosticValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !isSensitiveKey(key))
+      .map(([key, item]) => [key, sanitizeDiagnosticValue(item)]),
+  );
+}
+
 function collectTechnical(value: unknown, path = ""): Array<{ path: string; value: unknown }> {
   if (Array.isArray(value)) {
     return value.flatMap((item, index) => collectTechnical(item, path ? `${path}[${index}]` : `[${index}]`));
@@ -42,7 +52,7 @@ function collectTechnical(value: unknown, path = ""): Array<{ path: string; valu
   return Object.entries(value as Record<string, unknown>).flatMap(([key, item]) => {
     if (isSensitiveKey(key)) return [];
     const currentPath = path ? `${path}.${key}` : key;
-    if (isTechnicalKey(key)) return [{ path: currentPath, value: item }];
+    if (isTechnicalKey(key)) return [{ path: currentPath, value: sanitizeDiagnosticValue(item) }];
     return collectTechnical(item, currentPath);
   });
 }
@@ -50,7 +60,19 @@ function collectTechnical(value: unknown, path = ""): Array<{ path: string; valu
 function Value({ value, depth = 0 }: { value: unknown; depth?: number }): ReactNode {
   if (value == null || value === "") return <span className="structured-data-empty">暂无</span>;
   if (typeof value === "boolean") return <span>{value ? "是" : "否"}</span>;
-  if (typeof value === "number" || typeof value === "string") return <span className="structured-data-value">{String(value)}</span>;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        const parsed: unknown = JSON.parse(trimmed);
+        if (parsed && typeof parsed === "object") return <Value value={parsed} depth={depth} />;
+      } catch {
+        // Keep ordinary text unchanged when it is not valid structured JSON.
+      }
+    }
+    return <span className="structured-data-value">{value}</span>;
+  }
+  if (typeof value === "number") return <span className="structured-data-value">{String(value)}</span>;
   if (Array.isArray(value)) {
     if (!value.length) return <span className="structured-data-empty">暂无记录</span>;
     return <div className="structured-data-list">{value.map((item, index) => (
