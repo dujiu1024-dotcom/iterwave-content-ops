@@ -73,14 +73,14 @@ export default function ContentProductionLinePanel() {
       <div className="toolbar" style={{ marginBottom: 12 }}>
         <label className="tiny" htmlFor="content-production-line-select">生产任务</label>
         <select id="content-production-line-select" className="field" value={selectedId} onChange={(event) => setSelectedId(event.target.value)} style={{ maxWidth: 420 }}>
-          {items.map((item) => <option key={item.id} value={item.id}>{LINE_STATUS[item.status] ?? displayStatusLabel(item.status)} · {displayPlatformLabel(item.platform)} · {item.production_task_id.slice(0, 14)}</option>)}
+          {items.map((item) => <option key={item.id} value={item.id}>{LINE_STATUS[item.status] ?? displayStatusLabel(item.status)} · {displayPlatformLabel(item.platform)}</option>)}
         </select>
       </div>
       {selected && <>
         <div className="panel" style={{ padding: 12, marginBottom: 12 }}>
           <div className="panel-head">
             <div><div className="panel-title">{LINE_STATUS[selected.status] ?? displayStatusLabel(selected.status)}</div>
-              <div className="panel-sub">{displayPlatformLabel(selected.platform)} · 任务 {selected.production_task_id} · 轮次 #{selected.round_id}</div></div>
+              <div className="panel-sub">{displayPlatformLabel(selected.platform)} · 单内容生产任务</div></div>
             <span className={"tag " + (selected.status === "failed" ? "red" : ACTIVE.has(selected.status) ? "orange" : "green")}>{LINE_STATUS[selected.status] ?? selected.status}</span>
           </div>
           <div className="grid four" style={{ gap: 8 }}>
