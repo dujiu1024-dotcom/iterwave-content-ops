@@ -489,7 +489,7 @@ export default function Analytics() {
                     </td>
                     {/* P1-8 修复：失败态显示 error_msg（来自 metrics.error_msg 字段） */}
                     <td style={{ maxWidth: 180, fontSize: 11, color: (m.fetch_status === "failed" || m.fetch_status === "parse_error") ? "var(--red)" : "var(--subtle)" }}>
-                      {(m.fetch_status === "failed" || m.fetch_status === "parse_error") ? (m.error_msg || "—") : <span style={{ color: "transparent" }}>·</span>}
+                      {(m.fetch_status === "failed" || m.fetch_status === "parse_error") ? (m.error_msg ? <details className="advanced-report-editor"><summary>查看采集诊断</summary><pre className="diagnostic-text">{m.error_msg}</pre></details> : "—") : <span style={{ color: "transparent" }}>·</span>}
                     </td>
                     <td>
                       <Num value={m.views} />
