@@ -105,9 +105,11 @@ def test_schema_audit_detects_orphaned_cross_table_relationships():
 
 
 def test_schema_audit_detects_missing_migration_169_asset_usage_columns_and_index():
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.execute(
+    # verify_schema() owns and closes the connection it opens. Keep a separate
+    # anchor connection alive so fresh audit connections share this in-memory DB.
+    uri = "file:migration_169_schema_audit?mode=memory&cache=shared"
+    anchor = sqlite3.connect(uri, uri=True)
+    anchor.execute(
         """
         CREATE TABLE production_task_asset_usages (
             id INTEGER PRIMARY KEY,
@@ -121,8 +123,17 @@ def test_schema_audit_detects_missing_migration_169_asset_usage_columns_and_inde
         )
         """
     )
+
+    def connect_shared():
+        connection = sqlite3.connect(uri, uri=True)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    database = object.__new__(Database)
+    database.connect = connect_shared
+    database._discover_migrations = lambda: []
     try:
-        report = _database_for_connection(conn).verify_schema()
+        report = database.verify_schema()
         assert report["missing_columns"] == [
             ("production_task_asset_usages", "page_index")
         ]
@@ -133,17 +144,17 @@ def test_schema_audit_detects_missing_migration_169_asset_usage_columns_and_inde
             "production_task_asset_usages", ("generation_event_id",)
         ) in report["missing_unique_constraints"]
 
-        conn.execute(
+        anchor.execute(
             "ALTER TABLE production_task_asset_usages ADD COLUMN page_index INTEGER"
         )
-        conn.execute(
+        anchor.execute(
             """
             CREATE UNIQUE INDEX idx_production_task_asset_usage_generation_event
             ON production_task_asset_usages(generation_event_id)
             WHERE generation_event_id IS NOT NULL
             """
         )
-        report = _database_for_connection(conn).verify_schema()
+        report = database.verify_schema()
         assert not any(
             table == "production_task_asset_usages"
             for table, _column in report["missing_columns"]
@@ -155,8 +166,8 @@ def test_schema_audit_detects_missing_migration_169_asset_usage_columns_and_inde
             "production_task_asset_usages", ("generation_event_id",)
         ) not in report["missing_unique_constraints"]
 
-        conn.execute("DROP INDEX idx_production_task_asset_usage_generation_event")
-        report = _database_for_connection(conn).verify_schema()
+        anchor.execute("DROP INDEX idx_production_task_asset_usage_generation_event")
+        report = database.verify_schema()
         assert "idx_production_task_asset_usage_generation_event" in report[
             "missing_indexes"
         ]
@@ -164,4 +175,4 @@ def test_schema_audit_detects_missing_migration_169_asset_usage_columns_and_inde
             "production_task_asset_usages", ("generation_event_id",)
         ) in report["missing_unique_constraints"]
     finally:
-        conn.close()
+        anchor.close()
