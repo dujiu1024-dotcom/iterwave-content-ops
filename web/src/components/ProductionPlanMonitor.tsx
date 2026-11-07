@@ -88,7 +88,7 @@ export default function ProductionPlanMonitor() {
       setFailedTasks(tasks.items ?? []);
       setTaskError("");
     }
-    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    catch { setError("生产监控数据加载失败，请稍后重试。"); }
     finally { setLoading(false); }
   }, []);
   useEffect(() => { void load(); }, [load]);
@@ -129,17 +129,17 @@ export default function ProductionPlanMonitor() {
         {taskError && <div role="alert" className="tiny" style={{ color: "var(--orange)" }}>{taskError}</div>}
         {failedTasks.length === 0 ? <div className="empty-state">当前没有失败的独立生产任务。</div> : <div className="list">
           {failedTasks.map((task) => <div className="task-row" key={task.id}>
-            <div className="task-main"><div className="task-title">生产任务</div><div className="task-desc">{PLATFORM_LABEL[task.platform] ?? displayPlatformLabel(task.platform)} · 策略步骤 {data.platforms.flatMap((subplan) => subplan.stages).find((stage) => stage.stage_key === task.strategy_step_id)?.title ?? displayStepLabel(task.strategy_step_id)} · 尝试 {task.attempt_count}/{task.max_attempts}</div><div className="task-desc">{displayErrorLabel(task.error_code)}（{task.error_code || "未知错误代码"}）：{task.error_message || "未提供错误信息"}</div>{task.content_id && <div className="tiny">成品 ID：{task.content_id}</div>}</div>
-            <button className="btn sm" disabled={taskBusy} onClick={async () => { setTaskBusy(true); try { setSelectedTask(await api.productionTask(task.id)); } catch (err) { setTaskError(err instanceof Error ? err.message : String(err)); } finally { setTaskBusy(false); } }}>查看详情</button>
+            <div className="task-main"><div className="task-title">生产任务</div><div className="task-desc">{PLATFORM_LABEL[task.platform] ?? displayPlatformLabel(task.platform)} · 策略步骤 {data.platforms.flatMap((subplan) => subplan.stages).find((stage) => stage.stage_key === task.strategy_step_id)?.title ?? displayStepLabel(task.strategy_step_id)} · 尝试 {task.attempt_count}/{task.max_attempts}</div><div className="task-desc">{displayErrorLabel(task.error_code)}：请查看任务详情或联系管理员。</div></div>
+            <button className="btn sm" disabled={taskBusy} onClick={async () => { setTaskBusy(true); try { setSelectedTask(await api.productionTask(task.id)); } catch { setTaskError("任务操作失败，请稍后重试。"); } finally { setTaskBusy(false); } }}>查看详情</button>
           </div>)}
         </div>}
         {selectedTask && <div className="panel" style={{ marginTop: 12, padding: 12 }}>
-          <div className="panel-head"><div><strong>任务详情 · {selectedTask.task.id}</strong><div className="tiny">状态 {STATUS_LABEL[selectedTask.task.status] ?? displayStatusLabel(selectedTask.task.status)} · {selectedTask.task.attempt_count}/{selectedTask.task.max_attempts} 次尝试</div></div><button className="btn sm" onClick={() => setSelectedTask(null)}>关闭</button></div>
-          <div className="tiny">失败原因：{displayErrorLabel(selectedTask.task.error_code)} · {selectedTask.task.error_message || "—"}</div>
+          <div className="panel-head"><div><strong>生产任务详情</strong><div className="tiny">状态 {STATUS_LABEL[selectedTask.task.status] ?? displayStatusLabel(selectedTask.task.status)} · {selectedTask.task.attempt_count}/{selectedTask.task.max_attempts} 次尝试</div></div><button className="btn sm" onClick={() => setSelectedTask(null)}>关闭</button></div>
+          <div className="tiny">失败原因：{displayErrorLabel(selectedTask.task.error_code)}。请核对平台状态后再执行恢复。</div>
           {selectedTask.content && <div className="task-row"><div className="task-main"><div className="task-title">{selectedTask.content.title || selectedTask.content.id}</div><div className="task-desc">成品 {selectedTask.content.id}</div></div><button className="btn sm" onClick={() => navigate("production", "pipeline", { type: "content", id: selectedTask.content!.id })}>定位成品</button></div>}
           <div className="tiny" style={{ fontWeight: 700, marginTop: 10 }}>执行尝试记录</div>
-          {selectedTask.attempts.map((attempt) => <div className="task-row" key={attempt.id}><div className="task-main"><div className="task-title">第 {attempt.attempt_no} 次 · {STATUS_LABEL[attempt.status] ?? displayStatusLabel(attempt.status)} · {attempt.worker_id ? displayCodeLabel(attempt.worker_id, "未知执行器") : "未知执行器"}</div><div className="task-desc">{attempt.started_at} → {attempt.finished_at || "未结束"}</div>{attempt.error_message && <div className="task-desc">{displayErrorLabel(attempt.error_code)}（{attempt.error_code}）：{attempt.error_message}</div>}{attempt.output_content_id && <div className="task-desc">输出成品：{attempt.output_content_id}</div>}</div></div>)}
-          {["failed", "pending"].includes(selectedTask.task.status) && <button className="btn sm" disabled={taskBusy} onClick={async () => { const ok = window.confirm("确认已检查相关内容成品及外部平台，确定没有未完成的外部副作用？如果已存在成品，系统会优先关联而不会重新生成。"); if (!ok) return; setTaskBusy(true); try { await api.recoverProductionTask(selectedTask.task.id, true); setSelectedTask(await api.productionTask(selectedTask.task.id)); await load(); } catch (err) { setTaskError(err instanceof Error ? err.message : String(err)); } finally { setTaskBusy(false); } }}>人工核实并恢复任务</button>}
+          {selectedTask.attempts.map((attempt) => <div className="task-row" key={attempt.id}><div className="task-main"><div className="task-title">第 {attempt.attempt_no} 次 · {STATUS_LABEL[attempt.status] ?? displayStatusLabel(attempt.status)}</div><div className="task-desc">{formatBusinessDateTime(attempt.started_at)} → {formatBusinessDateTime(attempt.finished_at)}</div>{attempt.error_code && <div className="task-desc">{displayErrorLabel(attempt.error_code)}</div>}</div></div>)}
+          {["failed", "pending"].includes(selectedTask.task.status) && <button className="btn sm" disabled={taskBusy} onClick={async () => { const ok = window.confirm("确认已检查相关内容成品及外部平台，确定没有未完成的外部副作用？如果已存在成品，系统会优先关联而不会重新生成。"); if (!ok) return; setTaskBusy(true); try { await api.recoverProductionTask(selectedTask.task.id, true); setSelectedTask(await api.productionTask(selectedTask.task.id)); await load(); } catch { setTaskError("任务操作失败，请稍后重试。"); } finally { setTaskBusy(false); } }}>人工核实并恢复任务</button>}
         </div>}
       </div>
       <div className="panel" style={{ padding: 12, marginBottom: 12 }}>

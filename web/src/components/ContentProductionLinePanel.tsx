@@ -32,7 +32,7 @@ export default function ContentProductionLinePanel() {
       setItems(result.items ?? []);
       setSelectedId((current) => current && result.items.some((item) => item.id === current)
         ? current : result.items.find((item) => ACTIVE.has(item.status))?.id ?? result.items[0]?.id ?? "");
-    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    } catch { setError("生产线数据加载失败，请稍后重试。"); }
     finally { setLoading(false); }
   }, []);
   useEffect(() => { void load(); }, [load]);
@@ -80,7 +80,7 @@ export default function ContentProductionLinePanel() {
         <div className="panel" style={{ padding: 12, marginBottom: 12 }}>
           <div className="panel-head">
             <div><div className="panel-title">{LINE_STATUS[selected.status] ?? displayStatusLabel(selected.status)}</div>
-              <div className="panel-sub">{displayPlatformLabel(selected.platform)} · 第 {selected.round_id} 轮</div></div>
+              <div className="panel-sub">{displayPlatformLabel(selected.platform)} · 生产任务已关联</div></div>
             <span className={"tag " + (selected.status === "failed" ? "red" : ACTIVE.has(selected.status) ? "orange" : "green")}>{LINE_STATUS[selected.status] ?? selected.status}</span>
           </div>
           <div className="grid four" style={{ gap: 8 }}>
@@ -94,7 +94,7 @@ export default function ContentProductionLinePanel() {
             <button className="btn sm" onClick={() => navigate("production", "pipeline", { type: "content", id: selected.content_id! })}>查看成品</button>
           </div>}
           {selected.task_status === "failed" && <>
-            <div className="note" role="alert" style={{ marginTop: 10 }}>{displayErrorLabel(selected.error_code ?? undefined)}：{selected.error_message || "未提供错误信息"}</div>
+            <div className="note" role="alert" style={{ marginTop: 10 }}>{displayErrorLabel(selected.error_code ?? undefined)}：请核对平台状态后再尝试恢复。</div>
             <button className="btn primary" style={{ marginTop: 8 }} disabled={busy} onClick={() => void recover()}>{busy ? "提交中…" : "确认无外部副作用并恢复任务"}</button>
           </>}
         </div>
@@ -109,7 +109,7 @@ export default function ContentProductionLinePanel() {
               <div className="kpi-card"><div className="metric-label">当前选题</div><div className="metric-val" style={{ fontSize: 13 }}>{String(topic?.title ?? "—")}</div></div>
               <div className="kpi-card"><div className="metric-label">最近复盘引用</div><div className="metric-val" style={{ fontSize: 13 }}>{context?.latest_review_ref ?? "暂无历史复盘"}</div></div>
             </div>
-            <div className="tiny" style={{ marginTop: 10 }}>母计划 V{String(versions.master_plan_version_no ?? "—")} · 子计划 V{String(versions.sub_plan_version_no ?? "—")} · 策略步骤 {String(versions.strategy_step_id ?? "—")} · 诊断报告 V{String(context?.business_diagnosis?.version_no ?? "—")}</div>
+            <div className="tiny" style={{ marginTop: 10 }}>母计划 V{String(versions.master_plan_version_no ?? "—")} · 子计划 V{String(versions.sub_plan_version_no ?? "—")} · 诊断报告 V{String(context?.business_diagnosis?.version_no ?? "—")}</div>
             <div className="tiny" style={{ marginTop: 6 }}>前置依赖：{Array.isArray(stage?.dependencies) && stage!.dependencies.length ? (stage!.dependencies as string[]).join("、") : "无"} · 依赖验收：{Object.keys(dependencyOutcomes).length ? Object.entries(dependencyOutcomes).map(([key, value]) => key + "：" + String(value?.status ?? value?.decision ?? "已通过")).join("；") : "无前置依赖"} · 最近已发布内容：{context?.recent_published_content?.title ?? "暂无已发布内容"} · 指标记录：{context?.recent_published_content?.metrics?.length ?? 0} 条 · 发布核验：{context?.recent_published_content?.verification_status === "verified" ? "已核验" : context?.recent_published_content?.verification_status === "legacy_unverified" ? "历史未核验" : "暂无"}</div>
             <div className="tiny" style={{ marginTop: 6 }}>经营缺口：{businessGaps.length} 项 · 平台分析：{context?.account_performance?.platform_insights?.length ?? 0} 组 · 账号快照：{context?.account_performance?.account_snapshots?.length ?? 0} 条 · 内部资料：{context?.internal_materials?.length ?? 0} 条 · 外部引用：{context?.external_references?.length ?? 0} 条 · 素材版本：{context?.original_asset_versions?.length ?? 0} 个 · 素材关联：{context?.original_asset_relationships?.length ?? 0} 条</div>
             {businessGaps.length > 0 && <div className="note" style={{ marginTop: 8 }}>当前经营缺口：{businessGaps.slice(0, 3).map((gap) => typeof gap === "string" ? gap : String((gap as any).title ?? (gap as any).description ?? "待补充说明")).join("；")}</div>}

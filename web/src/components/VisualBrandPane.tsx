@@ -162,7 +162,7 @@ export default function VisualBrandPane() {
               <strong>视觉版本 v{version.version}</strong>
               <span className="tag blue">{displayStatusLabel(version.status)}</span>
             </div>
-            <div className="panel-sub">{version.style_key} · {version.renderer} · {version.created_at}{version.approved_at ? ` · 人工采用于 ${version.approved_at}` : ""}</div>
+            <div className="panel-sub">品牌视觉规范 · 创建于 {formatBusinessDateTime(version.created_at)}{version.approved_at ? ` · 人工采用于 ${formatBusinessDateTime(version.approved_at)}` : ""}</div>
             {version.status === "review_required" && <div className="note" style={{ marginTop: 6 }}>生成结果待人工审核；当前使用的原图保持不变。审核通过并采用后才会替换。</div>}
             {(version.status === "review_required" || version.status === "rendered") && (
               <div className="toolbar" style={{ marginTop: 8 }}>
@@ -206,18 +206,18 @@ export default function VisualBrandPane() {
         {regenerationHistory.length > 0 && <>
           <div className="panel-title" style={{ marginTop: 16 }}>图片重新生成记录</div>
           {regenerationHistory.map((item) => (
-            <div key={String(item.request_id)} className="panel" style={{ marginTop: 8, padding: 10 }}>
+            <div key={String(item.created_at || item.source_version_id || "regeneration")} className="panel" style={{ marginTop: 8, padding: 10 }}>
               <div className="toolbar" style={{ justifyContent: "space-between" }}>
                 <strong>{item.scope === "full" ? "整套重新生成" : `第 ${Number(item.page_index ?? 0) + 1} 页重新生成`}</strong>
                 <span className="tag">{displayStatusLabel(String(item.status || ""))}</span>
               </div>
               <div className="panel-sub">理由：{String(item.original_reason || "")}</div>
-              <div className="panel-sub">源版本 v{String(item.source_version_id ?? "—")} → 新版本 v{String(item.output_version_id ?? "未生成")} · {String(item.created_at || "")}</div>
+              <div className="panel-sub">视觉调整记录 · {formatBusinessDateTime(String(item.created_at || ""))}</div>
               <details style={{ marginTop: 6 }}>
                 <summary className="panel-sub" style={{ cursor: "pointer" }}>查看最终提示词与视觉基准</summary>
                 <StructuredDataView data={{ final_prompts: item.final_prompts, style_baseline: item.style_baseline, reference_images: item.reference_images }} title="品牌视觉配置"/>
               </details>
-              {Boolean(item.error_message) && <div className="panel-sub" style={{ color: "var(--red)" }}>失败原因：{String(item.error_message)}</div>}
+              {Boolean(item.error_message) && <div className="panel-sub" style={{ color: "var(--red)" }}>视觉调整未完成，请稍后重试或联系管理员。</div>}
             </div>
           ))}
         </>}
