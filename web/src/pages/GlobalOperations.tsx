@@ -304,10 +304,10 @@ export default function GlobalOperations() {
                       : null,
                   );
                 })
-                .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+                .catch(() => setError("通知状态更新失败，请稍后重试。"));
             }}>查看并标记已读</button>
             <button className="btn sm" disabled={loading} onClick={() => {
-              void api.markNotificationRead(notification.id).then(() => refresh()).catch((e) => setError(e instanceof Error ? e.message : String(e)));
+              void api.markNotificationRead(notification.id).then(() => refresh()).catch(() => setError("通知状态更新失败，请稍后重试。"));
             }}>仅标记已读</button>
           </div>)}
         </div> : <div className="empty-state">当前没有未读通知。</div>}

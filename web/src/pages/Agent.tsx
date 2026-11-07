@@ -425,8 +425,8 @@ function SkillsPane() {
       setCustomSkills(result.items ?? []);
       setBuiltinSkills(result.builtin_items ?? []);
       setLoadError("");
-    } catch (e: any) {
-      setLoadError(e?.message ?? "加载自定义 Skills 失败");
+    } catch {
+      setLoadError("自定义 Skills 加载失败，请稍后重试。");
     } finally {
       setLoading(false);
     }
