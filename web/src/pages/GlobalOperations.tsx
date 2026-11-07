@@ -110,7 +110,7 @@ export default function GlobalOperations() {
       ? [["账号组汇总", "活跃任务", "失败任务统计", "未读通知", "统一待办"][index]]
       : []);
     const diagnostics = results.flatMap((result, index) => result.status === "rejected"
-      ? [`${["账号组汇总", "活跃任务", "失败任务统计", "未读通知", "统一待办"][index]}：${result.reason instanceof Error ? result.reason.message : String(result.reason)}`]
+      ? [`${["账号组汇总", "活跃任务", "失败任务统计", "未读通知", "统一待办"][index]}：${result.reason instanceof Error ? result.reason.name : "请求异常"}`]
       : []);
     setError(failedSections.length ? `部分数据暂不可用：${failedSections.join("、")}` : "");
     setErrorDetails(diagnostics);
@@ -272,7 +272,7 @@ export default function GlobalOperations() {
               <div className="task-desc">{todo.tenant_name} · {todo.source_label} · {todo.detail} · {todo.created_at ? new Date(todo.created_at).toLocaleString("zh-CN") : "时间未知"}</div>
             </div>
             {todo.source === "notification" ? <button className="btn sm" disabled={loading} onClick={() => {
-              void api.markNotificationRead(Number(todo.record_id)).then(() => refresh()).catch((e) => { setError("标记通知失败，请稍后重试。"); setErrorDetails([e instanceof Error ? e.message : String(e)]); });
+              void api.markNotificationRead(Number(todo.record_id)).then(() => refresh()).catch((e) => { setError("标记通知失败，请稍后重试。"); setErrorDetails([e instanceof Error ? e.name : "请求异常"]); });
             }}>标记已读</button> : <button className="btn sm" onClick={() => navigate(todo.target_page, todo.target_page === "operations" ? (todo.target_tab ?? undefined) : undefined)}>处理</button>}
           </div>)}
         </div> : <div className="empty-state">当前筛选条件下没有待处理事项。</div>}
