@@ -63,7 +63,7 @@ export default function Review() {
       setSelectedId((current) => current && result.items.some((item) => item.id === current)
         ? current : result.items[0]?.id ?? null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "审核队列加载失败");
+      setError("审核队列加载失败，请稍后重试。");
     } finally {
       setLoading(false);
     }
@@ -79,7 +79,7 @@ export default function Review() {
     void api.stageEffectFeedback(stageId).then((result) => {
       if (!cancelled) setEffectFeedback(result);
     }).catch((err) => {
-      if (!cancelled) setError(err instanceof Error ? err.message : "策略效果数据加载失败");
+      if (!cancelled) setError("策略效果数据加载失败，请稍后重试。");
     });
     return () => { cancelled = true; };
   }, [selected?.sub_plan_stage_id]);
@@ -143,7 +143,7 @@ export default function Review() {
       setNotice("内容已保存，并已重新执行 G2 检查；需要重新审核。");
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "内容编辑失败");
+      setError("内容编辑失败，请检查输入后重试。");
     } finally { setBusyId(null); }
   };
 
@@ -155,7 +155,7 @@ export default function Review() {
       setPublishFailureReason("");
       setNotice("发布失败结果已记录；草稿仍保留，可在处理后重新发布。");
       await load();
-    } catch (err) { setError(err instanceof Error ? err.message : "发布结果记录失败"); }
+    } catch { setError("发布结果记录失败，请稍后重试。"); }
     finally { setBusyId(null); }
   };
 
@@ -170,7 +170,7 @@ export default function Review() {
       const result = await api.stageEffectFeedback(selected.sub_plan_stage_id);
       setEffectFeedback(result);
       setNotice("策略效果评估已保存，历史记录不会被覆盖。");
-    } catch (err) { setError(err instanceof Error ? err.message : "策略评估保存失败"); }
+    } catch { setError("策略评估保存失败，请稍后重试。"); }
   };
 
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
