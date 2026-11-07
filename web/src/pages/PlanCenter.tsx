@@ -11,6 +11,7 @@ import SubgoalManager from "../components/SubgoalManager";
 import { businessCalendarDate, formatCalendarDate } from "../calendarDate.mjs";
 import StructuredDataView from "../components/StructuredDataView";
 import { displaySourceLabel, displayStatusLabel } from "../displayLabels";
+import { formatBusinessDateTime } from "../businessTime.mjs";
 
 type Tab = "master" | "platforms" | "stages" | "goals" | "production-line" | "assets" | "north-star";
 type StageStatus = "pending" | "active" | "completed" | "paused" | "cancelled";
@@ -689,8 +690,8 @@ export default function PlanCenter() {
           </span>
         </div>
         {diagnosis ? <div className="grid two">
-          <div className="plan-summary-card"><div className="tiny">当前经营诊断</div><b>报告 v{diagnosis.version_no}</b><div className="tiny">状态：{diagnosis.status === "confirmed" ? "已确认" : diagnosis.status === "stale" ? "已过期" : diagnosis.status === "superseded" ? "已被新版本替代" : "待确认"}</div><div className="tiny">确认时间：{diagnosis.confirmed_at ?? "尚未确认"}</div><div className="tiny">诊断模型：{diagnosis.model_name || "—"}</div></div>
-          <div className="plan-summary-card"><div className="tiny">依据完整性</div><b>{diagnosisStrategyCurrent ? "北极星与资源基线版本一致" : "战略依据已变化或缺少版本快照"}</b><div className="tiny">关联资料与素材：{diagnosis.source_snapshot?.source_references?.length ?? 0} 项</div><StructuredDataView data={diagnosis.source_snapshot?.inventory_summary ?? {}} title="依据摘要" />{(diagnosis.source_snapshot?.source_references ?? []).map((source) => <div className="tiny" key={source.source_type + ":" + source.source_id}>{source.source_type} · {source.label}</div>)}</div>
+          <div className="plan-summary-card"><div className="tiny">当前经营诊断</div><b>报告 v{diagnosis.version_no}</b><div className="tiny">状态：{diagnosis.status === "confirmed" ? "已确认" : diagnosis.status === "stale" ? "已过期" : diagnosis.status === "superseded" ? "已被新版本替代" : "待确认"}</div><div className="tiny">确认时间：{formatBusinessDateTime(diagnosis.confirmed_at) === "—" ? "尚未确认" : formatBusinessDateTime(diagnosis.confirmed_at)}</div></div>
+          <div className="plan-summary-card"><div className="tiny">依据完整性</div><b>{diagnosisStrategyCurrent ? "北极星与资源基线版本一致" : "战略依据已变化或缺少版本快照"}</b><div className="tiny">关联资料与素材：{diagnosis.source_snapshot?.source_references?.length ?? 0} 项</div><StructuredDataView data={diagnosis.source_snapshot?.inventory_summary ?? {}} title="依据摘要" />{(diagnosis.source_snapshot?.source_references ?? []).map((source) => <div className="tiny" key={source.source_type + ":" + source.source_id}>{displaySourceLabel(source.source_type)} · {source.label}</div>)}</div>
         </div> : <div className="note">尚无经营诊断报告。AI 生成需要先完成并确认经营分析；也可直接编辑下方母计划并保存人工草稿，该路径不依赖 AI 模型，但仍要求账号组北极星已建立并确认。</div>}
         {diagnosis && diagnosis.status !== "confirmed" && <div className="note" style={{ marginTop: 10, color: "var(--orange)" }}>最新诊断报告尚未确认。请返回 AI 经营分析页面完成确认，生成入口会在确认后开放。</div>}
         {diagnosis?.status === "confirmed" && !diagnosisStrategyCurrent && <div className="note" style={{ marginTop: 10, color: "var(--orange)" }}>诊断报告绑定的账号组北极星或资源基线已变化，或报告缺少战略版本快照。请重新分析并确认。</div>}
