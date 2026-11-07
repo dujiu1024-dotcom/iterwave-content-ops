@@ -14,7 +14,7 @@ const LABELS: Record<string, string> = {
   field: "字段", message: "说明", code: "代码",
 };
 
-const TECHNICAL_KEY_PATTERN = /(^|_)(id|ids|tenant|worker|trace|request|execution|correlation|fingerprint|signature|raw|payload|error_code|stack|debug)(_|$)/i;
+const TECHNICAL_KEY_PATTERN = /(^|_)(id|ids|tenant|worker|trace|request|execution|correlation|fingerprint|signature|raw|payload|error_code|stack|debug|model|model_name|provider|provider_name|prompt_version)(_|$)/i;
 const SENSITIVE_KEY_PATTERN = /(^|_)(secret|token|password|passwd|authorization|cookie|api_key|credential|private_key)(_|$)/i;
 
 function normalizedKey(key: string): string {
