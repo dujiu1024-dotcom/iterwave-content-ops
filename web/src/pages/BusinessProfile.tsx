@@ -26,7 +26,7 @@ export default function BusinessProfilePage() {
   const [items, setItems] = useState<BusinessCatalogItem[]>([]);
   const [tab, setTab] = useState<EntityType>("product");
   const [name, setName] = useState("");
-  const [details, setDetails] = useState("{}");
+  const [details, setDetails] = useState("{}");\n  const [detailsError, setDetailsError] = useState("");
   const [editing, setEditing] = useState<string | null>(null);
   const [editingEvidence, setEditingEvidence] = useState<BusinessCatalogItem["field_evidence"]>({});
   const [analysis, setAnalysis] = useState<{ missing: Array<{ field: string; label: string }>; completeness: number } | null>(null);
@@ -59,16 +59,16 @@ export default function BusinessProfilePage() {
     finally { setBusy(false); }
   };
 
-  const resetEditor = () => { setEditing(null); setEditingEvidence({}); setName(""); setDetails("{}"); };
+  const resetEditor = () => { setEditing(null); setEditingEvidence({}); setName(""); setDetails("{}"); setDetailsError(""); };
   const editItem = (item: BusinessCatalogItem) => {
-    setEditing(item.id); setEditingEvidence(item.field_evidence); setName(item.name); setDetails(JSON.stringify(item.details, null, 2));
+    setEditing(item.id); setEditingEvidence(item.field_evidence); setName(item.name); setDetails(JSON.stringify(item.details, null, 2)); setDetailsError("");
   };
   const saveItem = async () => {
     let parsed: Record<string, unknown>;
     try {
       parsed = JSON.parse(details);
       if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") throw new Error();
-    } catch { showToast("资料详情必须是有效的 JSON 对象", "error"); return; }
+    } catch (e) { const message = e instanceof Error ? e.message : "JSON 格式错误"; setDetailsError(message); showToast("资料详情 JSON 格式错误，请检查编辑器提示", "error"); return; }\n    setDetailsError("");
     setBusy(true);
     try {
       await api.saveBusinessItem(tab, { name, details: parsed, field_evidence: editingEvidence }, editing ?? undefined);
@@ -125,7 +125,7 @@ export default function BusinessProfilePage() {
         <div className="editor">
           <h3>{editing ? "编辑资料" : "新增资料"}</h3>
           <label>名称<input className="field" value={name} onChange={e=>setName(e.target.value)} placeholder="填写名称" /></label>
-          <details className="advanced-report-editor"><summary>高级编辑：结构化详情</summary><p className="tiny">适用于需要维护自定义字段的场景。建议优先通过 AI 整理资料并逐项确认。</p><textarea aria-label="结构化详情高级编辑" className="field code-field" rows={7} value={details} onChange={e=>setDetails(e.target.value)} /></details>
+          <details className="advanced-report-editor"><summary>高级编辑：结构化详情</summary><p className="tiny">适用于需要维护自定义字段的场景。建议优先通过 AI 整理资料并逐项确认。</p><textarea aria-label="结构化详情高级编辑" aria-invalid={Boolean(detailsError)} aria-describedby={detailsError ? "business-details-error" : undefined} spellCheck={false} className="field code-field" rows={7} value={details} onChange={e=>{setDetails(e.target.value);setDetailsError("");}} />{detailsError && <div id="business-details-error" className="notice error" role="alert">JSON 格式错误：{detailsError}</div>}</details>
           <div className="actions"><button className="btn primary" disabled={busy || !name.trim()} onClick={() => void saveItem()}>保存</button><button className="btn" onClick={resetEditor}>取消</button></div>
         </div>
       </section>

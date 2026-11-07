@@ -50,7 +50,7 @@ function aggregateLabel(task: GlobalTaskQueueItem) {
   return label;
 }
 
-function timeLabel(value: string | null) {
+function auditActionLabel(value: string | null | undefined) {\n  const labels: Record<string, string> = { cancel: "取消任务", retry: "人工核验后重试", resolve_handled: "标记为已处理", resolve_ignored: "标记为已忽略" };\n  return value ? labels[value] ?? "其他管理操作" : "管理操作";\n}\n\nfunction auditActorLabel(value: string | null | undefined) {\n  if (!value) return "操作人未知";\n  if (value.startsWith("system:") || value.startsWith("service:")) return "系统";\n  return "操作人";\n}\n\nfunction timeLabel(value: string | null) {
   if (!value) return "—";
   return formatBusinessDateTime(value);
 }
@@ -483,7 +483,7 @@ export default function TaskQueue() {
                 
                 {detailTask.retry_confirmation_note && <div className="muted" style={{ marginTop: 6 }}>恢复核验：{detailTask.retry_confirmation_note}</div>}
                 {detailTask.resolution_action && <div className="muted" style={{ marginTop: 12 }}>
-                  处理记录：{detailTask.resolution_action === "handled" ? "已处理" : "已忽略"} · {detailTask.resolution_actor || "操作人未知"} · {timeLabel(detailTask.resolution_at)}
+                  处理记录：{detailTask.resolution_action === "handled" ? "已处理" : "已忽略"} · {auditActorLabel(detailTask.resolution_actor)} · {timeLabel(detailTask.resolution_at)}
                   {detailTask.resolution_note && <div>{detailTask.resolution_note}</div>}
                 </div>}
                 <section style={{ marginTop: 16 }}>
@@ -503,8 +503,8 @@ export default function TaskQueue() {
                   {detailAudit.length ? <div className="list">
                     {detailAudit.map((entry) => <div className="task-row" key={entry.id}>
                       <div className="task-main">
-                        <strong>{entry.action}</strong>
-                        <div className="tiny">{entry.actor} · {timeLabel(entry.acted_at)}</div>
+                        <strong>{auditActionLabel(entry.action)}</strong>
+                        <div className="tiny">{auditActorLabel(entry.actor)} · {timeLabel(entry.acted_at)}</div>
                         {typeof entry.details.note === "string" && <div className="tiny">{entry.details.note}</div>}
                         {typeof entry.details.confirmation_note === "string" && <div className="tiny">恢复核验：{entry.details.confirmation_note}</div>}
                         
