@@ -433,8 +433,11 @@ def test_primary_pages_error_state_layout_has_no_overflow_at_supported_viewports
         "calendar", "analytics", "agent",
     )
 
+    api_requests = []
+
     def handler(route):
         path = urlparse(route.request.url).path
+        api_requests.append(route.request.url)
         if path == "/api/auth/status":
             payload = {"configured": True, "authenticated": True, "needs_login": False}
             return route.fulfill(status=200, content_type="application/json",
@@ -1334,7 +1337,14 @@ def test_analytics_realistic_business_metrics_has_no_overflow_at_supported_viewp
             page.route("**/api/**", handler)
             page.goto(f"http://127.0.0.1:{port}/?page=analytics")
             page.get_by_role("heading", name="数据分析").wait_for(timeout=15000)
-            page.get_by_text("内容生产量", exact=True).wait_for(timeout=15000)
+            try:
+                page.locator(".analytics-business-kpis .metric-label").filter(has_text="内容生产量").wait_for(timeout=15000)
+            except Exception as exc:
+                raise AssertionError(
+                    "analytics KPI section did not render; body={!r}; api_requests={!r}; page_errors={!r}".format(
+                        page.locator("body").inner_text(), api_requests, page_errors
+                    )
+                ) from exc
             production_metric = page.locator(".analytics-business-kpis .metric").filter(has_text="内容生产量").locator(".metric-val")
             production_metric.wait_for(timeout=15000)
             assert "24" in production_metric.inner_text(), (
