@@ -8,6 +8,7 @@ import {
   OrchestrationView, OrchestrationRun, DiagnoseResult, StepState, TenantSkillManifest, BuiltinSkillManifest,
 } from "../api";
 import { displayStepLabel, displayStatusLabel, displayPlatformLabel } from "../displayLabels";
+import { formatBusinessDateTime } from "../businessTime.mjs";
 
 const PLATFORM_LABEL: Record<string, string> = {
   xhs: "小红书", douyin: "抖音", kuaishou: "快手", wechat_channels: "视频号",
@@ -295,7 +296,7 @@ function DiagnosePane() {
         <div>
           <div className="panel-title"><span className="icon">⚑</span>8 点端到端诊断</div>
           <div className="panel-sub">
-            {res ? `检查于 ${new Date(res.checked_at).toLocaleString("zh-CN")} · 总体 ${icon[res.overall]}` : "检查选题库、画像、登录、LLM、熔断、配额、数据库、Skills"}
+            {res ? `检查于 ${formatBusinessDateTime(res.checked_at)} · 总体 ${icon[res.overall]}` : "检查选题库、画像、登录、LLM、熔断、配额、数据库、Skills"}
           </div>
         </div>
         <div className="flex" style={{ gap: 10, alignItems: "center" }}>
