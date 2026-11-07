@@ -126,7 +126,7 @@ export default function ProductionPlanMonitor() {
       </div>
       <div className="panel" style={{ padding: 12, marginBottom: 12 }}>
         <div className="panel-head"><div><div className="panel-title">生产任务故障处理 · {failedTasks.length} 项</div><div className="panel-sub">定位失败策略步骤、具体任务、错误原因、尝试历史和内容成品；恢复前必须确认外部副作用。</div></div><button className="btn sm" onClick={() => void load()} disabled={loading}>刷新任务</button></div>
-        {taskError && <div role="alert" className="tiny" style={{ color: "var(--orange)" }}>{taskError}</div>}
+        {taskError && <div role="alert" className="tiny" style={{ color: "var(--orange)" }}>{displayErrorLabel(taskError)}<details className="advanced-report-editor"><summary>查看诊断详情</summary><pre className="diagnostic-text">{taskError}</pre></details></div>}
         {failedTasks.length === 0 ? <div className="empty-state">当前没有失败的独立生产任务。</div> : <div className="list">
           {failedTasks.map((task) => <div className="task-row" key={task.id}>
             <div className="task-main"><div className="task-title">{PLATFORM_LABEL[task.platform] ?? displayPlatformLabel(task.platform)} · 生产任务</div><div className="task-desc">策略步骤 {data.platforms.flatMap((subplan) => subplan.stages).find((stage) => stage.stage_key === task.strategy_step_id)?.title ?? displayStepLabel(task.strategy_step_id)} · 尝试 {task.attempt_count}/{task.max_attempts}</div><div className="task-desc">{displayErrorLabel(task.error_code)}</div></div>
