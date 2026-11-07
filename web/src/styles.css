@@ -1060,3 +1060,13 @@ th, td { padding: 8px 9px; }
 
 /* Raw diagnostics remain available on demand, with bounded readable layout. */
 .diagnostic-text { max-height: 280px; overflow: auto; margin: 8px 0 0; padding: 10px; border-radius: 8px; background: var(--surface-2); color: var(--muted); font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+
+/* Final readability pass: prevent high-frequency helper text from falling below readable sizes. */
+.global-operations-page .tiny { font-size: 12px; line-height: 1.5; }
+.calendar-event-title { font-size: 12px; line-height: 1.4; }
+.calendar-event-meta { font-size: 11px; line-height: 1.45; }
+.calendar-month-grid .calendar-event-title { font-size: 11px; }
+.calendar-month-grid .calendar-event-meta { font-size: 10px; }
+.skill-manifest-preview pre { font-size: 12px; line-height: 1.5; }
+.structured-data-diagnostics summary, .structured-data-diagnostics code { font-size: 12px; }
