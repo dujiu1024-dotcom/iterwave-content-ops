@@ -58,3 +58,14 @@
 WP5 在既有 `production_task_asset_usages` 中追加 `usage_role=consumed:...` 事件行，不更新原有授权快照，也不创建平行素材库/任务状态表。迁移 169 增加 Provider、模型、输入/输出哈希、事件 ID 和消费时间字段；事件 ID 唯一索引保证相同生成结果重试时幂等。消费回调使用 `production_task_id`，与视觉任务缓存 ID 分离。
 
 任务素材审计接口 `GET /api/production-tasks/{task_id}/assets` 同时返回授权快照行和 consumed 事件行。消费行可通过页面角色、Provider/模型、输入/输出哈希及 `generation_event_id` 追溯。
+
+
+## 快速体验样稿与素材库人工关联边界
+
+快速体验样稿的 `/api/activation/saved/{sample_content_id}/promote` 只负责将已通过正文质量门的文案导入正式轮次，并创建待存草稿。它不会创建 `production_tasks`、生成图片、保存平台草稿或发布；导入后的内容初始视觉状态为 `degraded`，必须另行进入正式视觉生产流程。
+
+素材库的 `POST /api/media/{asset_id}/use` 是人工图片关联操作：它将已审核素材的原图路径写入 `contents.image_paths`，并追加 `media_asset_usages` 关联行。该记录只表示人工选择/关联，不表示图片被 AI Provider 消费，不得映射为 `production_task_asset_usages` 的 consumed 事件。
+
+正式参考图再创作必须经过原始素材登记与版本快照、权限/隐私/质量确认、任务关联、VisualPlan、真实图片字节 Provider 输入、整组 OCR/质量门禁及 Provider 成功后的消费审计。若轮次缺少不可变计划/阶段/生产线绑定，必须先修复轮次归属并重新创建符合约束的正式生产任务；不得伪造计划归属或绕过 `ProductionTaskStore` 的绑定校验。
+
+产品交互应将“从素材库选择原图”与“AI 参考图再创作”明确区分。前者保持 `visual_status=media_asset`；后者只有在视觉生产门禁通过后才能标记为生成成品。
