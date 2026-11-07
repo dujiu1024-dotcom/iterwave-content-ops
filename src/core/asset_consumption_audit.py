@@ -116,12 +116,12 @@ def record_visual_asset_consumption(
         consumed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         conn.execute(
             """INSERT OR IGNORE INTO production_task_asset_usages(
-                production_task_id,original_asset_id,asset_version_no,usage_role,
+                production_task_id,original_asset_id,asset_version_no,usage_role,page_role,page_index,
                 permission_snapshot,privacy_snapshot,asset_quality_snapshot,
                 provider,model,source_sha256,result_sha256,generation_event_id,consumed_at
-            ) VALUES(?,?,?,?,'allowed',?,?,?,?,?,?,?,?)""",
+            ) VALUES(?,?,?,?,?,?,'allowed',?,?,?,?,?,?,?,?)""",
             (
-                production_task_id, asset_id, version_no, usage_role,
+                production_task_id, asset_id, version_no, usage_role, role, int(page_index),
                 candidate.get("privacy_status"), quality_snapshot,
                 str(provider or "")[:120], str(model or "")[:160],
                 source_sha, result_sha, event_id, consumed_at,
