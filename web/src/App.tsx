@@ -31,6 +31,7 @@ const ROUTABLE_PAGES = new Set<string>([
   "accounts",
   "settings",
   "business-diagnosis",
+  "business-profile",
 ]);
 
 function Router() {
