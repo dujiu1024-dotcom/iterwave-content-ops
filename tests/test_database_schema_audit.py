@@ -102,3 +102,66 @@ def test_schema_audit_detects_orphaned_cross_table_relationships():
     assert violations["production_line_current_versions"] == 1
     assert violations["production_line_version_subplans"] == 1
     assert violations["production_line_version_base_identity"] == 1
+
+
+def test_schema_audit_detects_missing_migration_169_asset_usage_columns_and_index():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE production_task_asset_usages (
+            id INTEGER PRIMARY KEY,
+            provider TEXT,
+            model TEXT,
+            source_sha256 TEXT,
+            result_sha256 TEXT,
+            generation_event_id TEXT,
+            consumed_at TEXT,
+            page_role TEXT
+        )
+        """
+    )
+    try:
+        report = _database_for_connection(conn).verify_schema()
+        assert report["missing_columns"] == [
+            ("production_task_asset_usages", "page_index")
+        ]
+        assert "idx_production_task_asset_usage_generation_event" in report[
+            "missing_indexes"
+        ]
+        assert (
+            "production_task_asset_usages", ("generation_event_id",)
+        ) in report["missing_unique_constraints"]
+
+        conn.execute(
+            "ALTER TABLE production_task_asset_usages ADD COLUMN page_index INTEGER"
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX idx_production_task_asset_usage_generation_event
+            ON production_task_asset_usages(generation_event_id)
+            WHERE generation_event_id IS NOT NULL
+            """
+        )
+        report = _database_for_connection(conn).verify_schema()
+        assert not any(
+            table == "production_task_asset_usages"
+            for table, _column in report["missing_columns"]
+        )
+        assert "idx_production_task_asset_usage_generation_event" not in report[
+            "missing_indexes"
+        ]
+        assert (
+            "production_task_asset_usages", ("generation_event_id",)
+        ) not in report["missing_unique_constraints"]
+
+        conn.execute("DROP INDEX idx_production_task_asset_usage_generation_event")
+        report = _database_for_connection(conn).verify_schema()
+        assert "idx_production_task_asset_usage_generation_event" in report[
+            "missing_indexes"
+        ]
+        assert (
+            "production_task_asset_usages", ("generation_event_id",)
+        ) in report["missing_unique_constraints"]
+    finally:
+        conn.close()
