@@ -1,3 +1,4 @@
+import StructuredDataView from "./StructuredDataView";
 import { useEffect, useState } from "react";
 import { api, OriginalAsset, OriginalAssetGap, OriginalAssetSummary } from "../api";
 import { useApp } from "../AppContext";
@@ -177,7 +178,7 @@ export default function OriginalAssetInventoryPanel() {
     </div>}
     {analysisResult && <div className="plan-stage-editor">
       <div className="panel-head"><b>AI 素材分析结果 · 待人工确认</b><button className="btn sm" onClick={() => setAnalysisResult(null)}>关闭</button></div>
-      <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxHeight: 320, overflow: "auto" }}>{JSON.stringify(analysisResult.result, null, 2)}</pre>
+      <StructuredDataView data={analysisResult.result} title="分析结果" />
       <div className="plan-form-actions"><button className="btn" onClick={() => void reviewAnalysis("rejected")}>驳回分析结果</button><button className="btn primary" onClick={() => void reviewAnalysis("confirmed")}>确认分析结果</button></div>
     </div>}
     {history && <div className="plan-stage-editor">
@@ -185,7 +186,7 @@ export default function OriginalAssetInventoryPanel() {
       <b>版本记录</b>
       {history.versions.length === 0 ? <div className="tiny">暂无版本记录</div> : <div className="list">{history.versions.map(v => <div className="task-row" key={v.version_no}><div className="task-main"><b>v{v.version_no} · {v.title}</b><div className="tiny">{v.created_at} · {statusLabel[v.review_status] ?? v.review_status} · 商业权限：{v.commercial_use_status}</div><div className="tiny">{v.description || "无说明"}</div></div></div>)}</div>}
       <b style={{ display: "block", marginTop: 12 }}>AI 分析记录</b>
-      {history.analyses.length === 0 ? <div className="tiny">暂无分析记录</div> : <div className="list">{history.analyses.map(item => <details className="task-row" key={item.id}><summary><b>#{item.id} · {item.analysis_type}</b> · v{item.asset_version_no} · {item.status} · {item.created_at}</summary><pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxHeight: 240, overflow: "auto" }}>{JSON.stringify(item.result, null, 2)}</pre>{item.warnings?.length > 0 && <div className="tiny">提示：{item.warnings.join("；")}</div>}</details>)}</div>}
+      {history.analyses.length === 0 ? <div className="tiny">暂无分析记录</div> : <div className="list">{history.analyses.map(item => <details className="task-row" key={item.id}><summary><b>#{item.id} · {item.analysis_type}</b> · v{item.asset_version_no} · {item.status} · {item.created_at}</summary><StructuredDataView data={item.result} title="历史分析结果" />{item.warnings?.length > 0 && <div className="tiny">提示：{item.warnings.join("；")}</div>}</details>)}</div>}
       <b style={{ display: "block", marginTop: 12 }}>业务对象关联</b>
       {history.links.length === 0 ? <div className="tiny">暂无关联</div> : <div className="tiny">{history.links.map(link => link.entity_type + "：" + link.entity_id + "（" + link.relation_type + "）").join(" · ")}</div>}
     </div>}
