@@ -407,7 +407,7 @@ details[open] > summary::before { content: "▾ "; }
   .review-cardcol { grid-column: 1 / -1; }
 }
 @media (max-width: 680px) {
-  .review-mobile-tabs { display: flex; gap: 6px; margin-bottom: 10px; position: sticky; top: 0; z-index: 5; padding: 8px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
+  .review-mobile-tabs { display: flex; gap: 6px; margin-bottom: 10px; padding: 8px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
   .review-mobile-tabs .btn { flex: 1; min-width: 0; padding-inline: 6px; }
   .review-layout { grid-template-columns: minmax(0, 1fr); }
   .review-layout > .panel { min-width: 0; }
