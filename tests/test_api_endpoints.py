@@ -5398,3 +5398,38 @@ def test_notifications_api_projects_public_fields_and_keeps_deep_links(client):
     legacy_item = next(row for row in legacy.json() if row["id"] == cur.lastrowid)
     assert "round_id" not in legacy_item
     assert legacy_item["target_id"] == 987
+
+
+def test_task_runs_api_projects_public_fields_and_sanitizes_internal_errors(client):
+    tc, conn, _seed = client
+    now = datetime.now().isoformat(sep=" ", timespec="seconds")
+    internal_error = (
+        "sqlite3.OperationalError: unable to open /home/ubuntu/iterwave/data/private.db\\n"
+        "Traceback (most recent call last):"
+    )
+    cur = conn.execute(
+        "INSERT INTO task_runs "
+        "(task_type,biz_id,platform,status,attempt,max_attempts,error_msg,created_at,started_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        ("comment_polling", "business-123", "xhs", "failed", 2, 3, internal_error, now, now),
+    )
+    conn.commit()
+
+    response = tc.get("/api/task_runs?page=1&page_size=20")
+    assert response.status_code == 200, response.text
+    item = next(row for row in response.json()["items"] if row["id"] == cur.lastrowid)
+    assert item["error_msg"] == "任务执行失败，请进入任务详情核对。"
+    assert "/home/ubuntu" not in response.text
+    assert "sqlite3.OperationalError" not in response.text
+    assert "Traceback" not in response.text
+    assert set(item) == {
+        "id", "task_type", "biz_id", "platform", "status", "attempt",
+        "max_attempts", "started_at", "finished_at", "next_run_at",
+        "error_msg", "created_at", "resolved_at", "resolved_by", "resolution_action",
+    }
+
+    legacy = tc.get("/api/task_runs?limit=20")
+    assert legacy.status_code == 200, legacy.text
+    legacy_item = next(row for row in legacy.json() if row["id"] == cur.lastrowid)
+    assert legacy_item["error_msg"] == "任务执行失败，请进入任务详情核对。"
+    assert "worker_id" not in legacy_item

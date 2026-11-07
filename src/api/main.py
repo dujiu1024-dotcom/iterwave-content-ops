@@ -9998,11 +9998,27 @@ def _register_routes(app: FastAPI) -> None:
         total = conn.execute("SELECT COUNT(*) FROM task_runs" + where_sql, params).fetchone()[0]
         effective_limit = page_size if page is not None else limit
         effective_offset = (page - 1) * page_size if page is not None else 0
-        items = [dict(r) for r in conn.execute(
+        rows = conn.execute(
             "SELECT * FROM task_runs" + where_sql +
             " ORDER BY id DESC LIMIT ? OFFSET ?",
             [*params, effective_limit, effective_offset],
-        ).fetchall()]
+        ).fetchall()
+        # task_runs 包含 worker/租约等内部列；只向前端提供任务历史契约字段。
+        # error_msg 保留可读业务说明，但统一过滤 traceback、数据库异常和内部路径。
+        public_task_fields = (
+            "id", "task_type", "biz_id", "platform", "status", "attempt",
+            "max_attempts", "started_at", "finished_at", "next_run_at",
+            "error_msg", "created_at", "resolved_at", "resolved_by", "resolution_action",
+        )
+        items = []
+        for row in rows:
+            source = dict(row)
+            item = {key: source.get(key) for key in public_task_fields}
+            if item.get("error_msg"):
+                item["error_msg"] = safe_error_summary(
+                    item["error_msg"], "任务执行失败，请进入任务详情核对。",
+                )
+            items.append(item)
         if page is None:
             return items
         return {
