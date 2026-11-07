@@ -97,7 +97,7 @@ def test_ai_card_generation_fails_closed_when_ocr_does_not_pass(monkeypatch, tmp
 def test_ai_card_generation_fails_closed_when_ocr_becomes_unavailable(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(cards, "generate_image_bytes", lambda prompt, **kwargs: (
-        calls.append(prompt) or (b"image", "image/png", ".png", 1024, 1536)
+        calls.append(prompt) or (_valid_generated_image(prompt), "image/png", ".png", 320, 480)
     ))
     monkeypatch.setattr(
         "src.core.visual_ocr.validate_rendered_pages",
@@ -192,7 +192,7 @@ def test_ai_card_generation_regenerates_corrupt_cached_page(monkeypatch, tmp_pat
     image_bytes = image_buffer.getvalue()
     calls = []
     monkeypatch.setattr(cards, "generate_image_bytes", lambda prompt, **kwargs: (
-        calls.append(prompt) or (image_bytes, "image/png", ".png", 1024, 1536)
+        calls.append(prompt) or (_valid_generated_image(prompt), "image/png", ".png", 320, 480)
     ))
     monkeypatch.setattr(
         "src.core.visual_ocr.validate_rendered_pages",
