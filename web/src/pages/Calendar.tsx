@@ -471,7 +471,7 @@ export default function Calendar() {
                 {planDetail.rounds.length ? planDetail.rounds.map((round) => <div className="calendar-plan-detail-row" key={round.round_id}>
                   {round.round_number != null ? `第 ${round.round_number} 轮` : "轮次信息不可用"} · {round.task_id ? "已进入生产队列" : "尚未入队"}
                   {round.attribution_status === "attributed" && round.strategy_step_id ? " · 已关联策略步骤" : " · 历史归属待核实"}
-                  {round.production_line_version_id ? ` · 生产线版本 v${round.production_line_version_id}` : ""}
+                  {round.production_line_version_id ? " · 已关联生产线版本" : ""}
                 </div>) : <div className="note">尚未关联生产轮次</div>}
               </div>
               <div><strong>关联草稿（{planDetail.drafts.length}）</strong>
@@ -490,16 +490,16 @@ export default function Calendar() {
           <section className="panel" onClick={(e) => e.stopPropagation()}>
             <div className="panel-head">
               <div>
-                <div className="panel-title">生产批次 · 第 {batchDetail.batch.round_number ?? batchDetail.batch.round_id} 轮</div>
+                <div className="panel-title">生产批次 · {batchDetail.batch.round_number != null ? `第 ${batchDetail.batch.round_number} 轮` : "历史轮次"}</div>
                 <div className="panel-sub">{batchDetail.batch.sub_plan_title ?? "历史轮次"} · {batchDetail.batch.platform ? platformMeta(batchDetail.batch.platform).label : "平台待核实"} · {displayStatusLabel(batchDetail.batch.round_status)}</div>
               </div>
               <button className="btn sm" onClick={() => setBatchDetail(null)}>关闭</button>
             </div>
             <div className="note">
-              母计划版本：{batchDetail.batch.master_plan_version_id ?? "待核实"} ·
-              子计划版本：{batchDetail.batch.sub_plan_version_id ?? "待核实"} ·
+              母计划版本：{batchDetail.batch.master_plan_version_id != null ? "已关联" : "待核实"} ·
+              子计划版本：{batchDetail.batch.sub_plan_version_id != null ? "已关联" : "待核实"} ·
               策略步骤：{batchDetail.batch.strategy_step_title ?? "待核实"} ·
-              生产线版本：{batchDetail.batch.production_line_version_id ?? "待核实"} ·
+              生产线版本：{batchDetail.batch.production_line_version_id != null ? "已关联" : "待核实"} ·
               归属：{batchDetail.batch.attribution_status === "attributed" ? "完整" : "待核实"}
             </div>
             <div className="calendar-plan-detail-grid">
