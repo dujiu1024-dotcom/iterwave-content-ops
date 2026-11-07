@@ -12,6 +12,13 @@ const LABELS: Record<string, string> = {
   date: "日期", created_at: "创建时间", updated_at: "更新时间",
   generated_at: "生成时间", model: "生成模型", version: "版本",
   field: "字段", message: "说明", code: "代码",
+  business_name: "业务名称", introduction: "业务介绍", industry: "所属行业", business_model: "商业模式",
+  business_stage: "业务阶段", operating_goal: "经营目标", entity_type: "业务对象类型", asset_type: "素材类型",
+  source_type: "来源类型", source_kind: "来源渠道", review_status: "审核状态", commercial_use_status: "商业使用权限",
+  readability_status: "可读性", completeness_status: "完整度", privacy_status: "隐私状态", priority: "优先级",
+  title_text: "标题", content: "内容", text: "文本", url: "链接", link: "链接",
+  start_date: "开始日期", end_date: "结束日期", target_count: "目标数量", actual_count: "实际数量",
+  expected_result: "预期结果", execution_strategy: "执行策略", current_problem: "当前问题", strategy_goal: "策略目标",
 };
 
 const TECHNICAL_KEY_PATTERN = /(^|_)(id|ids|tenant|worker|trace|request|execution|correlation|fingerprint|signature|raw|payload|error_code|stack|debug|model|model_name|provider|provider_name|prompt_version)(_|$)/i;
@@ -31,7 +38,7 @@ function isSensitiveKey(key: string): boolean {
 
 function labelFor(key: string): string {
   const normalized = normalizedKey(key);
-  return LABELS[normalized] ?? normalized.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  return LABELS[normalized] ?? "其他信息";
 }
 
 function sanitizeDiagnosticValue(value: unknown): unknown {
