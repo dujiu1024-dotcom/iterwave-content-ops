@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
 import StructuredDataView from "../components/StructuredDataView";
+import { useEffect, useState } from "react";
 import EmptyHint from "../components/EmptyHint";
 import OperatingFeedbackPane from "../components/OperatingFeedbackPane";
 import { api, MetricsResponse, MetricRow, Platform, SpiralAnalysis, Draft, WeeklyReport, ActivationStatus, GoalSummary, BusinessAnalyticsSummary } from "../api";
-import { displayMetricLabel, displaySourceLabel, displayPlatformLabel } from "../displayLabels";
+import { displayMetricLabel, displaySourceLabel, displayPlatformLabel, displayStatusLabel } from "../displayLabels";
 
 const PLATFORM_NAME: Record<Platform, string> = {
   xhs: "小红书", douyin: "抖音",
@@ -63,7 +63,7 @@ export default function Analytics() {
   const [detailView, setDetailView] = useState<"overview" | "details">("overview");
 
   const loadGaps = () => {
-    api.gaps().then(setAnalysis).catch((e) => setReportError(e.message));
+    api.gaps().then(setAnalysis).catch(() => setReportError("经营分析数据加载失败，请稍后重试。"));
   };
   const updateWeeklyAction = async (
     suggestionKey: string,
@@ -76,7 +76,7 @@ export default function Analytics() {
       await api.weeklyActionFeedback({ suggestion_key: suggestionKey, decision, outcome });
       setWeeklyReport(await api.weeklyReport());
     } catch (e: any) {
-      setReportError(e?.message || "建议反馈保存失败");
+      setReportError("建议反馈保存失败，请稍后重试。");
     } finally {
       setWeeklyActionBusy(null);
     }
@@ -84,15 +84,15 @@ export default function Analytics() {
 
   const loadMetrics = (p: Platform | "", page?: number) => {
     setMetricsError(null);
-    api.metrics(p || undefined, page, 20).then(setMetrics).catch((e) => setMetricsError(e.message));
+    api.metrics(p || undefined, page, 20).then(setMetrics).catch(() => setMetricsError("指标数据加载失败，请稍后重试。"));
   };
 
   useEffect(() => { loadGaps(); }, []);
   useEffect(() => {
-    api.goalsSummary().then(setGoalSummary).catch((e) => setReportError(e.message));
+    api.goalsSummary().then(setGoalSummary).catch(() => setReportError("目标汇总加载失败，请稍后重试。"));
   }, []);
   useEffect(() => {
-    api.businessAnalyticsSummary(businessDays).then(setBusinessSummary).catch((e) => setReportError(e.message));
+    api.businessAnalyticsSummary(businessDays).then(setBusinessSummary).catch(() => setReportError("经营汇总加载失败，请稍后重试。"));
   }, [businessDays]);
   useEffect(() => {
     loadMetrics(platformFilter, detailView === "details" ? metricsPage : undefined);
@@ -109,7 +109,7 @@ export default function Analytics() {
         note_url: d.platform_note_url || "", measured_at: "", correction_of: "",
         views: "", likes: "", collects: "", comments: "", shares: "",
       }])));
-    }).catch((e) => setReportError(e?.message || "发布回填与周报数据加载失败"));
+    }).catch(() => setReportError("发布回填与周报数据加载失败，请稍后重试。"));
   }, []);
 
   const toggleSnapshotHistory = async (draftId: string) => {
@@ -120,7 +120,7 @@ export default function Analytics() {
       const result = await api.metricSnapshots(draftId);
       setSnapshotHistory((prev) => ({ ...prev, [draftId]: result.items }));
     } catch (e: any) {
-      setReportError(e?.message || "历史快照加载失败");
+      setReportError("历史快照加载失败，请稍后重试。");
     }
   };
 
@@ -171,7 +171,7 @@ export default function Analytics() {
       }}));
       setWeeklyReport(await api.weeklyReport());
     } catch (e: any) {
-      setReportError(e?.message || "保存失败");
+      setReportError("保存失败，请稍后重试。");
     } finally {
       setBackfillBusy(null);
     }
@@ -276,7 +276,7 @@ export default function Analytics() {
               <tbody>
                 {Object.entries(businessSummary?.followers_growth_by_platform ?? {}).map(([platform, growth]) => (
                   <tr key={platform}>
-                    <td>{PLATFORM_NAME[platform as Platform] ?? platform}</td>
+                    <td>{PLATFORM_NAME[platform as Platform] ?? displayPlatformLabel(platform)}</td>
                     <td>{growth == null ? "—" : `${growth.growth > 0 ? "+" : ""}${growth.growth}`}</td>
                     <td>{growth?.baseline_at ?? "—"}</td>
                     <td>{growth?.latest_at ?? "—"}</td>
@@ -344,7 +344,7 @@ export default function Analytics() {
                   {(snapshotHistory[draft.id] || []).length === 0 ? <div className="panel-sub">暂无历史指标快照</div> :
                     (snapshotHistory[draft.id] || []).map((item) => <div className="panel-sub" key={item.id} style={{ padding: "6px 0" }}>
                       {item.measured_at} · {displaySourceLabel(item.source)}
-                      · {(activationStatus?.platform_metric_fields?.[draft.platform] || []).map((field) => `${({views:"曝光",likes:"点赞",collects:"收藏",comments:"评论",shares:"分享"} as Record<string,string>)[field] || field} ${item[field as keyof typeof item] ?? "—"}`).join(" · ")}
+                      · {(activationStatus?.platform_metric_fields?.[draft.platform] || []).map((field) => `${({views:"曝光",likes:"点赞",collects:"收藏",comments:"评论",shares:"分享"} as Record<string,string>)[field] || displayMetricLabel(field)} ${item[field as keyof typeof item] ?? "—"}`).join(" · ")}
                       {item.correction_of ? " · 修正记录" : ""}
                       {item.source === "manual" && <button type="button" className="btn sm" style={{ marginLeft: 8 }} onClick={() => setBackfillValues((prev) => ({
                         ...prev, [draft.id]: {
@@ -378,7 +378,7 @@ export default function Analytics() {
             {!!weeklyReport.data_conflicts?.length && <div className="note" style={{ marginTop: 12 }}>
               <strong>数据来源冲突（保留原始记录）</strong>
               {weeklyReport.data_conflicts.map((conflict) => <div className="panel-sub" key={conflict.content_id}>
-                {PLATFORM_NAME[conflict.platform]} · 内容 {conflict.content_id.slice(0, 8)} · 指标：{conflict.metrics.join("、")}
+                {PLATFORM_NAME[conflict.platform]} · 存在指标数据冲突 · 指标：{conflict.metrics.join("、")}
               </div>)}
             </div>}
             <h3 style={{ marginTop: 14 }}>可能原因</h3>
@@ -387,8 +387,6 @@ export default function Analytics() {
               <details>
                 <summary className="form-label" style={{ cursor: "pointer" }}>查看证据与适用范围</summary>
                 <div className="panel-sub">平台：{item.platform ? PLATFORM_NAME[item.platform] : "全部"} · 时间范围：{item.time_window ? item.time_window.start + " 至 " + item.time_window.end : "未指定"} · 数据来源：{weeklyReport.data_sources.join("、") || "暂无"}</div>
-                <div className="panel-sub">证据内容 ID：{item.evidence_content_ids?.join("、") || "无"}</div>
-                <div className="panel-sub">指标快照 ID：{item.metric_snapshot_ids?.join("、") || "无"}</div>
               </details>
             </div>)}
             <h3 style={{ marginTop: 14 }}>下一轮建议</h3>
@@ -397,8 +395,6 @@ export default function Analytics() {
               <div className="task-desc">依据：{zhSentence(item.basis)} · 验证：{zhSentence(item.verification)}</div>
               <details><summary className="form-label" style={{ cursor: "pointer" }}>查看建议证据</summary>
                 <div className="panel-sub">平台：{item.platform ? PLATFORM_NAME[item.platform] : "全部"} · 样本：{item.sample_size} · 时间范围：{item.time_window ? item.time_window.start + " 至 " + item.time_window.end : "未指定"}</div>
-                <div className="panel-sub">证据内容 ID：{item.evidence_content_ids?.join("、") || "无"}</div>
-                <div className="panel-sub">指标快照 ID：{item.metric_snapshot_ids?.join("、") || "无"}</div>
               </details>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10, alignItems: "center" }}>
                 <span className="tag">{item.decision === "adopted" ? "已采纳" : item.decision === "ignored" ? "已忽略" : "待处理"}</span>
@@ -485,11 +481,11 @@ export default function Analytics() {
                         m.fetch_status === "failed" ? "red" :
                         m.fetch_status === "parse_error" ? "red" :
                         "gray"  // pending / 其他：中性色
-                      }`}>{({ success: "已采集", partial: "部分采集", failed: "失败", parse_error: "解析失败", pending: "待采集" } as Record<string, string>)[m.fetch_status] ?? m.fetch_status}</span>
+                      }`}>{({ success: "已采集", partial: "部分采集", failed: "失败", parse_error: "解析失败", pending: "待采集" } as Record<string, string>)[m.fetch_status] ?? displayStatusLabel(m.fetch_status)}</span>
                     </td>
                     {/* P1-8 修复：失败态显示 error_msg（来自 metrics.error_msg 字段） */}
                     <td style={{ maxWidth: 180, fontSize: 11, color: (m.fetch_status === "failed" || m.fetch_status === "parse_error") ? "var(--red)" : "var(--subtle)" }}>
-                      {(m.fetch_status === "failed" || m.fetch_status === "parse_error") ? (m.error_msg || "—") : <span style={{ color: "transparent" }}>·</span>}
+                      {(m.fetch_status === "failed" || m.fetch_status === "parse_error") ? (m.error_msg ? <details className="advanced-report-editor"><summary>查看采集诊断</summary><pre className="diagnostic-text">{m.error_msg}</pre></details> : "—") : <span style={{ color: "transparent" }}>·</span>}
                     </td>
                     <td>
                       <Num value={m.views} />
@@ -603,7 +599,7 @@ export default function Analytics() {
             {analysis.evidence && Object.keys(analysis.evidence).length > 0 && (
               <details style={{ marginTop: 18 }}>
                 <summary className="form-label" style={{ cursor: "pointer" }}>查看触发数据</summary>
-                <StructuredDataView data={analysis.evidence} title="分析证据"/>
+                <StructuredDataView data={analysis.evidence} title="触发依据" />
               </details>
             )}
           </>
