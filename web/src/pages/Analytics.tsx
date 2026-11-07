@@ -63,7 +63,7 @@ export default function Analytics() {
   const [detailView, setDetailView] = useState<"overview" | "details">("overview");
 
   const loadGaps = () => {
-    api.gaps().then(setAnalysis).catch((e) => setReportError(e.message));
+    api.gaps().then(setAnalysis).catch(() => setReportError("经营分析数据加载失败，请稍后重试。"));
   };
   const updateWeeklyAction = async (
     suggestionKey: string,
@@ -76,7 +76,7 @@ export default function Analytics() {
       await api.weeklyActionFeedback({ suggestion_key: suggestionKey, decision, outcome });
       setWeeklyReport(await api.weeklyReport());
     } catch (e: any) {
-      setReportError(e?.message || "建议反馈保存失败");
+      setReportError("建议反馈保存失败，请稍后重试。");
     } finally {
       setWeeklyActionBusy(null);
     }
@@ -84,15 +84,15 @@ export default function Analytics() {
 
   const loadMetrics = (p: Platform | "", page?: number) => {
     setMetricsError(null);
-    api.metrics(p || undefined, page, 20).then(setMetrics).catch((e) => setMetricsError(e.message));
+    api.metrics(p || undefined, page, 20).then(setMetrics).catch(() => setMetricsError("指标数据加载失败，请稍后重试。"));
   };
 
   useEffect(() => { loadGaps(); }, []);
   useEffect(() => {
-    api.goalsSummary().then(setGoalSummary).catch((e) => setReportError(e.message));
+    api.goalsSummary().then(setGoalSummary).catch(() => setReportError("目标汇总加载失败，请稍后重试。"));
   }, []);
   useEffect(() => {
-    api.businessAnalyticsSummary(businessDays).then(setBusinessSummary).catch((e) => setReportError(e.message));
+    api.businessAnalyticsSummary(businessDays).then(setBusinessSummary).catch(() => setReportError("经营汇总加载失败，请稍后重试。"));
   }, [businessDays]);
   useEffect(() => {
     loadMetrics(platformFilter, detailView === "details" ? metricsPage : undefined);
@@ -109,7 +109,7 @@ export default function Analytics() {
         note_url: d.platform_note_url || "", measured_at: "", correction_of: "",
         views: "", likes: "", collects: "", comments: "", shares: "",
       }])));
-    }).catch((e) => setReportError(e?.message || "发布回填与周报数据加载失败"));
+    }).catch(() => setReportError("发布回填与周报数据加载失败，请稍后重试。"));
   }, []);
 
   const toggleSnapshotHistory = async (draftId: string) => {
