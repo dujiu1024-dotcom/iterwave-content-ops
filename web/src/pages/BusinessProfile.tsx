@@ -9,6 +9,11 @@ const tabs: Array<{ key: EntityType; label: string }> = [
   { key: "product", label: "产品" }, { key: "service", label: "服务" },
   { key: "audience", label: "目标客户" }, { key: "market", label: "市场信息" },
 ];
+const PROFILE_FIELD_LABELS: Record<string, string> = {
+  business_name: "业务名称", introduction: "业务介绍", industry: "所属行业",
+  business_model: "商业模式", business_stage: "业务阶段", operating_goal: "经营目标",
+};
+const evidenceFieldLabel = (field: string) => PROFILE_FIELD_LABELS[field] ?? "其他业务字段";
 const emptyProfile: BusinessProfile = {
   business_name: "", introduction: "", industry: "", business_model: "",
   business_stage: "", operating_goal: "", field_evidence: {}, version_no: 0,
@@ -96,7 +101,7 @@ export default function BusinessProfilePage() {
           <label className="full">业务介绍<textarea className="field" rows={3} value={profile.introduction} onChange={e => setProfile({...profile,introduction:e.target.value})} /></label>
           <label className="full">经营目标<textarea className="field" rows={2} value={profile.operating_goal} onChange={e => setProfile({...profile,operating_goal:e.target.value})} placeholder="例如：提高复购率、拓展某类客户、验证新产品" /></label>
         </div>
-        <div className="muted">字段来源：{Object.entries(profile.field_evidence).map(([field, evidence]) => `${field}：${({user_confirmed:"用户确认",external_source:"外部来源",ai_inferred:"AI 推测",missing:"尚未提供"} as Record<string,string>)[evidence.status] || "其他来源（需确认）"}`).join("；") || "尚未标注"}</div>
+        <div className="muted">字段来源：{Object.entries(profile.field_evidence).map(([field, evidence]) => `${evidenceFieldLabel(field)}：${({user_confirmed:"用户确认",external_source:"外部来源",ai_inferred:"AI 推测",missing:"尚未提供"} as Record<string,string>)[evidence.status] || "其他来源（需确认）"}`).join("；") || "尚未标注"}</div>
         <div className="actions"><button className="btn primary" disabled={busy} onClick={() => void saveProfile()}>保存业务概况</button></div>
       </section>
 
