@@ -4,7 +4,7 @@ import EmptyHint from "../components/EmptyHint";
 import { api, ContentPlan, Platform, ScheduleEvent, UnscheduledDraft, ProductionBatch, ProductionBatchDetail } from "../api";
 import { ALL_PLATFORMS, platformMeta } from "../platforms";
 import { businessCalendarDate, formatBusinessDateTimeInput, formatCalendarDate as _fmt, parseBusinessCalendarDate, shiftCalendarDate } from "../calendarDate.mjs";
-import { displayStatusLabel } from "../displayLabels";
+import { displayErrorLabel, displayStatusLabel } from "../displayLabels";
 
 const PLAN_STATUS_LABEL: Record<ContentPlan["status"], string> = {
   planned: "待执行",
