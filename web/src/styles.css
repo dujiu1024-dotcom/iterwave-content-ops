@@ -989,7 +989,7 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 .calendar-month-cell .calendar-event { min-width: 0; }
 .calendar-month-cell .calendar-event-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .calendar-month-cell .calendar-event-meta { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.calendar-week-grid { grid-template-columns: repeat(7, minmax(148px, 1fr)); overflow-x: auto; padding-bottom: 6px; }
+.calendar-week-grid { grid-template-columns: repeat(7, minmax(148px, 1fr)); padding-bottom: 6px; }
 .calendar-week-grid .calendar-agenda-day { min-height: 180px; }
 .calendar-week-grid .calendar-agenda-event { align-items: flex-start; }
 @media (max-width: 760px) {
