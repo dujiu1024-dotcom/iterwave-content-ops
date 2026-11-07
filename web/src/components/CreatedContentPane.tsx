@@ -110,14 +110,14 @@ export default function CreatedContentPane() {
                 const locked = LOCKED.has(d.status);
                 return (
                   <tr key={d.id}>
-                    <td><input type="checkbox" aria-label={`选择 ${d.title ?? d.id}`} disabled={locked}
+                    <td><input type="checkbox" aria-label={`选择 ${d.title ?? "未命名内容"}`} disabled={locked}
                       checked={selected.has(d.content_id)} onChange={() => toggle(d.content_id)} /></td>
                     <td>
                       <div className="ellipsis" style={{ maxWidth: 420, fontWeight: 550 }}>{d.title ?? "—"}</div>
-                      {d.error_msg && <div className="ellipsis" style={{ fontSize: 11, color: "var(--orange)", maxWidth: 420 }}>{d.error_msg}</div>}
+                      {d.error_msg && <details className="advanced-report-editor"><summary>查看生成诊断</summary><pre className="diagnostic-text">{d.error_msg}</pre></details>}
                     </td>
                     <td>{platformMeta(d.platform).label}</td>
-                    <td>{d.round_id ? `#${d.round_id}` : "—"}</td>
+                    <td>{d.round_id ? "已关联轮次" : "—"}</td>
                     <td><span className={`tag ${st.cls}`}>{st.text}</span></td>
                     <td>
                       {d.visual_status === "media_asset"
