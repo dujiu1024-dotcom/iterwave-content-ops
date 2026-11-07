@@ -1,4 +1,5 @@
 import { navigate, useUrlTab } from "../nav";
+import { formatBusinessDateTime } from "../businessTime.mjs";
 import React, { useEffect, useState } from "react";
 import { useApp } from "../AppContext";
 import AsyncPanel from "../components/AsyncPanel";
@@ -281,7 +282,7 @@ export default function Dashboard() {
                   <i className="task-prio" aria-hidden="true" />
                   <div className="task-main">
                     <div className="task-title">第 {r.round_number} 轮草稿待确认发布</div>
-                    <div className="task-desc">创建于 {new Date(r.created_at).toLocaleString("zh-CN")}</div>
+                    <div className="task-desc">创建于 {formatBusinessDateTime(r.created_at)}</div>
                   </div>
                   <div className="task-actions">
                     <button type="button" className="btn primary sm" onClick={() => go("production")}>审核</button>
