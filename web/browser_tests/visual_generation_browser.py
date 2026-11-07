@@ -510,6 +510,126 @@ def test_primary_pages_error_state_layout_has_no_overflow_at_supported_viewports
         _stop_vite(server)
 
 
+
+def test_review_realistic_content_layout_has_no_overflow_at_supported_viewports():
+    """Render a populated review queue/detail and verify desktop/tablet/mobile layout."""
+    server, port = _serve_vite()
+    screenshot_dir = ROOT / "artifacts" / "ui-viewport"
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    now = "2026-11-07T10:30:00+08:00"
+    item = {
+        "id": "review-layout-001", "round_id": 301, "round_number": 301,
+        "round_status": "completed", "master_plan_version_id": 7,
+        "master_plan_version_no": 4, "master_plan_title": "品牌长期增长母计划",
+        "sub_plan_id": "subplan-xhs", "subplan_title": "小红书专业内容增长策略",
+        "subplan_platform": "xhs", "subplan_version_id": 12, "subplan_version_no": 3,
+        "sub_plan_stage_id": 71, "stage_order": 1,
+        "strategy_step_title": "建立专业认知与案例信任",
+        "strategy_step_direction": "围绕真实案例持续输出",
+        "strategy_step_completion_condition": "完成 20 篇内容并复盘有效互动",
+        "strategy_step_notes": "优先使用可核验案例和明确数据来源",
+        "plan_attribution_status": "attributed", "topic_id": "topic-301",
+        "platform": "xhs",
+        "title": "如何用真实案例建立客户信任：从问题识别到方案落地",
+        "body": "第一部分：识别客户面临的真实问题。第二部分：说明解决方案和验证过程。",
+        "tags": ["真实案例", "客户信任"], "image_count": 0,
+        "guard_outcome": "pass", "guard_reason": "事实依据完整，未发现高风险表达。",
+        "review_rejected": False, "review_rejection_reason": None,
+        "created_at": now, "draft_id": "draft-layout-001",
+        "draft_status": "draft_saved", "draft_error": None, "saved_at": now,
+        "scheduled_publish_at": None, "publish_status": "not_published",
+        "published_at": None, "publish_time_source": None,
+        "publish_result_note": None, "user_confirmed_at": None,
+        "review_status": "pending", "review_history": [],
+    }
+
+    def handler(route):
+        path = urlparse(route.request.url).path
+        if path == "/api/auth/status":
+            payload = {"configured": True, "authenticated": True, "needs_login": False}
+        elif path == "/api/tenants":
+            payload = {
+                "runtime_tenant_id": "brand-main", "selected_tenant_id": "brand-main",
+                "restart_required": False,
+                "items": [{"id": "brand-main", "name": "主品牌运营账号组",
+                           "created_at": now, "is_active": True}],
+            }
+        elif path == "/api/status":
+            payload = {
+                "enabled_platforms": ["xhs"], "platforms_without_login": [],
+                "logged_in_platforms": ["xhs"], "circuit_broken_platforms": [],
+                "active_rounds": 1,
+            }
+        elif path == "/api/review-queue":
+            payload = {"items": [item], "total": 1, "page": 1, "page_size": 30, "pages": 1}
+        elif path == "/api/subplans/stages/71/effect-feedback":
+            payload = {
+                "stage": {"id": 71, "title": "建立专业认知与案例信任"},
+                "content_count": 12, "published_count": 5,
+                "manual_metrics": {"samples": 2, "views": 1200, "likes": 48,
+                                  "collects": 20, "comments": 6, "shares": 3},
+                "automatic_metrics": {"samples": 3, "views": 5800, "likes": 210,
+                                      "collects": 96, "comments": 18, "shares": 22,
+                                      "new_followers": 31},
+                "reviews": [{
+                    "id": 8, "assessment": "effective",
+                    "recommendation": "继续使用真实案例并增加可核验过程细节",
+                    "evidence_note": "三篇内容获得稳定收藏和评论",
+                    "confidence": "medium", "evidence_json": "{}",
+                    "created_at": now,
+                }],
+            }
+        else:
+            payload = {}
+        return route.fulfill(status=200, content_type="application/json",
+                             body=json.dumps(payload, ensure_ascii=False))
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 1000}, device_scale_factor=1)
+            page_errors = []
+            page.on("pageerror", lambda error: page_errors.append(str(error)))
+            page.route("**/api/**", handler)
+            page.goto(f"http://127.0.0.1:{port}/?page=review")
+            page.get_by_role("heading", name="集中审核").wait_for(timeout=15000)
+            page.get_by_text(item["title"], exact=True).wait_for(timeout=15000)
+            page.get_by_text("如何用真实案例建立客户信任", exact=False).wait_for(timeout=15000)
+            page.get_by_text("自动采集样本：3", exact=False).wait_for(timeout=15000)
+
+            for width in (1440, 1024, 768, 390):
+                page.set_viewport_size({"width": width, "height": 1000})
+                page.wait_for_timeout(150)
+                metrics = page.evaluate("""() => ({
+                    viewport: document.documentElement.clientWidth,
+                    document: document.documentElement.scrollWidth,
+                    body: document.body.scrollWidth,
+                    main: document.querySelector('#main-content')?.scrollWidth ?? 0,
+                    mainClient: document.querySelector('#main-content')?.clientWidth ?? 0,
+                    topbar: document.querySelector('.topbar')?.scrollWidth ?? 0,
+                    topbarClient: document.querySelector('.topbar')?.clientWidth ?? 0
+                })""")
+                assert metrics["document"] <= metrics["viewport"] + 1, (
+                    f"review document overflow at {width}px: {metrics}"
+                )
+                assert metrics["body"] <= metrics["viewport"] + 1, (
+                    f"review body overflow at {width}px: {metrics}"
+                )
+                assert metrics["main"] <= metrics["mainClient"] + 1, (
+                    f"review content overflow at {width}px: {metrics}"
+                )
+                assert metrics["topbar"] <= metrics["topbarClient"] + 1, (
+                    f"review topbar overflow at {width}px: {metrics}"
+                )
+                page.screenshot(
+                    path=str(screenshot_dir / f"review-real-data-{width}.png"),
+                    full_page=True,
+                )
+            assert not page_errors, f"review raised browser errors: {page_errors}"
+            browser.close()
+    finally:
+        _stop_vite(server)
+
 def test_global_operations_realistic_data_layout_has_no_overflow_at_supported_viewports():
     """Render a representative multi-tenant operations dataset at desktop/tablet/mobile widths."""
     server, port = _serve_vite()
