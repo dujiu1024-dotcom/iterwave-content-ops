@@ -3,6 +3,7 @@ import {
   api, BusinessGapItem, Draft, MetricFactItem, PublishVerificationItem, ReviewTaskItem,
 } from "../api";
 import { displayCodeLabel, displayPlatformLabel, displaySourceLabel } from "../displayLabels";
+import { formatBusinessDateTime } from "../businessTime.mjs";
 
 type VerificationForm = { platform_content_id: string; content_url: string; published_at: string; evidence_note: string };
 type CollectionForm = {
@@ -324,7 +325,7 @@ export default function OperatingFeedbackPane() {
             <thead><tr><th>内容</th><th>平台内容 ID</th><th>真实发布时间</th><th>关闭状态</th><th>凭证链接</th></tr></thead>
             <tbody>{verifications.map((item) => <tr key={item.verification_id}>
               <td>{drafts.find((draft) => draft.id === item.draft_id)?.title || "未命名内容"}</td>
-              <td>{item.platform_content_id ? <details className="advanced-report-editor"><summary>查看平台作品标识</summary><code>{item.platform_content_id}</code></details> : "—"}</td><td>{new Date(item.published_at).toLocaleString()}</td>
+              <td>{item.platform_content_id ? <details className="advanced-report-editor"><summary>查看平台作品标识</summary><code>{item.platform_content_id}</code></details> : "—"}</td><td>{formatBusinessDateTime(item.published_at)}</td>
               <td><span className="tag">{statusText(item.closure_status)}</span>{item.closure_error && <details className="advanced-report-editor"><summary>查看关闭诊断</summary><pre className="diagnostic-text">{item.closure_error}</pre></details>}
                 {item.closure_status === "failed" && item.close_event_id && <button className="btn sm" disabled={!!busy} onClick={() => void retryClose(item)}>重试关闭</button>}
               </td>
