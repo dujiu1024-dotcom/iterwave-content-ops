@@ -46,7 +46,7 @@ export default function BusinessProfilePage() {
         api.businessProfile(), api.businessItems(), api.businessAnalysis(), api.businessVersions(),
       ]);
       setProfile(p); setItems(catalog.items); setAnalysis(check); setVersions(history.items);
-    } catch (e) { setError(e instanceof Error ? e.message : "业务资料加载失败"); }
+    } catch { setError("业务资料加载失败，请稍后刷新重试。"); }
     finally { setLoading(false); }
   };
   useEffect(() => { void load(); }, []);
@@ -56,7 +56,7 @@ export default function BusinessProfilePage() {
     try {
       const saved = await api.saveBusinessProfile(profile);
       setProfile(saved); showToast("业务概况已保存", "success"); await load();
-    } catch (e) { showToast("保存失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
+    } catch { showToast("业务概况保存失败，请检查填写内容后重试", "error"); }
     finally { setBusy(false); }
   };
 
@@ -69,7 +69,7 @@ export default function BusinessProfilePage() {
     try {
       parsed = JSON.parse(details);
       if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") throw new Error();
-    } catch (e) { const message = e instanceof Error ? e.message : "JSON 格式错误"; setDetailsError(message); showToast("资料详情 JSON 格式错误，请检查编辑器提示", "error"); return; }
+    } catch { setDetailsError("JSON 格式无效，请检查逗号、引号和括号。"); showToast("资料详情 JSON 格式错误，请检查编辑器提示", "error"); return; }
     setDetailsError("");
     setBusy(true);
     try {
@@ -81,7 +81,7 @@ export default function BusinessProfilePage() {
   const archiveItem = async (id: string) => {
     if (!window.confirm("确认归档这条业务资料？历史计划快照不会受到影响。")) return;
     try { await api.archiveBusinessItem(id); await load(); }
-    catch (e) { showToast("归档失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
+    catch { showToast("资料归档失败，请刷新后重试", "error"); }
   };
 
   const visibleItems = items.filter(item => item.entity_type === tab);
@@ -109,7 +109,7 @@ export default function BusinessProfilePage() {
 
       <section className="panel">
         <div className="panel-head"><div className="panel-title">经营资料版本</div><span className="muted">每次业务概况或目录变更都会形成完整快照</span></div>
-        {versions.length ? <div className="catalog-list">{versions.map(v=><article className="catalog-item" key={v.version_no}><div><strong>业务资料 v{v.version_no}</strong><small className="muted">{v.change_note || "资料变更"} · {formatBusinessDateTime(v.created_at)}</small></div><button className="btn sm" onClick={async()=>{try{setSelectedVersion(await api.businessVersion(v.version_no));}catch(e){showToast((e as Error).message,"error");}}}>查看快照</button></article>)}</div> : <p className="muted">尚无历史版本，首次保存后自动建立。</p>}
+        {versions.length ? <div className="catalog-list">{versions.map(v=><article className="catalog-item" key={v.version_no}><div><strong>业务资料 v{v.version_no}</strong><small className="muted">{v.change_note || "资料变更"} · {formatBusinessDateTime(v.created_at)}</small></div><button className="btn sm" onClick={async()=>{try{setSelectedVersion(await api.businessVersion(v.version_no));}catch{showToast("历史快照读取失败，请稍后重试","error");}}}>查看快照</button></article>)}</div> : <p className="muted">尚无历史版本，首次保存后自动建立。</p>}
         {selectedVersion && <StructuredDataView data={selectedVersion.snapshot} title="历史版本内容" />}
       </section>
 
@@ -138,8 +138,8 @@ export default function BusinessProfilePage() {
         <p className="muted">当前检查仅识别缺失项，不会把推测内容写入正式档案。AI 整理建议必须经过人工确认。</p>
         <p className="muted">请勿粘贴密码、访问令牌、个人身份信息等敏感资料。AI 只返回待确认建议，不会自动修改档案。</p>
         <label>粘贴原始经营资料<textarea className="field" rows={4} value={sourceText} onChange={e=>setSourceText(e.target.value)} placeholder="粘贴产品介绍、服务说明、客户访谈、竞品观察等原始资料" /></label>
-        <div className="actions"><button className="btn" disabled={!sourceText.trim() || busy} onClick={async()=>{try{setBusy(true);const r=await api.businessAiProposal(sourceText);setProposals(r.proposals || []);showToast(r.message,"info");}catch(e){showToast((e as Error).message,"error");}finally{setBusy(false);}}}>AI 整理资料</button></div>
-        {proposals.map((proposal,index)=><article className="catalog-item" key={index}><div><strong>{String(proposal.name || proposal.entity_type)}</strong><StructuredDataView data={proposal} /></div><button className="btn sm primary" onClick={async()=>{try{await api.confirmBusinessAiProposal(proposal);setProposals(items=>items.filter((_,i)=>i!==index));await load();showToast("已确认并写入业务档案","success");}catch(e){showToast((e as Error).message,"error");}}}>确认写入</button></article>)}
+        <div className="actions"><button className="btn" disabled={!sourceText.trim() || busy} onClick={async()=>{try{setBusy(true);const r=await api.businessAiProposal(sourceText);setProposals(r.proposals || []);showToast(r.message,"info");}catch{showToast("AI 整理资料失败，请稍后重试","error");}finally{setBusy(false);}}}>AI 整理资料</button></div>
+        {proposals.map((proposal,index)=><article className="catalog-item" key={index}><div><strong>{String(proposal.name || "业务资料建议")}</strong><StructuredDataView data={proposal} /></div><button className="btn sm primary" onClick={async()=>{try{await api.confirmBusinessAiProposal(proposal);setProposals(items=>items.filter((_,i)=>i!==index));await load();showToast("已确认并写入业务档案","success");}catch{showToast("资料确认写入失败，请刷新后重试","error");}}}>确认写入</button></article>)}
       </section>
     </div>
   );
