@@ -277,6 +277,9 @@ def test_visual_plan_generates_cover_body_ending_with_verified_reference_bytes(m
     image_buffer = BytesIO()
     Image.new("RGB", (256, 384), "white").save(image_buffer, format="PNG")
     image_bytes = image_buffer.getvalue()
+    output_buffer = BytesIO()
+    Image.new("RGB", (1024, 1536), "white").save(output_buffer, format="PNG")
+    output_bytes = output_buffer.getvalue()
     image_path = tmp_path / "approved-reference.png"
     image_path.write_bytes(image_bytes)
     reference = {
@@ -293,7 +296,7 @@ def test_visual_plan_generates_cover_body_ending_with_verified_reference_bytes(m
     )
     calls = []
     monkeypatch.setattr(cards, "generate_image_bytes", lambda prompt, **kwargs: (
-        calls.append((prompt, kwargs)) or (image_bytes, "image/png", ".png", 256, 384)
+        calls.append((prompt, kwargs)) or (output_bytes, "image/png", ".png", 1024, 1536)
     ))
     monkeypatch.setattr(
         "src.core.visual_ocr.validate_rendered_pages",
