@@ -1,3 +1,4 @@
+import StructuredDataView from "../components/StructuredDataView";
 import { useEffect, useMemo, useState } from "react";
 import EmptyHint from "../components/EmptyHint";
 import { useApp } from "../AppContext";
@@ -7,6 +8,7 @@ import {
   OrchestrationView, OrchestrationRun, DiagnoseResult, StepState, TenantSkillManifest, BuiltinSkillManifest,
 } from "../api";
 import { displayStepLabel, displayStatusLabel, displayPlatformLabel } from "../displayLabels";
+import { formatBusinessDateTime } from "../businessTime.mjs";
 
 const PLATFORM_LABEL: Record<string, string> = {
   xhs: "小红书", douyin: "抖音", kuaishou: "快手", wechat_channels: "视频号",
@@ -47,7 +49,7 @@ export default function Agent() {
     try {
       const [s, o, r] = await Promise.all([api.status(), api.orchestration(), api.orchestrationRuns(10)]);
       setStatus(s); setOrch(o); setRuns(r.runs);
-    } catch (e: any) { setError(e.message); }
+    } catch { setError("智能助手数据加载失败，请稍后重试。"); }
   };
   useEffect(() => { load(); }, []);
 
@@ -153,7 +155,7 @@ function PreviewPane({ orch, runs, onEdit }: {
         const st = run?.step_status?.[s.id];
         return (
           <div className="note" style={{ marginTop: 12, padding: 14, background: "var(--surface-2)", borderRadius: 10 }}>
-            <div style={{ fontWeight: 700, marginBottom: 6 }}>{s.label} <code style={{ fontSize: 11, color: "var(--muted)" }}>skill: {s.skill}</code></div>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>{s.label}</div>
             <div style={{ marginBottom: 6 }}>{s.desc}</div>
             <div className="kv-grid">
               <span>依赖</span><span>{s.requires.length ? s.requires.map(labelOf).join("、") : "无"}</span>
@@ -213,11 +215,11 @@ function EditPane({ orch, onSaved }: { orch: OrchestrationView | null; onSaved: 
       const v = await api.saveOrchestration(steps);
       onSaved(v);
       showToast("✓ 编排已保存，下一轮按新编排执行", "success");
-    } catch (e: any) { showToast(`保存失败：${e.message}`, "error"); }
+    } catch (e: any) { showToast(`保存失败：请稍后重试`, "error"); }
   });
   const reset = () => withPending("orch:reset", async () => {
     try { onSaved(await api.resetOrchestration()); showToast("已恢复默认编排"); }
-    catch (e: any) { showToast(`恢复失败：${e.message}`, "error"); }
+    catch (e: any) { showToast(`恢复失败：请稍后重试`, "error"); }
   });
 
   return (
@@ -283,7 +285,7 @@ function DiagnosePane() {
   const [res, setRes] = useState<DiagnoseResult | null>(null);
   const [live, setLive] = useState(false);
   const run = () => withPending("diag", async () => {
-    try { setRes(await api.diagnose(live)); } catch (e: any) { showToast(`诊断失败：${e.message}`, "error"); }
+    try { setRes(await api.diagnose(live)); } catch (e: any) { showToast(`诊断失败：请稍后重试`, "error"); }
   });
   useEffect(() => { run(); /* 进页自动跑一次（不实测 LLM） */ }, []);  // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -294,7 +296,7 @@ function DiagnosePane() {
         <div>
           <div className="panel-title"><span className="icon">⚑</span>8 点端到端诊断</div>
           <div className="panel-sub">
-            {res ? `检查于 ${new Date(res.checked_at).toLocaleString("zh-CN")} · 总体 ${icon[res.overall]}` : "检查选题库、画像、登录、LLM、熔断、配额、数据库、Skills"}
+            {res ? `检查于 ${formatBusinessDateTime(res.checked_at)} · 总体 ${icon[res.overall]}` : "检查选题库、画像、登录、LLM、熔断、配额、数据库、Skills"}
           </div>
         </div>
         <div className="flex" style={{ gap: 10, alignItems: "center" }}>
@@ -461,7 +463,7 @@ function SkillsPane() {
         setSkillInputsJson("[]"); setSkillOutputsJson("[]"); setSkillPermissions([]);
         setEditingSkillId(null); setEditingSkillVersion(null); setDraftTest(null);
         await load();
-      } catch (e: any) { showToast(`${editingSkillId ? "更新" : "登记"}失败：${e?.message ?? e}`, "error"); }
+      } catch (e: any) { showToast(`${editingSkillId ? "更新" : "登记"}失败：请稍后重试`, "error"); }
     });
   };
 
@@ -485,7 +487,7 @@ function SkillsPane() {
         api.setTenantSkillEnabled(skill.skill_id, !skill.enabled, skill.manifest_version));
       await load();
       showToast(skill.enabled ? "Skill 已停用" : "Skill 已启用（仅登记状态，不会执行）", "success");
-    } catch (e: any) { showToast(`状态更新失败：${e?.message ?? e}`, "error"); }
+    } catch (e: any) { showToast(`状态更新失败：请稍后重试`, "error"); }
   };
 
   const remove = async (skill: TenantSkillManifest) => {
@@ -493,7 +495,7 @@ function SkillsPane() {
       await withPending(`skill:delete:${skill.skill_id}`, () => api.deleteTenantSkill(skill.skill_id));
       await load();
       showToast("Skill 登记已删除", "success");
-    } catch (e: any) { showToast(`删除失败：${e?.message ?? e}`, "error"); }
+    } catch (e: any) { showToast(`删除失败：请稍后重试`, "error"); }
   };
 
   return (
@@ -517,10 +519,10 @@ function SkillsPane() {
                     <tr key={skill.skill_id}>
                       <td>
                         <strong>{skill.name.replace(/（R\d+）/g, "").replace("Playwright ", "")}</strong>
-                        <div className="tiny">{skill.skill_id}</div>
+                         
                         <details className="skill-manifest-preview">
                           <summary>预览能力定义</summary>
-                          <pre>{JSON.stringify(skill, null, 2)}</pre>
+                          <StructuredDataView data={skill} title="能力详情" />
                         </details>
                       </td>
                       <td><span className="tag green">系统内置</span></td>
@@ -548,8 +550,7 @@ function SkillsPane() {
           <label>版本<input className="field" value={skillVersion} onChange={(e) => setSkillVersion(e.target.value)} placeholder="1.0.0" /></label>
           <label>分类<input className="field" value={skillCategory} onChange={(e) => setSkillCategory(e.target.value)} placeholder="custom" /></label>
           <label className="skill-register-description">能力说明<input className="field" value={skillDescription} onChange={(e) => setSkillDescription(e.target.value)} maxLength={2000} placeholder="说明输入、输出和适用场景" /></label>
-          <label>输入 Schema（JSON 数组）<textarea className="field" rows={3} value={skillInputsJson} onChange={(e) => setSkillInputsJson(e.target.value)} spellCheck={false} /></label>
-          <label>输出 Schema（JSON 数组）<textarea className="field" rows={3} value={skillOutputsJson} onChange={(e) => setSkillOutputsJson(e.target.value)} spellCheck={false} /></label>
+          <details className="advanced-report-editor"><summary>高级配置：输入 / 输出 Schema 结构</summary><label>输入 Schema（JSON 数组）<textarea className="field" rows={3} value={skillInputsJson} onChange={(e) => setSkillInputsJson(e.target.value)} spellCheck={false} /></label><label>输出 Schema（JSON 数组）<textarea className="field" rows={3} value={skillOutputsJson} onChange={(e) => setSkillOutputsJson(e.target.value)} spellCheck={false} /></label></details>
           <div className="skill-permissions">
             <span>只读权限声明</span>
             {(["read_content", "read_plan", "read_drafts"] as const).map((permission) => (
@@ -587,7 +588,7 @@ function SkillsPane() {
               <thead><tr><th>Skill</th><th>版本</th><th>分类</th><th>权限</th><th>安装</th><th>启用</th><th>可运行</th><th>操作</th></tr></thead>
               <tbody>{customSkills.map((skill) => (
                 <tr key={skill.skill_id}>
-                  <td><strong>{skill.name}</strong><div className="tiny">{skill.skill_id}</div><div className="tiny">{skill.description}</div><details className="skill-manifest-preview"><summary>预览 Manifest</summary><pre>{JSON.stringify(skill, null, 2)}</pre></details></td>
+                  <td><strong>{skill.name}</strong> <div className="tiny">{skill.description}</div><details className="skill-manifest-preview"><summary>高级技术配置（Manifest）</summary><StructuredDataView data={skill} title="Skill 配置详情" /></details></td>
                   <td>{skill.version}</td>
                   <td>{skill.category}</td>
                   <td>{skill.permissions.length ? skill.permissions.join("、") : "无"}</td>
@@ -676,7 +677,7 @@ function SkillContractTester({ skill, onClose }: { skill: TenantSkillManifest; o
       ]);
     } catch (e) {
       setChecks(null);
-      setError(e instanceof Error ? `JSON 格式错误：${e.message}` : "JSON 格式错误");
+      setError(e instanceof Error ? `JSON 格式错误：请稍后重试` : "JSON 格式错误");
     }
   };
   return (
@@ -742,9 +743,9 @@ function AuditPane() {
 
   const loadAudit = async () => {
     setAiCallsError(null); setOverridesError(null); setRedlinesError(null);
-    try { setAiCalls(await api.aiCalls(2000)); } catch (e: any) { setAiCallsError(e.message); }
-    try { setOverrides(await api.userOverride(2000)); } catch (e: any) { setOverridesError(e.message); }
-    try { setRedlines(await api.redlineHistory(2000)); } catch (e: any) { setRedlinesError(e.message); }
+    try { setAiCalls(await api.aiCalls(2000)); } catch { setAiCallsError("调用记录加载失败，请稍后重试。"); }
+    try { setOverrides(await api.userOverride(2000)); } catch { setOverridesError("人工干预记录加载失败，请稍后重试。"); }
+    try { setRedlines(await api.redlineHistory(2000)); } catch { setRedlinesError("红线记录加载失败，请稍后重试。"); }
   };
   useEffect(() => { loadAudit(); }, []);
 
@@ -794,16 +795,14 @@ function AuditPane() {
               <div className="table-wrap">
                 <table>
                   <thead><tr>
-                    <th>时间</th><th>Step</th><th>模型</th><th>Prompt Ver</th>
+                    <th>时间</th><th>Step</th>
                     <th>Tokens In</th><th>Tokens Out</th><th>延迟</th><th>结果</th>
                   </tr></thead>
                   <tbody>
                     {aiCalls.slice((auditPage - 1) * auditPageSize, auditPage * auditPageSize).map((r) => (
                       <tr key={r.id}>
-                        <td style={{ fontSize: 11, fontFamily: "monospace", color: "var(--subtle)" }}>{r.called_at}</td>
-                        <td style={{ fontSize: 12, fontFamily: "monospace" }}>{displayStepLabel(r.step)}</td>
-                        <td>{r.model}</td>
-                        <td style={{ fontSize: 11, fontFamily: "monospace" }}>{r.prompt_version}</td>
+                        <td style={{ fontSize: 12, color: "var(--subtle)" }}>{formatBusinessDateTime(r.called_at)}</td>
+                        <td>{displayStepLabel(r.step)}</td>
                         <td>{r.tokens_in ?? <span style={{ color: "var(--subtle)" }}>—</span>}</td>
                         <td>{r.tokens_out ?? <span style={{ color: "var(--subtle)" }}>—</span>}</td>
                         <td>{r.latency_ms}ms</td>
