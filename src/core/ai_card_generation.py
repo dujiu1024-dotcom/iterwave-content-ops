@@ -282,9 +282,13 @@ def _generate_ai_card_set(
                 expected_reference_hash = str(reference.get("sha256") or "").strip().lower()
                 if not reference_path.is_file() or not re.fullmatch(r"[0-9a-f]{64}", expected_reference_hash):
                     raise ValueError("reference_asset_missing_or_unverified")
-                actual_reference_hash = hashlib.sha256(reference_path.read_bytes()).hexdigest()
+                reference_bytes = reference_path.read_bytes()
+                if len(reference_bytes) > 12 * 1024 * 1024:
+                    raise ValueError("reference_asset_too_large")
+                actual_reference_hash = hashlib.sha256(reference_bytes).hexdigest()
                 if actual_reference_hash != expected_reference_hash:
                     raise ValueError("reference_asset_hash_mismatch")
+                validate_image_bytes(reference_bytes, cfg=cfg)
                 reference_identity = {
                     "asset_id": reference.get("asset_id"),
                     "version_no": reference.get("version_no"),
@@ -338,6 +342,7 @@ def _generate_ai_card_set(
                         source_path=reference_path,
                         source_mime_type=str(reference.get("mime_type") or "application/octet-stream") if reference else None,
                         source_filename=reference_path.name if reference_path else None,
+                        source_bytes=reference_bytes if reference else None,
                         cfg=cfg, allow_fallback=allow_fallback,
                     )
                     check_deadline(page_deadline, "图片单页")
