@@ -398,3 +398,60 @@ def test_visual_cache_fingerprint_changes_with_plan_role_and_reference_version(t
     )
     assert first != changed_version
     assert first != changed_role
+
+
+def test_visual_generation_audits_each_provider_accepted_reference_page(monkeypatch, tmp_path):
+    import hashlib
+    from io import BytesIO
+    from PIL import Image
+    from src.core import asset_consumption_audit, visual_ocr
+    from src.core.visual_planning import build_visual_brief, build_visual_plan
+
+    reference_buffer = BytesIO()
+    Image.new("RGB", (256, 384), "white").save(reference_buffer, format="PNG")
+    reference_bytes = reference_buffer.getvalue()
+    reference_path = tmp_path / "approved.png"
+    reference_path.write_bytes(reference_bytes)
+    reference = {
+        "asset_id": 17, "version_no": 4, "path": str(reference_path),
+        "sha256": hashlib.sha256(reference_bytes).hexdigest(), "mime_type": "image/png",
+    }
+    brief = build_visual_brief(platform="xhs", topic="主题", title="标题")
+    plan = build_visual_plan(brief=brief, title="标题", subtitle="栏目", body_pages=["正文内容。"])
+    events = []
+    monkeypatch.setattr(
+        asset_consumption_audit, "record_visual_asset_consumption",
+        lambda **event: events.append(event),
+    )
+    monkeypatch.setattr(visual_ocr, "preflight_ocr", lambda **_kwargs: {"status": "available"})
+
+    def accepted_provider(prompt, **kwargs):
+        raw = _valid_generated_image(prompt)
+        callback = kwargs.get("on_provider_accepted")
+        if callback is not None:
+            callback(provider="actual-provider", model="actual-model", result_bytes=raw)
+        return raw, "image/png", ".png", 1024, 1536
+
+    monkeypatch.setattr(cards, "generate_image_bytes", accepted_provider)
+    monkeypatch.setattr(
+        visual_ocr, "validate_rendered_pages",
+        lambda images, expected, report, **kwargs: {
+            "status": "passed", "gate": "passed",
+            "pages": [{"status": "passed"} for _ in images],
+        },
+    )
+    paths, _pages = cards.generate_ai_card_set(
+        title="标题", subtitle="栏目", body="正文内容。",
+        output_dir=tmp_path / "output", platform=type("P", (), {"value": "xhs"})(),
+        cfg=_Cfg(tmp_path), settings={"model": "requested-model", "size": "1024x1536"},
+        visual_plan=plan,
+        reference_assets={"cover": reference, "body": reference, "ending": reference},
+        production_task_id="pt-audit",
+    )
+    assert len(paths) == 3
+    assert len(events) == 3
+    assert [event["page_role"] for event in events] == ["cover", "body", "ending"]
+    assert [event["page_index"] for event in events] == [0, 1, 2]
+    assert all(event["production_task_id"] == "pt-audit" for event in events)
+    assert all(event["provider"] == "actual-provider" for event in events)
+    assert all(event["model"] == "actual-model" for event in events)
