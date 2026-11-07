@@ -207,7 +207,7 @@ export default function TaskQueue() {
       if (historyPage > nextHistoryPages) setHistoryPage(nextHistoryPages);
       setError("");
     } catch (err) {
-      setError((err as Error).message || "任务队列读取失败");
+      setError("任务队列读取失败，请稍后重试。");
     } finally {
       setLoading(false);
     }
@@ -479,7 +479,7 @@ export default function TaskQueue() {
                   />
                 )}
                 {detailTask.error_code && <div className="notice danger" style={{ marginTop: 14 }}>失败原因：{displayErrorLabel(detailTask.error_code)}</div>}
-                {detailTask.error_message && <details className="advanced-report-editor"><summary>高级诊断：原始错误详情</summary><pre className="diagnostic-text">{detailTask.error_message}</pre></details>}
+                {detailTask.error_message && <div className="tiny">诊断详情已记录：{displayErrorLabel(detailTask.error_code)}</div>}
 
                 {detailTask.retry_confirmation_note && <div className="muted" style={{ marginTop: 6 }}>恢复核验：{detailTask.retry_confirmation_note}</div>}
                 {detailTask.resolution_action && <div className="muted" style={{ marginTop: 12 }}>
