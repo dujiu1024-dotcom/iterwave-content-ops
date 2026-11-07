@@ -3,7 +3,7 @@ import { api, GlobalMonitorResponse, GlobalTaskQueueItem, GlobalTodoItem, Notifi
 import { navigate } from "../nav";
 import { roundTaskLabel } from "../roundLabel";
 import ProductionPlanMonitor from "../components/ProductionPlanMonitor";
-import { displayErrorLabel, displayStatusLabel } from "../displayLabels";
+import { displayErrorLabel, displayPlatformLabel, displayStatusLabel } from "../displayLabels";
 
 const STATUS: Record<string, string> = {
   queued: "排队中", running: "运行中", succeeded: "已完成",
@@ -166,9 +166,9 @@ export default function GlobalOperations() {
                   <td>{tenant.runtime?.available ? (
                     <div className="global-platform-cell">
                       <strong>{(tenant.runtime.logged_in_platforms ?? []).length}/{(tenant.runtime.enabled_platforms ?? []).length} 已登录</strong>
-                      <span className="tiny">已登录：{(tenant.runtime.logged_in_platforms ?? []).map((p) => PLATFORMS[p] ?? p).join("、") || "无"}</span>
-                      <span className="tiny">未登录：{(tenant.runtime.platforms_without_login ?? []).map((p) => PLATFORMS[p] ?? p).join("、") || "无"}</span>
-                      {(tenant.runtime.circuit_broken_platforms ?? []).length > 0 && <span className="tiny" style={{ color: "var(--red)" }}>熔断：{(tenant.runtime.circuit_broken_platforms ?? []).map((p) => PLATFORMS[p] ?? p).join("、")}</span>}
+                      <span className="tiny">已登录：{(tenant.runtime.logged_in_platforms ?? []).map((p) => displayPlatformLabel(p)).join("、") || "无"}</span>
+                      <span className="tiny">未登录：{(tenant.runtime.platforms_without_login ?? []).map((p) => displayPlatformLabel(p)).join("、") || "无"}</span>
+                      {(tenant.runtime.circuit_broken_platforms ?? []).length > 0 && <span className="tiny" style={{ color: "var(--red)" }}>熔断：{(tenant.runtime.circuit_broken_platforms ?? []).map((p) => displayPlatformLabel(p)).join("、")}</span>}
                     </div>
                   ) : tenant.db_status === "uninitialized" ? <span className="tag gray">未初始化</span> : tenant.db_available ? <span className="tag gray">未启动</span> : <span className="tag red">数据库不可用</span>}</td>
                   <td>{q.running}</td><td>{q.queued}</td><td>{q.failed || 0}</td>
@@ -203,7 +203,7 @@ export default function GlobalOperations() {
           <div className="panel-head"><div><div className="panel-title">全局 FIFO 任务</div><div className="panel-sub">运行任务不会因账号组切换而中断。</div></div><button className="btn sm" onClick={() => navigate("task-queue")}>完整队列</button></div>
           {active.length ? <div className="list">{active.map((task) => <div className="task-row" key={task.task_id}>
             <i className={`task-prio ${task.status === "running" ? "green" : "blue"}`} />
-            <div className="task-main"><div className="task-title">{task.tenant_name} · {task.task_type === "round_run" ? roundTaskLabel(task) : (TASK_TYPE_LABEL[task.task_type] ?? "账号组后台任务")}</div><div className="task-desc">队列 #{task.queue_order} · {STATUS[task.status]}</div></div>
+            <div className="task-main"><div className="task-title">{task.tenant_name} · {task.task_type === "round_run" ? roundTaskLabel(task) : (TASK_TYPE_LABEL[task.task_type] ?? "账号组后台任务")}</div><div className="task-desc">队列 #{task.queue_order} · {STATUS[task.status] ?? displayStatusLabel(task.status)}</div></div>
           </div>)}</div> : <div className="empty-state">当前没有排队或执行中的任务。</div>}
           {activePages > 1 && <div className="pagination-row" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, paddingTop: 12 }}>
             <button className="btn sm" disabled={activePage <= 1 || loading} onClick={() => setActivePage((p) => Math.max(1, p - 1))}>上一页</button>
@@ -214,7 +214,7 @@ export default function GlobalOperations() {
         <section className="panel">
           <div className="panel-head"><div><div className="panel-title">异常与待处理</div><div className="panel-sub">当前返回的队列记录中失败或中断的任务。</div></div><span className="tag">{failedCount ?? "—"} 项</span></div>
           {failed.length ? <div className="list">{failed.map((task) => <div className="task-row" key={task.task_id}>
-            <i className="task-prio red" /><div className="task-main"><div className="task-title">{task.tenant_name} · {task.task_type === "round_run" ? roundTaskLabel(task) : (TASK_TYPE_LABEL[task.task_type] ?? "账号组后台任务")} · {STATUS[task.status]}</div><div className="task-desc">{task.error_message ? displayErrorLabel(task.error_message) : "未记录错误说明"}</div></div>
+            <i className="task-prio red" /><div className="task-main"><div className="task-title">{task.tenant_name} · {task.task_type === "round_run" ? roundTaskLabel(task) : (TASK_TYPE_LABEL[task.task_type] ?? "账号组后台任务")} · {STATUS[task.status] ?? displayStatusLabel(task.status)}</div><div className="task-desc">{task.error_message ? displayErrorLabel(task.error_message) : "未记录错误说明"}</div></div>
           </div>)}</div> : <div className="empty-state">当前没有失败或中断任务。</div>}
           {failedPages > 1 && <div className="pagination-row" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, paddingTop: 12 }}>
             <button className="btn sm" disabled={failedPage <= 1 || loading} onClick={() => setFailedPage((p) => Math.max(1, p - 1))}>上一页</button>
@@ -228,7 +228,7 @@ export default function GlobalOperations() {
         <div className="panel-head"><div><div className="panel-title">平台与内容汇总</div><div className="panel-sub">近 30 天跨账号组内容产出；账号组登录态与调度状态来自各自运行时快照。</div></div></div>
         <div className="grid four">
           {Object.entries(monitor?.platform_totals ?? {}).map(([platform, value]) => <div className="metric" key={platform}>
-            <div className="metric-label">{PLATFORMS[platform] ?? platform}</div><div className="metric-val">{monitor?.tenants?.reduce((sum, tenant) => sum + (tenant.platforms?.[platform]?.contents_period ?? 0), 0) ?? "—"}</div><div className="metric-foot">近 30 天内容 · 草稿 {value.drafts}</div>
+            <div className="metric-label">{displayPlatformLabel(platform)}</div><div className="metric-val">{monitor?.tenants?.reduce((sum, tenant) => sum + (tenant.platforms?.[platform]?.contents_period ?? 0), 0) ?? "—"}</div><div className="metric-foot">近 30 天内容 · 草稿 {value.drafts}</div>
           </div>)}
         </div>
         {!monitor && <div className="empty-state">等待汇总数据。</div>}
