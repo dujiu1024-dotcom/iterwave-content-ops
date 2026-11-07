@@ -1814,9 +1814,7 @@ export default function Production() {
                 </div>
 
                 <div className="note" style={{ marginTop: 12 }}>
-                  计划版本：{roundDetail.plan_signature
-                    ? <span style={{ fontFamily: "monospace" }}>{roundDetail.plan_signature.slice(0, 16)}…</span>
-                    : "—"}
+                  计划版本：{roundDetail.plan_signature ? "已记录" : "—"}
                   {(roundDetail as any).guard_rejections != null && <> · 目标检查拦截 {(roundDetail as any).guard_rejections} 次</>}
                 </div>
 
