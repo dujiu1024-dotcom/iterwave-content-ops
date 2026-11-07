@@ -154,7 +154,7 @@ function PreviewPane({ orch, runs, onEdit }: {
         const st = run?.step_status?.[s.id];
         return (
           <div className="note" style={{ marginTop: 12, padding: 14, background: "var(--surface-2)", borderRadius: 10 }}>
-            <div style={{ fontWeight: 700, marginBottom: 6 }}>{s.label} <code style={{ fontSize: 11, color: "var(--muted)" }}>skill: {s.skill}</code></div>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>{s.label}</div>
             <div style={{ marginBottom: 6 }}>{s.desc}</div>
             <div className="kv-grid">
               <span>依赖</span><span>{s.requires.length ? s.requires.map(labelOf).join("、") : "无"}</span>
