@@ -394,7 +394,7 @@ function KpiPane({
               <div key={status} className="task-row">
                 <i className={`task-prio ${status === "published" ? "green" : status === "failed" || status === "expired" ? "red" : "blue"}`} />
                 <div className="task-main">
-                  <div className="task-title">{DRAFT_STATUS_LABEL[status] ?? status}</div>
+                  <div className="task-title">{DRAFT_STATUS_LABEL[status] ?? displayStatusLabel(status)}</div>
                 </div>
                 <div style={{ fontSize: 18, fontWeight: 700 }}>{n}</div>
               </div>
@@ -480,8 +480,8 @@ function LogsPane({ logs, total, page, pages, onPageChange, onResolved, targetId
                 <td style={{ fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>
                   {l.executed_at ? new Date(l.executed_at).toLocaleString("zh-CN") : l.schedule_time ? "待执行" : "-"}
                 </td>
-                <td>{PLATFORM_NAME[l.platform]}</td>
-                <td><span className="tag gray">{ACTION_LABEL[l.action_type] ?? l.action_type}</span></td>
+                <td>{PLATFORM_NAME[l.platform] ?? displayPlatformLabel(l.platform)}</td>
+                <td><span className="tag gray">{ACTION_LABEL[l.action_type] ?? displayCodeLabel(l.action_type)}</span></td>
                 <td style={{ maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12 }}>
                   {l.content ?? l.target_author ?? "-"}
                 </td>
@@ -622,7 +622,7 @@ function PublishPane() {
             <div key={d.id} className="task-row">
               <i className={`task-prio ${d.status === "user_published" ? "green" : "orange"}`} />
               <div className="task-main">
-                <div className="task-title">{PLATFORM_NAME[d.platform as Platform]} · {d.title ?? d.id}</div>
+                <div className="task-title">{PLATFORM_NAME[d.platform as Platform] ?? displayPlatformLabel(d.platform)} · {d.title ?? "未命名草稿"}</div>
                 <div className="task-desc">
                   状态：<strong>{displayStatusLabel(d.status)}</strong>
                   {d.status === "draft_pending"
