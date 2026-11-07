@@ -449,6 +449,19 @@ def _generate_ai_card_set(
                 json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8",
             )
 
+        from .visual_group_quality import validate_visual_group
+        group_report = validate_visual_group(
+            accepted_cache,
+            roles=[item["role"] for item in page_specs],
+            expected_texts=expected,
+            ocr_report=report,
+            require_ending=visual_plan is not None,
+        )
+        group_report_path = staging_dir / "visual_group_quality.json"
+        group_report_path.write_text(
+            json.dumps(group_report, ensure_ascii=False, indent=2), encoding="utf-8",
+        )
+
         delivery_stage = staging_dir / "delivery"
         delivery_stage.mkdir()
         staged_paths: list[Path] = []
