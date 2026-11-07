@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, GlobalMonitorResponse, GlobalTaskQueueItem, GlobalTodoItem, NotificationItem } from "../api";
 import { navigate } from "../nav";
+import { formatBusinessDateTime } from "../businessTime.mjs";
 import { roundTaskLabel } from "../roundLabel";
 import ProductionPlanMonitor from "../components/ProductionPlanMonitor";
 import { displayStatusLabel } from "../displayLabels";
@@ -187,7 +188,7 @@ export default function GlobalOperations() {
                       </span>
                       {tenant.recent_execution.has_error_detail && <span className="tiny">诊断详情已记录</span>}
                       <span className="tiny">{tenant.recent_execution.finished_at || tenant.recent_execution.started_at || tenant.recent_execution.created_at
-                        ? new Date(tenant.recent_execution.finished_at || tenant.recent_execution.started_at || tenant.recent_execution.created_at!).toLocaleString("zh-CN")
+                        ? formatBusinessDateTime(tenant.recent_execution.finished_at || tenant.recent_execution.started_at || tenant.recent_execution.created_at!)
                         : "时间未知"}</span>
                     </div>
                   ) : <span className="muted">暂无执行记录</span>}</td>
@@ -214,7 +215,7 @@ export default function GlobalOperations() {
         <section className="panel">
           <div className="panel-head"><div><div className="panel-title">异常与待处理</div><div className="panel-sub">当前返回的队列记录中失败或中断的任务。</div></div><span className="tag">{failedCount ?? "—"} 项</span></div>
           {failed.length ? <div className="list">{failed.map((task) => <div className="task-row" key={task.task_id}>
-            <i className="task-prio red" /><div className="task-main"><div className="task-title">{task.tenant_name} · {task.task_type === "round_run" ? roundTaskLabel(task) : (TASK_TYPE_LABEL[task.task_type] ?? "账号组后台任务")} · {STATUS[task.status]}</div><div className="task-desc">{task.error_message || "未记录错误说明"}</div></div>
+            <i className="task-prio red" /><div className="task-main"><div className="task-title">{task.tenant_name} · {task.task_type === "round_run" ? roundTaskLabel(task) : (TASK_TYPE_LABEL[task.task_type] ?? "账号组后台任务")} · {STATUS[task.status]}</div><div className="task-desc">{task.error_message ? "任务执行失败，请查看任务详情。" : "未记录错误说明"}</div></div>
           </div>)}</div> : <div className="empty-state">当前没有失败或中断任务。</div>}
           {failedPages > 1 && <div className="pagination-row" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, paddingTop: 12 }}>
             <button className="btn sm" disabled={failedPage <= 1 || loading} onClick={() => setFailedPage((p) => Math.max(1, p - 1))}>上一页</button>
@@ -259,7 +260,7 @@ export default function GlobalOperations() {
             <i className={`task-prio ${todo.severity === "high" ? "red" : "blue"}`} />
             <div className="task-main">
               <div className="task-title">{todo.title}</div>
-              <div className="task-desc">{todo.tenant_name} · {todo.source_label} · {todo.detail} · {todo.created_at ? new Date(todo.created_at).toLocaleString("zh-CN") : "时间未知"}</div>
+              <div className="task-desc">{todo.tenant_name} · {todo.source_label} · {todo.detail} · {todo.created_at ? formatBusinessDateTime(todo.created_at) : "时间未知"}</div>
             </div>
             {todo.source === "notification" ? <button className="btn sm" disabled={loading} onClick={() => {
               void api.markNotificationRead(Number(todo.record_id)).then(() => refresh()).catch((e) => setError(e instanceof Error ? e.message : String(e)));
@@ -289,7 +290,7 @@ export default function GlobalOperations() {
             <i className={`task-prio ${notification.level === "critical" || notification.level === "error" ? "red" : notification.level === "warning" ? "blue" : "green"}`} />
             <div className="task-main">
               <div className="task-title">{notification.title}</div>
-              <div className="task-desc">{notification.body || notification.type} · {notification.platform ? (PLATFORMS[notification.platform] ?? notification.platform) : "系统"} · {new Date(notification.sent_at).toLocaleString("zh-CN")}</div>
+              <div className="task-desc">{notification.body || notification.type} · {notification.platform ? (PLATFORMS[notification.platform] ?? notification.platform) : "系统"} · {formatBusinessDateTime(notification.sent_at)}</div>
             </div>
             <button className="btn sm primary" disabled={loading} onClick={() => {
               void api.markNotificationRead(notification.id)

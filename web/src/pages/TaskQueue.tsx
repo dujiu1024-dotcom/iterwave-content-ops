@@ -91,7 +91,7 @@ function TaskRow({
       </div>
       <div className="muted" style={{ fontSize: 12 }}>{timeLabel(task.created_at)}</div>
       <div className="muted" style={{ fontSize: 12 }}>
-        {task.error_message || (
+        {task.error_message ? "任务执行未完成，请查看详情中的诊断提示。" : (
           task.status === "queued" && new Date(task.available_at).getTime() > Date.now()
             ? `计划执行：${timeLabel(task.available_at)}`
             : task.started_at ? `开始：${timeLabel(task.started_at)}` : "尚未开始"
@@ -411,7 +411,7 @@ export default function TaskQueue() {
           >
             <h2 id="task-retry-title">人工核验后恢复任务</h2>
             <p className="muted" style={{ marginTop: 8 }}>
-              待恢复任务 · 账号组：{retryTask.tenant_name}<details className="structured-data-diagnostics"><summary>高级诊断</summary><code>{retryTask.task_id}</code></details>
+              待恢复任务 · 账号组：{retryTask.tenant_name}
             </p>
             <div role="alert" style={{ margin: "14px 0", padding: 12, borderRadius: 10, border: "1px solid var(--red)", background: "var(--red-weak)", color: "var(--text)", fontSize: 13, lineHeight: 1.6 }}>
               仅当你已在对应平台核实“该操作没有执行、没有创建草稿或发布记录”时才能恢复。
@@ -479,8 +479,8 @@ export default function TaskQueue() {
                   />
                 )}
                 {detailTask.error_code && <div className="notice danger" style={{ marginTop: 14 }}>错误说明：{displayErrorLabel(detailTask.error_code)} </div>}
-                {detailTask.error_message && <div style={{ marginTop: 10, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{detailTask.error_message}</div>}
-                {(detailTask.task_id || detailTask.tenant_id || detailTask.retry_of_task_id) && <details className="structured-data-diagnostics"><summary>高级诊断信息</summary><dl className="structured-data-grid"><div className="structured-data-field"><dt>任务标识</dt><dd><code>{detailTask.task_id}</code></dd></div><div className="structured-data-field"><dt>账号组标识</dt><dd><code>{detailTask.tenant_id}</code></dd></div>{detailTask.retry_of_task_id && <div className="structured-data-field"><dt>恢复来源任务</dt><dd><code>{detailTask.retry_of_task_id}</code></dd></div>}</dl></details>}
+                {detailTask.error_message && <div className="note" style={{ marginTop: 10 }}>任务执行未完成。请核对平台状态后再决定是否恢复。</div>}
+                
                 {detailTask.retry_confirmation_note && <div className="muted" style={{ marginTop: 6 }}>恢复核验：{detailTask.retry_confirmation_note}</div>}
                 {detailTask.resolution_action && <div className="muted" style={{ marginTop: 12 }}>
                   处理记录：{detailTask.resolution_action === "handled" ? "已处理" : "已忽略"} · {detailTask.resolution_actor || "操作人未知"} · {timeLabel(detailTask.resolution_at)}
@@ -507,7 +507,7 @@ export default function TaskQueue() {
                         <div className="tiny">{entry.actor} · {timeLabel(entry.acted_at)}</div>
                         {typeof entry.details.note === "string" && <div className="tiny">{entry.details.note}</div>}
                         {typeof entry.details.confirmation_note === "string" && <div className="tiny">恢复核验：{entry.details.confirmation_note}</div>}
-                        {typeof entry.details.retry_task_id === "string" && <details className="structured-data-diagnostics"><summary>高级诊断</summary><code>{entry.details.retry_task_id}</code></details>}
+                        
                       </div>
                     </div>)}
                   </div> : <div className="empty-state">暂无管理操作审计记录。</div>}
@@ -534,7 +534,7 @@ export default function TaskQueue() {
           >
             <h2 id="task-resolution-title">{resolutionAction === "handled" ? "标记任务已处理" : "忽略此任务"}</h2>
             <p className="muted" style={{ marginTop: 8 }}>
-              待处理任务 · 账号组：{resolutionTask.tenant_name}<details className="structured-data-diagnostics"><summary>高级诊断</summary><code>{resolutionTask.task_id}</code></details>
+              待处理任务 · 账号组：{resolutionTask.tenant_name}
             </p>
             <div role="alert" className="notice" style={{ margin: "14px 0" }}>
               此操作只关闭待办，不会修改原始失败状态，也不会重新执行任务。处理记录会永久保留。

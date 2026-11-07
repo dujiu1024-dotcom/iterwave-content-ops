@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { formatBusinessDateTime } from "../businessTime.mjs";
 import { useApp } from "../AppContext";
 import { useUrlTab } from "../nav";
 import DemoBadge from "../components/DemoBadge";
@@ -890,23 +891,23 @@ function TasksPane({ tasks, total, page, pages, onPageChange, onResolved, target
       </div>
       <div className="table-wrap">
         <table>
-          <thead><tr><th>ID</th><th>类型</th><th>平台</th><th>状态</th><th>尝试</th><th>开始</th><th>结束</th><th>错误</th><th>操作</th></tr></thead>
+          <thead><tr><th>类型</th><th>平台</th><th>状态</th><th>尝试</th><th>开始</th><th>结束</th><th>错误</th><th>操作</th></tr></thead>
           <tbody>
             {tasks.length === 0 && (
-              <tr><td colSpan={9}>
+              <tr><td colSpan={8}>
                 <EmptyHint className="" next="运行一轮生产，或等待定时任务触发后会自动记录">暂无任务记录</EmptyHint>
               </td></tr>
             )}
             {tasks.map((t) => (
               <tr key={t.id} style={(targetType === "round" ? t.task_type === "round_pipeline" && t.biz_id === String(targetId) : targetId === t.id) ? { background: "var(--surface-2)", outline: "2px solid var(--primary)" } : undefined}>
-                <td style={{ fontSize: 12, fontFamily: "monospace" }}>#{t.id}</td>
+                
                 <td>{TYPE_LABEL[t.task_type] ?? displayTaskTypeLabel(t.task_type)}</td>
                 <td>{t.platform ? PLATFORM_NAME[t.platform] : "-"}</td>
                 <td><span className={`demo-status ${STATUS_CLS[t.status] ?? ""}`}>{STATUS_LABEL[t.status] ?? displayStatusLabel(t.status)}</span></td>
                 <td>{t.attempt}/{t.max_attempts}</td>
-                <td style={{ fontSize: 11, color: "var(--muted)" }}>{t.started_at ? new Date(t.started_at).toLocaleString("zh-CN") : "-"}</td>
-                <td style={{ fontSize: 11, color: "var(--muted)" }}>{t.finished_at ? new Date(t.finished_at).toLocaleString("zh-CN") : "-"}</td>
-                <td style={{ fontSize: 11, maxWidth: 200 }}>{t.error_msg ?? "-"}</td>
+                <td style={{ fontSize: 11, color: "var(--muted)" }}>{formatBusinessDateTime(t.started_at)}</td>
+                <td style={{ fontSize: 11, color: "var(--muted)" }}>{formatBusinessDateTime(t.finished_at)}</td>
+                <td style={{ fontSize: 11, maxWidth: 200 }}>{t.error_msg ? "任务执行未完成，请查看任务详情。" : "—"}</td>
                 <td>
                   {t.status === "pending_verify" ? (
                     <>
