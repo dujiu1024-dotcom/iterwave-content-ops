@@ -46,24 +46,31 @@ def _paginate_body(body: str, *, max_chars: int = 90, segments_per_page: int = 5
 
 
 def _page_prompt(*, title: str, subtitle: str, page_text: str, page_index: int,
-                 page_count: int, cover: bool = False) -> str:
-    if cover:
-        role = "这是整组图文的封面页"
+                 page_count: int, cover: bool = False, role: str | None = None,
+                 visual_direction: str = "") -> str:
+    page_role = str(role or ("cover" if cover else "body")).lower()
+    if page_role == "cover":
+        role_label = "这是整组图文的封面页"
         content = f"必须准确呈现的封面标题：\n{title}\n副标题：\n{subtitle}"
         layout = "封面要有明确主视觉、醒目的标题排版和克制的辅助信息，形成完整的编辑设计。"
+    elif page_role == "ending":
+        role_label = "这是整组图文的收束尾页"
+        content = f"必须逐字、完整呈现以下结论/行动文案，不得改写、删减、增补或杜撰：\n{page_text}"
+        layout = "以清晰结论收束整组叙事，形成有记忆点的终章构图；不得伪造行动号召。"
     else:
-        role = f"这是第 {page_index} 页正文，共 {page_count} 页正文"
+        role_label = f"这是第 {page_index} 页正文，共 {page_count} 页正文"
         content = f"必须逐字、完整呈现以下中文正文，不得改写、删减、增补或杜撰：\n{page_text}"
         layout = (
             "将内容设计成真正的信息图页面：按语义选择流程、步骤、对比、分组、"
             "时间线、重点数字或图解构图。避免整页大段连续文字，避免统一的矩形文字框堆叠。"
         )
+    direction = f"\n本页专属视觉策划：{visual_direction}" if visual_direction else ""
     return (
         "请直接生成一张完整、可发布的中文社交媒体图文卡片成品图片，而不是背景图、素材图或模板。"
         "图片本身必须包含所有文字、插画、图形、信息层级、色彩和装饰；不得依赖后期程序叠字。"
         "高品质中文编辑设计，专业信息图与品牌杂志视觉，构图有重点、留白充足、字体清晰可读，"
         "插画和图形必须服务于本页具体内容。严格适配请求的输出尺寸与纵横比，高清。"
-        f"\n{role}。主题：{title}。栏目：{subtitle}。\n{layout}\n"
+        f"\n{role_label}。主题：{title}。栏目：{subtitle}。\n{layout}{direction}\n"
         f"{content}\n"
         "文字准确性优先于装饰：中文必须使用简体中文，严格保留给定文字及数字，不得出现乱码、"
         "伪文字、无关英文、水印、虚构品牌标识。不得把正文缩成难以阅读的小字。"
@@ -76,7 +83,9 @@ def _canonical_hash(value: dict) -> str:
 
 
 def _cache_fingerprint(*, expected: str, prompt: str, settings: dict, brand_profile: dict,
-                       platform: str, page_index: int, cfg, allow_fallback: bool | None) -> str:
+                       platform: str, page_index: int, cfg, allow_fallback: bool | None,
+                       visual_plan_version: str = "", page_role: str = "",
+                       reference_identity: dict | None = None) -> str:
     from .visual_ocr import _OCR_RULES_VERSION
     media = getattr(cfg, "media_generation", None)
     quality = getattr(cfg, "media_quality", None)
@@ -110,6 +119,9 @@ def _cache_fingerprint(*, expected: str, prompt: str, settings: dict, brand_prof
         "layout_parameters": settings.get("layout_parameters") or {"max_chars": 60, "segments_per_page": 3},
         "ocr_rules_version": _OCR_RULES_VERSION,
         "page_index": page_index,
+        "visual_plan_version": visual_plan_version,
+        "page_role": page_role,
+        "reference_asset": reference_identity or {},
     })
 
 
@@ -156,7 +168,8 @@ def _generate_ai_card_set(
     *, title: str, subtitle: str, body: str, output_dir: Path, platform,
     cfg, settings: dict, allow_fallback: bool | None = None,
     brand_profile: dict | None = None, task_id: str | None = None,
-    account_group: str | None = None,
+    account_group: str | None = None, visual_plan=None,
+    reference_assets: dict | None = None,
 ) -> tuple[list[Path], list[str]]:
     """Generate validated AI pages with durable task checkpoints and atomic delivery."""
     from .visual_ocr import preflight_ocr, validate_rendered_pages
@@ -166,18 +179,53 @@ def _generate_ai_card_set(
     preflight = preflight_ocr(languages=getattr(policy, "ocr_languages", "chi_sim+eng"), timeout=getattr(policy, "ocr_timeout_seconds", 45))
     if preflight.get("status") != "available":
         raise RuntimeError(f"OCR 前置预检失败（{preflight.get('reason')}），已阻止图片 API 调用")
-    body_pages = _paginate_body(body, max_chars=60, segments_per_page=3, max_pages=getattr(policy, "max_pages_per_article", 9))
+    max_pages = int(getattr(policy, "max_pages_per_article", 9))
+    body_pages = _paginate_body(body, max_chars=60, segments_per_page=3, max_pages=max_pages)
+    if visual_plan is not None and len(body_pages) + 2 > max_pages:
+        raise ValueError(
+            f"视觉计划需要 {len(body_pages) + 2} 页（含封面和尾页），超过单篇最大 {max_pages} 页"
+        )
     page_texts = ["".join(page) for page in body_pages]
     expected = [f"{title}\n{subtitle}", *page_texts]
-    prompts = [
-        _page_prompt(title=title, subtitle=subtitle, page_text="", page_index=0,
-                     page_count=len(body_pages), cover=True)
-    ]
-    prompts.extend(
-        _page_prompt(title=title, subtitle=subtitle, page_text=text,
-                     page_index=index, page_count=len(body_pages))
-        for index, text in enumerate(page_texts, start=1)
-    )
+    plan_pages = list(getattr(visual_plan, "pages", ()) or ())
+    plan_version = str(getattr(visual_plan, "version", "") or "")
+    page_specs = [{"role": "cover", "direction": "", "text": ""}]
+    if visual_plan is not None:
+        if len(plan_pages) != len(body_pages) + 2:
+            raise ValueError("visual_plan_page_count_mismatch")
+        roles = [str(getattr(item, "role", "") or "") for item in plan_pages]
+        if roles != ["cover", *("body" for _ in body_pages), "ending"]:
+            raise ValueError("visual_plan_roles_invalid")
+        planned_body_texts = [
+            str(getattr(item, "source_text", "") or "") for item in plan_pages[1:-1]
+        ]
+        if planned_body_texts != page_texts:
+            raise ValueError("visual_plan_body_text_mismatch")
+        page_specs = []
+        for item in plan_pages:
+            role = str(getattr(item, "role", "") or "")
+            page_specs.append({
+                "role": role,
+                "direction": str(getattr(item, "visual_direction", "") or ""),
+                "text": str(getattr(item, "source_text", "") or ""),
+            })
+        ending_text = page_specs[-1]["text"]
+        if not ending_text:
+            raise ValueError("visual_plan_ending_text_required")
+        expected.append(ending_text)
+    else:
+        page_specs.extend({"role": "body", "direction": "", "text": text} for text in page_texts)
+
+    prompts = []
+    for index, spec in enumerate(page_specs):
+        role = spec["role"]
+        page_text = spec["text"] if role != "cover" else ""
+        prompts.append(_page_prompt(
+            title=title, subtitle=subtitle, page_text=page_text,
+            page_index=max(1, index), page_count=len(body_pages),
+            cover=(role == "cover"), role=role,
+            visual_direction=spec["direction"],
+        ))
     prefix = str(settings.get("prefix") or "").strip()
     brand_profile = brand_profile if isinstance(brand_profile, dict) else {}
     if brand_profile:
@@ -231,10 +279,45 @@ def _generate_ai_card_set(
         for index, prompt in enumerate(prompts):
             check_deadline(task_deadline, "图片整组/任务")
             page_deadline = min(task_deadline, time.monotonic() + page_timeout)
+            page_role = page_specs[index]["role"]
+            reference = (reference_assets or {}).get(page_role)
+            if isinstance(reference, list):
+                reference = reference[0] if reference else None
+            reference_path = None
+            reference_identity = {}
+            if reference is not None:
+                if not isinstance(reference, dict):
+                    raise ValueError("reference_asset_descriptor_invalid")
+                reference_input_path = Path(str(reference.get("path") or ""))
+                if reference_input_path.is_symlink():
+                    raise ValueError("reference_asset_symlink_not_allowed")
+                reference_path = reference_input_path.resolve()
+                expected_reference_hash = str(reference.get("sha256") or "").strip().lower()
+                if not reference_path.is_file() or not re.fullmatch(r"[0-9a-f]{64}", expected_reference_hash):
+                    raise ValueError("reference_asset_missing_or_unverified")
+                reference_bytes = reference_path.read_bytes()
+                if len(reference_bytes) > 12 * 1024 * 1024:
+                    raise ValueError("reference_asset_too_large")
+                actual_reference_hash = hashlib.sha256(reference_bytes).hexdigest()
+                if actual_reference_hash != expected_reference_hash:
+                    raise ValueError("reference_asset_hash_mismatch")
+                actual_reference_mime, _reference_suffix, _reference_width, _reference_height = validate_image_bytes(
+                    reference_bytes, cfg=cfg,
+                )
+                if actual_reference_mime != str(reference.get("mime_type") or "").lower():
+                    raise ValueError("reference_asset_mime_mismatch")
+                reference_identity = {
+                    "asset_id": reference.get("asset_id"),
+                    "version_no": reference.get("version_no"),
+                    "sha256": expected_reference_hash,
+                    "mime_type": reference.get("mime_type"),
+                }
             fingerprint = _cache_fingerprint(
                 expected=expected[index], prompt=prompt, settings=settings,
                 brand_profile=brand_profile, platform=platform.value, page_index=index,
                 cfg=cfg, allow_fallback=allow_fallback,
+                visual_plan_version=plan_version, page_role=page_role,
+                reference_identity=reference_identity,
             )
             cache_dir = validated_root / fingerprint
             critical = index <= 1 or bool(re.search(r"\d|禁止|不|没|无|非|未", expected[index]))
@@ -272,8 +355,12 @@ def _generate_ai_card_set(
                         "减少装饰和文字数量，增大字号，重新设计整页成品。"
                     )
                     raw, _mime, suffix, width, height = generate_image_bytes(
-                        retry_prompt, model=settings["model"], size=settings["size"], cfg=cfg,
-                        allow_fallback=allow_fallback,
+                        retry_prompt, model=settings["model"], size=settings["size"],
+                        source_path=reference_path,
+                        source_mime_type=str(reference.get("mime_type") or "application/octet-stream") if reference else None,
+                        source_filename=reference_path.name if reference_path else None,
+                        source_bytes=reference_bytes if reference else None,
+                        cfg=cfg, allow_fallback=allow_fallback,
                     )
                     check_deadline(page_deadline, "图片单页")
                     validate_target_image_spec(width, height, settings["size"], cfg=cfg)
@@ -406,7 +493,8 @@ def generate_ai_card_set(
     *, title: str, subtitle: str, body: str, output_dir: Path, platform,
     cfg, settings: dict, allow_fallback: bool | None = None,
     brand_profile: dict | None = None, task_id: str | None = None,
-    account_group: str | None = None,
+    account_group: str | None = None, visual_plan=None,
+    reference_assets: dict | None = None,
 ) -> tuple[list[Path], list[str]]:
     """Run durable article generation under the configured shared API budget."""
     policy = getattr(cfg, "media_generation", None)
@@ -424,4 +512,5 @@ def generate_ai_card_set(
                 platform=platform, cfg=cfg, settings=settings,
                 allow_fallback=allow_fallback, brand_profile=brand_profile,
                 task_id=task_id, account_group=account_group,
+                visual_plan=visual_plan, reference_assets=reference_assets,
             )
