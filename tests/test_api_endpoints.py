@@ -5398,7 +5398,7 @@ def test_notifications_api_projects_public_fields_and_keeps_deep_links(client):
     assert legacy.status_code == 200, legacy.text
     legacy_item = next(row for row in legacy.json() if row["id"] == cur.lastrowid)
     assert "round_id" not in legacy_item
-    assert legacy_item["target_id"] == 987
+    assert legacy_item["target_id"] == round_id
 
 
 def test_task_runs_api_projects_public_fields_and_sanitizes_internal_errors(client):
