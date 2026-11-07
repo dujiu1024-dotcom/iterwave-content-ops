@@ -138,7 +138,7 @@ export default function Calendar() {
 
   const openBatchDetails = async (roundId: number) => {
     try { setBatchDetail(await api.productionBatch(roundId)); }
-    catch (e: any) { showToast(`加载生产批次失败：${e?.message ?? e}`, "error"); }
+    catch { showToast("加载生产批次失败，请稍后重试。", "error"); }
   };
 
 
@@ -151,7 +151,7 @@ export default function Calendar() {
         api.schedule(_fmt(visibleStart), _fmt(visibleEndExclusive)),
         api.contentPlans(_fmt(visibleStart), endDate),
         api.productionBatches(_fmt(visibleStart), endDate).catch((batchError) => {
-          showToast(`加载生产批次失败：${batchError instanceof Error ? batchError.message : String(batchError)}`, "error");
+          showToast("加载生产批次失败，请稍后重试。", "error");
           return { items: [], total: 0 };
         }),
       ]);
@@ -162,7 +162,7 @@ export default function Calendar() {
       setUnscheduledTotal(r.unscheduled_total ?? (r.unscheduled ?? []).length);
       setUnscheduledPage(1);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError("日历数据加载失败，请稍后重试。");
     } finally {
       setLoading(false);
     }
@@ -504,7 +504,7 @@ export default function Calendar() {
                   <div className="calendar-plan-detail-row" key={task.id}>
                     <strong>{task.content_title || "已生成内容"}</strong>
                     <div>{platformMeta(task.platform).label} · {displayStatusLabel(task.status)} · 尝试 {task.attempt_count}/{task.max_attempts}</div>
-                    {task.error_message && <details className="advanced-report-editor"><summary>查看任务诊断</summary><pre className="diagnostic-text">{task.error_message}</pre></details>}
+                    {task.error_message && <div className="tiny">诊断详情已记录：{displayErrorLabel(task.error_message)}</div>}
                   </div>
                 )) : <div className="note">该批次尚未生成独立生产任务</div>}
               </div>
