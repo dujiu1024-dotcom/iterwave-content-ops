@@ -158,7 +158,7 @@ export default function ProductionPlanMonitor() {
         <strong>异常与一致性检查 · {data.consistency_checks.length} 项</strong>
         {data.consistency_checks.map((item, index) => <div className="task-row" key={`${item.code}-${index}`}>
           <i className={`task-prio ${item.severity === "critical" ? "red" : "blue"}`}/>
-          <div className="task-main"><div className="task-title">{item.message}</div><div className="task-desc">{displayErrorLabel(item.code)}（{item.code}）{item.round_id ? ` · 轮次 #${item.round_id}` : ""}{item.count ? ` · ${item.count} 条` : ""}</div></div>
+          <div className="task-main"><div className="task-title">{item.message}</div><div className="task-desc">{displayErrorLabel(item.code)}{item.count ? ` · ${item.count} 条` : ""}</div></div>
           {item.round_id && <button className="btn sm" onClick={() => navigate("production", "rounds", { type: "round", id: item.round_id! })}>定位轮次</button>}
         </div>)}
       </div>}
