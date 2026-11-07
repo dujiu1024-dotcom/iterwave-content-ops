@@ -1493,6 +1493,7 @@ class RoundExecutor:
                             brand_profile=self._visual_brand_profile(),
                             visual_plan=visual_plan,
                             reference_assets=visual_reference_assets,
+                            production_task_id=production_task_id,
                             task_id=hashlib.sha256(json.dumps({
                                 "round_id": round_id, "platform": platform.value, "topic_id": topic.id,
                                 "title": title, "subtitle": topic.dimension, "body": body, "image_settings": image_settings,
@@ -1593,6 +1594,7 @@ class RoundExecutor:
                             brand_profile=self._visual_brand_profile(),
                             visual_plan=visual_plan,
                             reference_assets=visual_reference_assets,
+                            production_task_id=production_task_id,
                             task_id=hashlib.sha256(json.dumps({
                                 "round_id": round_id, "platform": platform.value, "topic_id": topic.id,
                                 "title": title, "body": body, "image_settings": image_settings,
