@@ -1045,3 +1045,298 @@ def test_task_queue_realistic_data_layout_has_no_overflow_at_supported_viewports
             browser.close()
     finally:
         _stop_vite(server)
+
+
+def _assert_supported_viewports(page, screenshot_dir: Path, prefix: str):
+    for width in (1440, 1024, 768, 390):
+        page.set_viewport_size({"width": width, "height": 1000})
+        page.wait_for_timeout(160)
+        metrics = page.evaluate("""() => ({
+            viewport: document.documentElement.clientWidth,
+            document: document.documentElement.scrollWidth,
+            body: document.body.scrollWidth,
+            main: document.querySelector('#main-content')?.scrollWidth ?? 0,
+            mainClient: document.querySelector('#main-content')?.clientWidth ?? 0,
+            topbar: document.querySelector('.topbar')?.scrollWidth ?? 0,
+            topbarClient: document.querySelector('.topbar')?.clientWidth ?? 0
+        })""")
+        assert metrics["document"] <= metrics["viewport"] + 1, (
+            "{} document overflow at {}px: {}".format(prefix, width, metrics)
+        )
+        assert metrics["body"] <= metrics["viewport"] + 1, (
+            "{} body overflow at {}px: {}".format(prefix, width, metrics)
+        )
+        assert metrics["main"] <= metrics["mainClient"] + 1, (
+            "{} content overflow at {}px: {}".format(prefix, width, metrics)
+        )
+        assert metrics["topbar"] <= metrics["topbarClient"] + 1, (
+            "{} topbar overflow at {}px: {}".format(prefix, width, metrics)
+        )
+        page.screenshot(path=str(screenshot_dir / "{}-{}.png".format(prefix, width)), full_page=True)
+
+
+def test_plan_center_realistic_master_plan_data_has_no_overflow_at_supported_viewports():
+    """Render a real-shaped effective master plan and verify desktop/tablet/mobile layouts."""
+    server, port = _serve_vite()
+    screenshot_dir = ROOT / "artifacts" / "ui-viewport"
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    now = "2026-11-07T10:30:00+08:00"
+    plan = {
+        "topic_count_per_platform": 6,
+        "dimension_allocation": {"客户案例": 2, "专业知识": 2, "产品应用": 2},
+        "enabled_platforms": ["xhs", "douyin"],
+        "content_format": "image_text",
+        "per_platform": {
+            "xhs": {"topic_count": 6, "publish_slots": ["09:00", "19:00"]},
+            "douyin": {"topic_count": 4, "publish_slots": ["12:00"]},
+        },
+        "cadence": {"round_interval_days": 3, "rounds_planned": 4},
+    }
+    plan_response = {
+        "plan": plan, "signature": "layout-plan-signature", "updated_at": now,
+        "source": "plan_settings",
+        "per_platform": {
+            "xhs": {"enabled": True, "config_enabled": True, "topic_count": 6,
+                   "topic_count_override": None, "publish_slots": ["09:00", "19:00"]},
+            "douyin": {"enabled": True, "config_enabled": True, "topic_count": 4,
+                       "topic_count_override": 4, "publish_slots": ["12:00"]},
+            "kuaishou": {"enabled": False, "config_enabled": False, "topic_count": 0,
+                         "topic_count_override": None, "publish_slots": []},
+            "wechat_channels": {"enabled": False, "config_enabled": False, "topic_count": 0,
+                                "topic_count_override": None, "publish_slots": []},
+        },
+        "history": [], "stale_rounds": [],
+    }
+    effective_version = {
+        "id": 11, "version_no": 3, "status": "effective",
+        "plan_snapshot": json.dumps(plan, ensure_ascii=False),
+        "plan_signature": "layout-plan-signature", "created_at": now,
+        "north_star_version_id": None,
+    }
+
+    def handler(route):
+        path = urlparse(route.request.url).path
+        if path == "/api/auth/status":
+            payload = {"configured": True, "authenticated": True, "needs_login": False}
+        elif path == "/api/tenants":
+            payload = {"runtime_tenant_id": "brand-main", "selected_tenant_id": "brand-main",
+                       "restart_required": False,
+                       "items": [{"id": "brand-main", "name": "主品牌运营账号组", "created_at": now, "is_active": True}]}
+        elif path == "/api/status":
+            payload = {"enabled_platforms": ["xhs", "douyin"], "platforms_without_login": [],
+                       "logged_in_platforms": ["xhs", "douyin"], "circuit_broken_platforms": [],
+                       "active_rounds": 0, "published_samples": 12, "scoring_mode": "default",
+                       "recovery": {"interrupted_tasks": 0, "requeued_data_fetch": [],
+                                    "stale_rounds": [], "pending_verify": 0}}
+        elif path == "/api/plans":
+            payload = plan_response
+        elif path == "/api/goals":
+            payload = []
+        elif path == "/api/plans/versions":
+            payload = {"items": [effective_version]}
+        elif path == "/api/subplans":
+            payload = {"items": [], "total": 0, "page": 1, "page_size": 100, "pages": 0}
+        elif path == "/api/business-diagnosis":
+            payload = {"report": None}
+        elif path == "/api/master-plans/11/resource-baseline":
+            payload = {"snapshot": {}, "captured_at": now, "captured_by": "system"}
+        elif path == "/api/gaps":
+            payload = {"round_id": 0, "gaps": [], "strategy_adjustments": [],
+                       "ops_adjustments": [], "evidence": {}}
+        else:
+            payload = {}
+        return route.fulfill(status=200, content_type="application/json",
+                             body=json.dumps(payload, ensure_ascii=False))
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 1000}, device_scale_factor=1)
+            page_errors = []
+            page.on("pageerror", lambda error: page_errors.append(str(error)))
+            page.route("**/api/**", handler)
+            page.goto(f"http://127.0.0.1:{port}/?page=plan-center")
+            page.get_by_role("heading", name="计划管理").wait_for(timeout=15000)
+            page.get_by_text("主计划确定目标与策略", exact=False).wait_for(timeout=15000)
+            page.get_by_text("6", exact=True).first.wait_for(timeout=15000)
+            _assert_supported_viewports(page, screenshot_dir, "plan-center-real-data")
+            assert not page_errors, "plan-center real-data raised browser errors: {}".format(page_errors)
+            browser.close()
+    finally:
+        _stop_vite(server)
+
+
+def test_calendar_realistic_schedule_plan_and_batch_data_has_no_overflow_at_supported_viewports():
+    """Render scheduled content, a content plan, a production batch and unscheduled draft."""
+    server, port = _serve_vite()
+    screenshot_dir = ROOT / "artifacts" / "ui-viewport"
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    now = "2026-11-07T10:30:00+08:00"
+    event = {
+        "id": "draft-calendar-layout", "title": "真实排期布局验收：客户案例长标题",
+        "platform": "xhs", "status": "draft_saved", "round_id": 301,
+        "scheduled": "2026-11-07T19:00:00+08:00", "saved_at": now, "day": 7,
+    }
+    content_plan = {
+        "id": "plan-calendar-layout", "title": "真实内容计划：十一月客户案例系列",
+        "topic": "客户案例", "platforms": ["xhs", "douyin"], "planned_count": 8,
+        "scheduled_date": "2026-11-07", "status": "planned", "notes": "按周分批生产",
+        "version": 2, "created_at": now, "updated_at": now,
+    }
+    batch = {
+        "round_id": 301, "round_number": 301, "round_status": "partial_completed",
+        "created_at": now, "master_plan_version_id": 11, "sub_plan_id": "subplan-xhs",
+        "sub_plan_title": "小红书客户案例运营子计划", "platform": "xhs",
+        "sub_plan_version_id": 4, "strategy_step_id": "case-study",
+        "strategy_step_title": "客户案例内容生产", "production_line_version_id": 2,
+        "attribution_status": "attributed", "task_count": 4, "pending_task_count": 1,
+        "running_task_count": 1, "succeeded_task_count": 1, "failed_task_count": 1,
+        "cancelled_task_count": 0,
+    }
+    unscheduled = {"id": "draft-unscheduled-layout", "platform": "xhs",
+                   "status": "draft_pending", "title": "待排期的真实业务草稿", "round_id": 301}
+
+    def handler(route):
+        path = urlparse(route.request.url).path
+        if path == "/api/auth/status":
+            payload = {"configured": True, "authenticated": True, "needs_login": False}
+        elif path == "/api/tenants":
+            payload = {"runtime_tenant_id": "brand-main", "selected_tenant_id": "brand-main",
+                       "restart_required": False,
+                       "items": [{"id": "brand-main", "name": "主品牌运营账号组", "created_at": now, "is_active": True}]}
+        elif path == "/api/status":
+            payload = {"enabled_platforms": ["xhs"], "platforms_without_login": [],
+                       "logged_in_platforms": ["xhs"], "circuit_broken_platforms": [],
+                       "active_rounds": 1, "published_samples": 5, "scoring_mode": "default",
+                       "recovery": {"interrupted_tasks": 0, "requeued_data_fetch": [],
+                                    "stale_rounds": [], "pending_verify": 0}}
+        elif path == "/api/schedule":
+            payload = {"start_date": "2026-11-01", "end_date": "2026-12-06",
+                       "items": [event], "total": 1, "unscheduled": [unscheduled],
+                       "unscheduled_total": 1, "unscheduled_page": 1, "unscheduled_page_size": 50}
+        elif path == "/api/content-plans":
+            payload = {"items": [content_plan], "total": 1}
+        elif path == "/api/production-batches":
+            payload = {"items": [batch], "total": 1}
+        else:
+            payload = {}
+        return route.fulfill(status=200, content_type="application/json",
+                             body=json.dumps(payload, ensure_ascii=False))
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 1000}, device_scale_factor=1)
+            page_errors = []
+            page.on("pageerror", lambda error: page_errors.append(str(error)))
+            page.route("**/api/**", handler)
+            page.goto(f"http://127.0.0.1:{port}/?page=calendar")
+            page.get_by_role("heading", name="内容排期日历").wait_for(timeout=15000)
+            page.get_by_text("真实排期布局验收：客户案例长标题", exact=False).wait_for(timeout=15000)
+            page.get_by_text("十一月客户案例系列", exact=False).wait_for(timeout=15000)
+            page.get_by_text("小红书客户案例运营子计划", exact=False).wait_for(timeout=15000)
+            _assert_supported_viewports(page, screenshot_dir, "calendar-real-data")
+            assert not page_errors, "calendar real-data raised browser errors: {}".format(page_errors)
+            browser.close()
+    finally:
+        _stop_vite(server)
+
+
+def test_analytics_realistic_business_metrics_has_no_overflow_at_supported_viewports():
+    """Render business KPIs and platform metrics while keeping feedback panes API-backed."""
+    server, port = _serve_vite()
+    screenshot_dir = ROOT / "artifacts" / "ui-viewport"
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    now = "2026-11-07T10:30:00+08:00"
+    metric_row = {
+        "id": 1, "platform": "xhs", "content_id": "content-301",
+        "content_title": "真实数据分析验收：客户案例复盘", "round_id": 301,
+        "views": 12800, "likes": 560, "collects": 320, "comments": 48,
+        "shares": 72, "new_followers": 95, "interaction_rate": 0.0781,
+        "like_rate": 0.0437, "collect_rate": 0.025, "fetch_status": "success",
+        "fetched_at": now,
+    }
+    business_summary = {
+        "window_days": 30, "since": "2026-10-08", "contents_created": 24,
+        "drafts_created": 18, "confirmed_published": 12,
+        "interactions": {"sample_count": 5, "views": 12800, "likes": 560,
+                         "collects": 320, "comments": 48, "shares": 72,
+                         "new_followers": 95,
+                         "known_samples": {"views": 5, "likes": 5, "collects": 5,
+                                           "comments": 4, "shares": 3}},
+        "followers_growth_by_platform": {
+            "xhs": {"growth": 95, "baseline_at": "2026-10-08T09:00:00+08:00",
+                    "latest_at": now},
+            "douyin": None,
+        },
+    }
+    metrics_response = {
+        "items": [metric_row], "total": 1,
+        "z_stats": [{"platform": "xhs", "metric": "views", "mean": 8000,
+                     "std": 2000, "sample_count": 5}],
+        "z_window_days": 30, "cross_platform_comparable": ["interaction_rate"],
+        "platform_only_metrics": ["views", "likes", "collects"],
+        "page": 1, "page_size": 20, "pages": 1,
+    }
+
+    def handler(route):
+        path = urlparse(route.request.url).path
+        if path == "/api/auth/status":
+            payload = {"configured": True, "authenticated": True, "needs_login": False}
+        elif path == "/api/tenants":
+            payload = {"runtime_tenant_id": "brand-main", "selected_tenant_id": "brand-main",
+                       "restart_required": False,
+                       "items": [{"id": "brand-main", "name": "主品牌运营账号组", "created_at": now, "is_active": True}]}
+        elif path == "/api/status":
+            payload = {"enabled_platforms": ["xhs"], "platforms_without_login": [],
+                       "logged_in_platforms": ["xhs"], "circuit_broken_platforms": [],
+                       "active_rounds": 0, "published_samples": 12, "scoring_mode": "default",
+                       "recovery": {"interrupted_tasks": 0, "requeued_data_fetch": [],
+                                    "stale_rounds": [], "pending_verify": 0}}
+        elif path == "/api/gaps":
+            payload = {"round_id": 301, "gaps": [], "strategy_adjustments": [],
+                       "ops_adjustments": [], "evidence": {}}
+        elif path == "/api/goals/summary":
+            payload = {"percent": 68.5, "method": "equal_weight_mean",
+                       "active_goals": 2, "counted_goals": 2, "pending_goals": 0,
+                       "period_start": "2026-10-08", "period_end": "2026-11-07",
+                       "days_left": 23, "by_platform": {"xhs": {"percent": 68.5, "goals": 2, "counted": 2}}}
+        elif path == "/api/analytics/business-summary":
+            payload = business_summary
+        elif path == "/api/metrics":
+            payload = metrics_response
+        elif path == "/api/drafts":
+            payload = {"items": [], "total": 0, "page": 1, "page_size": 100, "pages": 1}
+        elif path == "/api/reports/weekly":
+            payload = {"week_start": "2026-11-02", "suggestions": [], "summary": {}}
+        elif path == "/api/activation/status":
+            payload = {}
+        elif path == "/api/publish-verifications":
+            payload = {"items": []}
+        elif path == "/api/review-tasks":
+            payload = {"items": []}
+        elif path == "/api/business-gaps":
+            payload = {"items": []}
+        elif path == "/api/metric-facts":
+            payload = {"items": []}
+        else:
+            payload = {}
+        return route.fulfill(status=200, content_type="application/json",
+                             body=json.dumps(payload, ensure_ascii=False))
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 1000}, device_scale_factor=1)
+            page_errors = []
+            page.on("pageerror", lambda error: page_errors.append(str(error)))
+            page.route("**/api/**", handler)
+            page.goto(f"http://127.0.0.1:{port}/?page=analytics")
+            page.get_by_role("heading", name="数据分析").wait_for(timeout=15000)
+            page.get_by_text("真实数据分析验收：客户案例复盘", exact=False).wait_for(timeout=15000)
+            page.get_by_text("24", exact=True).first.wait_for(timeout=15000)
+            _assert_supported_viewports(page, screenshot_dir, "analytics-real-data")
+            assert not page_errors, "analytics real-data raised browser errors: {}".format(page_errors)
+            browser.close()
+    finally:
+        _stop_vite(server)
