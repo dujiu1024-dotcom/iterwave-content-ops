@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import StructuredDataView from "./StructuredDataView";
 import {
   api, BusinessGapItem, Draft, MetricFactItem, PublishVerificationItem, ReviewTaskItem,
 } from "../api";
@@ -135,7 +136,7 @@ export default function OperatingFeedbackPane() {
         evidence_source: "user_confirmed",
         evidence_note: form.evidence_note.trim(),
       });
-      setNotice(`发布核验已保存；独立复盘任务 ${result.verification.review_task_id ?? "已创建"}，生产线关闭事件等待任务3消费。`);
+      setNotice(`发布核验已保存；独立复盘任务已创建，生产线关闭事件等待任务3消费。`);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "发布核验失败");
@@ -343,7 +344,7 @@ export default function OperatingFeedbackPane() {
               {runHistory[task.task_id].map((run, index) => <div key={String(run.run_id || index)} className="panel-sub">
                 {statusText(String(run.status || ""))} · {String(run.source || "")} · {String(run.window_start || "—")} 至 {String(run.window_end || "—")}
                 {run.error_message ? ` · ${String(run.error_message)}` : ""}
-                {run.metrics ? ` · ${JSON.stringify(run.metrics)}` : ""}
+                {run.metrics && <StructuredDataView data={run.metrics} title="本批采集指标"/>}
               </div>)}
             </div>}
             <div className="form-grid" style={{ marginTop: 8 }}>

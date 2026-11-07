@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { formatBusinessDateTime } from "../businessTime.mjs";
+import { displaySourceLabel } from "../displayLabels";
 
 const fields = [
   ["positioning", "账号组定位"],
@@ -68,7 +69,7 @@ export default function NorthStarResourcePanel({ onOpenAssets }: { onOpenAssets?
     <section className="panel">
       <div className="panel-head"><div><div className="panel-title">母计划资源基准盘点</div><div className="panel-sub">展示现有来源的真实状态；待审核、缺失或未接入的来源不会标记为已具备。</div></div></div>
       <div className="grid four">{Object.entries(summary).map(([key,value])=><div className="plan-summary-card" key={key}><div className="tiny">{labels[key] ?? key}</div><b>{value}</b></div>)}</div>
-      <div className="table-wrap" style={{marginTop:12}}><table><thead><tr><th>类别</th><th>资源</th><th>来源</th><th>状态</th><th>更新时间</th></tr></thead><tbody>{resources.map((item,index)=><tr key={item.source_type+":"+item.source_id+":"+index}><td>{item.category}</td><td>{item.title}</td><td>{item.source_type} / {item.source_id}{(item as any).source_uri ? <div className="tiny">{(item as any).source_uri}</div> : null}</td><td>{statuses[item.status] ?? item.status}</td><td>{formatBusinessDateTime(item.updated_at)}</td></tr>)}</tbody></table></div>
+      <div className="table-wrap" style={{marginTop:12}}><table><thead><tr><th>类别</th><th>资源</th><th>来源</th><th>状态</th><th>更新时间</th></tr></thead><tbody>{resources.map((item,index)=><tr key={item.source_type+":"+item.source_id+":"+index}><td>{item.category}</td><td>{item.title}</td><td>{displaySourceLabel(item.source_type)}</td><td>{statuses[item.status] ?? item.status}</td><td>{formatBusinessDateTime(item.updated_at)}</td></tr>)}</tbody></table></div>
       {gaps.length>0 && <><div className="note" style={{marginTop:12}}>当前有 {gaps.length} 项资源缺口或待确认事项；缺口登记、素材补充与审核可在素材盘点中维护。</div><div className="table-wrap"><table><thead><tr><th>类别</th><th>缺口</th><th>状态</th><th>优先级</th></tr></thead><tbody>{gaps.map((gap,index)=><tr key={String(gap.id ?? index)}><td>{String(gap.category ?? gap.entity_type ?? "资源")}</td><td>{String(gap.title ?? "待确认")}</td><td>{String(gap.status ?? "open")}</td><td>{String(gap.priority ?? "—")}</td></tr>)}</tbody></table></div><button className="btn sm" style={{marginTop:10}} onClick={onOpenAssets}>前往素材盘点与缺口维护</button></>}
     </section>
   </div>;
