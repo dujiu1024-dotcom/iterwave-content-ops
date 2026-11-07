@@ -1026,6 +1026,9 @@ def test_task_queue_realistic_data_layout_has_no_overflow_at_supported_viewports
             page.get_by_role("heading", name="全局任务队列").wait_for(timeout=15000)
             page.get_by_role("heading", name="全局调度仪表盘").wait_for(timeout=15000)
             page.get_by_text("主品牌运营账号组（真实数据布局测试）", exact=False).first.wait_for(timeout=15000)
+            tenant_filter = page.get_by_label("按账号组筛选")
+            assert tenant_filter.locator("option").filter(has_text="主品牌运营账号组").count() == 1
+            assert tenant_filter.locator("option").filter(has_text="brand-main").count() == 0
             page.get_by_text("内容生产 / 存草稿", exact=True).first.wait_for(timeout=15000)
             page.get_by_text("任务状态分布", exact=True).wait_for(timeout=15000)
 
