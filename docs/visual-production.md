@@ -47,3 +47,14 @@
 - 含数字的短句 → 指标强调；
 - 引号开头 → 引用面板；
 - 其余 → 文本块。
+
+
+## 原始素材真实消费审计（WP5）
+
+任务输入中的 `original_assets` 是不可变候选/授权上下文，`visual_asset_selection.selected_by_role` 是筛选结果；两者都不代表素材已被图像模型消费。
+
+只有 `generate_image_bytes` 收到 Provider 返回的有效图片结果、并通过目标尺寸校验后，才会触发消费审计回调。回调记录实际成功的 Provider/模型、原始素材版本及 SHA-256、生成结果 SHA-256、页面角色/索引和幂等事件 ID。Provider 请求失败、超时或拒绝请求不会产生 consumed 记录；OCR/整组质量门禁随后失败，不会抹去已经真实发生的 Provider 消费事实。
+
+WP5 在既有 `production_task_asset_usages` 中追加 `usage_role=consumed:...` 事件行，不更新原有授权快照，也不创建平行素材库/任务状态表。迁移 169 增加 Provider、模型、输入/输出哈希、事件 ID 和消费时间字段；事件 ID 唯一索引保证相同生成结果重试时幂等。消费回调使用 `production_task_id`，与视觉任务缓存 ID 分离。
+
+任务素材审计接口 `GET /api/production-tasks/{task_id}/assets` 同时返回授权快照行和 consumed 事件行。消费行可通过页面角色、Provider/模型、输入/输出哈希及 `generation_event_id` 追溯。

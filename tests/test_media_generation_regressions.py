@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
+import pytest
 
 from src.api import main as api_main
 from src.core import media_generation
@@ -347,3 +348,63 @@ def test_primary_and_fallback_provider_calls_are_both_persisted(monkeypatch, con
     finally:
         api_main._g_ctx.clear()
         api_main._g_ctx.update(saved)
+
+
+def test_generate_image_bytes_reports_only_the_provider_that_returns_an_accepted_image(monkeypatch):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    from src.core import image_generation_budget, visual_ocr
+
+    cfg = SimpleNamespace(media_generation=SimpleNamespace(
+        max_api_calls_per_run=10, hard_timeout_seconds=60,
+        max_api_calls_per_article=10, max_api_calls_per_page=3,
+    ))
+    monkeypatch.setattr(image_generation_budget, "has_active_run", lambda: True)
+    monkeypatch.setattr(image_generation_budget, "has_active_article", lambda: True)
+    monkeypatch.setattr(image_generation_budget, "provider_request", lambda: nullcontext(30))
+    monkeypatch.setattr(visual_ocr, "preflight_ocr", lambda **_kwargs: {"status": "available"})
+    endpoint = SimpleNamespace(label="fallback", provider="fallback-provider", model="fallback-model", base_url="https://fallback.example.test")
+    monkeypatch.setattr(media_generation, "_endpoints", lambda *args, **kwargs: [endpoint])
+    monkeypatch.setattr(
+        media_generation, "_request_endpoint",
+        lambda *args, **kwargs: (b"accepted-image", "image/png", ".png", 1024, 1024),
+    )
+    monkeypatch.setattr(media_generation, "validate_target_image_spec", lambda *args, **kwargs: None)
+    accepted = []
+    result = media_generation.generate_image_bytes(
+        "prompt", model="primary-model", size="1024x1024", cfg=cfg,
+        on_provider_accepted=lambda **event: accepted.append(event),
+    )
+    assert result[0] == b"accepted-image"
+    assert accepted == [{
+        "provider": "fallback-provider",
+        "model": "fallback-model",
+        "result_bytes": b"accepted-image",
+    }]
+
+
+def test_generate_image_bytes_does_not_report_provider_failure_as_consumption(monkeypatch):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    from src.core import image_generation_budget, visual_ocr
+
+    cfg = SimpleNamespace(media_generation=SimpleNamespace(
+        max_api_calls_per_run=10, hard_timeout_seconds=60,
+        max_api_calls_per_article=10, max_api_calls_per_page=3,
+    ))
+    monkeypatch.setattr(image_generation_budget, "has_active_run", lambda: True)
+    monkeypatch.setattr(image_generation_budget, "has_active_article", lambda: True)
+    monkeypatch.setattr(image_generation_budget, "provider_request", lambda: nullcontext(30))
+    monkeypatch.setattr(visual_ocr, "preflight_ocr", lambda **_kwargs: {"status": "available"})
+    endpoint = SimpleNamespace(label="primary", provider="primary-provider", model="primary-model", base_url="https://images.example.test")
+    monkeypatch.setattr(media_generation, "_endpoints", lambda *args, **kwargs: [endpoint])
+    def fail(*args, **kwargs):
+        raise media_generation.ImageGenerationError("provider rejected request")
+    monkeypatch.setattr(media_generation, "_request_endpoint", fail)
+    accepted = []
+    with pytest.raises(media_generation.ImageGenerationError):
+        media_generation.generate_image_bytes(
+            "prompt", model="primary-model", size="1024x1024", cfg=cfg,
+            on_provider_accepted=lambda **event: accepted.append(event),
+        )
+    assert accepted == []
