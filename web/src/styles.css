@@ -674,7 +674,8 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
   .calendar-month-grid > div { min-height: 92px !important; padding: 6px !important; }
   .calendar-month-grid > div > div:not(:first-child) { font-size: 10px !important; padding: 3px 4px !important; }
 }
-\n
+
+
 
 /* Calendar month/week/day views */
 .calendar-toolbar { flex-wrap: wrap; align-items: center; }
