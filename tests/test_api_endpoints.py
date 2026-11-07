@@ -5548,3 +5548,52 @@ def test_global_task_queue_list_sanitizes_task_errors_and_keeps_list_working(cli
     assert "/home/ubuntu" not in response.text
     assert "sqlite3.OperationalError" not in response.text
     assert "Traceback" not in response.text
+
+
+def test_round_run_status_sanitizes_nested_report_and_progress(client, tmp_path, monkeypatch):
+    from src.core.task_queue import GlobalTaskQueue
+
+    tc, _conn, seed = client
+    round_id = seed.round(status="producing")
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    monkeypatch.setattr(api_main, "_task_queue", queue)
+    task, _ = queue.enqueue(
+        task_type="round_run", tenant_id="default", aggregate_id=str(round_id),
+        payload={"operation": "run", "round_id": round_id},
+    )
+    internal = (
+        "sqlite3.OperationalError: unable to open /home/ubuntu/iterwave/data/private.db\\n"
+        "Traceback (most recent call last):"
+    )
+    result = {
+        "round_id": round_id, "final_status": "failed",
+        "errors": [internal], "failure_message": internal,
+        "task_id": "internal-task-123", "tenant_id": "default",
+        "steps": [{"step": "save_drafts", "detail": internal, "draft_id": 987}],
+    }
+    progress = {"steps": [{"id": "save", "label": "存草稿", "status": "failed", "detail": internal}], "detail": internal, "percent": 80}
+    conn = queue._connect()
+    try:
+        conn.execute(
+            "UPDATE global_task_queue SET status='failed', error_message=?, error_code=?, "
+            "result_json=?, progress_json=? WHERE task_id=?",
+            (internal, "sqlite3.OperationalError", json.dumps(result, ensure_ascii=False),
+             json.dumps(progress, ensure_ascii=False), task.task_id),
+        )
+    finally:
+        conn.close()
+
+    response = tc.get(f"/api/rounds/{round_id}/run_status")
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["report"]["errors"] == ["详细诊断已隐藏，请联系管理员。"]
+    assert payload["report"]["steps"][0]["detail"] == "详细诊断已隐藏，请联系管理员。"
+    assert "task_id" not in payload["report"]
+    assert "tenant_id" not in payload["report"]
+    assert "draft_id" not in payload["report"]["steps"][0]
+    assert payload["progress"]["detail"] == "步骤已记录；详细诊断请联系管理员。"
+    assert payload["error"] == "本轮执行失败，请查看管理员诊断日志。"
+    assert "/home/ubuntu" not in response.text
+    assert "sqlite3.OperationalError" not in response.text
+    assert "Traceback" not in response.text

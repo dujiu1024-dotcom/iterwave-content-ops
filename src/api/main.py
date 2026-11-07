@@ -1901,6 +1901,31 @@ def _register_routes(app: FastAPI) -> None:
             "updated_at": value.get("updated_at"),
         }
 
+    def _safe_round_report(value, depth=0):
+        """递归安全化轮次报告，限制嵌套规模并移除内部关联键。"""
+        if depth > 8:
+            return None
+        if isinstance(value, dict):
+            result = {}
+            for key, item in list(value.items())[:300]:
+                name = str(key)[:100]
+                lowered = name.lower()
+                if any(token in lowered for token in ("password", "secret", "token", "authorization", "traceback")):
+                    continue
+                if lowered in {"task_id", "tenant_id", "ai_call_id", "signature", "plan_signature"}:
+                    continue
+                if lowered.endswith("_id") and lowered not in {"round_id"}:
+                    continue
+                result[name] = _safe_round_report(item, depth + 1)
+            return result
+        if isinstance(value, list):
+            return [_safe_round_report(item, depth + 1) for item in value[:200]]
+        if isinstance(value, str):
+            return safe_error_summary(value, "详细诊断已隐藏，请联系管理员。")[:2000]
+        if isinstance(value, (int, float, bool)) or value is None:
+            return value
+        return safe_error_summary(str(value), "详细诊断已隐藏，请联系管理员。")[:500]
+
     def _elapsed_seconds(value):
         """从持久化时间戳算出已运行秒数；无法解析时返回 None，不伪造 0。"""
         if not value:
@@ -5448,17 +5473,21 @@ def _register_routes(app: FastAPI) -> None:
                     "status": task.status,
                     "running": task.status in ("queued", "running"),
                     "queued": task.status == "queued",
-                    "progress": task.progress,
+                    "progress": _safe_task_progress(task.progress),
                     "started_at": task.started_at,
                     "queued_at": task.created_at,
                     "elapsed_seconds": _elapsed_seconds(task.started_at or task.created_at),
-                    "report": task.result,
-                    "error": task.error_message,
-                    "error_code": task.error_code,
+                    "report": _safe_round_report(task.result),
+                    "error": safe_error_summary(task.error_message, "本轮执行失败，请查看管理员诊断日志。") if task.error_message else None,
+                    "error_code": safe_error_summary(task.error_code, "执行异常") if task.error_code else None,
                 }
         status = _round_job_status.get(round_id)
         if status is not None:
-            return dict(status)
+            safe_status = dict(status)
+            safe_status["progress"] = _safe_task_progress(status.get("progress"))
+            safe_status["report"] = _safe_round_report(status.get("report"))
+            safe_status["error"] = safe_error_summary(status.get("error"), "本轮执行失败，请查看管理员诊断日志。") if status.get("error") else None
+            return safe_status
         row = _g()["conn"].execute(
             "SELECT status, run_report FROM spiral_rounds WHERE id = ?", (round_id,)
         ).fetchone()
@@ -5472,7 +5501,7 @@ def _register_routes(app: FastAPI) -> None:
         return {
             "round_id": round_id,
             "running": row["status"] == "producing",
-            "report": report, "error": None,
+            "report": _safe_round_report(report), "error": None,
         }
 
     @app.post("/api/rounds/{round_id}/save_pending", status_code=202)
