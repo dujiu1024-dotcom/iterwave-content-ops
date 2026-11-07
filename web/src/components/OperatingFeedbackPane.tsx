@@ -46,6 +46,12 @@ function statusText(value: string): string {
 function displayMetric(value: number, unit: string): string {
   return unit === "ratio" ? `${(value * 100).toFixed(2)}%` : value.toLocaleString();
 }
+function formatRunMetrics(value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "指标已记录";
+  const labels: Record<string, string> = { views: "曝光", likes: "点赞", collects: "收藏", comments: "评论", shares: "分享" };
+  const entries = Object.entries(value as Record<string, unknown>).filter(([, item]) => item != null && ["string", "number", "boolean"].includes(typeof item));
+  return entries.length ? entries.map(([key, item]) => `${labels[key] ?? key}: ${String(item)}`).join(" · ") : "指标已记录";
+}
 
 export default function OperatingFeedbackPane() {
   const [drafts, setDrafts] = useState<Draft[]>([]);
@@ -343,7 +349,7 @@ export default function OperatingFeedbackPane() {
               {runHistory[task.task_id].map((run, index) => <div key={String(run.run_id || index)} className="panel-sub">
                 {statusText(String(run.status || ""))} · {String(run.source || "")} · {String(run.window_start || "—")} 至 {String(run.window_end || "—")}
                 {run.error_message ? ` · ${String(run.error_message)}` : ""}
-                {run.metrics ? ` · ${JSON.stringify(run.metrics)}` : ""}
+                {run.metrics ? ` · ${formatRunMetrics(run.metrics)}` : ""}
               </div>)}
             </div>}
             <div className="form-grid" style={{ marginTop: 8 }}>
