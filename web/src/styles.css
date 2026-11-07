@@ -377,6 +377,27 @@ details[open] > summary::before { content: "▾ "; }
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
 }
+/* 平板宽度下将顶部操作区移至第二行，避免侧栏压缩主区后控件互相挤压。 */
+@media (max-width: 900px) {
+  .topbar {
+    height: auto;
+    min-height: 58px;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 12px;
+    padding: 10px 16px;
+  }
+  .crumb { flex: 1 1 auto; min-width: 120px; }
+  .top-actions {
+    flex: 1 1 100%;
+    width: 100%;
+    min-width: 0;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+}
+
 @media (max-width: 760px) {
   .queue-summary-grid { grid-template-columns: minmax(0, 1fr); }
 }
