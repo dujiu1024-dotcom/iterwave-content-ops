@@ -1221,7 +1221,8 @@ class RoundExecutor:
                         registry = TenantRegistry(PROJECT_ROOT, cfg=self.cfg)
                         registry.get(str(tenant_id))
                         tenant_paths = registry.paths(str(tenant_id), create=False)
-                        selected = select_visual_assets(
+                        selected = await asyncio.to_thread(
+                            select_visual_assets,
                             candidates=image_candidates,
                             media_dir=tenant_paths.media_dir,
                             topic=topic.title,
