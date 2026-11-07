@@ -1083,7 +1083,7 @@ th, td { padding: 8px 9px; }
 .global-operations-page .tiny { font-size: 12px; line-height: 1.5; }
 .calendar-event-title { font-size: 12px; line-height: 1.4; }
 .calendar-event-meta { font-size: 11px; line-height: 1.45; }
-.calendar-month-grid .calendar-event-title { font-size: 11px; }
-.calendar-month-grid .calendar-event-meta { font-size: 10px; }
+.calendar-month-grid .calendar-event-title { font-size: 12px; }
+.calendar-month-grid .calendar-event-meta { font-size: 12px; }
 .skill-manifest-preview pre { font-size: 12px; line-height: 1.5; }
 .structured-data-diagnostics summary, .structured-data-diagnostics code { font-size: 12px; }
