@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   api, BusinessGapItem, Draft, MetricFactItem, PublishVerificationItem, ReviewTaskItem,
 } from "../api";
-import { displayCodeLabel, displayPlatformLabel } from "../displayLabels";
+import { displayCodeLabel, displayPlatformLabel, displaySourceLabel } from "../displayLabels";
 
 type VerificationForm = { platform_content_id: string; content_url: string; published_at: string; evidence_note: string };
 type CollectionForm = {
@@ -295,7 +295,7 @@ export default function OperatingFeedbackPane() {
           };
           return <div key={draft.id} className="panel" style={{ margin: "8px 0", padding: 12 }}>
             <div className="toolbar" style={{ justifyContent: "space-between" }}>
-              <strong>{draft.title || draft.id}</strong>
+              <strong>{draft.title || "未命名内容"}</strong>
               <span className="tag">{displayPlatformLabel(draft.platform)}</span>
             </div>
             <div className="form-grid" style={{ marginTop: 8 }}>
@@ -323,9 +323,9 @@ export default function OperatingFeedbackPane() {
           <table className="table">
             <thead><tr><th>内容</th><th>平台内容 ID</th><th>真实发布时间</th><th>关闭状态</th><th>凭证链接</th></tr></thead>
             <tbody>{verifications.map((item) => <tr key={item.verification_id}>
-              <td>{drafts.find((draft) => draft.id === item.draft_id)?.title || item.content_id}</td>
-              <td>{item.platform_content_id}</td><td>{new Date(item.published_at).toLocaleString()}</td>
-              <td><span className="tag">{statusText(item.closure_status)}</span>{item.closure_error && <div className="panel-sub">{item.closure_error}</div>}
+              <td>{drafts.find((draft) => draft.id === item.draft_id)?.title || "未命名内容"}</td>
+              <td>{item.platform_content_id ? <details className="advanced-report-editor"><summary>查看平台作品标识</summary><code>{item.platform_content_id}</code></details> : "—"}</td><td>{new Date(item.published_at).toLocaleString()}</td>
+              <td><span className="tag">{statusText(item.closure_status)}</span>{item.closure_error && <details className="advanced-report-editor"><summary>查看关闭诊断</summary><pre className="diagnostic-text">{item.closure_error}</pre></details>}
                 {item.closure_status === "failed" && item.close_event_id && <button className="btn sm" disabled={!!busy} onClick={() => void retryClose(item)}>重试关闭</button>}
               </td>
               <td><a href={item.content_url} target="_blank" rel="noreferrer">查看作品</a></td>
@@ -339,15 +339,15 @@ export default function OperatingFeedbackPane() {
           const conclusion = conclusionForms[task.task_id] ?? emptyConclusion;
           return <div key={task.task_id} className="panel" style={{ margin: "8px 0", padding: 12 }}>
             <div className="toolbar" style={{ justifyContent: "space-between" }}>
-              <div><strong>{drafts.find((draft) => draft.id === task.draft_id)?.title || task.content_id}</strong><div className="panel-sub">{displayPlatformLabel(task.platform)} · 计划采集：{new Date(task.scheduled_at).toLocaleString()}</div></div>
+              <div><strong>{drafts.find((draft) => draft.id === task.draft_id)?.title || "未命名内容"}</strong><div className="panel-sub">{displayPlatformLabel(task.platform)} · 计划采集：{new Date(task.scheduled_at).toLocaleString()}</div></div>
               <span className="tag">{statusText(task.status)}</span>
             </div>
             <div className="panel-sub">尝试 {task.attempt_count}/{task.max_attempts} 次 · 最近采集：{task.last_attempt_at ? new Date(task.last_attempt_at).toLocaleString() : "尚未采集"}</div>
-            {task.last_error && <div className="panel-sub" style={{ color: "var(--danger)" }}>最近失败/部分采集原因：{task.last_error}</div>}
+            {task.last_error && <details className="advanced-report-editor"><summary>查看最近采集诊断</summary><pre className="diagnostic-text">{task.last_error}</pre></details>}
             <button className="btn sm" style={{ marginTop: 6 }} onClick={() => void loadRunHistory(task.task_id)}>查看采集批次（{runHistory[task.task_id]?.length ?? "加载"}）</button>
             {runHistory[task.task_id] && <div style={{ marginTop: 6 }}>
               {runHistory[task.task_id].map((run, index) => <div key={String(run.run_id || index)} className="panel-sub">
-                {statusText(String(run.status || ""))} · {String(run.source || "")} · {String(run.window_start || "—")} 至 {String(run.window_end || "—")}
+                {statusText(String(run.status || ""))} · {displaySourceLabel(String(run.source || ""))} · {String(run.window_start || "—")} 至 {String(run.window_end || "—")}
                 {run.error_message ? <details className="advanced-report-editor"><summary>查看采集诊断</summary><pre className="diagnostic-text">{String(run.error_message)}</pre></details> : ""}
                 {run.metrics ? ` · ${formatRunMetrics(run.metrics)}` : ""}
               </div>)}
