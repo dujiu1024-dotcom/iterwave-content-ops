@@ -106,7 +106,7 @@ def _read_verified_image(
 
     # A file is eligible only when the immutable asset-version hash is present,
     # well-formed, and matches the bytes read from the tenant-scoped media store.
-    expected_hash = str(asset.get("sha256") or asset.get("source_version") or "").strip().lower()
+    expected_hash = str(asset.get("sha256") or "").strip().lower()
     if not _HEX_SHA256.fullmatch(expected_hash):
         raise VisualAssetSelectionError("source_version_hash_missing_or_invalid")
     actual_hash = hashlib.sha256(raw).hexdigest()
