@@ -5054,9 +5054,7 @@ def _register_routes(app: FastAPI) -> None:
             if scope == "active":
                 active_stats = _task_queue.status_counts(scope="active")
                 response["status_counts"] = active_stats["by_status"]
-                response["tenant_status_counts"] = active_stats["by_tenant"]
             elif scope == "failed":
-                response["tenant_status_counts"] = _task_queue.status_counts(scope="failed")["by_tenant"]
         return response
 
     @app.get("/api/task-queue/summary")
@@ -5071,10 +5069,13 @@ def _register_routes(app: FastAPI) -> None:
         if _task_queue is None:
             raise HTTPException(503, "全局任务队列尚未初始化")
         try:
-            return _task_queue.dispatch_summary(
+            summary = _task_queue.dispatch_summary(
                 date_from=date_from, date_to=date_to,
                 tenant_id=tenant_id, task_type=task_type, status=status,
             )
+            if isinstance(summary.get("filters"), dict):
+                summary["filters"].pop("tenant_id", None)
+            return summary
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
