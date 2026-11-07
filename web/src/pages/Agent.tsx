@@ -1,3 +1,4 @@
+import StructuredDataView from "../components/StructuredDataView";
 import { useEffect, useMemo, useState } from "react";
 import EmptyHint from "../components/EmptyHint";
 import { useApp } from "../AppContext";
@@ -517,10 +518,10 @@ function SkillsPane() {
                     <tr key={skill.skill_id}>
                       <td>
                         <strong>{skill.name.replace(/（R\d+）/g, "").replace("Playwright ", "")}</strong>
-                        <div className="tiny">{skill.skill_id}</div>
+                         
                         <details className="skill-manifest-preview">
                           <summary>预览能力定义</summary>
-                          <pre>{JSON.stringify(skill, null, 2)}</pre>
+                          <StructuredDataView data={skill} title="能力详情" />
                         </details>
                       </td>
                       <td><span className="tag green">系统内置</span></td>
