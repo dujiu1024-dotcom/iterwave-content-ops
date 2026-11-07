@@ -1031,3 +1031,22 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 @media (max-width: 680px) {
   .structured-data-grid { grid-template-columns: minmax(0, 1fr); }
 }
+
+
+/* Shared density and readability baseline: compact without shrinking essential text. */
+.content { padding: 22px 26px 36px; }
+.panel { padding: 15px; margin-bottom: 12px; }
+.panel-head { margin-bottom: 11px; }
+.tiny { font-size: 11px; line-height: 1.45; }
+.task-title { font-size: 12px; }
+.task-desc { font-size: 11px; line-height: 1.45; }
+.task-row { padding: 9px 10px; gap: 9px; }
+.metric { padding: 14px; }
+table { font-size: 12px; }
+th { font-size: 11px; }
+th, td { padding: 8px 9px; }
+@media (max-width: 760px) {
+  .content { padding: 16px 14px 28px; }
+  .panel { padding: 13px; }
+  .page-head { gap: 12px; margin-bottom: 15px; }
+}
