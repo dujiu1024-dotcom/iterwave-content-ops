@@ -1162,24 +1162,36 @@ class RoundExecutor:
                            ORDER BY a.id""",
                         (str(topic.id), platform.value, str(self._subplan_context["sub_plan_id"])),
                     ).fetchall()
-                    original_asset_snapshot = [{
-                        "asset_id": int(row["id"]),
-                        "version_no": int(row["current_version_no"]),
-                        "title": row["title"],
-                        "review_status": row["review_status"],
-                        "archived_at": row["archived_at"],
-                        "metadata_json": row["metadata_json"],
-                        "description": row["description"],
-                        "source_kind": row["source_kind"],
-                        "source_media_asset_id": row["source_media_asset_id"],
-                        "source_content_asset_id": row["source_content_asset_id"],
-                        "source_kb_id": row["source_kb_id"],
-                        "commercial_use_status": row["commercial_use_status"],
-                        "privacy_status": row["privacy_status"],
-                        "readability_status": row["readability_status"],
-                        "completeness_status": row["completeness_status"],
-                        "duplicate_status": row["duplicate_status"],
-                    } for row in linked_assets]
+                    original_asset_snapshot = []
+                    for row in linked_assets:
+                        try:
+                            media_metadata = json.loads(row["metadata_json"] or "{}")
+                        except (TypeError, ValueError):
+                            media_metadata = {}
+                        original_asset_snapshot.append({
+                            "asset_id": int(row["id"]),
+                            "version_no": int(row["current_version_no"]),
+                            "title": row["title"],
+                            "description": row["description"],
+                            "source_kind": row["source_kind"],
+                            "source_media_asset_id": row["source_media_asset_id"],
+                            "source_content_asset_id": row["source_content_asset_id"],
+                            "source_kb_id": row["source_kb_id"],
+                            "review_status": row["review_status"],
+                            "archived_at": row["archived_at"],
+                            "commercial_use_status": row["commercial_use_status"],
+                            "privacy_status": row["privacy_status"],
+                            "readability_status": row["readability_status"],
+                            "completeness_status": row["completeness_status"],
+                            "duplicate_status": row["duplicate_status"],
+                            # Persist only the source fields required to re-verify the
+                            # exact approved image version, not the raw metadata blob.
+                            "stored_filename": media_metadata.get("stored_filename"),
+                            "mime_type": media_metadata.get("mime_type"),
+                            "sha256": media_metadata.get("sha256"),
+                            "alt_text": media_metadata.get("alt_text"),
+                            "tags": media_metadata.get("tags"),
+                        })
                     # Run the WP1 visual selector against this task's immutable,
                     # already-authorized candidates. Resolve storage only through the
                     # worker's trusted tenant identity; never fall back to active tenant.
@@ -1191,18 +1203,7 @@ class RoundExecutor:
                     for asset in original_asset_snapshot:
                         if asset.get("source_kind") != "media_asset":
                             continue
-                        try:
-                            metadata = json.loads(asset.get("metadata_json") or "{}")
-                        except (TypeError, ValueError):
-                            metadata = {}
-                        image_candidates.append({
-                            **asset,
-                            "stored_filename": metadata.get("stored_filename"),
-                            "mime_type": metadata.get("mime_type"),
-                            "sha256": metadata.get("sha256"),
-                            "alt_text": metadata.get("alt_text"),
-                            "tags": metadata.get("tags"),
-                        })
+                        image_candidates.append(asset)
                     visual_selection = {
                         "selection_version": "visual-asset-selection-v1",
                         "selected": [],
