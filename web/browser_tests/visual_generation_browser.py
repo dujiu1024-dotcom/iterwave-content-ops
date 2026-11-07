@@ -1433,7 +1433,7 @@ def test_business_profile_realistic_data_layout_has_no_overflow_at_supported_vie
             page.route("**/api/**", handler)
             page.goto(f"http://127.0.0.1:{port}/?page=business-profile")
             page.get_by_role("heading", name="经营资料").wait_for(timeout=15000)
-            business_name = page.get_by_label("业务名称")
+            business_name = page.locator(".form-grid label").filter(has_text="业务名称").locator("input")
             business_name.wait_for(timeout=15000)
             assert business_name.input_value() == "山岚户外装备"
             page.get_by_text("轻量化双人帐篷", exact=True).wait_for(timeout=15000)
@@ -1479,7 +1479,8 @@ def test_business_diagnosis_history_does_not_expose_model_names_or_overflow():
             page.route("**/api/**", handler)
             page.goto(f"http://127.0.0.1:{port}/?page=business-diagnosis")
             page.get_by_role("heading", name="AI 经营分析").wait_for(timeout=15000)
-            page.get_by_text("补充目标客群证据", exact=True).wait_for(timeout=15000)
+            page.get_by_text("V3", exact=True).wait_for(timeout=15000)
+            page.get_by_text("已确认", exact=True).wait_for(timeout=15000)
             page.get_by_text("V3", exact=True).wait_for(timeout=15000)
             assert "internal-provider-model-secret" not in page.locator("body").inner_text()
             _assert_supported_viewports(page, screenshot_dir, "business-diagnosis-real-data")
