@@ -119,7 +119,7 @@ export default function BusinessProfilePage() {
         <div className="editor">
           <h3>{editing ? "编辑资料" : "新增资料"}</h3>
           <label>名称<input className="field" value={name} onChange={e=>setName(e.target.value)} placeholder="填写名称" /></label>
-          <label>结构化详情（JSON）<textarea className="field code-field" rows={7} value={details} onChange={e=>setDetails(e.target.value)} /></label>
+          <details className="advanced-report-editor"><summary>高级编辑：结构化详情</summary><p className="tiny">适用于需要维护自定义字段的场景。建议优先通过 AI 整理资料并逐项确认。</p><textarea aria-label="结构化详情高级编辑" className="field code-field" rows={7} value={details} onChange={e=>setDetails(e.target.value)} /></details>
           <div className="actions"><button className="btn primary" disabled={busy || !name.trim()} onClick={() => void saveItem()}>保存</button><button className="btn" onClick={resetEditor}>取消</button></div>
         </div>
       </section>
