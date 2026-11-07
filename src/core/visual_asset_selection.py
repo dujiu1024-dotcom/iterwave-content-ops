@@ -25,6 +25,10 @@ _ALLOWED_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _TOKEN = re.compile(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]+", re.UNICODE)
 
+class VisualAssetSelectionError(ValueError):
+    """Raised when a visual asset candidate cannot be safely selected."""
+
+
 
 def _tokens(value: object) -> set[str]:
     tokens: set[str] = set()
