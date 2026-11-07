@@ -3,7 +3,7 @@ import { api, GlobalMonitorResponse, GlobalTaskQueueItem, GlobalTodoItem, Notifi
 import { navigate } from "../nav";
 import { roundTaskLabel } from "../roundLabel";
 import ProductionPlanMonitor from "../components/ProductionPlanMonitor";
-import { displayErrorLabel, displayPlatformLabel, displayStatusLabel } from "../displayLabels";
+import { displayCodeLabel, displayErrorLabel, displayPlatformLabel, displayStatusLabel } from "../displayLabels";
 
 const STATUS: Record<string, string> = {
   queued: "排队中", running: "运行中", succeeded: "已完成",
@@ -289,7 +289,7 @@ export default function GlobalOperations() {
             <i className={`task-prio ${notification.level === "critical" || notification.level === "error" ? "red" : notification.level === "warning" ? "blue" : "green"}`} />
             <div className="task-main">
               <div className="task-title">{notification.title}</div>
-              <div className="task-desc">{notification.body || notification.type} · {notification.platform ? (PLATFORMS[notification.platform] ?? notification.platform) : "系统"} · {new Date(notification.sent_at).toLocaleString("zh-CN")}</div>
+              <div className="task-desc">{notification.body || displayCodeLabel(notification.type, "系统通知")} · {notification.platform ? (PLATFORMS[notification.platform] ?? displayPlatformLabel(notification.platform)) : "系统"} · {new Date(notification.sent_at).toLocaleString("zh-CN")}</div>
             </div>
             <button className="btn sm primary" disabled={loading} onClick={() => {
               void api.markNotificationRead(notification.id)
