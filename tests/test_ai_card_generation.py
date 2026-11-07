@@ -347,3 +347,24 @@ def test_reference_asset_hash_mismatch_stops_before_provider_call(monkeypatch, t
             }},
         )
     assert calls == []
+
+
+def test_visual_cache_fingerprint_changes_with_plan_role_and_reference_version(tmp_path):
+    cfg = _Cfg(tmp_path)
+    common = dict(
+        expected="same text", prompt="same prompt", settings={"model": "image-model", "size": "1024x1536"},
+        brand_profile={}, platform="xhs", page_index=0, cfg=cfg, allow_fallback=False,
+        visual_plan_version="visual-plan-v1", page_role="cover",
+    )
+    first = cards._cache_fingerprint(
+        **common, reference_identity={"asset_id": 1, "version_no": 1, "sha256": "a" * 64},
+    )
+    changed_version = cards._cache_fingerprint(
+        **common, reference_identity={"asset_id": 1, "version_no": 2, "sha256": "b" * 64},
+    )
+    changed_role = cards._cache_fingerprint(
+        **{**common, "page_role": "ending"},
+        reference_identity={"asset_id": 1, "version_no": 1, "sha256": "a" * 64},
+    )
+    assert first != changed_version
+    assert first != changed_role
