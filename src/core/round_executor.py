@@ -1315,10 +1315,14 @@ class RoundExecutor:
                         persisted_roles = persisted_selection.get("selected_by_role") or {}
                         visual_reference_assets = {}
                         if persisted_roles:
-                            if not tenant_id or tenant_media_dir is None:
+                            if not tenant_id:
                                 raise RoundPreconditionError(
                                     "任务快照包含已选视觉素材，但当前 Worker 缺少可信租户身份；拒绝跨租户恢复"
                                 )
+                            if tenant_media_dir is None:
+                                registry = TenantRegistry(PROJECT_ROOT, cfg=self.cfg)
+                                registry.get(str(tenant_id))
+                                tenant_media_dir = registry.paths(str(tenant_id), create=False).media_dir
                             snapshot_assets = task_input_snapshot.get("original_assets") or []
                             for usage_role in ("cover", "body", "ending"):
                                 role_items = persisted_roles.get(usage_role) or []
