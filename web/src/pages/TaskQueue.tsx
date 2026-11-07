@@ -91,7 +91,7 @@ function TaskRow({
       </div>
       <div className="muted" style={{ fontSize: 12 }}>{timeLabel(task.created_at)}</div>
       <div className="muted" style={{ fontSize: 12 }}>
-        {task.error_message || (
+        {task.error_message ? displayErrorLabel(task.error_message) : (
           task.status === "queued" && new Date(task.available_at).getTime() > Date.now()
             ? `计划执行：${timeLabel(task.available_at)}`
             : task.started_at ? `开始：${timeLabel(task.started_at)}` : "尚未开始"
@@ -244,7 +244,7 @@ export default function TaskQueue() {
       setDetailTask(detail);
       setDetailAudit(audit.items ?? []);
     } catch (err) {
-      setDetailError((err as Error).message || "任务详情读取失败");
+      setDetailError("任务详情读取失败，请刷新后重试。");
     } finally {
       setDetailLoading(false);
     }
@@ -479,7 +479,7 @@ export default function TaskQueue() {
                   />
                 )}
                 {detailTask.error_code && <div className="notice danger" style={{ marginTop: 14 }}>失败原因：{displayErrorLabel(detailTask.error_code)}</div>}
-                {detailTask.error_message && <div style={{ marginTop: 10, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{detailTask.error_message}</div>}
+                {detailTask.error_message && <details className="advanced-report-editor"><summary>高级诊断：原始错误详情</summary><pre className="diagnostic-text">{detailTask.error_message}</pre></details>}
 
                 {detailTask.retry_confirmation_note && <div className="muted" style={{ marginTop: 6 }}>恢复核验：{detailTask.retry_confirmation_note}</div>}
                 {detailTask.resolution_action && <div className="muted" style={{ marginTop: 12 }}>
@@ -493,7 +493,7 @@ export default function TaskQueue() {
                       <div className="task-main">
                         <strong>{displayStepLabel(entry.step)}</strong>
                         <div className="tiny">{displayStatusLabel(entry.status)}</div>
-                        {entry.detail && <div className="tiny" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{entry.detail}</div>}
+                        {entry.detail && <details className="advanced-report-editor"><summary>步骤诊断详情</summary><pre className="diagnostic-text">{entry.detail}</pre></details>}
                       </div>
                     </div>)}
                   </div> : <div className="empty-state">该任务没有步骤明细（历史任务或尚未开始执行）。</div>}
