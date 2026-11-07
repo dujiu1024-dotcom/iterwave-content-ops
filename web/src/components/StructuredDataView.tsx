@@ -13,7 +13,7 @@ const LABELS: Record<string, string> = {
   generated_at: "生成时间", model: "生成模型", version: "版本",
   field: "字段", message: "说明", code: "代码",
 };
-const HIDDEN_KEYS = /(^|_)(id|ids|tenant|worker|trace|request|execution|correlation|fingerprint|signature|raw|payload)(_|$)/i;
+const HIDDEN_KEYS = /(^|_)(id|ids|tenant|worker|trace|request|execution|correlation|fingerprint|signature|raw|payload|error_code|stack|debug)(_|$)/i;
 const TECHNICAL_KEYS = /(^|_)(id|ids|tenant|worker|trace|request|execution|correlation|fingerprint|signature|raw|payload|error_code|stack|debug)(_|$)/i;
 
 function labelFor(key: string): string {
