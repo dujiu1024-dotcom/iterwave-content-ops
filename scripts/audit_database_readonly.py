@@ -9,6 +9,7 @@ No row values, client IPs, tokens, or content are printed.
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import hashlib
 import json
 import sqlite3
@@ -29,15 +30,15 @@ def readonly_uri(path: Path) -> str:
 
 def create_readonly_snapshot(source: Path, destination: Path) -> None:
     """Copy a consistent snapshot while the source connection is strictly read-only."""
-    with sqlite3.connect(readonly_uri(source), uri=True) as src:
-        with sqlite3.connect(destination) as dst:
+    with closing(sqlite3.connect(readonly_uri(source), uri=True)) as src:
+        with closing(sqlite3.connect(destination)) as dst:
             src.backup(dst)
 
 
 def audit_auth_store(path: Path) -> dict:
     if not path.is_file():
         return {"file_present": False}
-    with sqlite3.connect(readonly_uri(path), uri=True) as conn:
+    with closing(sqlite3.connect(readonly_uri(path), uri=True)) as conn:
         tables = {
             row[0] for row in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
@@ -93,7 +94,7 @@ def main() -> int:
 
         migrations = db._discover_migrations()
         checksum_report = {"checked": 0, "mismatches": []}
-        with sqlite3.connect(snapshot) as conn:
+        with closing(sqlite3.connect(snapshot)) as conn:
             conn.row_factory = sqlite3.Row
             tables = {
                 row[0] for row in conn.execute(
