@@ -905,7 +905,7 @@ function TasksPane({ tasks, total, page, pages, onPageChange, onResolved, target
                 <td>{t.attempt}/{t.max_attempts}</td>
                 <td style={{ fontSize: 11, color: "var(--muted)" }}>{t.started_at ? new Date(t.started_at).toLocaleString("zh-CN") : "-"}</td>
                 <td style={{ fontSize: 11, color: "var(--muted)" }}>{t.finished_at ? new Date(t.finished_at).toLocaleString("zh-CN") : "-"}</td>
-                <td style={{ fontSize: 11, maxWidth: 200 }}>{t.error_msg ?? "-"}</td>
+                <td style={{ maxWidth: 200 }}>{t.error_msg ? <details className="advanced-report-editor"><summary>查看诊断</summary><pre className="diagnostic-text">{t.error_msg}</pre></details> : "—"}</td>
                 <td>
                   {t.status === "pending_verify" ? (
                     <>
