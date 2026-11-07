@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import json
 import re
 import shutil
@@ -457,6 +458,22 @@ def _generate_ai_card_set(
             ocr_report=report,
             require_ending=visual_plan is not None,
         )
+        if group_report.get("gate") != "passed":
+            raise ValueError(
+                "AI 完整卡片整组视觉质量门禁未通过：" +
+                json.dumps(group_report.get("failures", []), ensure_ascii=False)
+            )
+        visual_review_report = {"status": "not_evaluated", "reason": "disabled", "score": None}
+        if os.getenv("ITERWAVE_ENABLE_VISUAL_REVIEW") == "1":
+            from .visual_review import assess_visual_pages
+            visual_review_report = assess_visual_pages(accepted_cache)
+            minimum_score = float(os.getenv("ITERWAVE_VISUAL_REVIEW_MIN_SCORE", "70"))
+            if visual_review_report.get("status") != "evaluated" or float(visual_review_report.get("score") or 0) < minimum_score:
+                raise ValueError(
+                    "AI 整组视觉语义评估未通过或不可用：" +
+                    json.dumps(visual_review_report, ensure_ascii=False)
+                )
+        group_report["semantic_review"] = visual_review_report
         group_report_path = staging_dir / "visual_group_quality.json"
         group_report_path.write_text(
             json.dumps(group_report, ensure_ascii=False, indent=2), encoding="utf-8",
@@ -482,6 +499,7 @@ def _generate_ai_card_set(
         final_report.write_text(
             json.dumps(delivery_report, ensure_ascii=False, indent=2), encoding="utf-8",
         )
+        shutil.copy2(group_report_path, delivery_stage / "visual_group_quality.json")
         sets_root = media_root / "sets"
         sets_root.mkdir(parents=True, exist_ok=True)
         target_dir = sets_root / f"{task_id}-{uuid.uuid4().hex[:8]}"
