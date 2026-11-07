@@ -117,7 +117,7 @@ export default function BusinessProfilePage() {
         <div className="catalog-list">
           {visibleItems.length === 0 ? <p className="muted">暂无{tabs.find(t=>t.key===tab)?.label}资料。</p> : visibleItems.map(item => (
             <article className="catalog-item" key={item.id}>
-              <div><strong>{item.name}</strong><StructuredDataView data={item.details} /><small className="muted">来源：{Object.entries(item.field_evidence).map(([field,evidence])=>`${field}：${({user_confirmed:"用户确认",external_source:"外部来源",ai_inferred:"AI 推测",missing:"尚未提供"} as Record<string,string>)[evidence.status] || "其他来源（需确认）"}`).join("；") || "未标注"}</small></div>
+              <div><strong>{item.name}</strong><StructuredDataView data={item.details} /><small className="muted">来源：{Object.entries(item.field_evidence).map(([field,evidence])=>`${evidenceFieldLabel(field)}：${({user_confirmed:"用户确认",external_source:"外部来源",ai_inferred:"AI 推测",missing:"尚未提供"} as Record<string,string>)[evidence.status] || "其他来源（需确认）"}`).join("；") || "未标注"}</small></div>
               <div className="actions"><button className="btn sm" onClick={() => editItem(item)}>编辑</button><button className="btn sm danger" onClick={() => void archiveItem(item.id)}>归档</button></div>
             </article>
           ))}
