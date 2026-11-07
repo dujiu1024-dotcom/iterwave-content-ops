@@ -148,11 +148,11 @@ export default function Activation() {
       window.history.pushState({}, "", url.toString());
       window.dispatchEvent(new PopStateEvent("popstate"));
     } catch (e: any) {
-      const message = "";
+      const message = String(e?.message ?? "");
       if (message.includes("母计划") || message.includes("子计划阶段")) {
         setError("当前账号组已启用生效母计划：请先在「计划中心 → 子计划阶段」创建本阶段生产轮次，再导入体验样稿");
       } else {
-        setError(message || "导入正式生产失败");
+        setError("导入正式生产失败，请检查计划配置和样稿状态后重试。");
       }
       await loadSaved();
     } finally {
