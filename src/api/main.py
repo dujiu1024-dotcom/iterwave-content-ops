@@ -6997,12 +6997,28 @@ def _register_routes(app: FastAPI) -> None:
                                       - datetime.fromisoformat(rep_["started_at"])).total_seconds(), 1)
                 except ValueError:
                     duration = None
+            step_status = (rep_ or {}).get("step_status") or step_status_from_report(rep_, orch_now)
+            safe_step_status = {
+                key: {
+                    **value,
+                    "detail": safe_error_summary(
+                        value.get("detail"),
+                        "步骤执行异常，请进入任务详情查看。",
+                    ) if value.get("detail") else "",
+                }
+                for key, value in (step_status or {}).items()
+                if isinstance(value, dict)
+            }
+            safe_errors = [
+                safe_error_summary(error, "本轮执行存在异常，请进入任务详情查看。")
+                for error in (rep_ or {}).get("errors", [])[:5]
+            ]
             out.append({
                 "round_id": r["id"], "round_number": r["round_number"], "status": r["status"],
                 "trigger_source": r["trigger_source"], "created_at": r["created_at"],
                 "duration_seconds": duration,
-                "step_status": (rep_ or {}).get("step_status") or step_status_from_report(rep_, orch_now),
-                "errors": (rep_ or {}).get("errors", [])[:5],
+                "step_status": safe_step_status,
+                "errors": safe_errors,
                 "has_report": rep_ is not None,
             })
         return {"runs": out}
