@@ -464,9 +464,7 @@ export default function TaskQueue() {
             {detailLoading ? <div className="empty-state">正在读取任务详情…</div> : detailError ? <div className="notice danger" role="alert">{detailError}</div> : detailTask && (
               <>
                 <div className="grid two">
-                  <div><div className="muted">任务 ID</div><code>{detailTask.task_id}</code></div>
-                  <div><div className="muted">队列序号</div><strong>#{detailTask.queue_order}</strong></div>
-                  <div><div className="muted">所属账号组</div><strong>{detailTask.tenant_id}</strong></div>
+                  <div><div className="muted">队列位置</div><strong>第 {detailTask.queue_order} 位</strong></div>
                   <div><div className="muted">任务类型 / 状态</div><strong>{displayTaskTypeLabel(detailTask.task_type)} · {STATUS_LABEL[detailTask.status] ?? displayStatusLabel(detailTask.status)}</strong></div>
                   <div><div className="muted">创建时间</div>{timeLabel(detailTask.created_at)}</div>
                   <div><div className="muted">开始时间</div>{timeLabel(detailTask.started_at)}</div>
@@ -480,9 +478,9 @@ export default function TaskQueue() {
                     queued={detailTask.status === "queued"}
                   />
                 )}
-                {detailTask.error_code && <div className="notice danger" style={{ marginTop: 14 }}>错误说明：{displayErrorLabel(detailTask.error_code)} <code style={{ marginLeft: 6 }}>{detailTask.error_code}</code></div>}
+                {detailTask.error_code && <div className="notice danger" style={{ marginTop: 14 }}>失败原因：{displayErrorLabel(detailTask.error_code)}</div>}
                 {detailTask.error_message && <div style={{ marginTop: 10, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{detailTask.error_message}</div>}
-                {detailTask.retry_of_task_id && <div className="muted" style={{ marginTop: 12 }}>恢复自任务：{detailTask.retry_of_task_id}</div>}
+
                 {detailTask.retry_confirmation_note && <div className="muted" style={{ marginTop: 6 }}>恢复核验：{detailTask.retry_confirmation_note}</div>}
                 {detailTask.resolution_action && <div className="muted" style={{ marginTop: 12 }}>
                   处理记录：{detailTask.resolution_action === "handled" ? "已处理" : "已忽略"} · {detailTask.resolution_actor || "操作人未知"} · {timeLabel(detailTask.resolution_at)}
