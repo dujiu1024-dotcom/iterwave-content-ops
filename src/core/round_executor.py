@@ -1671,9 +1671,13 @@ class RoundExecutor:
                                     "background_path": None,
                                     "body_pages": pages or None,
                                     "pages": [
-                                        {"page_index": index, "image_path": str(path),
-                                         "background_path": None,
-                                         "generation_mode": "ai_complete_card"}
+                                        {
+                                            "page_index": index,
+                                            "role": "cover" if index == 0 else "ending" if index == len(image_paths) - 1 else "body",
+                                            "image_path": str(path),
+                                            "background_path": None,
+                                            "generation_mode": "ai_complete_card",
+                                        }
                                         for index, path in enumerate(image_paths)
                                     ],
                                     "ocr": visual_ocr,
