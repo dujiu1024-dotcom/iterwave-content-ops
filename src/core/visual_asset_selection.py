@@ -7,7 +7,7 @@ records: selection is not evidence that a provider consumed an image.
 from __future__ import annotations
 
 import hashlib
-import json
+import io
 import re
 from pathlib import Path
 from typing import Any
@@ -86,9 +86,9 @@ def _read_verified_image(
     if not allowed_formats:
         raise VisualAssetSelectionError("unsupported_mime_type")
     try:
-        with Image.open(path) as image:
+        with Image.open(io.BytesIO(raw)) as image:
             image.verify()
-        with Image.open(path) as image:
+        with Image.open(io.BytesIO(raw)) as image:
             image_format = str(image.format or "").upper()
             width, height = image.size
     except (UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError):
