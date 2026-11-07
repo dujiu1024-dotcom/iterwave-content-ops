@@ -1335,7 +1335,13 @@ def test_analytics_realistic_business_metrics_has_no_overflow_at_supported_viewp
             page.goto(f"http://127.0.0.1:{port}/?page=analytics")
             page.get_by_role("heading", name="数据分析").wait_for(timeout=15000)
             page.get_by_text("内容生产量", exact=True).wait_for(timeout=15000)
-            page.get_by_text("24", exact=True).first.wait_for(timeout=15000)
+            production_metric = page.locator(".analytics-business-kpis .metric").filter(has_text="内容生产量").locator(".metric-val")
+            production_metric.wait_for(timeout=15000)
+            assert "24" in production_metric.inner_text(), (
+                "analytics production KPI did not render the mocked contents_created value: {}".format(
+                    production_metric.inner_text()
+                )
+            )
             page.get_by_role("button", name="详细数据").click()
             page.get_by_text("真实数据分析验收：客户案例复盘", exact=False).wait_for(timeout=15000)
             _assert_supported_viewports(page, screenshot_dir, "analytics-real-data")
