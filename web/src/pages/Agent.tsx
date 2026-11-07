@@ -214,11 +214,11 @@ function EditPane({ orch, onSaved }: { orch: OrchestrationView | null; onSaved: 
       const v = await api.saveOrchestration(steps);
       onSaved(v);
       showToast("✓ 编排已保存，下一轮按新编排执行", "success");
-    } catch (e: any) { showToast(`保存失败：${e.message}`, "error"); }
+    } catch (e: any) { showToast(`保存失败：请稍后重试`, "error"); }
   });
   const reset = () => withPending("orch:reset", async () => {
     try { onSaved(await api.resetOrchestration()); showToast("已恢复默认编排"); }
-    catch (e: any) { showToast(`恢复失败：${e.message}`, "error"); }
+    catch (e: any) { showToast(`恢复失败：请稍后重试`, "error"); }
   });
 
   return (
@@ -284,7 +284,7 @@ function DiagnosePane() {
   const [res, setRes] = useState<DiagnoseResult | null>(null);
   const [live, setLive] = useState(false);
   const run = () => withPending("diag", async () => {
-    try { setRes(await api.diagnose(live)); } catch (e: any) { showToast(`诊断失败：${e.message}`, "error"); }
+    try { setRes(await api.diagnose(live)); } catch (e: any) { showToast(`诊断失败：请稍后重试`, "error"); }
   });
   useEffect(() => { run(); /* 进页自动跑一次（不实测 LLM） */ }, []);  // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -462,7 +462,7 @@ function SkillsPane() {
         setSkillInputsJson("[]"); setSkillOutputsJson("[]"); setSkillPermissions([]);
         setEditingSkillId(null); setEditingSkillVersion(null); setDraftTest(null);
         await load();
-      } catch (e: any) { showToast(`${editingSkillId ? "更新" : "登记"}失败：${e?.message ?? e}`, "error"); }
+      } catch (e: any) { showToast(`${editingSkillId ? "更新" : "登记"}失败：请稍后重试`, "error"); }
     });
   };
 
@@ -486,7 +486,7 @@ function SkillsPane() {
         api.setTenantSkillEnabled(skill.skill_id, !skill.enabled, skill.manifest_version));
       await load();
       showToast(skill.enabled ? "Skill 已停用" : "Skill 已启用（仅登记状态，不会执行）", "success");
-    } catch (e: any) { showToast(`状态更新失败：${e?.message ?? e}`, "error"); }
+    } catch (e: any) { showToast(`状态更新失败：请稍后重试`, "error"); }
   };
 
   const remove = async (skill: TenantSkillManifest) => {
@@ -494,7 +494,7 @@ function SkillsPane() {
       await withPending(`skill:delete:${skill.skill_id}`, () => api.deleteTenantSkill(skill.skill_id));
       await load();
       showToast("Skill 登记已删除", "success");
-    } catch (e: any) { showToast(`删除失败：${e?.message ?? e}`, "error"); }
+    } catch (e: any) { showToast(`删除失败：请稍后重试`, "error"); }
   };
 
   return (
@@ -676,7 +676,7 @@ function SkillContractTester({ skill, onClose }: { skill: TenantSkillManifest; o
       ]);
     } catch (e) {
       setChecks(null);
-      setError(e instanceof Error ? `JSON 格式错误：${e.message}` : "JSON 格式错误");
+      setError(e instanceof Error ? `JSON 格式错误：请稍后重试` : "JSON 格式错误");
     }
   };
   return (
