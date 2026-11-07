@@ -380,6 +380,14 @@ details[open] > summary::before { content: "▾ "; }
 @media (max-width: 760px) {
   .queue-summary-grid { grid-template-columns: minmax(0, 1fr); }
 }
+@media (max-width: 900px) and (min-width: 761px) {
+  .task-queue-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 10px 14px !important;
+  }
+  .task-queue-row > :first-child { grid-column: 1 / -1; }
+  .task-queue-row > * { min-width: 0; overflow-wrap: anywhere; }
+}
 .review-mobile-tabs { display: none; }
 @media (max-width: 1200px) and (min-width: 681px) {
   .review-layout { grid-template-columns: minmax(220px, .8fr) minmax(0, 1.2fr); }
