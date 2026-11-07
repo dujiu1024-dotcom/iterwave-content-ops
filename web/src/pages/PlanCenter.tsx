@@ -704,7 +704,7 @@ export default function PlanCenter() {
         {aiGenerationError && <div className="note" role="alert" style={{ marginTop: 10, color: "var(--red)" }}>生成失败：{aiGenerationError}。当前编辑内容和已生效计划未被覆盖，可修复依据或配置后重试。</div>}
         {aiGeneration && <div className="plan-version-detail" style={{ marginTop: 14 }}>
           <div className="panel-head"><b>本次 AI 生成依据与待确认事项</b><span className="tag gray">仅草稿 · 待人工审核</span></div>
-          <div className="tiny">经营诊断 v{aiGeneration.diagnosis_version_no} · 北极星 v{aiGeneration.north_star_version_no} · 模型：{aiGeneration.model} · 生成时间：{aiGeneration.generated_at}</div>
+          <div className="tiny">经营诊断 v{aiGeneration.diagnosis_version_no} · 北极星 v{aiGeneration.north_star_version_no} · 生成时间：{formatBusinessDateTime(aiGeneration.generated_at)}</div>
           <div className="tiny">资源基线：{String((aiGeneration.resource_baseline.summary as Record<string, number> | undefined)?.confirmed ?? 0)} 项已确认 / {String((aiGeneration.resource_baseline.summary as Record<string, number> | undefined)?.total ?? 0)} 项</div>
           <div style={{ marginTop: 10 }}><b>制定摘要</b><p>{aiGeneration.summary}</p></div>
           <div className="grid two">
