@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useApp } from "../AppContext";
 import { api, TenantBackupItem, TenantListResponse } from "../api";
+import { formatBusinessDateTime } from "../businessTime.mjs";
 
 export default function TenantManagerPane() {
   const { showToast, withPending, isPending } = useApp();
@@ -118,7 +119,7 @@ export default function TenantManagerPane() {
                 {(data?.items ?? []).map((item) => (
                   <tr key={item.id}>
                     <td>{item.name}</td>
-                    <td>{item.created_at ? new Date(item.created_at).toLocaleString("zh-CN") : "—"}</td>
+                    <td>{formatBusinessDateTime(item.created_at)}</td>
                     <td>
                       {item.id === data?.runtime_tenant_id
                         ? <span className="tag green">当前运行</span>
@@ -156,7 +157,7 @@ export default function TenantManagerPane() {
                 {backups.map((backup) => (
                   <tr key={backup.backup_name}>
                     <td><code>{backup.backup_name}</code></td>
-                    <td>{backup.created_at}</td>
+                    <td>{formatBusinessDateTime(backup.created_at)}</td>
                     <td>{(backup.size_bytes / 1024 / 1024).toFixed(1)} MB</td>
                     <td>
                       <button className="btn sm" disabled={isPending("tenant:restore")} onClick={() => void restoreBackup(backup)}>安排恢复</button>
