@@ -469,13 +469,13 @@ export default function Calendar() {
             <div className="calendar-plan-detail-grid">
               <div><strong>生产轮次（{planDetail.rounds.length}）</strong>
                 {planDetail.rounds.length ? planDetail.rounds.map((round) => <div className="calendar-plan-detail-row" key={round.round_id}>
-                  {round.round_number != null ? `第 ${round.round_number} 轮` : "轮次信息不可用"} · {round.task_id ? `任务 ${round.task_id.slice(0, 8)}` : "尚未入队"}
-                  {round.attribution_status === "attributed" && round.strategy_step_id ? ` · 策略步骤 ${round.strategy_step_id}` : " · 历史归属待核实"}
+                  {round.round_number != null ? `第 ${round.round_number} 轮` : "轮次信息不可用"} · {round.task_id ? "已进入生产队列" : "尚未入队"}
+                  {round.attribution_status === "attributed" && round.strategy_step_id ? " · 已关联策略步骤" : " · 历史归属待核实"}
                   {round.production_line_version_id ? ` · 生产线版本 v${round.production_line_version_id}` : ""}
                 </div>) : <div className="note">尚未关联生产轮次</div>}
               </div>
               <div><strong>关联草稿（{planDetail.drafts.length}）</strong>
-                {planDetail.drafts.length ? planDetail.drafts.map((draft) => <div className="calendar-plan-detail-row" key={draft.draft_id}>{draft.title || draft.draft_id} · {platformMeta(draft.platform).label} · {draft.status}</div>) : <div className="note">生产完成后自动回写草稿</div>}
+                {planDetail.drafts.length ? planDetail.drafts.map((draft) => <div className="calendar-plan-detail-row" key={draft.draft_id}>{draft.title || "未命名草稿"} · {platformMeta(draft.platform).label} · {displayStatusLabel(draft.status)}</div>) : <div className="note">生产完成后自动回写草稿</div>}
               </div>
             </div>
             {planDetailLoading && <div className="loading"><div className="spinner" />刷新中…</div>}
@@ -498,7 +498,7 @@ export default function Calendar() {
             <div className="note">
               母计划版本：{batchDetail.batch.master_plan_version_id ?? "待核实"} ·
               子计划版本：{batchDetail.batch.sub_plan_version_id ?? "待核实"} ·
-              策略步骤：{batchDetail.batch.strategy_step_title ?? batchDetail.batch.strategy_step_id ?? "待核实"} ·
+              策略步骤：{batchDetail.batch.strategy_step_title ?? "待核实"} ·
               生产线版本：{batchDetail.batch.production_line_version_id ?? "待核实"} ·
               归属：{batchDetail.batch.attribution_status === "attributed" ? "完整" : "待核实"}
             </div>
@@ -506,7 +506,7 @@ export default function Calendar() {
               <div><strong>生产任务（{batchDetail.tasks.length}）</strong>
                 {batchDetail.tasks.length ? batchDetail.tasks.map((task) => (
                   <div className="calendar-plan-detail-row" key={task.id}>
-                    <strong>{task.content_title || task.id}</strong>
+                    <strong>{task.content_title || "已生成内容"}</strong>
                     <div>{platformMeta(task.platform).label} · {TASK_STATUS_LABEL[task.status] ?? task.status} · 尝试 {task.attempt_count}/{task.max_attempts}</div>
                     {task.error_message && <div className="note">{task.error_message}</div>}
                   </div>
