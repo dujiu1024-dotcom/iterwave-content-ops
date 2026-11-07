@@ -378,7 +378,7 @@ export default function Analytics() {
             {!!weeklyReport.data_conflicts?.length && <div className="note" style={{ marginTop: 12 }}>
               <strong>数据来源冲突（保留原始记录）</strong>
               {weeklyReport.data_conflicts.map((conflict) => <div className="panel-sub" key={conflict.content_id}>
-                {PLATFORM_NAME[conflict.platform]} · 内容 {conflict.content_id.slice(0, 8)} · 指标：{conflict.metrics.join("、")}
+                {PLATFORM_NAME[conflict.platform]} · 存在指标数据冲突 · 指标：{conflict.metrics.join("、")}
               </div>)}
             </div>}
             <h3 style={{ marginTop: 14 }}>可能原因</h3>
