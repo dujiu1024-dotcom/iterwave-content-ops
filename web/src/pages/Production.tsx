@@ -800,8 +800,8 @@ export default function Production() {
           {orphanDrafts.map((draft) => (
             <div key={draft.id} className="task-row" style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
               <div>
-                <div style={{ fontWeight: 600 }}>{displayPlatformLabel(draft.platform)} · {draft.id}</div>
-                <div className="tiny">来源内容：{draft.content_id} · 草稿状态：{displayStatusLabel(draft.status)} · 创建：{draft.created_at || "未知"}</div>
+                <div style={{ fontWeight: 600 }}>{displayPlatformLabel(draft.platform)} · 待核实草稿</div>
+                <div className="tiny">草稿状态：{displayStatusLabel(draft.status)} · 创建：{draft.created_at || "未知"}</div>
                 <div className="tiny">处置建议：{({
                   manual_verification_required: "先人工核实平台是否已保存",
                   platform_state_must_be_preserved: "保留平台状态，不得自动清理",

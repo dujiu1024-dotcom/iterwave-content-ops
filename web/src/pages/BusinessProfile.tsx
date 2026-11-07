@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import StructuredDataView from "../components/StructuredDataView";
 import { api, BusinessCatalogItem, BusinessProfile } from "../api";
 import { useApp } from "../AppContext";
 
@@ -101,7 +102,7 @@ export default function BusinessProfilePage() {
       <section className="panel">
         <div className="panel-header"><h2>经营资料版本</h2><span className="muted">每次业务概况或目录变更都会形成完整快照</span></div>
         {versions.length ? <div className="catalog-list">{versions.map(v=><article className="catalog-item" key={v.version_no}><div><strong>业务资料 v{v.version_no}</strong><small className="muted">{v.change_note || "资料变更"} · {new Date(v.created_at).toLocaleString()}</small></div><button className="btn sm" onClick={async()=>{try{setSelectedVersion(await api.businessVersion(v.version_no));}catch(e){showToast((e as Error).message,"error");}}}>查看快照</button></article>)}</div> : <p className="muted">尚无历史版本，首次保存后自动建立。</p>}
-        {selectedVersion && <pre>{JSON.stringify(selectedVersion.snapshot,null,2)}</pre>}
+        {selectedVersion && <StructuredDataView data={selectedVersion.snapshot} title="版本内容"/>}
       </section>
 
       <section className="panel">
@@ -110,7 +111,7 @@ export default function BusinessProfilePage() {
         <div className="catalog-list">
           {visibleItems.length === 0 ? <p className="muted">暂无{tabs.find(t=>t.key===tab)?.label}资料。</p> : visibleItems.map(item => (
             <article className="catalog-item" key={item.id}>
-              <div><strong>{item.name}</strong><pre>{JSON.stringify(item.details,null,2)}</pre><small className="muted">来源：{Object.entries(item.field_evidence).map(([field,evidence])=>`${field}：${({user_confirmed:"用户确认",external_source:"外部来源",ai_inferred:"AI 推测",missing:"尚未提供"} as Record<string,string>)[evidence.status] || evidence.status}`).join("；") || "未标注"}</small></div>
+              <div><strong>{item.name}</strong><StructuredDataView data={item.details} title="资料详情"/><small className="muted">来源：{Object.entries(item.field_evidence).map(([field,evidence])=>`${field}：${({user_confirmed:"用户确认",external_source:"外部来源",ai_inferred:"AI 推测",missing:"尚未提供"} as Record<string,string>)[evidence.status] || evidence.status}`).join("；") || "未标注"}</small></div>
               <div className="actions"><button className="btn sm" onClick={() => editItem(item)}>编辑</button><button className="btn sm danger" onClick={() => void archiveItem(item.id)}>归档</button></div>
             </article>
           ))}
@@ -130,7 +131,7 @@ export default function BusinessProfilePage() {
         <p className="muted">请勿粘贴密码、访问令牌、个人身份信息等敏感资料。AI 只返回待确认建议，不会自动修改档案。</p>
         <label>粘贴原始经营资料<textarea className="field" rows={4} value={sourceText} onChange={e=>setSourceText(e.target.value)} placeholder="粘贴产品介绍、服务说明、客户访谈、竞品观察等原始资料" /></label>
         <div className="actions"><button className="btn" disabled={!sourceText.trim() || busy} onClick={async()=>{try{setBusy(true);const r=await api.businessAiProposal(sourceText);setProposals(r.proposals || []);showToast(r.message,"info");}catch(e){showToast((e as Error).message,"error");}finally{setBusy(false);}}}>AI 整理资料</button></div>
-        {proposals.map((proposal,index)=><article className="catalog-item" key={index}><div><strong>{String(proposal.name || proposal.entity_type)}</strong><pre>{JSON.stringify(proposal,null,2)}</pre></div><button className="btn sm primary" onClick={async()=>{try{await api.confirmBusinessAiProposal(proposal);setProposals(items=>items.filter((_,i)=>i!==index));await load();showToast("已确认并写入业务档案","success");}catch(e){showToast((e as Error).message,"error");}}}>确认写入</button></article>)}
+        {proposals.map((proposal,index)=><article className="catalog-item" key={index}><div><strong>{String(proposal.name || proposal.entity_type)}</strong><StructuredDataView data={proposal} title="建议资料"/></div><button className="btn sm primary" onClick={async()=>{try{await api.confirmBusinessAiProposal(proposal);setProposals(items=>items.filter((_,i)=>i!==index));await load();showToast("已确认并写入业务档案","success");}catch(e){showToast((e as Error).message,"error");}}}>确认写入</button></article>)}
       </section>
     </div>
   );

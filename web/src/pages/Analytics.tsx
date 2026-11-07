@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import StructuredDataView from "../components/StructuredDataView";
 import EmptyHint from "../components/EmptyHint";
 import OperatingFeedbackPane from "../components/OperatingFeedbackPane";
 import { api, MetricsResponse, MetricRow, Platform, SpiralAnalysis, Draft, WeeklyReport, ActivationStatus, GoalSummary, BusinessAnalyticsSummary } from "../api";
@@ -602,9 +603,7 @@ export default function Analytics() {
             {analysis.evidence && Object.keys(analysis.evidence).length > 0 && (
               <details style={{ marginTop: 18 }}>
                 <summary className="form-label" style={{ cursor: "pointer" }}>查看触发数据</summary>
-                <pre style={{ background: "var(--surface-2)", padding: 12, borderRadius: 8, fontSize: 11, overflow: "auto" }}>
-{JSON.stringify(analysis.evidence, null, 2)}
-                </pre>
+                <StructuredDataView data={analysis.evidence} title="分析证据"/>
               </details>
             )}
           </>

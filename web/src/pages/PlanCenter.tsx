@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import StructuredDataView from "../components/StructuredDataView";
 import { useApp } from "../AppContext";
 import { navigate } from "../nav";
 import { api, BusinessDiagnosisReport, Goal, MasterPlan, MasterPlanGenerationMetadata, MasterPlanVersion, PlanResponse, PlanSignatureHistory, SpiralAnalysis, SubPlanStageRecord } from "../api";
@@ -9,6 +10,7 @@ import OriginalAssetInventoryPanel from "../components/OriginalAssetInventoryPan
 import NorthStarResourcePanel from "../components/NorthStarResourcePanel";
 import SubgoalManager from "../components/SubgoalManager";
 import { businessCalendarDate, formatCalendarDate } from "../calendarDate.mjs";
+import { displaySourceLabel } from "../displayLabels";
 
 type Tab = "master" | "platforms" | "stages" | "goals" | "production-line" | "assets" | "north-star";
 type StageStatus = "pending" | "active" | "completed" | "paused" | "cancelled";
@@ -606,7 +608,7 @@ export default function PlanCenter() {
         topic_count: created.topic_count, platforms: [child.platform],
       });
       setPendingRoundLaunch(null);
-      showToast(`第 ${created.round_number} 轮已进入生产队列（任务 ${queued.task_id}）`, "success");
+      showToast(`第 ${created.round_number} 轮已进入生产队列`, "success");
       await load(child.id);
     } catch (e) {
       showToast("生产轮次启动失败：" + (e instanceof Error ? e.message : String(e)) +
@@ -688,7 +690,7 @@ export default function PlanCenter() {
         </div>
         {diagnosis ? <div className="grid two">
           <div className="plan-summary-card"><div className="tiny">当前经营诊断</div><b>报告 v{diagnosis.version_no}</b><div className="tiny">状态：{diagnosis.status === "confirmed" ? "已确认" : diagnosis.status === "stale" ? "已过期" : diagnosis.status === "superseded" ? "已被新版本替代" : "待确认"}</div><div className="tiny">确认时间：{diagnosis.confirmed_at ?? "尚未确认"}</div><div className="tiny">诊断模型：{diagnosis.model_name || "—"}</div></div>
-          <div className="plan-summary-card"><div className="tiny">依据完整性</div><b>{diagnosisStrategyCurrent ? "北极星与资源基线版本一致" : "战略依据已变化或缺少版本快照"}</b><div className="tiny">关联资料与素材：{diagnosis.source_snapshot?.source_references?.length ?? 0} 项</div><div className="tiny">依据摘要：{JSON.stringify(diagnosis.source_snapshot?.inventory_summary ?? {})}</div>{(diagnosis.source_snapshot?.source_references ?? []).map((source) => <div className="tiny" key={source.source_type + ":" + source.source_id}>{source.source_type} · {source.label}</div>)}</div>
+          <div className="plan-summary-card"><div className="tiny">依据完整性</div><b>{diagnosisStrategyCurrent ? "北极星与资源基线版本一致" : "战略依据已变化或缺少版本快照"}</b><div className="tiny">关联资料与素材：{diagnosis.source_snapshot?.source_references?.length ?? 0} 项</div><StructuredDataView data={diagnosis.source_snapshot?.inventory_summary ?? {}} title="依据摘要"/>{(diagnosis.source_snapshot?.source_references ?? []).map((source) => <div className="tiny" key={source.source_type + ":" + source.source_id}>{displaySourceLabel(source.source_type)} · {source.label}</div>)}</div>
         </div> : <div className="note">尚无经营诊断报告。AI 生成需要先完成并确认经营分析；也可直接编辑下方母计划并保存人工草稿，该路径不依赖 AI 模型，但仍要求账号组北极星已建立并确认。</div>}
         {diagnosis && diagnosis.status !== "confirmed" && <div className="note" style={{ marginTop: 10, color: "var(--orange)" }}>最新诊断报告尚未确认。请返回 AI 经营分析页面完成确认，生成入口会在确认后开放。</div>}
         {diagnosis?.status === "confirmed" && !diagnosisStrategyCurrent && <div className="note" style={{ marginTop: 10, color: "var(--orange)" }}>诊断报告绑定的账号组北极星或资源基线已变化，或报告缺少战略版本快照。请重新分析并确认。</div>}
@@ -705,10 +707,10 @@ export default function PlanCenter() {
           <div className="tiny">资源基线：{String((aiGeneration.resource_baseline.summary as Record<string, number> | undefined)?.confirmed ?? 0)} 项已确认 / {String((aiGeneration.resource_baseline.summary as Record<string, number> | undefined)?.total ?? 0)} 项 · 版本指纹 {aiGeneration.strategy_fingerprint.slice(0, 12)}…</div>
           <div style={{ marginTop: 10 }}><b>制定摘要</b><p>{aiGeneration.summary}</p></div>
           <div className="grid two">
-            <div><b>业务资料与素材依据</b><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.resource_basis, null, 2)}</pre></div>
-            <div><b>风险提示</b><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.risks, null, 2)}</pre></div>
-            <div><b>前提与假设</b><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.assumptions, null, 2)}</pre></div>
-            <div><b>待用户确认</b><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.pending_confirmations, null, 2)}</pre></div>
+            <div><b>业务资料与素材依据</b><StructuredDataView data={aiGeneration.resource_basis} title="业务资料与素材依据"/></div>
+            <div><b>风险提示</b><StructuredDataView data={aiGeneration.risks} title="风险提示"/></div>
+            <div><b>前提与假设</b><StructuredDataView data={aiGeneration.assumptions} title="前提与假设"/></div>
+            <div><b>待用户确认</b><StructuredDataView data={aiGeneration.pending_confirmations} title="待用户确认"/></div>
           </div>
         </div>}
       </div>

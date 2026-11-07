@@ -253,7 +253,6 @@ export default function Review() {
           {!selected ? <div className="empty-state">选择左侧内容查看详情和处理历史。</div> : <>
             <div className="review-detail">
               <h2>{selected.title || "未命名内容"}</h2>
-              <div className="muted">内容 ID：{selected.id}</div>
               <div className="review-detail-meta">
                 <span>{platformMeta(selected.platform).label}</span>
                 <span>生产轮次：{selected.round_number ?? "—"}</span>

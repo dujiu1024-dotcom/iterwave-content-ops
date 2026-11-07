@@ -469,9 +469,8 @@ export default function Calendar() {
             <div className="calendar-plan-detail-grid">
               <div><strong>生产轮次（{planDetail.rounds.length}）</strong>
                 {planDetail.rounds.length ? planDetail.rounds.map((round) => <div className="calendar-plan-detail-row" key={round.round_id}>
-                  {round.round_number != null ? `第 ${round.round_number} 轮` : "轮次信息不可用"} · {round.task_id ? `任务 ${round.task_id.slice(0, 8)}` : "尚未入队"}
-                  {round.attribution_status === "attributed" && round.strategy_step_id ? ` · 策略步骤 ${round.strategy_step_id}` : " · 历史归属待核实"}
-                  {round.production_line_version_id ? ` · 生产线版本 v${round.production_line_version_id}` : ""}
+                  {round.round_number != null ? `第 ${round.round_number} 轮` : "轮次信息不可用"} · {round.task_id ? "已入队" : "尚未入队"}
+                  {round.attribution_status === "attributed" ? " · 策略归属已确认" : " · 历史归属待核实"}
                 </div>) : <div className="note">尚未关联生产轮次</div>}
               </div>
               <div><strong>关联草稿（{planDetail.drafts.length}）</strong>
@@ -498,17 +497,16 @@ export default function Calendar() {
             <div className="note">
               母计划版本：{batchDetail.batch.master_plan_version_id ?? "待核实"} ·
               子计划版本：{batchDetail.batch.sub_plan_version_id ?? "待核实"} ·
-              策略步骤：{batchDetail.batch.strategy_step_title ?? batchDetail.batch.strategy_step_id ?? "待核实"} ·
-              生产线版本：{batchDetail.batch.production_line_version_id ?? "待核实"} ·
+              策略步骤：{batchDetail.batch.strategy_step_title ?? "待核实"} ·
               归属：{batchDetail.batch.attribution_status === "attributed" ? "完整" : "待核实"}
             </div>
             <div className="calendar-plan-detail-grid">
               <div><strong>生产任务（{batchDetail.tasks.length}）</strong>
                 {batchDetail.tasks.length ? batchDetail.tasks.map((task) => (
                   <div className="calendar-plan-detail-row" key={task.id}>
-                    <strong>{task.content_title || task.id}</strong>
+                    <strong>{task.content_title || "未命名内容"}</strong>
                     <div>{platformMeta(task.platform).label} · {TASK_STATUS_LABEL[task.status] ?? task.status} · 尝试 {task.attempt_count}/{task.max_attempts}</div>
-                    {task.error_message && <div className="note">{task.error_message}</div>}
+                    {task.status === "failed" && <div className="note">任务执行失败，请查看生产监控中的诊断信息。</div>}
                   </div>
                 )) : <div className="note">该批次尚未生成独立生产任务</div>}
               </div>
