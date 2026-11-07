@@ -3,7 +3,7 @@ import { api, GlobalMonitorResponse, GlobalTaskQueueItem, GlobalTodoItem, Notifi
 import { navigate } from "../nav";
 import { roundTaskLabel } from "../roundLabel";
 import ProductionPlanMonitor from "../components/ProductionPlanMonitor";
-import { displayStatusLabel } from "../displayLabels";
+import { displayErrorLabel, displayStatusLabel } from "../displayLabels";
 
 const STATUS: Record<string, string> = {
   queued: "排队中", running: "运行中", succeeded: "已完成",
@@ -214,7 +214,7 @@ export default function GlobalOperations() {
         <section className="panel">
           <div className="panel-head"><div><div className="panel-title">异常与待处理</div><div className="panel-sub">当前返回的队列记录中失败或中断的任务。</div></div><span className="tag">{failedCount ?? "—"} 项</span></div>
           {failed.length ? <div className="list">{failed.map((task) => <div className="task-row" key={task.task_id}>
-            <i className="task-prio red" /><div className="task-main"><div className="task-title">{task.tenant_name} · {task.task_type === "round_run" ? roundTaskLabel(task) : (TASK_TYPE_LABEL[task.task_type] ?? "账号组后台任务")} · {STATUS[task.status]}</div><div className="task-desc">{task.error_message || "未记录错误说明"}</div></div>
+            <i className="task-prio red" /><div className="task-main"><div className="task-title">{task.tenant_name} · {task.task_type === "round_run" ? roundTaskLabel(task) : (TASK_TYPE_LABEL[task.task_type] ?? "账号组后台任务")} · {STATUS[task.status]}</div><div className="task-desc">{task.error_message ? displayErrorLabel(task.error_message) : "未记录错误说明"}</div></div>
           </div>)}</div> : <div className="empty-state">当前没有失败或中断任务。</div>}
           {failedPages > 1 && <div className="pagination-row" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, paddingTop: 12 }}>
             <button className="btn sm" disabled={failedPage <= 1 || loading} onClick={() => setFailedPage((p) => Math.max(1, p - 1))}>上一页</button>
