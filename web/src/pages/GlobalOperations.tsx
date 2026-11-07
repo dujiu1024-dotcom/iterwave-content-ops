@@ -50,11 +50,13 @@ export default function GlobalOperations() {
   const [tenantCounts, setTenantCounts] = useState<Record<string, { queued: number; running: number; failed: number }>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [errorDetails, setErrorDetails] = useState<string[]>([]);
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     setError("");
+    setErrorDetails([]);
     const results = await Promise.allSettled([
       api.globalOperationsSummary(30),
       api.taskQueue({ scope: "active", page: activePage, pageSize: 12 }),
@@ -104,10 +106,14 @@ export default function GlobalOperations() {
         failed: (failedByTenant[tenantId]?.failed ?? 0) + (failedByTenant[tenantId]?.interrupted ?? 0),
       },
     ])));
-    const failures = results.flatMap((r, i) => r.status === "rejected"
-      ? [`${["账号组汇总", "活跃任务", "失败任务统计", "未读通知", "统一待办"][i]}：${r.reason instanceof Error ? r.reason.message : String(r.reason)}`]
+    const failedSections = results.flatMap((result, index) => result.status === "rejected"
+      ? [["账号组汇总", "活跃任务", "失败任务统计", "未读通知", "统一待办"][index]]
       : []);
-    setError(failures.join("；"));
+    const diagnostics = results.flatMap((result, index) => result.status === "rejected"
+      ? [`${["账号组汇总", "活跃任务", "失败任务统计", "未读通知", "统一待办"][index]}：${result.reason instanceof Error ? result.reason.message : String(result.reason)}`]
+      : []);
+    setError(failedSections.length ? `部分数据暂不可用：${failedSections.join("、")}` : "");
+    setErrorDetails(diagnostics);
     setUpdatedAt(new Date());
     setLoading(false);
   }, [activePage, failedPage, todoPage, todoSource, todoTenantId]);
@@ -135,8 +141,12 @@ export default function GlobalOperations() {
         </div>
       </div>
 
-      {error && <div className="panel" role="alert" style={{ borderColor: "var(--orange)", color: "var(--orange)" }}>
-        部分数据加载失败：{error}。未成功加载的指标不会按 0 处理。
+      {error && <div className="panel" role="alert" style={{ borderColor: "var(--orange)" }}>
+        <div style={{ color: "var(--orange)" }}>{error}。未成功加载的指标不会按 0 处理。</div>
+        {errorDetails.length > 0 && <details className="advanced-report-editor">
+          <summary>高级诊断：加载错误详情</summary>
+          <pre className="diagnostic-text">{errorDetails.join("\n")}</pre>
+        </details>}
       </div>}
 
       <ProductionPlanMonitor />
@@ -262,7 +272,7 @@ export default function GlobalOperations() {
               <div className="task-desc">{todo.tenant_name} · {todo.source_label} · {todo.detail} · {todo.created_at ? new Date(todo.created_at).toLocaleString("zh-CN") : "时间未知"}</div>
             </div>
             {todo.source === "notification" ? <button className="btn sm" disabled={loading} onClick={() => {
-              void api.markNotificationRead(Number(todo.record_id)).then(() => refresh()).catch((e) => setError(e instanceof Error ? e.message : String(e)));
+              void api.markNotificationRead(Number(todo.record_id)).then(() => refresh()).catch((e) => { setError("标记通知失败，请稍后重试。"); setErrorDetails([e instanceof Error ? e.message : String(e)]); });
             }}>标记已读</button> : <button className="btn sm" onClick={() => navigate(todo.target_page, todo.target_page === "operations" ? (todo.target_tab ?? undefined) : undefined)}>处理</button>}
           </div>)}
         </div> : <div className="empty-state">当前筛选条件下没有待处理事项。</div>}
