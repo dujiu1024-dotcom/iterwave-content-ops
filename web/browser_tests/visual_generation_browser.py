@@ -806,6 +806,7 @@ def test_global_operations_realistic_data_layout_has_no_overflow_at_supported_vi
             page.get_by_role("heading", name="全局运营中心").wait_for(timeout=15000)
             page.get_by_text("主品牌运营账号组（长名称布局测试）", exact=False).first.wait_for(timeout=15000)
             page.get_by_text("如何用真实案例建立客户信任：从问题识别到方案落地", exact=True).wait_for(timeout=15000)
+            assert page.get_by_text("subplan-xhs", exact=True).count() == 0, "internal subplan identifier leaked into operations UI"
 
             for width in (1440, 1024, 768, 390):
                 page.set_viewport_size({"width": width, "height": 1000})
