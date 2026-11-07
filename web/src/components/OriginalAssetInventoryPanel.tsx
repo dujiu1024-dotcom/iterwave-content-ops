@@ -186,9 +186,9 @@ export default function OriginalAssetInventoryPanel() {
       <b>版本记录</b>
       {history.versions.length === 0 ? <div className="tiny">暂无版本记录</div> : <div className="list">{history.versions.map(v => <div className="task-row" key={v.version_no}><div className="task-main"><b>v{v.version_no} · {v.title}</b><div className="tiny">{v.created_at} · {statusLabel[v.review_status] ?? v.review_status} · 商业权限：{v.commercial_use_status}</div><div className="tiny">{v.description || "无说明"}</div></div></div>)}</div>}
       <b style={{ display: "block", marginTop: 12 }}>AI 分析记录</b>
-      {history.analyses.length === 0 ? <div className="tiny">暂无分析记录</div> : <div className="list">{history.analyses.map(item => <details className="task-row" key={item.id}><summary><b>#{item.id} · {item.analysis_type}</b> · v{item.asset_version_no} · {item.status} · {item.created_at}</summary><StructuredDataView data={item.result} title="历史分析结果" />{item.warnings?.length > 0 && <div className="tiny">提示：{item.warnings.join("；")}</div>}</details>)}</div>}
+      {history.analyses.length === 0 ? <div className="tiny">暂无分析记录</div> : <div className="list">{history.analyses.map(item => <details className="task-row" key={item.id}><summary><b>{item.analysis_type === "quality" ? "质量分析" : item.analysis_type === "classification" ? "素材分类" : "素材分析"}</b> · v{item.asset_version_no} · {statusLabel[item.status] ?? "已记录"} · {item.created_at}</summary><StructuredDataView data={item.result} title="历史分析结果" />{item.warnings?.length > 0 && <div className="tiny">提示：{item.warnings.join("；")}</div>}</details>)}</div>}
       <b style={{ display: "block", marginTop: 12 }}>业务对象关联</b>
-      {history.links.length === 0 ? <div className="tiny">暂无关联</div> : <div className="tiny">{history.links.map(link => link.entity_type + "：" + link.entity_id + "（" + link.relation_type + "）").join(" · ")}</div>}
+      {history.links.length === 0 ? <div className="tiny">暂无关联</div> : <div className="tiny">{history.links.map(link => link.entity_type + "（" + link.relation_type + "）").join(" · ")}</div>}
     </div>}
     {showGap && <div className="plan-stage-editor">
       <div className="panel-head"><b>登记素材缺口</b><button className="btn sm" onClick={() => setShowGap(false)}>取消</button></div>
