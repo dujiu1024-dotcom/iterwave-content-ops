@@ -942,3 +942,106 @@ def test_agent_realistic_orchestration_data_layout_has_no_overflow_at_supported_
             browser.close()
     finally:
         _stop_vite(server)
+
+
+def test_task_queue_realistic_data_layout_has_no_overflow_at_supported_viewports():
+    """Render active and failed cross-tenant tasks at desktop/tablet/mobile widths."""
+    server, port = _serve_vite()
+    screenshot_dir = ROOT / "artifacts" / "ui-viewport"
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    now = "2026-11-07T10:30:00+08:00"
+    active_task = {
+        "queue_order": 3, "task_id": "task-layout-active", "task_type": "round_run",
+        "tenant_id": "brand-main", "tenant_name": "主品牌运营账号组（真实数据布局测试）",
+        "aggregate_id": "round-301", "round_number": 301, "status": "running",
+        "created_at": now, "available_at": now, "started_at": now, "finished_at": None,
+        "attempts": 1, "error_code": None, "error_message": None,
+        "resolution_action": None, "resolution_actor": None, "resolution_at": None,
+        "resolution_note": None,
+    }
+    failed_task = {
+        **active_task, "queue_order": 8, "task_id": "task-layout-failed",
+        "status": "failed", "finished_at": now, "error_code": "PRODUCTION_STEP_FAILED",
+        "error_message": "内部异常堆栈不应直接暴露；列表只显示可理解的失败原因。",
+    }
+    summary = {
+        "total": 4,
+        "by_status": {"queued": 2, "running": 1, "succeeded": 0, "failed": 1,
+                      "cancelled": 0, "interrupted": 0},
+        "average_duration_seconds": 18,
+        "daily": [{"date": "2026-11-07", "total": 4, "failed": 1}],
+    }
+
+    def handler(route):
+        path = urlparse(route.request.url).path
+        query = dict(part.split("=", 1) for part in urlparse(route.request.url).query.split("&") if "=" in part)
+        if path == "/api/auth/status":
+            payload = {"configured": True, "authenticated": True, "needs_login": False}
+        elif path == "/api/tenants":
+            payload = {"runtime_tenant_id": "brand-main", "selected_tenant_id": "brand-main",
+                       "restart_required": False,
+                       "items": [{"id": "brand-main", "name": "主品牌运营账号组", "created_at": now, "is_active": True}]}
+        elif path == "/api/status":
+            payload = {"enabled_platforms": ["xhs"], "platforms_without_login": [],
+                       "logged_in_platforms": ["xhs"], "circuit_broken_platforms": [],
+                       "active_rounds": 1, "published_samples": 5, "scoring_mode": "default",
+                       "recovery": {"interrupted_tasks": 0, "requeued_data_fetch": [],
+                                    "stale_rounds": [], "pending_verify": 0}}
+        elif path == "/api/task-queue/summary":
+            payload = summary
+        elif path == "/api/task-queue":
+            failed_scope = query.get("scope") == "failed"
+            payload = {"items": [failed_task] if failed_scope else [active_task],
+                       "total": 1, "page": 1, "page_size": 20, "pages": 1,
+                       "status_counts": {"queued": 2, "running": 1, "failed": 1, "interrupted": 0},
+                       "tenant_status_counts": {"brand-main": {"queued": 2, "running": 1, "failed": 1}}}
+        else:
+            payload = {}
+        return route.fulfill(status=200, content_type="application/json",
+                             body=json.dumps(payload, ensure_ascii=False))
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 1000}, device_scale_factor=1)
+            page_errors = []
+            page.on("pageerror", lambda error: page_errors.append(str(error)))
+            page.route("**/api/**", handler)
+            page.goto("http://127.0.0.1:{}/?page=task-queue".format(port))
+            page.locator("#main-content").wait_for(timeout=15000)
+            page.get_by_role("heading", name="全局任务队列").wait_for(timeout=15000)
+            page.get_by_role("heading", name="全局调度仪表盘").wait_for(timeout=15000)
+            page.get_by_text("主品牌运营账号组（真实数据布局测试）", exact=False).first.wait_for(timeout=15000)
+            page.get_by_text("内容生产 / 存草稿", exact=True).first.wait_for(timeout=15000)
+            page.get_by_text("任务状态分布", exact=True).wait_for(timeout=15000)
+
+            for width in (1440, 1024, 768, 390):
+                page.set_viewport_size({"width": width, "height": 1000})
+                page.wait_for_timeout(160)
+                metrics = page.evaluate("""() => ({
+                    viewport: document.documentElement.clientWidth,
+                    document: document.documentElement.scrollWidth,
+                    body: document.body.scrollWidth,
+                    main: document.querySelector('#main-content')?.scrollWidth ?? 0,
+                    mainClient: document.querySelector('#main-content')?.clientWidth ?? 0,
+                    topbar: document.querySelector('.topbar')?.scrollWidth ?? 0,
+                    topbarClient: document.querySelector('.topbar')?.clientWidth ?? 0
+                })""")
+                assert metrics["document"] <= metrics["viewport"] + 1, (
+                    "task-queue real-data document overflow at {}px: {}".format(width, metrics)
+                )
+                assert metrics["body"] <= metrics["viewport"] + 1, (
+                    "task-queue real-data body overflow at {}px: {}".format(width, metrics)
+                )
+                assert metrics["main"] <= metrics["mainClient"] + 1, (
+                    "task-queue real-data content overflow at {}px: {}".format(width, metrics)
+                )
+                assert metrics["topbar"] <= metrics["topbarClient"] + 1, (
+                    "task-queue real-data topbar overflow at {}px: {}".format(width, metrics)
+                )
+                page.screenshot(path=str(screenshot_dir / "task-queue-real-data-{}.png".format(width)),
+                               full_page=True)
+            assert not page_errors, "task-queue real-data raised browser errors: {}".format(page_errors)
+            browser.close()
+    finally:
+        _stop_vite(server)
