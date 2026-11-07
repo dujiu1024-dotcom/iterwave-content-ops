@@ -588,7 +588,7 @@ function SkillsPane() {
               <thead><tr><th>Skill</th><th>版本</th><th>分类</th><th>权限</th><th>安装</th><th>启用</th><th>可运行</th><th>操作</th></tr></thead>
               <tbody>{customSkills.map((skill) => (
                 <tr key={skill.skill_id}>
-                  <td><strong>{skill.name}</strong> <div className="tiny">{skill.description}</div><details className="skill-manifest-preview"><summary>高级技术配置（Manifest）</summary><pre>{JSON.stringify(skill, null, 2)}</pre></details></td>
+                  <td><strong>{skill.name}</strong> <div className="tiny">{skill.description}</div><details className="skill-manifest-preview"><summary>高级技术配置（Manifest）</summary><StructuredDataView data={skill} title="Skill 配置详情" /></details></td>
                   <td>{skill.version}</td>
                   <td>{skill.category}</td>
                   <td>{skill.permissions.length ? skill.permissions.join("、") : "无"}</td>
