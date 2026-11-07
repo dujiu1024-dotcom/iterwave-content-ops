@@ -340,10 +340,10 @@ export default function OperatingFeedbackPane() {
           const conclusion = conclusionForms[task.task_id] ?? emptyConclusion;
           return <div key={task.task_id} className="panel" style={{ margin: "8px 0", padding: 12 }}>
             <div className="toolbar" style={{ justifyContent: "space-between" }}>
-              <div><strong>{drafts.find((draft) => draft.id === task.draft_id)?.title || "未命名内容"}</strong><div className="panel-sub">{displayPlatformLabel(task.platform)} · 计划采集：{new Date(task.scheduled_at).toLocaleString()}</div></div>
+              <div><strong>{drafts.find((draft) => draft.id === task.draft_id)?.title || "未命名内容"}</strong><div className="panel-sub">{displayPlatformLabel(task.platform)} · 计划采集：{formatBusinessDateTime(task.scheduled_at)}</div></div>
               <span className="tag">{statusText(task.status)}</span>
             </div>
-            <div className="panel-sub">尝试 {task.attempt_count}/{task.max_attempts} 次 · 最近采集：{task.last_attempt_at ? new Date(task.last_attempt_at).toLocaleString() : "尚未采集"}</div>
+            <div className="panel-sub">尝试 {task.attempt_count}/{task.max_attempts} 次 · 最近采集：{task.last_attempt_at ? formatBusinessDateTime(task.last_attempt_at) : "尚未采集"}</div>
             {task.last_error && <details className="advanced-report-editor"><summary>查看最近采集诊断</summary><pre className="diagnostic-text">{task.last_error}</pre></details>}
             <button className="btn sm" style={{ marginTop: 6 }} onClick={() => void loadRunHistory(task.task_id)}>查看采集批次（{runHistory[task.task_id]?.length ?? "加载"}）</button>
             {runHistory[task.task_id] && <div style={{ marginTop: 6 }}>
@@ -428,7 +428,7 @@ export default function OperatingFeedbackPane() {
             <tbody>{facts.map((fact) => <tr key={fact.fact_id}>
               <td>{metricLabels[fact.metric_key as keyof typeof metricLabels] || fact.metric_key}</td>
               <td>{displayMetric(fact.value, fact.unit)}</td><td>{fact.source === "manual" ? "人工补采" : fact.source === "platform_readback" ? "平台回读" : "导入"}</td>
-              <td>{statusText(fact.collection_status)}</td><td>{new Date(fact.measured_at).toLocaleString()}</td>
+              <td>{statusText(fact.collection_status)}</td><td>{formatBusinessDateTime(fact.measured_at)}</td>
             </tr>)}</tbody>
           </table>
         </div>}
