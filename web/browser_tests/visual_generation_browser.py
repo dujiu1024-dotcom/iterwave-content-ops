@@ -1315,7 +1315,13 @@ def test_analytics_realistic_business_metrics_has_no_overflow_at_supported_viewp
         elif path == "/api/drafts":
             payload = {"items": [], "total": 0, "page": 1, "page_size": 100, "pages": 1}
         elif path == "/api/reports/weekly":
-            payload = {"week_start": "2026-11-02", "suggestions": [], "summary": {}}
+            payload = {
+                "period": {"start": "2026-11-02", "end": "2026-11-08"},
+                "best_content": [], "why_it_may_work": [], "next_actions": [],
+                "sample_size": 0, "effective_review_count": 0, "data_sources": [],
+                "limitations": ["当前样本不足，暂不生成策略结论。"],
+                "generated_at": now, "data_conflicts": [],
+            }
         elif path == "/api/activation/status":
             payload = {}
         elif path == "/api/publish-verifications":
