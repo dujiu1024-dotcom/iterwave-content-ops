@@ -1154,7 +1154,11 @@ def test_plan_center_realistic_master_plan_data_has_no_overflow_at_supported_vie
         elif path == "/api/subplans":
             payload = {"items": [], "total": 0, "page": 1, "page_size": 100, "pages": 0}
         elif path == "/api/business-diagnosis":
-            payload = {"report": None}
+            payload = {"report": {
+                "version_no": 4, "status": "confirmed", "confirmed_at": now,
+                "model_name": "internal-provider-model-secret", "strategy_is_current": True,
+                "source_snapshot": {"source_references": [], "inventory_summary": {}},
+            }}
         elif path == "/api/master-plans/11/resource-baseline":
             payload = {"snapshot": {}, "captured_at": now, "captured_by": "system"}
         elif path == "/api/gaps":
@@ -1177,6 +1181,7 @@ def test_plan_center_realistic_master_plan_data_has_no_overflow_at_supported_vie
             page.get_by_text("主计划确定目标与策略", exact=False).wait_for(timeout=15000)
             page.get_by_text("每个平台默认选题数", exact=True).wait_for(timeout=15000)
             page.get_by_text("启用平台 2 个 · 每平台默认 6 篇/轮", exact=True).wait_for(timeout=15000)
+            assert page.get_by_text("internal-provider-model-secret", exact=True).count() == 0, "plan center leaked internal diagnosis model metadata"
             _assert_supported_viewports(page, screenshot_dir, "plan-center-real-data")
             assert not page_errors, "plan-center real-data raised browser errors: {}".format(page_errors)
             browser.close()
