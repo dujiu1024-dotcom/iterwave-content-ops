@@ -58,7 +58,8 @@ def test_save_pending_drafts_queues_after_running_round_instead_of_deduping(tmp_
         and "GET" in (getattr(route, "methods", None) or set())
     )
     status = status_route.endpoint(7)
-    assert status["task_type"] == "save_pending_drafts"
+    assert "task_type" not in status
+    assert status["status"] == "queued"
     assert status["queued"] is True
     conn.close()
 

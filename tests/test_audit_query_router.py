@@ -74,9 +74,13 @@ def test_user_override_query_includes_business_round_number():
 def test_audit_query_apis_do_not_leak_future_internal_columns():
     client, conn = _client()
     try:
-        conn.execute("ALTER TABLE ai_calls ADD COLUMN internal_worker_trace TEXT")
+        ai_columns = {row[1] for row in conn.execute("PRAGMA table_info(ai_calls)")}
+        if "internal_worker_trace" not in ai_columns:
+            conn.execute("ALTER TABLE ai_calls ADD COLUMN internal_worker_trace TEXT")
         conn.execute("UPDATE ai_calls SET internal_worker_trace='private worker diagnostics'")
-        conn.execute("ALTER TABLE user_override ADD COLUMN internal_audit_blob TEXT")
+        override_columns = {row[1] for row in conn.execute("PRAGMA table_info(user_override)")}
+        if "internal_audit_blob" not in override_columns:
+            conn.execute("ALTER TABLE user_override ADD COLUMN internal_audit_blob TEXT")
         conn.execute("UPDATE user_override SET internal_audit_blob='private override metadata'")
         conn.commit()
 

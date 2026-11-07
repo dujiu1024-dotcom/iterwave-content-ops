@@ -5367,14 +5367,15 @@ def test_kpi_one_day_window_includes_midnight_through_0800_shanghai(client, monk
 
 
 def test_notifications_api_projects_public_fields_and_keeps_deep_links(client):
-    tc, conn, _seed = client
+    tc, conn, seed = client
+    round_id = seed.round(status="failed")
     now = datetime.now().isoformat(sep=" ", timespec="seconds")
     cur = conn.execute(
         "INSERT INTO notifications "
         "(level,type,platform,title,body,channel,sent_at,task_run_id,ops_log_id,round_id,draft_id) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         ("warning", "round_timeout", "xhs", "轮次阶段超时", "阶段执行超时，请检查任务。",
-         "wecom", now, 321, 654, 987, "private-draft-id"),
+         "wecom", now, None, None, round_id, None),
     )
     conn.commit()
 
@@ -5383,7 +5384,7 @@ def test_notifications_api_projects_public_fields_and_keeps_deep_links(client):
     payload = response.json()
     item = next(row for row in payload["items"] if row["id"] == cur.lastrowid)
     assert item["target_type"] == "round"
-    assert item["target_id"] == 987
+    assert item["target_id"] == round_id
     assert item["target_page"] == "operations"
     assert item["target_tab"] == "tasks"
     for internal_key in ("task_run_id", "ops_log_id", "round_id", "draft_id"):
@@ -5442,11 +5443,16 @@ def test_ops_logs_api_hides_task_run_fk_and_sanitizes_error_details(client):
         "sqlite3.OperationalError: unable to open /home/ubuntu/iterwave/data/private.db\\n"
         "Traceback (most recent call last):"
     )
+    task_run = conn.execute(
+        "INSERT INTO task_runs (task_type,biz_id,platform,status,attempt,max_attempts,created_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        ("comment_polling", "ops-log-fixture", "xhs", "failed", 1, 1, now),
+    )
     cur = conn.execute(
         "INSERT INTO ops_logs "
         "(platform,action_type,content,executed_at,status,task_run_id,error_msg) "
         "VALUES (?,?,?,?,?,?,?)",
-        ("xhs", "active_comment", "业务操作说明", now, "failed", 987, internal_error),
+        ("xhs", "active_comment", "业务操作说明", now, "failed", task_run.lastrowid, internal_error),
     )
     conn.commit()
 
