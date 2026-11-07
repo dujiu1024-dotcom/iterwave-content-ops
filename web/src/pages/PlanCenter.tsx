@@ -262,7 +262,7 @@ export default function PlanCenter() {
       setMasterDraftVersionId(result.draft.id);
       setSaved(true); setDirty(false);
       showToast(`母计划草稿 v${result.draft.version_no} 已写入服务器，尚未生效`, "success");
-    } catch (e) { showToast("保存母计划草稿失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
+    } catch (e) { showToast("保存母计划草稿失败：" + "请稍后重试", "error"); }
   };
   const inspectRebaseDrafts = async (targetMasterPlanVersionId: number) => {
     const listed = await api.subplans();
@@ -347,7 +347,7 @@ export default function PlanCenter() {
         showToast("母计划已审核生效", "success");
       }
       await load();
-    } catch (e) { showToast("母计划审核失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
+    } catch (e) { showToast("母计划审核失败：" + "请稍后重试", "error"); }
   };
   const rejectMasterDraft = async () => {
     if (!masterDraftVersionId) return;
@@ -358,7 +358,7 @@ export default function PlanCenter() {
       showToast("母计划草稿已退回，当前生效计划保持不变", "success");
       await load();
     } catch (e) {
-      showToast("退回母计划草稿失败：" + (e instanceof Error ? e.message : String(e)), "error");
+      showToast("退回母计划草稿失败：" + "请稍后重试", "error");
     }
   };
   const deleteMasterPlan = async () => {
@@ -373,7 +373,7 @@ export default function PlanCenter() {
       showToast(`当前母计划已软删除，已恢复母计划 v${result.restored_version.version_no}`, "success");
       await load();
     } catch (e) {
-      showToast("删除母计划失败：" + (e instanceof Error ? e.message : String(e)), "error");
+      showToast("删除母计划失败：" + "请稍后重试", "error");
     }
   };
   const resetDraft = () => { if (data) { setDraft({ ...structuredClone(data.plan), content_format: "image_text" }); setDirty(false); setSaved(false); } };
@@ -388,7 +388,7 @@ export default function PlanCenter() {
       });
       showToast("已创建复盘采纳母计划草稿；审核生效后再将旧子计划 rebase", "success");
       await load();
-    } catch (e) { showToast("采纳失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
+    } catch (e) { showToast("采纳失败：" + "请稍后重试", "error"); }
   };
   const retryAdoptionRebase = async () => {
     if (!masterVersionId || !pendingAdoptionDimensions.length) return;
@@ -452,7 +452,7 @@ export default function PlanCenter() {
       setSelectedChildId(created.subplan.id);
       showToast("子计划草稿已写入服务器，尚未获得生产授权", "success");
       await load();
-    } catch (e) { showToast("创建失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
+    } catch (e) { showToast("创建失败：" + "请稍后重试", "error"); }
   };
   const saveChild = async () => {
     if (!editingChild || editingChild.status === "stale") return;
@@ -478,7 +478,7 @@ export default function PlanCenter() {
       });
       setEditingChild(null); showToast("已创建新的子计划草稿版本，需重新审核", "success");
       await load();
-    } catch (e) { showToast("保存失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
+    } catch (e) { showToast("保存失败：" + "请稍后重试", "error"); }
   };
   const reviewChild = async (item: Child) => {
     if (item.status === "effective" || item.status === "stale") return;
@@ -495,7 +495,7 @@ export default function PlanCenter() {
           (lineError instanceof Error ? lineError.message : String(lineError)), "error");
       }
       await load(item.id);
-    } catch (e) { showToast("审核失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
+    } catch (e) { showToast("审核失败：" + "请稍后重试", "error"); }
   };
   const createStage = async () => {
     if (!stageName.trim()) { showToast("请填写阶段名称", "error"); return; }
@@ -524,7 +524,7 @@ export default function PlanCenter() {
       setStageBusinessRequired(false); setStageEffectRequired(false); setStageDependencies([]);
       showToast("阶段已写入新的子计划草稿版本，需重新审核", "success");
       await load();
-    } catch (e) { showToast("创建阶段失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
+    } catch (e) { showToast("创建阶段失败：" + "请稍后重试", "error"); }
   };
   const saveStage = async () => {
     if (!editingStage) return;
@@ -549,7 +549,7 @@ export default function PlanCenter() {
       });
       setEditingStage(null); showToast("阶段修改已保存为新草稿版本，需重新审核", "success");
       await load();
-    } catch (e) { showToast("保存阶段失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
+    } catch (e) { showToast("保存阶段失败：" + "请稍后重试", "error"); }
   };
   const openStageForm = () => {
     const selected = children.find((item) => item.id === selectedChildId);
@@ -571,7 +571,7 @@ export default function PlanCenter() {
     try {
       await api.reorderSubplanStages(child.id, { based_on_version_id: child.versionId, expected_version_no: child.versionNo, stage_ids: ordered.map((item) => item.id) });
       showToast("策略步骤顺序已保存为新草稿版本，需重新审核", "success"); await load(child.id);
-    } catch (e) { showToast("排序失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
+    } catch (e) { showToast("排序失败：" + "请稍后重试", "error"); }
   };
   const recordStageOutcome = async (stage: Stage) => {
     const child = children.find((item) => item.id === selectedChildId);
@@ -583,7 +583,7 @@ export default function PlanCenter() {
       const evaluation = window.prompt("输入效果评价（可留空）") ?? "";
       await api.recordSubplanStageOutcome(child.id, Number(stage.id), { version_id: child.versionId, result, evaluation });
       showToast("阶段实际结果已记录，可供后续步骤引用", "success"); await load(child.id);
-    } catch (e) { showToast("结果记录失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
+    } catch (e) { showToast("结果记录失败：" + "请稍后重试", "error"); }
   };
   const openStageRound = async () => {
     const child = children.find((item) => item.id === selectedChildId);
@@ -611,7 +611,7 @@ export default function PlanCenter() {
       showToast(`第 ${created.round_number} 轮已进入生产队列`, "success");
       await load(child.id);
     } catch (e) {
-      showToast("生产轮次启动失败：" + (e instanceof Error ? e.message : String(e)) +
+      showToast("生产轮次启动失败：" + "请稍后重试" +
         "。若轮次已创建，可使用页面中的“重试入队”操作。", "error");
     } finally {
       setOpeningRound(false);
@@ -628,7 +628,7 @@ export default function PlanCenter() {
       setPendingRoundLaunch(null);
       await load();
     } catch (e) {
-      showToast("重新入队失败：" + (e instanceof Error ? e.message : String(e)), "error");
+      showToast("重新入队失败：" + "请稍后重试", "error");
     } finally {
       setOpeningRound(false);
     }
@@ -655,7 +655,7 @@ export default function PlanCenter() {
       showToast("阶段条件审核已记录，完成门状态已更新", "success");
       await load(child.id);
     } catch (e) {
-      showToast("阶段条件审核失败：" + (e instanceof Error ? e.message : String(e)), "error");
+      showToast("阶段条件审核失败：" + "请稍后重试", "error");
     }
   };
   const deleteStage = async (stage: Stage) => {
@@ -665,7 +665,7 @@ export default function PlanCenter() {
       await api.deleteSubplanStage(child.id, Number(stage.id), child.versionId, child.versionNo);
       showToast("阶段已从新草稿版本移除，需重新审核", "success");
       await load();
-    } catch (e) { showToast("删除阶段失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
+    } catch (e) { showToast("删除阶段失败：" + "请稍后重试", "error"); }
   };
   const platforms = (data?.plan.enabled_platforms ?? []).filter((p): p is Platform => ALL_PLATFORMS.includes(p as Platform));
   const diagnosisStrategyCurrent = diagnosis?.strategy_is_current ?? diagnosis?.source_is_current ?? false;
@@ -731,7 +731,7 @@ export default function PlanCenter() {
     </>}
 
     {!loading && !error && tab === "platforms" && data && <>
-      <div className="panel"><div className="panel-head"><div><div className="panel-title">平台子计划</div><div className="panel-sub">各平台独立维护方向、目标篇数与执行授权，并引用来源主计划版本。</div></div><div className="head-actions"><button className="btn" onClick={async () => { if (!masterVersionId) { showToast("请先审核生效母计划", "error"); return; } try { const result = await api.aiDraftSubplans(masterVersionId, platforms); showToast(result.already_exists ? "所选平台均已有子计划，无需重复拆解" : `AI 已生成 ${result.items.length} 个子计划草稿，需人工审核`, result.already_exists ? "info" : "success"); await load(); } catch (e) { showToast("AI 拆解失败：" + (e instanceof Error ? e.message : String(e)), "error"); } }}>AI 拆解</button><button className="btn primary" onClick={() => { setChildForm(true); setChildPlatform(platforms[0] ?? "xhs"); setChildCount(data.plan.topic_count_per_platform); }}>＋ 手工创建</button></div></div><div className="note">子计划和版本均持久化在当前账号组数据库；草稿不会自动获得生产授权。</div><div className="grid two" style={{ marginTop: 12 }}>{platforms.map((p) => { const child = children.find((c) => c.platform === p); return <div className="plan-child-card" key={p}><div className="panel-head"><b>{platformMeta(p).label}</b><span className="tag gray">{child ? (childLabels[child.status] ?? displayStatusLabel(child.status)) : "尚未创建子计划"}</span></div>{child ? <><h3>{child.name}</h3><p>{child.direction || "未填写方向"}</p><div className="tiny">目标 {child.count} 篇 · 来源母计划 V{child.masterPlanVersionNo || "—"} · 子计划 V{child.versionNo}</div>{child.status === "stale" && <div className="note" role="status">该子计划绑定的母计划版本已归档，不能继续审核、编辑或生产。请基于当前生效母计划重新创建子计划；历史阶段和生产记录仍保留。</div>}{child.versionHistory.length > 1 && <div className="tiny">最近版本差异：{Object.keys({ ...child.versionHistory[0].snapshot, ...child.versionHistory[1].snapshot }).filter((key) => JSON.stringify(child.versionHistory[0].snapshot[key]) !== JSON.stringify(child.versionHistory[1].snapshot[key])).join("、") || "无字段变化"}（V{child.versionHistory[1].version_no} → V{child.versionHistory[0].version_no}）</div>}<div className="plan-form-actions">{child.status === "stale" ? <button className="btn sm primary" disabled={!masterVersionId} onClick={() => { setChildForm(true); setChildPlatform(child.platform); setChildName(`${child.name}（新母计划）`); setChildDirection(child.direction); setChildCount(Math.max(1, child.count)); }}>基于当前母计划重建</button> : <><button className="btn sm" onClick={() => setEditingChild({ ...child })}>编辑</button><button className="btn sm" onClick={() => reviewChild(child)}>{child.status === "draft" ? "提交审核" : child.status === "review" ? "审核并生效" : "已生效"}</button></>}{child.status === "effective" && <button className="btn sm primary" onClick={() => { setSelectedChildId(child.id); setTab("production-line"); }}>管理生产线 →</button>}</div></> : <><p>继承主计划目标与约束；当前没有独立子计划记录。</p><button className="btn sm" onClick={() => { setChildForm(true); setChildPlatform(p); setChildCount(data.plan.topic_count_per_platform); }}>创建该平台子计划</button></>}</div>; })}</div></div>
+      <div className="panel"><div className="panel-head"><div><div className="panel-title">平台子计划</div><div className="panel-sub">各平台独立维护方向、目标篇数与执行授权，并引用来源主计划版本。</div></div><div className="head-actions"><button className="btn" onClick={async () => { if (!masterVersionId) { showToast("请先审核生效母计划", "error"); return; } try { const result = await api.aiDraftSubplans(masterVersionId, platforms); showToast(result.already_exists ? "所选平台均已有子计划，无需重复拆解" : `AI 已生成 ${result.items.length} 个子计划草稿，需人工审核`, result.already_exists ? "info" : "success"); await load(); } catch (e) { showToast("AI 拆解失败：" + "请稍后重试", "error"); } }}>AI 拆解</button><button className="btn primary" onClick={() => { setChildForm(true); setChildPlatform(platforms[0] ?? "xhs"); setChildCount(data.plan.topic_count_per_platform); }}>＋ 手工创建</button></div></div><div className="note">子计划和版本均持久化在当前账号组数据库；草稿不会自动获得生产授权。</div><div className="grid two" style={{ marginTop: 12 }}>{platforms.map((p) => { const child = children.find((c) => c.platform === p); return <div className="plan-child-card" key={p}><div className="panel-head"><b>{platformMeta(p).label}</b><span className="tag gray">{child ? (childLabels[child.status] ?? displayStatusLabel(child.status)) : "尚未创建子计划"}</span></div>{child ? <><h3>{child.name}</h3><p>{child.direction || "未填写方向"}</p><div className="tiny">目标 {child.count} 篇 · 来源母计划 V{child.masterPlanVersionNo || "—"} · 子计划 V{child.versionNo}</div>{child.status === "stale" && <div className="note" role="status">该子计划绑定的母计划版本已归档，不能继续审核、编辑或生产。请基于当前生效母计划重新创建子计划；历史阶段和生产记录仍保留。</div>}{child.versionHistory.length > 1 && <div className="tiny">最近版本差异：{Object.keys({ ...child.versionHistory[0].snapshot, ...child.versionHistory[1].snapshot }).filter((key) => JSON.stringify(child.versionHistory[0].snapshot[key]) !== JSON.stringify(child.versionHistory[1].snapshot[key])).join("、") || "无字段变化"}（V{child.versionHistory[1].version_no} → V{child.versionHistory[0].version_no}）</div>}<div className="plan-form-actions">{child.status === "stale" ? <button className="btn sm primary" disabled={!masterVersionId} onClick={() => { setChildForm(true); setChildPlatform(child.platform); setChildName(`${child.name}（新母计划）`); setChildDirection(child.direction); setChildCount(Math.max(1, child.count)); }}>基于当前母计划重建</button> : <><button className="btn sm" onClick={() => setEditingChild({ ...child })}>编辑</button><button className="btn sm" onClick={() => reviewChild(child)}>{child.status === "draft" ? "提交审核" : child.status === "review" ? "审核并生效" : "已生效"}</button></>}{child.status === "effective" && <button className="btn sm primary" onClick={() => { setSelectedChildId(child.id); setTab("production-line"); }}>管理生产线 →</button>}</div></> : <><p>继承主计划目标与约束；当前没有独立子计划记录。</p><button className="btn sm" onClick={() => { setChildForm(true); setChildPlatform(p); setChildCount(data.plan.topic_count_per_platform); }}>创建该平台子计划</button></>}</div>; })}</div></div>
       {childForm && <div className="panel"><div className="panel-head"><b>手工创建子计划</b><button className="btn sm" onClick={() => setChildForm(false)}>取消</button></div><div className="grid two"><div><label className="form-label">平台</label><select className="field" value={childPlatform} onChange={(e) => setChildPlatform(e.target.value as Platform)}>{ALL_PLATFORMS.map((p) => <option value={p} key={p}>{platformMeta(p).label}</option>)}</select><label className="form-label" style={{ marginTop: 10 }}>名称</label><input className="field" value={childName} onChange={(e) => setChildName(e.target.value)}/></div><div><label className="form-label">选题方向</label><textarea className="field" rows={3} value={childDirection} onChange={(e) => setChildDirection(e.target.value)}/><label className="form-label" style={{ marginTop: 10 }}>目标篇数</label><input className="field" type="number" min={1} value={childCount} onChange={(e) => setChildCount(Math.max(1, Number(e.target.value) || 1))}/></div></div><div className="plan-form-actions"><button className="btn primary" onClick={createChild}>保存子计划草稿</button></div></div>}
       {editingChild && <div className="panel"><div className="panel-head"><b>编辑子计划 · {platformMeta(editingChild.platform).label}</b><button className="btn sm" onClick={() => setEditingChild(null)}>取消</button></div><label className="form-label">名称</label><input className="field" value={editingChild.name} onChange={(e) => setEditingChild({ ...editingChild, name: e.target.value })}/><label className="form-label" style={{ marginTop: 10 }}>方向</label><textarea className="field" rows={3} value={editingChild.direction} onChange={(e) => setEditingChild({ ...editingChild, direction: e.target.value })}/><div className="note">子计划总目标篇数由各阶段目标合计；请在「阶段管理」中调整阶段篇数。</div><div className="plan-form-actions"><button className="btn primary" onClick={saveChild}>保存修改</button></div></div>}
     </>}
