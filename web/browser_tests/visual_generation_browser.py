@@ -383,7 +383,10 @@ def test_dashboard_layout_has_no_horizontal_overflow_at_supported_viewports():
                 assert metrics["body"] <= metrics["viewport"] + 1, (
                     f"body overflow at {width}px: {metrics}"
                 )
-                assert metrics["main"] <= metrics["mainClient"] + 1, (\n                    f"main content overflow at {width}px: {metrics}"\n                )\n                page.screenshot(path=str(screenshot_dir / f"dashboard-{width}.png"), full_page=True)
+                assert metrics["main"] <= metrics["mainClient"] + 1, (
+                    f"main content overflow at {width}px: {metrics}"
+                )
+                page.screenshot(path=str(screenshot_dir / f"dashboard-{width}.png"), full_page=True)
             browser.close()
     finally:
         _stop_vite(server)
