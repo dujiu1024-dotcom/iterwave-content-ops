@@ -27,6 +27,13 @@ def readonly_uri(path: Path) -> str:
     return path.resolve().as_uri() + "?mode=ro"
 
 
+def create_readonly_snapshot(source: Path, destination: Path) -> None:
+    """Copy a consistent snapshot while the source connection is strictly read-only."""
+    with sqlite3.connect(readonly_uri(source), uri=True) as src:
+        with sqlite3.connect(destination) as dst:
+            src.backup(dst)
+
+
 def audit_auth_store(path: Path) -> dict:
     if not path.is_file():
         return {"file_present": False}
@@ -80,9 +87,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="iterwave-db-audit-") as temp_dir:
         snapshot = Path(temp_dir) / "audit-snapshot.sqlite3"
         # mode=ro prevents source writes; backup() reads a consistent SQLite snapshot.
-        with sqlite3.connect(readonly_uri(source), uri=True) as src:
-            with sqlite3.connect(snapshot) as dst:
-                src.backup(dst)
+        create_readonly_snapshot(source, snapshot)
         db.db_path = snapshot
         report = db.verify_schema(full_integrity=True)
 
