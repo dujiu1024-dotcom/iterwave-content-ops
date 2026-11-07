@@ -616,7 +616,12 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
   .head-actions { flex-wrap: wrap; max-width: 100%; }
   .page-head > *, .panel-head > * { min-width: 0; max-width: 100%; }
   .table-wrap table { min-width: 620px; }
-  .content .grid { grid-template-columns: minmax(0, 1fr) !important; }
+  .content .grid:not(.kpis):not(.four) { grid-template-columns: minmax(0, 1fr) !important; }
+  /* Preserve the established two-column KPI density; generic content grids still collapse to one column. */
+  .content .grid.kpis, .content .grid.four,
+  .content .analytics-business-kpis, .content .analytics-activation-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
   .content input, .content select, .content textarea { max-width: 100%; }
 }
 
