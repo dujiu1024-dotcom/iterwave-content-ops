@@ -890,10 +890,10 @@ function TasksPane({ tasks, total, page, pages, onPageChange, onResolved, target
       </div>
       <div className="table-wrap">
         <table>
-          <thead><tr><th>ID</th><th>类型</th><th>平台</th><th>状态</th><th>尝试</th><th>开始</th><th>结束</th><th>错误</th><th>操作</th></tr></thead>
+          <thead><tr><th>类型</th><th>平台</th><th>状态</th><th>尝试</th><th>开始</th><th>结束</th><th>错误</th><th>操作</th></tr></thead>
           <tbody>
             {tasks.length === 0 && (
-              <tr><td colSpan={9}>
+              <tr><td colSpan={8}>
                 <EmptyHint className="" next="运行一轮生产，或等待定时任务触发后会自动记录">暂无任务记录</EmptyHint>
               </td></tr>
             )}
