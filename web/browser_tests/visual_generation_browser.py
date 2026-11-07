@@ -789,7 +789,7 @@ def test_agent_realistic_orchestration_data_layout_has_no_overflow_at_supported_
             page.goto(f"http://127.0.0.1:{port}/?page=agent")
             page.get_by_role("heading", name="Agent 编排与诊断").wait_for(timeout=15000)
             assert page.locator("select option").filter(has_text="第 301 轮 · 部分完成").count() == 1
-            page.get_by_text("有 1 篇内容需要补充事实依据后重新审核。", exact=True).wait_for(timeout=15000)
+            page.get_by_text("本轮提示：有 1 篇内容需要补充事实依据后重新审核。", exact=True).wait_for(timeout=15000)
 
             for width in (1440, 1024, 768, 390):
                 page.set_viewport_size({"width": width, "height": 1000})
