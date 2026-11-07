@@ -846,7 +846,7 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
   .calendar-toolbar { flex-wrap: wrap; justify-content: flex-start; }
 }
 @media (max-width: 760px) {
-  .calendar-week-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  /* Week view keeps all seven days; the scroll container is added in Calendar.tsx. */
   .calendar-day-add { opacity: 1; }
   .calendar-side-drawer { width: min(100vw, 520px); border-radius: 0; padding: 16px; }
   .calendar-date-picker { width: 100%; }
@@ -1032,4 +1032,25 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 .advanced-report-editor[open] > summary { margin-bottom: 9px; }
 @media (max-width: 700px) {
   .structured-data-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+
+/* Week view on narrow screens: preserve seven readable day columns inside an accessible scroller. */
+.calendar-week-scroll {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+.calendar-week-scroll:focus-visible {
+  outline: 3px solid #b7c8ff;
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+@media (max-width: 760px) {
+  .calendar-week-scroll .calendar-week-grid {
+    min-width: 1588px;
+    grid-template-columns: repeat(7, minmax(220px, 1fr));
+  }
 }

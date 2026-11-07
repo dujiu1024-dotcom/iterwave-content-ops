@@ -373,7 +373,13 @@ export default function Calendar() {
             </div>
           </div>
         ) : (
-          <div className={`calendar-agenda ${viewMode === "week" ? "calendar-week-grid" : ""}`}>
+          <div
+            className={viewMode === "week" ? "calendar-week-scroll" : undefined}
+            role={viewMode === "week" ? "region" : undefined}
+            aria-label={viewMode === "week" ? "一周日历，可横向滚动" : undefined}
+            tabIndex={viewMode === "week" ? 0 : undefined}
+          >
+            <div className={`calendar-agenda ${viewMode === "week" ? "calendar-week-grid" : ""}`}>
             {days.map((d) => (
               <section className="calendar-agenda-day" key={d.key} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); const id = e.dataTransfer.getData("text/plain"); const event = events.find((item) => item.id === id); if (event) { const oldValue = _toLocalInput(event.scheduled || event.saved_at); const time = oldValue.includes("T") ? oldValue.slice(11, 16) : "09:00"; void saveSchedule(id, `${d.key}T${time}`); } }}>
                 <button className="calendar-agenda-date" onClick={() => { setCursorDate(d.date); setViewMode("day"); }}>
@@ -409,6 +415,7 @@ export default function Calendar() {
                 })}
               </section>
             ))}
+            </div>
           </div>
         )}
 
