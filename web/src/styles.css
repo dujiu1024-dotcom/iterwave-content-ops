@@ -1081,3 +1081,10 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
     grid-template-columns: repeat(7, minmax(220px, 1fr));
   }
 }
+
+/* Keep unbroken identifiers and user-provided text inside detail grids and table cells. */
+.kv-grid > span { min-width: 0; overflow-wrap: anywhere; }
+.table-wrap td, .demo-table-wrap td, .ops-metric-table td {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
