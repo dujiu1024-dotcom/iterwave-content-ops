@@ -359,11 +359,10 @@ export default function Settings() {
             {auditItems.length > 0 && (
               <div className="table-wrap" style={{ marginTop: 14 }}>
                 <table>
-                  <thead><tr><th>#</th><th>配置项</th><th>旧值</th><th>新值</th><th>时间</th></tr></thead>
+                  <thead><tr><th>配置项</th><th>旧值</th><th>新值</th><th>时间</th></tr></thead>
                   <tbody>
                     {auditItems.map((a) => (
                       <tr key={a.id}>
-                        <td style={{ color: "var(--subtle)", fontSize: 11 }}>{a.id}</td>
                         <td style={{ fontSize: 12 }} title={a.key}>{configKeyLabel(a.key)}</td>
                         <td style={{ color: "var(--muted)" }}>{a.old_value ?? <span style={{ color: "var(--subtle)" }}>—</span>}</td>
                         <td>{a.new_value ?? <span style={{ color: "var(--subtle)" }}>—</span>}</td>
