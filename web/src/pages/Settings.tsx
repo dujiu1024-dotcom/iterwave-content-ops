@@ -361,9 +361,9 @@ export default function Settings() {
                 <table>
                   <thead><tr><th>#</th><th>配置项</th><th>旧值</th><th>新值</th><th>时间</th></tr></thead>
                   <tbody>
-                    {auditItems.map((a) => (
+                    {auditItems.map((a, index) => (
                       <tr key={a.id}>
-                        <td style={{ color: "var(--subtle)", fontSize: 11 }}>{a.id}</td>
+                        <td style={{ color: "var(--subtle)", fontSize: 11 }}>{index + 1}</td>
                         <td style={{ fontSize: 12 }} title={a.key}>{configKeyLabel(a.key)}</td>
                         <td style={{ color: "var(--muted)" }}>{a.old_value ?? <span style={{ color: "var(--subtle)" }}>—</span>}</td>
                         <td>{a.new_value ?? <span style={{ color: "var(--subtle)" }}>—</span>}</td>
