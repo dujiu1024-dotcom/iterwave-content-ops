@@ -1784,7 +1784,7 @@ export default function Production() {
               <div>
                 <div className="panel-title">
                   <span className="icon">⎇</span>当前轮次
-                  {roundDetail && <span className={`tag ${STATUS_CLS[roundDetail.status]}`} style={{ marginLeft: 10 }}>{ROUND_STATUS_LABEL[roundDetail.status] ?? roundDetail.status}</span>}
+                  {roundDetail && <span className={`tag ${STATUS_CLS[roundDetail.status]}`} style={{ marginLeft: 10 }}>{ROUND_STATUS_LABEL[roundDetail.status] ?? displayStatusLabel(roundDetail.status)}</span>}
                 </div>
                 <div className="panel-sub">合法迁移按钮由后端状态机校验生成</div>
               </div>
@@ -1806,7 +1806,7 @@ export default function Production() {
                         {i > 0 && <div className={`track-connector ${isPast ? "completed" : ""}`} />}
                         <div className={`track-node ${isCurrent ? "active" : ""} ${isPast ? "completed" : ""}`}>
                           <div className="dot" />
-                          <div className="label">{ROUND_STATUS_LABEL[s] ?? s}</div>
+                          <div className="label">{ROUND_STATUS_LABEL[s] ?? displayStatusLabel(s)}</div>
                         </div>
                       </Fragment>
                     );
@@ -1821,7 +1821,7 @@ export default function Production() {
                 <div style={{ marginTop: 14, display: "flex", flexWrap: "wrap", gap: 8 }}>
                   <span style={{ fontSize: 11, color: "var(--muted)", marginRight: 4 }}>可迁移到：</span>
                   {(ROUND_TARGETABLE[roundDetail.status] || []).map((t) => (
-                    <button key={t} className="btn sm" onClick={() => handleTransition(t)}>→ {t}</button>
+                    <button key={t} className="btn sm" onClick={() => handleTransition(t)}>→ {ROUND_STATUS_LABEL[t] ?? displayStatusLabel(t)}</button>
                   ))}
                   {(ROUND_TARGETABLE[roundDetail.status] || []).length === 0 && (
                     <span style={{ fontSize: 12, color: "var(--subtle)" }}>当前状态无合法迁移（终态）</span>
@@ -1844,9 +1844,9 @@ export default function Production() {
                             <EmptyHint className="" next="到「③ 生产线」点「▶ 运行本轮」生成内容并存草稿">该轮次暂无草稿</EmptyHint>
                           </td></tr>
                         )}
-                        {roundDetail.drafts?.map((d) => (
+                        {roundDetail.drafts?.map((d, index) => (
                           <tr key={d.id}>
-                            <td style={{ fontFamily: "monospace", fontSize: 11 }}>{d.id.slice(0, 16)}...</td>
+                            <td>第 {index + 1} 篇</td>
                             <td>{PLATFORM_NAME[d.platform] ?? displayPlatformLabel(d.platform)}</td>
                             <td><span className={`tag ${STATUS_CLS[d.status] || "gray"}`}>{displayStatusLabel(d.status)}</span></td>
                             <td>
@@ -1895,7 +1895,7 @@ function RoundPicker({ rounds, value, onChange }: {
       style={{ fontSize: 12 }}
     >
       {rounds.map((r) => (
-        <option key={r.id} value={r.id}>第 {r.round_number} 轮 · {ROUND_STATUS_LABEL[r.status] ?? r.status}</option>
+        <option key={r.id} value={r.id}>第 {r.round_number} 轮 · {ROUND_STATUS_LABEL[r.status] ?? displayStatusLabel(r.status)}</option>
       ))}
     </select>
   );
