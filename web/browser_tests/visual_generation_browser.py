@@ -908,6 +908,12 @@ def test_agent_realistic_orchestration_data_layout_has_no_overflow_at_supported_
             payload = orchestration
         elif path == "/api/orchestration/runs":
             payload = {"runs": runs}
+        elif path == "/api/ai_calls":
+            payload = [{
+                "id": 1, "called_at": now, "step": "copy", "model": "internal-provider-model-secret",
+                "prompt_version": "v3", "tokens_in": 1200, "tokens_out": 450,
+                "latency_ms": 820, "success": True,
+            }]
         else:
             payload = {}
         return route.fulfill(status=200, content_type="application/json",
@@ -925,6 +931,10 @@ def test_agent_realistic_orchestration_data_layout_has_no_overflow_at_supported_
             assert page.locator("select option").filter(has_text="第 301 轮 · 部分完成").count() == 1
             page.locator(".agent-flow button").filter(has_text="内容质量门").click()
             page.get_by_text("有 1 篇内容缺少可核验事实依据", exact=False).wait_for(timeout=15000)
+            page.get_by_role("button", name="AI 审计链").click()
+            page.get_by_text("Prompt Ver", exact=True).wait_for(timeout=15000)
+            assert page.get_by_text("internal-provider-model-secret", exact=True).count() == 0
+            assert page.get_by_text("模型", exact=True).count() == 0
 
             for width in (1440, 1024, 768, 390):
                 page.set_viewport_size({"width": width, "height": 1000})
