@@ -101,7 +101,7 @@ from src.core.ops.engine import OperationsEngine
 from src.core import auth
 from src.core import kb_sources
 from src.core.env_store import env_file, read_env, write_env
-from src.core.redact import redact, redact_path
+from src.core.redact import redact, redact_path, safe_error_summary
 from src.core.notify import Notifier, set_active as set_active_notifier, macos_available
 from src.core.hot_topics import HotTopicCollector
 from src.core.recovery import RecoveryManager
@@ -4300,7 +4300,7 @@ def _register_routes(app: FastAPI) -> None:
                         })
                         add_item(task_tenant, "global_queue", task.task_id,
                                  f"{task.task_type} · {task.status}",
-                                 task.error_message or "全局队列任务需要处理",
+                                 safe_error_summary(task.error_message, "全局队列任务执行失败，请进入任务队列查看详情。"),
                                  task.status, task.created_at,
                                  "high", "task-queue", "history")
                 except Exception as exc:  # noqa: BLE001 — 全局队列故障不能阻断其他账号组待办
@@ -4453,7 +4453,7 @@ def _register_routes(app: FastAPI) -> None:
                         status = str(row["status"])
                         add_item(tenant, "task_run", row["id"],
                                  f"{row['task_type']} · {status}",
-                                 f"{row['platform'] or '未指定平台'} · {row['error_msg'] or '需要检查任务结果'}",
+                                 f"{row['platform'] or '未指定平台'} · {safe_error_summary(row['error_msg'], '任务执行失败，请进入任务追踪查看详情。') if row['error_msg'] else '需要检查任务结果'}",
                                  status, row["todo_at"],
                                  "high" if status in ("failed", "interrupted") else "medium",
                                  "operations", "tasks")
@@ -4530,7 +4530,7 @@ def _register_routes(app: FastAPI) -> None:
                     capped = capped or total > fetch_limit
                     for row in rows:
                         add_item(tenant, "media_generation", row["id"], "AI 配图生成失败",
-                                 row["error_message"] or "请检查图片生成配置后重试", "failed",
+                                 safe_error_summary(row["error_message"], "AI 配图生成失败，请检查图片生成配置后重试。"), "failed",
                                  row["created_at"], "high", "assets", "media")
             except (sqlite3.Error, OSError) as exc:
                 logger.warning("todo scan skipped tenant=%s error=%s", tenant["id"], type(exc).__name__)
