@@ -266,3 +266,84 @@ def test_ocr_becoming_unavailable_stops_without_paid_retry(monkeypatch, tmp_path
             cfg=_Cfg(tmp_path), settings={"model": "image-model", "size": "1024x1536"},
         )
     assert len(calls) == 1
+
+
+def test_visual_plan_generates_cover_body_ending_with_verified_reference_bytes(monkeypatch, tmp_path):
+    import hashlib
+    from io import BytesIO
+    from PIL import Image
+    from src.core.visual_planning import build_visual_brief, build_visual_plan
+
+    image_buffer = BytesIO()
+    Image.new("RGB", (256, 384), "white").save(image_buffer, format="PNG")
+    image_bytes = image_buffer.getvalue()
+    image_path = tmp_path / "approved-reference.png"
+    image_path.write_bytes(image_bytes)
+    reference = {
+        "asset_id": 41, "version_no": 3, "path": str(image_path),
+        "sha256": hashlib.sha256(image_bytes).hexdigest(), "mime_type": "image/png",
+    }
+    brief = build_visual_brief(
+        platform="xhs", topic="测试主题", title="测试标题", goal="education",
+        key_message="记住核心结论", call_to_action="收藏备用",
+    )
+    plan = build_visual_plan(
+        brief=brief, title="测试标题", subtitle="运营",
+        body_pages=["第一条内容。第二条内容。"],
+    )
+    calls = []
+    monkeypatch.setattr(cards, "generate_image_bytes", lambda prompt, **kwargs: (
+        calls.append((prompt, kwargs)) or (image_bytes, "image/png", ".png", 256, 384)
+    ))
+    monkeypatch.setattr(
+        "src.core.visual_ocr.validate_rendered_pages",
+        lambda images, expected, report, **kwargs: {"status": "passed", "gate": "passed"},
+    )
+
+    paths, pages = cards.generate_ai_card_set(
+        title="测试标题", subtitle="运营", body="第一条内容。第二条内容。",
+        output_dir=tmp_path / "output", platform=type("P", (), {"value": "xhs"})(),
+        cfg=_Cfg(tmp_path), settings={"model": "image-model", "size": "1024x1536"},
+        visual_plan=plan,
+        reference_assets={"cover": reference, "body": reference, "ending": reference},
+    )
+
+    assert len(paths) == 3
+    assert len(calls) == 3
+    assert [kwargs["source_bytes"] for _prompt, kwargs in calls] == [image_bytes] * 3
+    assert all(kwargs["source_path"] == image_path for _prompt, kwargs in calls)
+    assert "封面页" in calls[0][0]
+    assert "正文" in calls[1][0]
+    assert "收束尾页" in calls[2][0]
+    assert "收藏备用" in calls[2][0]
+    assert "优先解释概念、步骤和因果关系" in calls[1][0]
+    assert len(pages) == 1
+
+
+def test_reference_asset_hash_mismatch_stops_before_provider_call(monkeypatch, tmp_path):
+    import hashlib
+    from io import BytesIO
+    from PIL import Image
+    from src.core.visual_planning import build_visual_brief, build_visual_plan
+
+    image_buffer = BytesIO()
+    Image.new("RGB", (256, 384), "white").save(image_buffer, format="PNG")
+    image_bytes = image_buffer.getvalue()
+    image_path = tmp_path / "reference.png"
+    image_path.write_bytes(image_bytes)
+    brief = build_visual_brief(platform="xhs", topic="主题", title="标题")
+    plan = build_visual_plan(brief=brief, title="标题", subtitle="栏目", body_pages=["正文。"])
+    calls = []
+    monkeypatch.setattr(cards, "generate_image_bytes", lambda *args, **kwargs: calls.append(args))
+    with pytest.raises(ValueError, match="reference_asset_hash_mismatch"):
+        cards.generate_ai_card_set(
+            title="标题", subtitle="栏目", body="正文。",
+            output_dir=tmp_path / "output", platform=type("P", (), {"value": "xhs"})(),
+            cfg=_Cfg(tmp_path), settings={"model": "image-model", "size": "1024x1536"},
+            visual_plan=plan,
+            reference_assets={"cover": {
+                "asset_id": 9, "version_no": 1, "path": str(image_path),
+                "sha256": hashlib.sha256(b"wrong").hexdigest(), "mime_type": "image/png",
+            }},
+        )
+    assert calls == []
