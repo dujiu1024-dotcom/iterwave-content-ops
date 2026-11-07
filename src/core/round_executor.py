@@ -1607,7 +1607,7 @@ class RoundExecutor:
                 visual_status = "generated" if has_ai else "degraded"
                 if has_ai:
                     visual_reason = (
-                        f"图片 API 直接生成完整卡片：封面 + {body_ai_count} 张正文页；"
+                        f"图片 API 直接生成完整卡片：封面 + {body_ai_count} 张正文页 + 尾页；"
                         "无模板叠字、无背景图后期拼字"
                     )
                 else:
