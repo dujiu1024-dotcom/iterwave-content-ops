@@ -1143,9 +1143,9 @@ class RoundExecutor:
                     linked_assets = self.conn.execute(
                         """SELECT DISTINCT a.id,a.current_version_no,v.title,v.description,
                                   v.metadata_json,a.source_kind,a.source_media_asset_id,
-                                  a.source_content_asset_id,a.source_kb_id,a.commercial_use_status,
-                                  a.privacy_status,a.readability_status,a.completeness_status,
-                                  a.duplicate_status
+                                  a.source_content_asset_id,a.source_kb_id,a.review_status,
+                                  a.archived_at,a.commercial_use_status,a.privacy_status,
+                                  a.readability_status,a.completeness_status,a.duplicate_status
                            FROM original_assets a
                            JOIN original_asset_versions v
                              ON v.original_asset_id=a.id AND v.version_no=a.current_version_no
@@ -1162,21 +1162,88 @@ class RoundExecutor:
                            ORDER BY a.id""",
                         (str(topic.id), platform.value, str(self._subplan_context["sub_plan_id"])),
                     ).fetchall()
-                    original_asset_snapshot = [{
-                        "asset_id": int(row["id"]),
-                        "version_no": int(row["current_version_no"]),
-                        "title": row["title"],
-                        "description": row["description"],
-                        "source_kind": row["source_kind"],
-                        "source_media_asset_id": row["source_media_asset_id"],
-                        "source_content_asset_id": row["source_content_asset_id"],
-                        "source_kb_id": row["source_kb_id"],
-                        "commercial_use_status": row["commercial_use_status"],
-                        "privacy_status": row["privacy_status"],
-                        "readability_status": row["readability_status"],
-                        "completeness_status": row["completeness_status"],
-                        "duplicate_status": row["duplicate_status"],
-                    } for row in linked_assets]
+                    original_asset_snapshot = []
+                    for row in linked_assets:
+                        try:
+                            media_metadata = json.loads(row["metadata_json"] or "{}")
+                        except (TypeError, ValueError):
+                            media_metadata = {}
+                        original_asset_snapshot.append({
+                            "asset_id": int(row["id"]),
+                            "version_no": int(row["current_version_no"]),
+                            "title": row["title"],
+                            "description": row["description"],
+                            "source_kind": row["source_kind"],
+                            "source_media_asset_id": row["source_media_asset_id"],
+                            "source_content_asset_id": row["source_content_asset_id"],
+                            "source_kb_id": row["source_kb_id"],
+                            "review_status": row["review_status"],
+                            "archived_at": row["archived_at"],
+                            "commercial_use_status": row["commercial_use_status"],
+                            "privacy_status": row["privacy_status"],
+                            "readability_status": row["readability_status"],
+                            "completeness_status": row["completeness_status"],
+                            "duplicate_status": row["duplicate_status"],
+                            # Persist only the source fields required to re-verify the
+                            # exact approved image version, not the raw metadata blob.
+                            "stored_filename": media_metadata.get("stored_filename"),
+                            "mime_type": media_metadata.get("mime_type"),
+                            "sha256": media_metadata.get("sha256"),
+                            "alt_text": media_metadata.get("alt_text"),
+                            "tags": media_metadata.get("tags"),
+                        })
+                    # Run the WP1 visual selector against this task's immutable,
+                    # already-authorized candidates. Resolve storage only through the
+                    # worker's trusted tenant identity; never fall back to active tenant.
+                    from .task_context import current_task_identity
+                    from .tenant_registry import TenantRegistry
+                    from .visual_asset_selection import select_visual_assets
+                    tenant_id = current_task_identity().get("tenant_id")
+                    image_candidates = []
+                    for asset in original_asset_snapshot:
+                        if asset.get("source_kind") != "media_asset":
+                            continue
+                        image_candidates.append(asset)
+                    visual_selection = {
+                        "selection_version": "visual-asset-selection-v1",
+                        "selected": [],
+                        "rejected": [],
+                        "candidate_count": len(image_candidates),
+                    }
+                    if image_candidates and not tenant_id:
+                        # Missing trusted identity means no asset may be read. Keep the
+                        # task running without reference assets rather than guessing a tenant.
+                        visual_selection["rejected"] = [{
+                            "asset_id": item.get("asset_id"),
+                            "reason": "trusted_tenant_identity_unavailable",
+                        } for item in image_candidates]
+                    elif image_candidates:
+                        registry = TenantRegistry(PROJECT_ROOT, cfg=self.cfg)
+                        registry.get(str(tenant_id))
+                        tenant_paths = registry.paths(str(tenant_id), create=False)
+                        selected = await asyncio.to_thread(
+                            select_visual_assets,
+                            candidates=image_candidates,
+                            media_dir=tenant_paths.media_dir,
+                            topic=topic.title,
+                            body=topic.summary,
+                            usage_role="cover",
+                            limit=8,
+                            cfg=self.cfg,
+                        )
+                        visual_selection = {
+                            "selection_version": selected["selection_version"],
+                            "candidate_count": selected["candidate_count"],
+                            "verified_count": selected["verified_count"],
+                            "selected": [{
+                                "asset_id": item["asset_id"],
+                                "version_no": item["version_no"],
+                                "sha256": item["sha256"],
+                                "score": item["score"],
+                                "reasons": item["reasons"],
+                            } for item in selected["selected"]],
+                            "rejected": selected["rejected"],
+                        }
                     task = task_store.create_task(
                         round_id=round_id,
                         master_plan_version_id=int(self._subplan_context["master_plan_version_id"]),
@@ -1204,6 +1271,7 @@ class RoundExecutor:
                             },
                             "template": template_data,
                             "original_assets": original_asset_snapshot,
+                            "visual_asset_selection": visual_selection,
                         },
                     )
                     # original_assets in the immutable task input are eligible reference

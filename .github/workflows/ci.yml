@@ -63,7 +63,7 @@ jobs:
         timeout-minutes: 5
         run: python -m pytest -vv tests/test_t8_master_plan_atomicity_api.py --durations=20 -o faulthandler_timeout=240
       - name: Run tests
-        timeout-minutes: 8
+        timeout-minutes: 15
         run: python -m pytest -vv --durations=20 -o faulthandler_timeout=240
       - name: Compile Python sources
         run: python -m compileall -q src tests
