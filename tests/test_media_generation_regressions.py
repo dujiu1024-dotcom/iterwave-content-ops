@@ -396,7 +396,7 @@ def test_generate_image_bytes_does_not_report_provider_failure_as_consumption(mo
     monkeypatch.setattr(image_generation_budget, "has_active_article", lambda: True)
     monkeypatch.setattr(image_generation_budget, "provider_request", lambda: nullcontext(30))
     monkeypatch.setattr(visual_ocr, "preflight_ocr", lambda **_kwargs: {"status": "available"})
-    endpoint = SimpleNamespace(label="primary", provider="primary-provider", model="primary-model")
+    endpoint = SimpleNamespace(label="primary", provider="primary-provider", model="primary-model", base_url="https://images.example.test")
     monkeypatch.setattr(media_generation, "_endpoints", lambda *args, **kwargs: [endpoint])
     def fail(*args, **kwargs):
         raise media_generation.ImageGenerationError("provider rejected request")
