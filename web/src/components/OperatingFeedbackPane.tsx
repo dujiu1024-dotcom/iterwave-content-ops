@@ -344,7 +344,7 @@ export default function OperatingFeedbackPane() {
               {runHistory[task.task_id].map((run, index) => <div key={String(run.run_id || index)} className="panel-sub">
                 {statusText(String(run.status || ""))} · {String(run.source || "")} · {String(run.window_start || "—")} 至 {String(run.window_end || "—")}
                 {run.error_message ? ` · ${String(run.error_message)}` : ""}
-                {run.metrics && <StructuredDataView data={run.metrics} title="本批采集指标"/>}
+                {Boolean(run.metrics) && <StructuredDataView data={run.metrics} title="本批采集指标"/>}
               </div>)}
             </div>}
             <div className="form-grid" style={{ marginTop: 8 }}>
