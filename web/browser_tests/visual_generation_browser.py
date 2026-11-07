@@ -832,6 +832,13 @@ def test_global_operations_realistic_data_layout_has_no_overflow_at_supported_vi
                 assert metrics["topbar"] <= metrics["topbarClient"] + 1, (
                     "global-ops real-data topbar overflow at {}px: {}".format(width, metrics)
                 )
+                if width <= 620:
+                    metric_columns = page.locator(".global-operations-page .grid.four").evaluate_all(
+                        "(nodes) => nodes.map(node => getComputedStyle(node).gridTemplateColumns.split(' ').length)"
+                    )
+                    assert metric_columns and all(count == 2 for count in metric_columns), (
+                        "global-ops mobile metric cards should use two columns: {}".format(metric_columns)
+                    )
                 page.screenshot(
                     path=str(screenshot_dir / "global-ops-real-data-{}.png".format(width)),
                     full_page=True,
