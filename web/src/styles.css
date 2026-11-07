@@ -380,6 +380,15 @@ details[open] > summary::before { content: "▾ "; }
 @media (max-width: 760px) {
   .queue-summary-grid { grid-template-columns: minmax(0, 1fr); }
 }
+@media (max-width: 760px) {
+  .task-queue-row {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 8px !important;
+    padding: 12px !important;
+  }
+  .task-queue-row > :first-child { grid-column: auto; }
+  .task-queue-row > * { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+}
 @media (max-width: 900px) and (min-width: 761px) {
   .task-queue-row {
     grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
