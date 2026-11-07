@@ -179,7 +179,12 @@ def _generate_ai_card_set(
     preflight = preflight_ocr(languages=getattr(policy, "ocr_languages", "chi_sim+eng"), timeout=getattr(policy, "ocr_timeout_seconds", 45))
     if preflight.get("status") != "available":
         raise RuntimeError(f"OCR 前置预检失败（{preflight.get('reason')}），已阻止图片 API 调用")
-    body_pages = _paginate_body(body, max_chars=60, segments_per_page=3, max_pages=getattr(policy, "max_pages_per_article", 9))
+    max_pages = int(getattr(policy, "max_pages_per_article", 9))
+    body_pages = _paginate_body(body, max_chars=60, segments_per_page=3, max_pages=max_pages)
+    if visual_plan is not None and len(body_pages) + 2 > max_pages:
+        raise ValueError(
+            f"视觉计划需要 {len(body_pages) + 2} 页（含封面和尾页），超过单篇最大 {max_pages} 页"
+        )
     page_texts = ["".join(page) for page in body_pages]
     expected = [f"{title}\n{subtitle}", *page_texts]
     plan_pages = list(getattr(visual_plan, "pages", ()) or ())
