@@ -6,6 +6,7 @@ import { displaySourceLabel, displayPlatformLabel } from "../displayLabels";
 import DemoBadge from "../components/DemoBadge";
 import EmptyHint from "../components/EmptyHint";
 import { useApp } from "../AppContext";
+import { formatBusinessRelativeDateTime } from "../businessTime.mjs";
 
 type TabKey = "all" | "matched" | "urgent" | "unknown";
 const PAGE_TABS = ["list", "logic"] as const;
@@ -20,17 +21,9 @@ const TREND_CLASS: Record<string, string> = {
   平稳: "gray",
 };
 
-/** 采集时间：今天的显示「今天 15:32」，其余显示「10-28 09:12」 */
+/** 采集时间统一按业务时区（Asia/Shanghai）展示。 */
 function fmtCollected(v?: string | null): string {
-  if (!v) return "—";
-  const d = new Date(v.replace(" ", "T"));
-  if (Number.isNaN(d.getTime())) return v;
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const now = new Date();
-  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  const today = d.getFullYear() === now.getFullYear()
-    && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
-  return today ? `今天 ${hm}` : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`;
+  return formatBusinessRelativeDateTime(v);
 }
 
 export default function HotTopics() {
