@@ -45,6 +45,18 @@ function sanitizeDiagnosticValue(value: unknown): unknown {
 }
 
 function collectTechnical(value: unknown, path = ""): Array<{ path: string; value: unknown }> {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        const parsed: unknown = JSON.parse(trimmed);
+        if (parsed && typeof parsed === "object") return collectTechnical(parsed, path);
+      } catch {
+        // Ignore ordinary text; only valid serialized objects/arrays are traversed.
+      }
+    }
+    return [];
+  }
   if (Array.isArray(value)) {
     return value.flatMap((item, index) => collectTechnical(item, path ? `${path}[${index}]` : `[${index}]`));
   }
