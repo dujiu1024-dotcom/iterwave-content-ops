@@ -504,7 +504,7 @@ export default function Calendar() {
                   <div className="calendar-plan-detail-row" key={task.id}>
                     <strong>{task.content_title || "已生成内容"}</strong>
                     <div>{platformMeta(task.platform).label} · {displayStatusLabel(task.status)} · 尝试 {task.attempt_count}/{task.max_attempts}</div>
-                    {task.error_message && <div className="note">{task.error_message}</div>}
+                    {task.error_message && <details className="advanced-report-editor"><summary>查看任务诊断</summary><pre className="diagnostic-text">{task.error_message}</pre></details>}
                   </div>
                 )) : <div className="note">该批次尚未生成独立生产任务</div>}
               </div>
