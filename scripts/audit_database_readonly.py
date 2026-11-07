@@ -93,7 +93,7 @@ def main() -> int:
         report = db.verify_schema(full_integrity=True)
 
         migrations = db._discover_migrations()
-        checksum_report = {"checked": 0, "mismatches": []}
+        checksum_report = {"checked": 0, "mismatches": [], "accepted_legacy_versions": []}
         with closing(sqlite3.connect(snapshot)) as conn:
             conn.row_factory = sqlite3.Row
             tables = {
@@ -116,8 +116,17 @@ def main() -> int:
                         continue
                     checksum_report["checked"] += 1
                     expected = hashlib.sha256(migration.path.read_bytes()).hexdigest()
-                    if stored.get(migration.version) != expected:
-                        checksum_report["mismatches"].append(migration.version)
+                    stored_checksum = stored.get(migration.version)
+                    # Match Database._verify_applied_migration_checksums(): version 131
+                    # has one explicitly accepted checksum from a historical parallel branch.
+                    legacy_checksums = {
+                        131: {"db83577353daffd3ebc4ce8707b544bdf3ddd6cfcc20fdf505f8e49e0d1dc4db"}
+                    }
+                    if stored_checksum != expected:
+                        if stored_checksum in legacy_checksums.get(migration.version, set()):
+                            checksum_report["accepted_legacy_versions"].append(migration.version)
+                        else:
+                            checksum_report["mismatches"].append(migration.version)
                 checksum_report["applied_versions"] = sorted(applied)
                 checksum_report["missing_checksum_versions"] = sorted(applied - set(stored))
 
@@ -127,8 +136,9 @@ def main() -> int:
             "missing_foreign_keys", "missing_unique_constraints",
             "missing_columns", "column_type_mismatches", "nullable_mismatches",
             "default_mismatches", "missing_check_constraints",
-            "missing_governance_indexes", "missing_governance_triggers",
+            "missing_governance_tables", "missing_governance_indexes", "missing_governance_triggers",
             "missing_governance_columns", "missing_governance_foreign_keys",
+            "governance_column_type_mismatches",
         )
         summary = {
             "integrity_check": report.get("integrity_check"),
@@ -138,6 +148,7 @@ def main() -> int:
             "unknown_applied_migrations": report.get("unknown_applied_migrations", []),
             "foreign_key_violation_count": len(report.get("foreign_key_violations", [])),
             "relationship_violations": report.get("relationship_violations", {}),
+            "governance_integrity_check": report.get("governance_integrity_check"),
             "governance_data_integrity_check": report.get("governance_data_integrity_check"),
             "governance_data_violations": report.get("governance_data_violations", {}),
             "migration_checksums": checksum_report,
