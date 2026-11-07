@@ -1362,6 +1362,7 @@ class RoundExecutor:
                 body_ai_count = 0
                 body_page_count = 0
                 pages: list = []
+                visual_plan_data: Optional[dict] = None
                 reject_reason: Optional[str] = None
                 visual_generation_attempts: list[dict] = []
                 for attempt in range(self.cfg.copy_generation.max_guard_retries + 1):
@@ -1400,28 +1401,30 @@ class RoundExecutor:
                         image_settings, image_reason = self._image_settings()
                         if not image_settings:
                             raise RuntimeError(f"AI 图片生成未启用，拒绝模板降级：{image_reason}")
+                        visual_brief = build_visual_brief(
+                            platform=platform.value, topic=topic.title, title=title,
+                            goal="informational", key_message=title,
+                            brand_profile=self._visual_brand_profile(),
+                        )
+                        visual_plan = build_visual_plan(
+                            brief=visual_brief, title=title, subtitle=topic.dimension,
+                            body_pages=["".join(page) for page in _paginate_body(
+                                body, max_chars=60, segments_per_page=3,
+                                max_pages=getattr(self.cfg.media_generation, "max_pages_per_article", 9),
+                            )],
+                            reference_asset_ids={
+                                role: [asset["asset_id"]]
+                                for role, asset in visual_reference_assets.items()
+                            },
+                        )
+                        visual_plan_data = visual_plan.to_dict()
                         image_paths, pages = await asyncio.to_thread(
                             generate_ai_card_set, title=title, subtitle=topic.dimension,
                             body=body, output_dir=output_dir, platform=platform,
                             cfg=self.cfg, settings=image_settings,
                             allow_fallback=image_settings.get("fallback_enabled"),
                             brand_profile=self._visual_brand_profile(),
-                            visual_plan=build_visual_plan(
-                                brief=build_visual_brief(
-                                    platform=platform.value, topic=topic.title,
-                                    title=title, goal="informational", key_message=title,
-                                    brand_profile=self._visual_brand_profile(),
-                                ),
-                                title=title, subtitle=topic.dimension,
-                                body_pages=["".join(page) for page in _paginate_body(
-                                    body, max_chars=60, segments_per_page=3,
-                                    max_pages=getattr(self.cfg.media_generation, "max_pages_per_article", 9),
-                                )],
-                                reference_asset_ids={
-                                    role: [asset["asset_id"]]
-                                    for role, asset in visual_reference_assets.items()
-                                },
-                            ),
+                            visual_plan=visual_plan,
                             reference_assets=visual_reference_assets,
                             task_id=hashlib.sha256(json.dumps({
                                 "round_id": round_id, "platform": platform.value, "topic_id": topic.id,
@@ -1498,28 +1501,30 @@ class RoundExecutor:
                         image_settings, image_reason = self._image_settings()
                         if not image_settings:
                             raise RuntimeError(f"AI 图片生成未启用，拒绝模板降级：{image_reason}")
+                        visual_brief = build_visual_brief(
+                            platform=platform.value, topic=topic.title, title=title,
+                            goal="informational", key_message=title,
+                            brand_profile=self._visual_brand_profile(),
+                        )
+                        visual_plan = build_visual_plan(
+                            brief=visual_brief, title=title, subtitle=topic.dimension,
+                            body_pages=["".join(page) for page in _paginate_body(
+                                body, max_chars=60, segments_per_page=3,
+                                max_pages=getattr(self.cfg.media_generation, "max_pages_per_article", 9),
+                            )],
+                            reference_asset_ids={
+                                role: [asset["asset_id"]]
+                                for role, asset in visual_reference_assets.items()
+                            },
+                        )
+                        visual_plan_data = visual_plan.to_dict()
                         image_paths, pages = await asyncio.to_thread(
                             generate_ai_card_set, title=title, subtitle=topic.dimension,
                             body=body, output_dir=output_dir, platform=platform,
                             cfg=self.cfg, settings=image_settings,
                             allow_fallback=image_settings.get("fallback_enabled"),
                             brand_profile=self._visual_brand_profile(),
-                            visual_plan=build_visual_plan(
-                                brief=build_visual_brief(
-                                    platform=platform.value, topic=topic.title,
-                                    title=title, goal="informational", key_message=title,
-                                    brand_profile=self._visual_brand_profile(),
-                                ),
-                                title=title, subtitle=topic.dimension,
-                                body_pages=["".join(page) for page in _paginate_body(
-                                    body, max_chars=60, segments_per_page=3,
-                                    max_pages=getattr(self.cfg.media_generation, "max_pages_per_article", 9),
-                                )],
-                                reference_asset_ids={
-                                    role: [asset["asset_id"]]
-                                    for role, asset in visual_reference_assets.items()
-                                },
-                            ),
+                            visual_plan=visual_plan,
                             reference_assets=visual_reference_assets,
                             task_id=hashlib.sha256(json.dumps({
                                 "round_id": round_id, "platform": platform.value, "topic_id": topic.id,
@@ -1670,6 +1675,7 @@ class RoundExecutor:
                                     "generation_mode": "ai_complete_card",
                                     "background_path": None,
                                     "body_pages": pages or None,
+                                    "visual_plan": visual_plan_data,
                                     "pages": [
                                         {
                                             "page_index": index,
