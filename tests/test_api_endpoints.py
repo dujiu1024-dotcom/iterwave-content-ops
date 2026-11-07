@@ -5711,6 +5711,7 @@ def test_global_task_queue_list_uses_business_label_without_internal_aggregate_k
     assert response.status_code == 200, response.text
     item = next(row for row in response.json()["items"] if row["task_id"] == task.task_id)
     assert item["aggregate_label"] == "平台数据采集 · 第 3 次"
+    assert item["tenant_name"] == "未登记账号组"
     assert "aggregate_id" not in item
     assert "tenant_id" not in item
     assert "internal-object" not in response.text

@@ -5015,9 +5015,9 @@ def _register_routes(app: FastAPI) -> None:
         round_numbers = _resolve_task_round_numbers(registry, tasks)
         for task in tasks:
             try:
-                tenant_name = registry.get(task.tenant_id)["name"] if registry else task.tenant_id
+                tenant_name = registry.get(task.tenant_id)["name"] if registry else "未登记账号组"
             except TenantError:
-                tenant_name = task.tenant_id
+                tenant_name = "未登记账号组"
             round_id = _round_id_from_aggregate(task.task_type, task.aggregate_id)
             safe_task_error = safe_error_summary(
                 task.error_message, "任务执行失败，请进入任务详情核对。",
