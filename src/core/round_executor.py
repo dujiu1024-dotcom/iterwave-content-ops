@@ -1424,10 +1424,10 @@ class RoundExecutor:
                             }, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
                         )
                         cover_path = str(image_paths[0])
-                        body_page_count = len(image_paths) - 1
+                        body_page_count = max(0, len(image_paths) - 2)
                         body_ai_count = body_page_count
                         visual_generation_attempts.extend({
-                            "kind": "cover" if index == 0 else "body",
+                            "kind": "cover" if index == 0 else "ending" if index == len(image_paths) - 1 else "body",
                             "status": "generated", "model": image_settings["model"],
                             "bytes": Path(path).stat().st_size,
                         } for index, path in enumerate(image_paths))
@@ -1522,10 +1522,10 @@ class RoundExecutor:
                             }, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
                         )
                         cover_path = str(image_paths[0])
-                        body_page_count = len(image_paths) - 1
+                        body_page_count = max(0, len(image_paths) - 2)
                         body_ai_count = body_page_count
                         visual_generation_attempts.extend({
-                            "kind": "cover" if index == 0 else "body",
+                            "kind": "cover" if index == 0 else "ending" if index == len(image_paths) - 1 else "body",
                             "status": "generated", "model": image_settings["model"],
                             "bytes": Path(path).stat().st_size,
                         } for index, path in enumerate(image_paths))
