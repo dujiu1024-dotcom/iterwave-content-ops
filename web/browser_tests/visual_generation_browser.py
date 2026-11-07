@@ -508,3 +508,211 @@ def test_primary_pages_error_state_layout_has_no_overflow_at_supported_viewports
             browser.close()
     finally:
         _stop_vite(server)
+
+
+def test_global_operations_realistic_data_layout_has_no_overflow_at_supported_viewports():
+    """Render a representative multi-tenant operations dataset at desktop/tablet/mobile widths."""
+    server, port = _serve_vite()
+    screenshot_dir = ROOT / "artifacts" / "ui-viewport"
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    now = "2026-11-07T10:30:00+08:00"
+
+    monitor = {
+        "days": 30, "since": "2026-10-08T00:00:00+08:00",
+        "totals": {
+            "tenants": 2, "available_tenants": 2, "registered_accounts": 3,
+            "registered_accounts_active": 2, "contents_period": 86, "contents_all": 420,
+            "drafts_all": 120, "drafts_pending": 18, "drafts_saved": 76,
+            "drafts_published": 20, "drafts_failed": 6, "media_active": 54, "media_usage": 38,
+        },
+        "platform_totals": {"xhs": {"contents": 62, "drafts": 80, "registered_accounts": 2},
+                            "douyin": {"contents": 24, "drafts": 40, "registered_accounts": 1}},
+        "tenants": [
+            {
+                "tenant_id": "brand-main", "tenant_name": "主品牌运营账号组（长名称布局测试）",
+                "created_at": now, "db_available": True, "db_status": "available",
+                "contents_period": 64, "contents_all": 300, "drafts_all": 80,
+                "drafts_pending": 12, "drafts_saved": 52, "drafts_published": 14,
+                "drafts_failed": 4, "media_active": 35, "media_usage": 24,
+                "registered_accounts": 2, "registered_accounts_active": 2,
+                "recent_execution": {"task_type": "round_pipeline", "status": "failed",
+                    "has_error_detail": True, "started_at": now, "finished_at": now, "created_at": now},
+                "runtime": {"available": True, "enabled_platforms": ["xhs", "douyin"],
+                    "logged_in_platforms": ["xhs"], "platforms_without_login": ["douyin"],
+                    "circuit_broken_platforms": [], "scheduler_running": True,
+                    "scheduler_job_count": 8, "scheduler_enabled_count": 6, "active_rounds": 2},
+                "platforms": {"xhs": {"contents": 48, "contents_period": 36, "drafts": 58, "registered_accounts": 1},
+                              "douyin": {"contents": 16, "contents_period": 8, "drafts": 22, "registered_accounts": 1}},
+            },
+            {
+                "tenant_id": "brand-test", "tenant_name": "区域测试账号组",
+                "created_at": now, "db_available": True, "db_status": "available",
+                "contents_period": 22, "contents_all": 120, "drafts_all": 40,
+                "drafts_pending": 6, "drafts_saved": 24, "drafts_published": 6,
+                "drafts_failed": 2, "media_active": 19, "media_usage": 14,
+                "registered_accounts": 1, "registered_accounts_active": 0,
+                "recent_execution": None,
+                "runtime": {"available": True, "enabled_platforms": ["xhs"],
+                    "logged_in_platforms": [], "platforms_without_login": ["xhs"],
+                    "circuit_broken_platforms": ["xhs"], "scheduler_running": False,
+                    "scheduler_job_count": 5, "scheduler_enabled_count": 0, "active_rounds": 0},
+                "platforms": {"xhs": {"contents": 22, "contents_period": 22, "drafts": 40, "registered_accounts": 1}},
+            },
+        ],
+        "account_count_note": "账号统计来自账号组数据库。",
+    }
+    task = {
+        "queue_order": 3, "task_id": "task-layout-001", "task_type": "round_run",
+        "tenant_id": "brand-main", "tenant_name": "主品牌运营账号组（长名称布局测试）",
+        "aggregate_id": "round-301", "round_number": 301, "status": "running",
+        "created_at": now, "available_at": now, "started_at": now, "finished_at": None,
+        "attempts": 1, "error_code": None, "error_message": None,
+    }
+    failed_task = {**task, "queue_order": 8, "task_id": "task-layout-failed",
+                   "status": "failed", "error_code": "PRODUCTION_STEP_FAILED",
+                   "error_message": "测试数据中的内部异常细节不得泄漏到普通列表。"}
+    todo = {
+        "id": "todo-layout-001", "record_id": 501, "source": "global_queue",
+        "source_label": "全局任务队列", "tenant_id": "brand-main",
+        "tenant_name": "主品牌运营账号组（长名称布局测试）",
+        "title": "请核实第 301 轮生产任务状态与外部副作用",
+        "detail": "任务执行异常，需人工确认是否已经产生外部平台副作用。",
+        "status": "pending", "created_at": now, "severity": "high",
+        "target_page": "task-queue", "target_tab": None,
+    }
+    notification = {
+        "id": 81, "level": "warning", "type": "task_failed", "platform": "xhs",
+        "title": "主品牌账号组有生产任务失败待处理",
+        "body": "第 301 轮生产任务需要人工核查。", "channel": "in_app",
+        "sent_at": now, "read_at": None, "target_page": "task-queue",
+        "target_tab": None, "target_type": "task_run", "target_id": 301,
+    }
+    production_monitor = {
+        "master_plan": {"id": 7, "version_no": 4, "status": "active",
+                        "created_at": now, "effective_at": now},
+        "platforms": [{
+            "id": "subplan-xhs", "platform": "xhs", "title": "小红书主品牌内容增长策略",
+            "status": "active", "version_no": 3, "stage_count": 1, "round_count": 2,
+            "stages": [{
+                "id": 71, "title": "建立专业认知与案例信任", "status": "in_progress",
+                "stage_order": 1, "stage_key": "authority", "direction": "围绕真实案例持续输出",
+                "completion_condition": "完成 20 篇内容并复盘有效互动",
+                "target_count": 20, "round_count": 2, "production_task_count": 3,
+                "production_task_status_counts": {"succeeded": 2, "failed": 1},
+                "content_count": 12, "draft_count": 9, "review_pending_count": 2,
+                "review_approved_count": 7, "review_rejected_count": 1, "published_count": 5,
+                "failed_draft_count": 1, "metric_record_count": 5,
+                "dependencies": [], "dependencies_available": True,
+                "round_status_counts": {"succeeded": 1, "failed": 1},
+                "rounds": [{"id": 301, "round_number": 301, "status": "failed",
+                            "created_at": now, "trigger_source": "manual"}],
+                "contents": [{"id": "content-layout-001",
+                    "title": "如何用真实案例建立客户信任：从问题识别到方案落地",
+                    "platform": "xhs", "created_at": now, "draft_count": 2,
+                    "draft_statuses": "已保存", "review_rejected": 0}],
+            }],
+        }],
+        "totals": {"subplans": 1, "stages": 1, "rounds": 2, "successful_rounds": 1,
+                   "production_tasks": 3, "contents": 12, "content_progress_percent": 60,
+                   "review_pending": 2, "review_approved": 7, "review_rejected": 1,
+                   "published": 5, "abnormal_rounds": 1, "failed_rounds": 1,
+                   "failed_drafts": 1, "metric_records": 5},
+        "effect_summary": {"views": 12800, "likes": 560, "collects": 320,
+                           "comments": 48, "shares": 72, "new_followers": 95},
+        "consistency_checks": [{"code": "ROUND_FAILED", "severity": "warning",
+                                "count": 1, "round_id": 301,
+                                "message": "有 1 个轮次需要检查失败原因。"}],
+        "generated_at": now, "data_scope": "当前账号组",
+        "limitations": {"production_task_source": "production_tasks",
+                        "task_model_available": True, "legacy_task_run_fallback": False,
+                        "metric_records_source": "metrics",
+                        "published_definition": "用户确认发布"},
+    }
+
+    def handler(route):
+        path = urlparse(route.request.url).path
+        query = dict(part.split("=", 1) for part in urlparse(route.request.url).query.split("&") if "=" in part)
+        if path == "/api/auth/status":
+            payload = {"configured": True, "authenticated": True, "needs_login": False}
+        elif path == "/api/tenants":
+            payload = {"runtime_tenant_id": "brand-main", "selected_tenant_id": "brand-main",
+                       "restart_required": False,
+                       "items": [{"id": "brand-main", "name": "主品牌运营账号组",
+                                  "created_at": now, "is_active": True}]}
+        elif path == "/api/status":
+            payload = {"enabled_platforms": ["xhs"], "platforms_without_login": [],
+                       "logged_in_platforms": ["xhs"], "circuit_broken_platforms": [],
+                       "active_rounds": 1, "published_samples": 5, "scoring_mode": "default",
+                       "recovery": {"interrupted_tasks": 0, "requeued_data_fetch": [],
+                                    "stale_rounds": [], "pending_verify": 0}}
+        elif path == "/api/global-monitor":
+            payload = monitor
+        elif path == "/api/production-monitor":
+            payload = production_monitor
+        elif path == "/api/production-tasks":
+            payload = {"items": [], "total": 0, "page": 1, "page_size": 100, "pages": 0}
+        elif path == "/api/task-queue":
+            is_failed = query.get("scope") == "failed"
+            payload = {"items": [failed_task] if is_failed else [task],
+                       "total": 1, "page": 1, "page_size": 12, "pages": 1,
+                       "status_counts": {"queued": 2, "running": 1, "failed": 1, "interrupted": 0},
+                       "tenant_status_counts": {"brand-main": {"queued": 2, "running": 1, "failed": 1}}}
+        elif path == "/api/notifications":
+            payload = {"items": [notification], "total": 1, "page": 1, "page_size": 5,
+                       "pages": 1, "unread_total": 1}
+        elif path == "/api/todos":
+            payload = {"items": [todo], "total": 1,
+                       "counts": {"global_queue": 1, "task_run": 0, "ops_log": 0,
+                                  "circuit_breaker": 0, "hot_topic_source": 0,
+                                  "media_review": 0, "notification": 0, "media_generation": 0},
+                       "page": 1, "page_size": 12, "pages": 1, "capped": False}
+        else:
+            payload = {}
+        return route.fulfill(status=200, content_type="application/json",
+                             body=json.dumps(payload, ensure_ascii=False))
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 1000}, device_scale_factor=1)
+            page_errors = []
+            page.on("pageerror", lambda error: page_errors.append(str(error)))
+            page.route("**/api/**", handler)
+            page.goto("http://127.0.0.1:{}/?page=global-ops".format(port))
+            page.locator("#main-content").wait_for(timeout=15000)
+            page.get_by_text("全局运营中心", exact=True).wait_for(timeout=15000)
+            page.get_by_text("主品牌运营账号组（长名称布局测试）", exact=False).first.wait_for(timeout=15000)
+            page.get_by_text("如何用真实案例建立客户信任：从问题识别到方案落地", exact=True).wait_for(timeout=15000)
+
+            for width in (1440, 1024, 768, 390):
+                page.set_viewport_size({"width": width, "height": 1000})
+                page.wait_for_timeout(180)
+                metrics = page.evaluate("""() => ({
+                    viewport: document.documentElement.clientWidth,
+                    document: document.documentElement.scrollWidth,
+                    body: document.body.scrollWidth,
+                    main: document.querySelector('#main-content')?.scrollWidth ?? 0,
+                    mainClient: document.querySelector('#main-content')?.clientWidth ?? 0,
+                    topbar: document.querySelector('.topbar')?.scrollWidth ?? 0,
+                    topbarClient: document.querySelector('.topbar')?.clientWidth ?? 0
+                })""")
+                assert metrics["document"] <= metrics["viewport"] + 1, (
+                    "global-ops real-data document overflow at {}px: {}".format(width, metrics)
+                )
+                assert metrics["body"] <= metrics["viewport"] + 1, (
+                    "global-ops real-data body overflow at {}px: {}".format(width, metrics)
+                )
+                assert metrics["main"] <= metrics["mainClient"] + 1, (
+                    "global-ops real-data content overflow at {}px: {}".format(width, metrics)
+                )
+                assert metrics["topbar"] <= metrics["topbarClient"] + 1, (
+                    "global-ops real-data topbar overflow at {}px: {}".format(width, metrics)
+                )
+                page.screenshot(
+                    path=str(screenshot_dir / "global-ops-real-data-{}.png".format(width)),
+                    full_page=True,
+                )
+            assert not page_errors, "global-ops real-data raised browser errors: {}".format(page_errors)
+            browser.close()
+    finally:
+        _stop_vite(server)
