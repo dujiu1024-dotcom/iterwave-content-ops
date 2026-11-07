@@ -10378,6 +10378,10 @@ def _register_routes(app: FastAPI) -> None:
             public_item["target_tab"] = target_tab
             public_item["target_type"] = target_type
             public_item["target_id"] = target_id
+            if item.get("type") in {"draft_failed", "data_fetch_failed", "login_expired"} and public_item.get("body"):
+                public_item["body"] = safe_error_summary(
+                    public_item["body"], "任务执行失败，详细诊断已隐藏。",
+                )
             item.clear()
             item.update(public_item)
         if page is None:

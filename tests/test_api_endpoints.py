@@ -5709,3 +5709,25 @@ def test_global_task_queue_list_uses_business_label_without_internal_aggregate_k
     assert "tenant_id" not in item
     assert "internal-object" not in response.text
     assert "private-tenant" not in response.text
+
+
+def test_notifications_api_sanitizes_legacy_error_bodies(client):
+    tc, conn, _seed = client
+    now = datetime.now().isoformat(sep=" ", timespec="seconds")
+    internal = (
+        "小红书存草稿失败：示例标题 — sqlite3.OperationalError: unable to open "
+        "/home/ubuntu/iterwave/data/private.db\\nTraceback (most recent call last):"
+    )
+    cursor = conn.execute(
+        "INSERT INTO notifications (level,type,title,body,channel,sent_at) VALUES(?,?,?,?,?,?)",
+        ("error", "draft_failed", "存草稿失败", internal, "wecom", now),
+    )
+    conn.commit()
+
+    response = tc.get("/api/notifications?page=1&page_size=20")
+    assert response.status_code == 200, response.text
+    item = next(row for row in response.json()["items"] if row["id"] == cursor.lastrowid)
+    assert item["body"] == "任务执行失败，详细诊断已隐藏。"
+    assert "/home/ubuntu" not in response.text
+    assert "sqlite3.OperationalError" not in response.text
+    assert "Traceback" not in response.text
