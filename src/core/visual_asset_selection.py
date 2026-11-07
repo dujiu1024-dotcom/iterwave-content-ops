@@ -23,19 +23,21 @@ _ALLOWED_MIME_FORMATS = {
 }
 _ALLOWED_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_TOKEN = re.compile(r"[\w\u4e00-\u9fff]+", re.UNICODE)
-
-
-class VisualAssetSelectionError(ValueError):
-    """Raised when the selection request itself is unsafe or invalid."""
+_TOKEN = re.compile(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]+", re.UNICODE)
 
 
 def _tokens(value: object) -> set[str]:
-    return {
-        token.casefold()
-        for token in _TOKEN.findall(str(value or ""))
-        if len(token.strip()) > 1
-    }
+    tokens: set[str] = set()
+    for token in _TOKEN.findall(str(value or "")):
+        normalized = token.casefold()
+        if re.fullmatch(r"[\u4e00-\u9fff]+", normalized):
+            if len(normalized) == 1:
+                tokens.add(normalized)
+            else:
+                tokens.update(normalized[index:index + 2] for index in range(len(normalized) - 1))
+        elif len(normalized) > 1:
+            tokens.add(normalized)
+    return tokens
 
 
 def _hard_gate_reason(asset: dict[str, Any]) -> str | None:
