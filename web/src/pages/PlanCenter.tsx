@@ -607,7 +607,7 @@ export default function PlanCenter() {
         topic_count: created.topic_count, platforms: [child.platform],
       });
       setPendingRoundLaunch(null);
-      showToast(`第 ${created.round_number} 轮已进入生产队列（任务 ${queued.task_id}）`, "success");
+      showToast(`第 ${created.round_number} 轮已进入生产队列`, "success");
       await load(child.id);
     } catch (e) {
       showToast("生产轮次启动失败：" + (e instanceof Error ? e.message : String(e)) +

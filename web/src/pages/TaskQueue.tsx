@@ -507,7 +507,7 @@ export default function TaskQueue() {
                         <div className="tiny">{entry.actor} · {timeLabel(entry.acted_at)}</div>
                         {typeof entry.details.note === "string" && <div className="tiny">{entry.details.note}</div>}
                         {typeof entry.details.confirmation_note === "string" && <div className="tiny">恢复核验：{entry.details.confirmation_note}</div>}
-                        {typeof entry.details.retry_task_id === "string" && <div className="tiny">恢复任务：{entry.details.retry_task_id}</div>}
+                        {typeof entry.details.retry_task_id === "string" && <details className="structured-data-diagnostics"><summary>高级诊断</summary><code>{entry.details.retry_task_id}</code></details>}
                       </div>
                     </div>)}
                   </div> : <div className="empty-state">暂无管理操作审计记录。</div>}
