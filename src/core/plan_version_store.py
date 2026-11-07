@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 import uuid
@@ -11,6 +12,8 @@ from typing import Any, Optional
 
 from .plan_version import PlanVersionManager
 from .plan_change_audit import record_plan_change
+
+logger = logging.getLogger(__name__)
 
 
 class PlanVersionError(ValueError):
@@ -47,6 +50,18 @@ def normalize_stage_date(value: Any) -> Optional[str]:
         return datetime.strptime(text, "%Y-%m-%d").date().isoformat()
     except ValueError:
         return None
+
+
+def _optional_float(value: Any, field_name: str) -> Optional[float]:
+    """可选数值字段：空值保持 NULL，禁止用 0 表示未知（R3/R21）。"""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if isinstance(value, bool):
+        raise PlanVersionError(f"{field_name} 必须是数字")
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise PlanVersionError(f"{field_name} 必须是数字") from exc
 
 
 class PlanVersionStore:
@@ -95,6 +110,157 @@ class PlanVersionStore:
         canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
+    def _has_table(self, name: str) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone() is not None
+
+    def _table_columns(self, name: str) -> set[str]:
+        """读取表的实际列集合；用于兼容尚未跑新迁移的租户库/旧测试夹具。"""
+        try:
+            return {row[1] for row in self.conn.execute(f"PRAGMA table_info({name})").fetchall()}
+        except sqlite3.Error:
+            return set()
+
+    def _save_runtime_config(
+        self, version_id: int, runtime: dict[str, Any], *, now: str, author: str,
+    ) -> None:
+        """平台执行参数写入独立表；迁移未执行时跳过，不阻断母计划草稿。"""
+        if not self._has_table("platform_plan_configs"):
+            logger.warning("platform_plan_configs 不存在，跳过母计划 %s 的平台执行配置落库", version_id)
+            return
+        cadence = runtime.get("cadence") or None
+        self.conn.execute(
+            "INSERT OR REPLACE INTO master_plan_runtime_configs"
+            "(master_plan_version_id,cadence_json,created_at,created_by)VALUES(?,?,?,?)",
+            (version_id, json.dumps(cadence, ensure_ascii=False, sort_keys=True) if cadence else None,
+             now, author),
+        )
+        for platform, conf in (runtime.get("per_platform") or {}).items():
+            slots = conf.get("publish_slots") or None
+            topic_count = conf.get("topic_count")
+            self.conn.execute(
+                """INSERT OR REPLACE INTO platform_plan_configs(
+                       master_plan_version_id,platform,topic_count,publish_slots_json,created_at
+                   )VALUES(?,?,?,?,?)""",
+                (version_id, platform,
+                 int(topic_count) if topic_count not in (None, "") else None,
+                 json.dumps(list(slots), ensure_ascii=False) if slots else None,
+                 now),
+            )
+
+    def load_runtime_config(self, version_id: Optional[int]) -> dict[str, Any]:
+        """读取某母计划版本的平台执行配置（不存在返回空 dict）。"""
+        if version_id is None or not self._has_table("platform_plan_configs"):
+            return {}
+        runtime: dict[str, Any] = {}
+        rows = self.conn.execute(
+            "SELECT platform,topic_count,publish_slots_json FROM platform_plan_configs "
+            "WHERE master_plan_version_id=? ORDER BY platform",
+            (int(version_id),),
+        ).fetchall()
+        per_platform: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            entry: dict[str, Any] = {}
+            if row["topic_count"] is not None:
+                entry["topic_count"] = int(row["topic_count"])
+            if row["publish_slots_json"]:
+                try:
+                    entry["publish_slots"] = json.loads(row["publish_slots_json"])
+                except (TypeError, ValueError):
+                    pass
+            per_platform[row["platform"]] = entry
+        if per_platform:
+            runtime["per_platform"] = per_platform
+        if self._has_table("master_plan_runtime_configs"):
+            row = self.conn.execute(
+                "SELECT cadence_json FROM master_plan_runtime_configs WHERE master_plan_version_id=?",
+                (int(version_id),),
+            ).fetchone()
+            if row is not None and row["cadence_json"]:
+                try:
+                    runtime["cadence"] = json.loads(row["cadence_json"])
+                except (TypeError, ValueError):
+                    pass
+        return runtime
+
+    def stage_progress(self, stage_id: int) -> dict[str, Any]:
+        """阶段计划进度：以独立指标为准，内容发布数只作参考（D6/R21）。
+
+        指标值来自 goals.current_value：优先阶段显式关联的 goal_id；兼容旧数据时
+        若 metric_period 是纯数字则视作 goals.id；否则按 target_metric 取最近一条目标。
+        metric_period 本身只表示统计周期文本。读不到一律 NULL，禁止当 0。
+        """
+        row = self.conn.execute("SELECT * FROM sub_plan_stages WHERE id=?", (stage_id,)).fetchone()
+        if row is None:
+            raise PlanVersionError("子计划阶段不存在")
+        keys = set(row.keys())
+        confirmed: Optional[int] = None
+        if self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='view' AND name='sub_plan_stage_publish_stats'"
+        ).fetchone():
+            stat = self.conn.execute(
+                "SELECT confirmed_published_count FROM sub_plan_stage_publish_stats WHERE stage_id=?",
+                (stage_id,),
+            ).fetchone()
+            confirmed = int(stat["confirmed_published_count"]) if stat is not None else None
+
+        target_metric = row["target_metric"] if "target_metric" in keys else None
+        target_value = row["target_value"] if "target_value" in keys else None
+        if not target_metric or target_value is None:
+            return {
+                "basis": "content_reference",
+                "target_metric": target_metric, "target_value": target_value,
+                "metric_scope": row["metric_scope"] if "metric_scope" in keys else None,
+                "current_value": None, "achievement_rate": None,
+                "confirmed_published_count": confirmed, "data_ready": False,
+            }
+
+        goal = None
+        goal_id = row["goal_id"] if "goal_id" in keys else None
+        period = row["metric_period"] if "metric_period" in keys else None
+        if goal_id is not None:
+            goal = self.conn.execute(
+                "SELECT current_value,baseline_value,metric_scope FROM goals WHERE id=?",
+                (str(goal_id),),
+            ).fetchone()
+        elif period is not None and str(period).strip().isdigit():
+            # 兼容 167 之前把 metric_period 当 goals.id 使用的历史数据。
+            goal = self.conn.execute(
+                "SELECT current_value,baseline_value,metric_scope FROM goals WHERE id=?",
+                (str(period).strip(),),
+            ).fetchone()
+        if goal is None:
+            goal = self.conn.execute(
+                "SELECT current_value,baseline_value,metric_scope FROM goals "
+                "WHERE target_metric=? ORDER BY created_at DESC LIMIT 1",
+                (target_metric,),
+            ).fetchone()
+
+        current_value = goal["current_value"] if goal is not None else None
+        stage_baseline = row["baseline_value"] if "baseline_value" in keys else None
+        baseline = stage_baseline if stage_baseline is not None else (
+            goal["baseline_value"] if goal is not None else None
+        )
+        scope = (row["metric_scope"] if "metric_scope" in keys else None) or (
+            goal["metric_scope"] if goal is not None else "delta"
+        )
+        achievement: Optional[float] = None
+        if current_value is not None and float(target_value) != 0:
+            if scope == "total":
+                achievement = float(current_value) / float(target_value)
+            elif baseline is not None:
+                achievement = (float(current_value) - float(baseline)) / float(target_value)
+        return {
+            "basis": "metric",
+            "target_metric": target_metric, "target_value": float(target_value),
+            "metric_scope": scope, "baseline_value": baseline,
+            "current_value": float(current_value) if current_value is not None else None,
+            "achievement_rate": achievement,
+            "confirmed_published_count": confirmed,
+            "data_ready": current_value is not None,
+        }
+
     # ------------------------------------------------------------------
     # Master plan lifecycle
     # ------------------------------------------------------------------
@@ -116,7 +282,9 @@ class PlanVersionStore:
             raise PlanVersionError("主计划快照必须是对象")
         if source not in {"user", "review_adoption", "legacy_recovery", "system"}:
             raise PlanVersionError("无效的主计划版本来源")
-        signature = self._signer.compute_signature(snapshot)
+        # 母计划版本只固化战略字段；平台执行参数单独存表（D2）。
+        strategic, runtime_config = self._signer.split_runtime_config(snapshot)
+        signature = self._signer.compute_signature(strategic)
         if ai_metadata is not None and not isinstance(ai_metadata, dict):
             raise PlanVersionError("AI 元数据必须是对象")
         ai_metadata_json = (
@@ -168,10 +336,11 @@ class PlanVersionStore:
                     ai_metadata_json,effective_metadata_json,metadata_signature,
                     metadata_version,metadata_updated_at,metadata_updated_by
                 )VALUES(?,?,?,'draft',?,?,?,?,?,?,?, ?,1,?,?)""",
-                (version_no, signature, json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
+                (version_no, signature, json.dumps(strategic, ensure_ascii=False, sort_keys=True),
                  source, based_on_version_id, now, author, change_note,
                  ai_metadata_json, effective_metadata_json, metadata_signature, now, author),
             )
+            self._save_runtime_config(cur.lastrowid, runtime_config, now=now, author=author)
             # Freeze the exact account-group North Star version at draft creation.
             if self.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_group_north_star_versions'").fetchone():
                 if north_star_version_id is not None:
@@ -340,7 +509,11 @@ class PlanVersionStore:
             snapshot = json.loads(row["plan_snapshot"])
             signature = self._signer.compute_signature(snapshot)
             if signature != row["plan_signature"]:
-                raise PlanVersionError("主计划快照与签名不一致，拒绝生效")
+                # 兼容 167 之前写入的、包含平台篇数的历史签名。
+                from .plan_version import legacy_signature_with_platform_counts
+                if legacy_signature_with_platform_counts(snapshot) != row["plan_signature"]:
+                    raise PlanVersionError("主计划快照与签名不一致，拒绝生效")
+                signature = row["plan_signature"]
             if row["metadata_signature"]:
                 expected_metadata_signature = self._compute_metadata_signature(
                     signature, row["ai_metadata_json"], row["effective_metadata_json"]
@@ -350,12 +523,14 @@ class PlanVersionStore:
             elif str(row["change_note"] or "").startswith("AI 母计划草稿："):
                 raise PlanVersionError("历史 AI 草稿元数据尚未纳入完整签名，请重新生成草稿后再审核")
             previous_effective = self.conn.execute(
-                "SELECT id FROM master_plan_versions WHERE status='effective'"
+                "SELECT id,plan_signature FROM master_plan_versions WHERE status='effective'"
             ).fetchone()
             previous_version_id = int(previous_effective["id"]) if previous_effective else None
-            if previous_effective is not None:
-                # A new mother plan pauses child plans still based on the superseded
-                # version. Existing rounds and child snapshots remain untouched.
+            same_strategy = bool(
+                previous_effective is not None
+                and previous_effective["plan_signature"] == signature
+            )
+            def _pause_all_subplans() -> None:
                 self.conn.execute(
                     """UPDATE sub_plans
                        SET status='paused',pause_reason='master_plan_switch',
@@ -374,6 +549,35 @@ class PlanVersionStore:
                            )""",
                         (now, previous_effective["id"], version_id),
                     )
+
+            if previous_effective is not None and not same_strategy:
+                # A new mother plan pauses child plans still based on the superseded
+                # version. Existing rounds and child snapshots remain untouched.
+                _pause_all_subplans()
+            elif previous_effective is not None and same_strategy:
+                # 战略不变、仅平台执行配置变化：只暂停变化平台的子计划（D3）；
+                # 没有任何平台配置差异的新版本（如复盘采纳）仍需全部重新审核。
+                changed_platforms = self._signer.platform_config_diff(
+                    self.load_runtime_config(previous_version_id),
+                    self.load_runtime_config(version_id),
+                )
+                if not changed_platforms:
+                    _pause_all_subplans()
+                for platform in changed_platforms:
+                    self.conn.execute(
+                        """UPDATE sub_plans
+                           SET status='paused',pause_reason='master_plan_switch',
+                               paused_by_master_version_id=?,updated_at=?
+                           WHERE platform=? AND status='active'""",
+                        (version_id, now, platform),
+                    )
+                    record_plan_change(
+                        self.conn, entity_type="master_plan", entity_id=str(version_id),
+                        event_type="version_approved",
+                        from_version_id=previous_version_id, to_version_id=version_id,
+                        change_reason=f"平台 {platform} 执行配置变更，仅暂停该平台子计划等待重新审核",
+                        actor=reviewer,
+                    )
             self.conn.execute(
                 """UPDATE master_plan_versions
                    SET status='archived',superseded_at=? WHERE status='effective'""", (now,)
@@ -384,6 +588,10 @@ class PlanVersionStore:
                    WHERE id=? AND status='draft'""",
                 (now, reviewer, now, version_id),
             )
+            # 运行时投影：战略字段 + 平台执行配置，兼容既有消费方（D2）。
+            projection = dict(snapshot)
+            projection.update(self.load_runtime_config(version_id))
+            projection_json = json.dumps(projection, ensure_ascii=False, sort_keys=True)
             self.conn.execute(
                 """INSERT INTO plan_settings(
                        id,plan_snapshot,plan_signature,updated_at,updated_by,active_version_id
@@ -394,13 +602,13 @@ class PlanVersionStore:
                        updated_at=excluded.updated_at,
                        updated_by=excluded.updated_by,
                        active_version_id=excluded.active_version_id""",
-                (row["plan_snapshot"], signature, now, reviewer, version_id),
+                (projection_json, signature, now, reviewer, version_id),
             )
             self.conn.execute(
                 """INSERT INTO signature_history(
                        plan_signature,plan_snapshot,round_id,created_at,author
                    ) VALUES(?,?,NULL,?,?)""",
-                (signature, row["plan_snapshot"], now, reviewer),
+                (signature, projection_json, now, reviewer),
             )
             if self.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='master_plan_resource_baselines'").fetchone():
                 from src.core.resource_baseline_repository import capture_resource_baseline
@@ -888,32 +1096,58 @@ class PlanVersionStore:
                 else:
                     business_status = "pending" if business_required else "not_required"
                     effect_status = "pending" if effect_required else "not_required"
+                # 阶段独立指标（D6/F3）：NULL = 未配置，禁止写 0 冒充。
+                target_metric = str(stage.get("target_metric") or "").strip() or None
+                target_value = _optional_float(stage.get("target_value"), "target_value")
+                metric_scope = str(stage.get("metric_scope") or "").strip() or None
+                baseline_value = _optional_float(stage.get("baseline_value"), "baseline_value")
+                baseline_at = str(stage.get("baseline_at") or "").strip() or None
+                metric_period = str(stage.get("metric_period") or "").strip() or None
+                data_source = str(stage.get("data_source") or "").strip() or None
+                goal_id: Optional[str] = str(stage.get("goal_id") or "").strip() or None
+                columns = [
+                    "sub_plan_version_id", "stage_key", "stage_order", "title", "direction",
+                    "target_count", "start_date", "end_date", "completion_condition", "status",
+                    "notes", "created_at", "updated_at", "strategy_goal", "current_problem",
+                    "execution_strategy", "prerequisites", "input_info", "expected_result",
+                    "completion_criteria", "effect_evaluation", "entry_condition",
+                    "entry_condition_met", "dependencies_json", "business_completion_required",
+                    "business_completion_status", "effect_required", "effect_status",
+                ]
+                values: list[Any] = [
+                    version_id, stage_key, stage_order, title,
+                    str(stage.get("direction") or ""), target_count,
+                    start_date, end_date, str(stage.get("completion_condition") or ""),
+                    stage_status, str(stage.get("notes") or ""), now, now,
+                    str(stage.get("strategy_goal") or "")[:4000],
+                    str(stage.get("current_problem") or "")[:4000],
+                    str(stage.get("execution_strategy") or "")[:8000],
+                    str(stage.get("prerequisites") or "")[:4000],
+                    str(stage.get("input_info") or "")[:4000],
+                    str(stage.get("expected_result") or "")[:4000],
+                    completion_criteria,
+                    effect_evaluation,
+                    entry_condition,
+                    1 if entry_met else 0,
+                    dependencies_json,
+                    1 if business_required else 0, business_status,
+                    1 if effect_required else 0, effect_status,
+                ]
+                # 指标列可能尚未迁移（旧租户库/旧测试夹具）：只写实际存在的列。
+                existing_columns = self._table_columns("sub_plan_stages")
+                for column, value in (
+                    ("target_metric", target_metric), ("target_value", target_value),
+                    ("metric_scope", metric_scope), ("baseline_value", baseline_value),
+                    ("baseline_at", baseline_at), ("metric_period", metric_period),
+                    ("data_source", data_source), ("goal_id", goal_id),
+                ):
+                    if column in existing_columns:
+                        columns.append(column)
+                        values.append(value)
                 self.conn.execute(
-                    """INSERT INTO sub_plan_stages(
-                        sub_plan_version_id,stage_key,stage_order,title,direction,target_count,
-                        start_date,end_date,completion_condition,status,notes,created_at,updated_at,
-                        strategy_goal,current_problem,execution_strategy,prerequisites,input_info,
-                        expected_result,completion_criteria,effect_evaluation,entry_condition,
-                        entry_condition_met,dependencies_json,business_completion_required,
-                        business_completion_status,effect_required,effect_status
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (version_id, stage_key, stage_order, title,
-                     str(stage.get("direction") or ""), target_count,
-                     start_date, end_date, str(stage.get("completion_condition") or ""),
-                     stage_status, str(stage.get("notes") or ""), now, now,
-                     str(stage.get("strategy_goal") or "")[:4000],
-                     str(stage.get("current_problem") or "")[:4000],
-                     str(stage.get("execution_strategy") or "")[:8000],
-                     str(stage.get("prerequisites") or "")[:4000],
-                     str(stage.get("input_info") or "")[:4000],
-                     str(stage.get("expected_result") or "")[:4000],
-                     completion_criteria,
-                     effect_evaluation,
-                     entry_condition,
-                     1 if entry_met else 0,
-                     dependencies_json,
-                     1 if business_required else 0, business_status,
-                     1 if effect_required else 0, effect_status),
+                    f"INSERT INTO sub_plan_stages({','.join(columns)}) "
+                    f"VALUES({','.join('?' for _ in values)})",
+                    values,
                 )
             row = dict(self.conn.execute(
                 "SELECT * FROM sub_plan_versions WHERE id=?", (version_id,)
@@ -1574,6 +1808,30 @@ class PlanVersionStore:
             },
         }
 
+    def _cascade_round_attribution(
+        self, round_id: int, master_plan_version_id: int, round_row: dict[str, Any],
+    ) -> None:
+        """把人工归属级联到同轮内容/草稿；缺列的旧库只更新实际存在的列。"""
+        for table, condition in (
+            ("contents", "round_id=? AND master_plan_version_id IS NULL"),
+            ("drafts", "master_plan_version_id IS NULL AND content_id IN "
+                       "(SELECT id FROM contents WHERE round_id=?)"),
+        ):
+            columns = self._table_columns(table)
+            if "master_plan_version_id" not in columns:
+                continue
+            link = ["master_plan_version_id"] + [
+                column for column in ("sub_plan_id", "sub_plan_version_id",
+                                      "sub_plan_stage_id", "production_line_version_id")
+                if column in columns and column in round_row
+            ]
+            values = [master_plan_version_id] + [round_row[column] for column in link[1:]]
+            self.conn.execute(
+                f"UPDATE {table} SET {','.join(f'{column}=?' for column in link)} "
+                f"WHERE {condition}",
+                (*values, round_id),
+            )
+
     def attribute_legacy_round(
         self,
         round_id: int,
@@ -1589,12 +1847,19 @@ class PlanVersionStore:
             raise PlanVersionError("人工归属必须记录审核人和原因")
         self._begin()
         try:
-            round_row = self.conn.execute(
-                """SELECT plan_signature,master_plan_version_id,plan_attribution_status
-                   FROM spiral_rounds WHERE id=?""", (round_id,)
+            round_columns = self._table_columns("spiral_rounds")
+            desired = ["plan_signature", "master_plan_version_id", "plan_attribution_status",
+                       "sub_plan_id", "sub_plan_version_id", "sub_plan_stage_id",
+                       "production_line_version_id"]
+            selected = [column for column in desired if column in round_columns]
+            if "master_plan_version_id" not in selected or "plan_attribution_status" not in selected:
+                raise PlanVersionError("当前数据库尚未迁移计划归属列，无法人工归属")
+            row = self.conn.execute(
+                f"SELECT {','.join(selected)} FROM spiral_rounds WHERE id=?", (round_id,)
             ).fetchone()
-            if round_row is None:
+            if row is None:
                 raise PlanVersionError("轮次不存在")
+            round_row = dict(row)
             if round_row["master_plan_version_id"] is not None:
                 raise PlanVersionError("轮次已经归属版本，禁止覆盖")
             if round_row["plan_attribution_status"] not in ("pending", "manual_review"):
@@ -1605,15 +1870,21 @@ class PlanVersionStore:
             ).fetchone()
             if version is None:
                 raise PlanVersionError("待归属的主计划版本不存在")
-            old_signature = round_row["plan_signature"]
+            old_signature = round_row.get("plan_signature")
             if old_signature and old_signature != version["plan_signature"]:
                 raise PlanVersionError("所选版本签名与轮次已有签名不一致")
+            round_set = ["master_plan_version_id=?", "plan_attribution_status='resolved'"]
+            round_values: list[Any] = [master_plan_version_id]
+            if "plan_signature" in round_columns:
+                round_set.insert(1, "plan_signature=?")
+                round_values.append(version["plan_signature"])
             self.conn.execute(
-                """UPDATE spiral_rounds
-                   SET master_plan_version_id=?,plan_signature=?,plan_attribution_status='resolved'
-                   WHERE id=? AND master_plan_version_id IS NULL""",
-                (master_plan_version_id, version["plan_signature"], round_id),
+                f"UPDATE spiral_rounds SET {','.join(round_set)} "
+                "WHERE id=? AND master_plan_version_id IS NULL",
+                (*round_values, round_id),
             )
+            # 归属必须级联到同轮内容与草稿，否则计划维度统计仍会漏掉这些内容（F6）。
+            self._cascade_round_attribution(round_id, master_plan_version_id, round_row)
             self.conn.execute(
                 """INSERT INTO user_override(
                     round_id,override_field,original_value,override_value,

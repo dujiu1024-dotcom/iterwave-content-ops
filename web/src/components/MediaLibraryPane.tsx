@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useApp } from "../AppContext";
-import { api, MediaAsset, MediaUsageTarget, MediaGenerationSettings, MediaRecommendation } from "../api";
+import { api, assetUrl, MediaAsset, MediaUsageTarget, MediaGenerationSettings, MediaRecommendation } from "../api";
 import { platformMeta } from "../platforms";
 
 type UsageRole = "cover" | "illustration" | "background";
@@ -259,7 +259,10 @@ export default function MediaLibraryPane() {
     await withPending("media:use:" + item.id, async () => {
       try {
         const result = await api.useMediaAsset(item.id, selectedContentId, usageRole);
-        showToast(result.message, "success");
+        showToast(
+          result.already_assigned ? result.message : `${result.message}（已配 ${result.image_count ?? 1} 张）`,
+          result.already_assigned ? "info" : "success",
+        );
         await load();
       } catch (e) {
         showToast(e instanceof Error ? e.message : "配图失败", "error");
@@ -431,7 +434,7 @@ export default function MediaLibraryPane() {
           <div className="ml-drawer">
             {editTarget && (
               <div className="ml-edit-target">
-                <img src={editTarget.file_url} alt="" />
+                <img src={assetUrl(editTarget.file_url)} alt="" />
                 <div>基于「{editTarget.title}」改图 <button className="btn sm ghost" onClick={() => setEditTarget(null)}>改为新生成</button></div>
               </div>
             )}
@@ -537,7 +540,7 @@ export default function MediaLibraryPane() {
         </div>
         {selectedTarget && (
           <div className="ml-hint ml-target-state">
-            当前配图：{VISUAL_LABEL[selectedTarget.visual_status] ?? "未知"}。在下方素材卡片点「配给这篇」即可替换为{ROLE_LABEL[usageRole]}，不会自动替换。
+            当前配图：{VISUAL_LABEL[selectedTarget.visual_status] ?? "未知"}。在下方素材卡片点「配给这篇」即可追加为{ROLE_LABEL[usageRole]}；同一篇内容可配多张图，重复点击不会重复添加。
           </div>
         )}
         {targetWarning && <div className="note orange" role="alert">{targetWarning}</div>}
@@ -550,7 +553,7 @@ export default function MediaLibraryPane() {
                 if (!asset) return null;
                 return (
                   <div className="ml-rec" key={rec.asset_id}>
-                    <img src={asset.file_url} alt={asset.alt_text || asset.title} loading="lazy" />
+                    <img src={assetUrl(asset.file_url)} alt={asset.alt_text || asset.title} loading="lazy" />
                     <div className="ml-rec-body">
                       <div className="ml-card-title" title={asset.title}>{asset.title}</div>
                       <div className="ml-hint ml-clamp">{rec.reason || "关键词匹配"}</div>
@@ -589,8 +592,8 @@ export default function MediaLibraryPane() {
               const state = assetState(item);
               return (
                 <article key={item.id} className={`ml-card ${state}`}>
-                  <a className="ml-thumb" href={item.file_url} target="_blank" rel="noreferrer" title="查看原图">
-                    <img src={item.file_url} alt={item.alt_text || item.title} loading="lazy" />
+                  <a className="ml-thumb" href={assetUrl(item.file_url)} target="_blank" rel="noreferrer" title="查看原图">
+                    <img src={assetUrl(item.file_url)} alt={item.alt_text || item.title} loading="lazy" />
                     <span className={`ml-badge ${state}`}>
                       {state === "pending" ? "待审核" : state === "approved" ? "可用" : state === "rejected" ? "已驳回" : "已归档"}
                     </span>

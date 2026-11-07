@@ -305,6 +305,16 @@ class TenantRegistry:
                 if conn.execute("SELECT 1 FROM tenants WHERE id=?", (tenant_id,)).fetchone():
                     raise TenantError(f"账号组标识已存在：{tenant_id}")
                 paths = self.paths(tenant_id, name=name, create=True)
+                # P1-2：建组即建库并跑完整迁移，避免首次写入时才暴露缺表。
+                from .config import load_config  # 函数内导入，避免模块级循环依赖
+                from .db import Database
+                tenant_cfg = (
+                    self.cfg.model_copy(deep=True) if self.cfg is not None else load_config()
+                )
+                tenant_cfg.paths.db_file = str(paths.db_file)
+                tenant_cfg.paths.data_dir = str(paths.data_dir)
+                tenant_db = Database(tenant_cfg)
+                tenant_db.initialize()
                 conn.execute(
                     "INSERT INTO tenants(id,name,created_at) VALUES(?,?,?)",
                     (tenant_id, name, _utc_now_iso()),

@@ -11,6 +11,29 @@ from src.core.task_snapshot import (
 )
 
 
+def _persist_plan(conn, plan) -> None:
+    """测试内直接写当前计划投影（生产代码已停用 PlanVersionManager.save_plan）。"""
+    import json
+    from datetime import datetime
+
+    signature = PlanVersionManager(None, conn).compute_signature(plan)
+    snapshot = json.dumps(plan, ensure_ascii=False, sort_keys=True)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        "INSERT INTO plan_settings (id, plan_snapshot, plan_signature, updated_at, updated_by) "
+        "VALUES (1, ?, ?, ?, 'test') ON CONFLICT(id) DO UPDATE SET "
+        "plan_snapshot=excluded.plan_snapshot, plan_signature=excluded.plan_signature, "
+        "updated_at=excluded.updated_at, updated_by=excluded.updated_by",
+        (snapshot, signature, now),
+    )
+    conn.execute(
+        "INSERT INTO signature_history (plan_signature, plan_snapshot, round_id, created_at, author) "
+        "VALUES (?, ?, NULL, ?, 'test')",
+        (signature, snapshot, now),
+    )
+    conn.commit()
+
+
 def _activate_test_production_line(conn, sub_plan_id: str, sub_plan_version_id: int) -> int:
     from src.core.production_line_store import ProductionLineStore
 
@@ -75,7 +98,7 @@ def test_execution_snapshot_rejects_changed_master_plan(cfg, conn, seed):
     manager = PlanVersionManager(cfg, conn)
     plan = manager.load_plan()[0]
     plan["topic_count_per_platform"] = int(plan["topic_count_per_platform"]) + 1
-    manager.save_plan(plan)
+    _persist_plan(conn, plan)
 
     with pytest.raises(StaleTaskSnapshot, match="母计划已变化"):
         validate_execution_snapshot(snapshot, cfg, conn)
@@ -88,7 +111,7 @@ def test_enqueue_rejects_round_already_based_on_old_plan(cfg, conn, seed):
     manager.record(round_id, original_plan)
     changed_plan = dict(original_plan)
     changed_plan["topic_count_per_platform"] = int(original_plan["topic_count_per_platform"]) + 1
-    manager.save_plan(changed_plan)
+    _persist_plan(conn, changed_plan)
 
     with pytest.raises(StaleTaskSnapshot, match="目标轮次已基于旧母计划"):
         build_execution_snapshot(

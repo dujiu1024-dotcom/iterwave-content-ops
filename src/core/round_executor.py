@@ -106,10 +106,34 @@ class RoundExecutor:
         self.sm_draft = sm_draft
         self.cb = circuit_breaker
         self.notifier = notifier
+        # 当前轮次的计划归属（内容/草稿写入时带入，见 D4）。
+        self._round_plan_meta: dict = {}
 
     # ------------------------------------------------------------------
     # 入口
     # ------------------------------------------------------------------
+
+    def _ensure_draft_row(self, content_id: str, platform: str) -> str:
+        """复用已有草稿；缺失时按轮次计划归属补建（F5）。"""
+        draft = self.conn.execute(
+            "SELECT id FROM drafts WHERE content_id=? AND platform=? ORDER BY rowid DESC LIMIT 1",
+            (content_id, platform),
+        ).fetchone()
+        if draft is not None:
+            return str(draft["id"])
+        draft_id = f"draft-{uuid.uuid4().hex[:12]}"
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO drafts (id,content_id,platform,status, "
+                "master_plan_version_id, sub_plan_id, sub_plan_version_id, sub_plan_stage_id) "
+                "VALUES (?,?,?,'draft_pending',?,?,?,?)",
+                (draft_id, content_id, platform,
+                 self._round_plan_meta.get("master_plan_version_id"),
+                 self._round_plan_meta.get("sub_plan_id"),
+                 self._round_plan_meta.get("sub_plan_version_id"),
+                 self._round_plan_meta.get("sub_plan_stage_id")),
+            )
+        return draft_id
 
     async def run(
         self,
@@ -227,6 +251,14 @@ class RoundExecutor:
         self._pvm = PlanVersionManager(self.cfg, self.conn)
         self._plan, self._plan_sig, _at, self._plan_source = self._pvm.load_plan()
         self._subplan_context = None
+        round_keys = set(round_row.keys())
+        self._round_plan_meta = {
+            column: (round_row[column] if column in round_keys else None)
+            for column in (
+                "master_plan_version_id", "sub_plan_id", "sub_plan_version_id",
+                "sub_plan_stage_id", "production_line_version_id",
+            )
+        }
         if round_row["sub_plan_id"]:
             master = self.conn.execute(
                 "SELECT plan_signature,plan_snapshot FROM master_plan_versions WHERE id=?",
@@ -1204,19 +1236,7 @@ class RoundExecutor:
                                 f"生产任务 {task['id']} 状态为 {task['status']}，但已有成品；"
                                 "请通过任务恢复入口核对，不允许重新生成"
                             )
-                        draft = self.conn.execute(
-                            "SELECT id FROM drafts WHERE content_id=? AND platform=? ORDER BY rowid DESC LIMIT 1",
-                            (str(existing["id"]), platform.value),
-                        ).fetchone()
-                        if draft is None:
-                            draft_id = f"draft-{uuid.uuid4().hex[:12]}"
-                            with self.conn:
-                                self.conn.execute(
-                                    "INSERT INTO drafts (id,content_id,platform,status) VALUES (?,?,?,'draft_pending')",
-                                    (draft_id, str(existing["id"]), platform.value),
-                                )
-                        else:
-                            draft_id = str(draft["id"])
+                        draft_id = self._ensure_draft_row(str(existing["id"]), platform.value)
                         try:
                             saved_tags = json.loads(existing["tags"] or "[]")
                         except (TypeError, ValueError):
@@ -1482,8 +1502,9 @@ class RoundExecutor:
                         "INSERT INTO contents (id, round_id, topic_id, platform, title, body, "
                         "tags, image_paths, word_count, card_style, guard_outcome, guard_reason, "
                         "visual_status, visual_reason, template_id, template_version, template_snapshot_json, "
-                        "production_task_id) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "production_task_id, master_plan_version_id, sub_plan_id, sub_plan_version_id, "
+                        "sub_plan_stage_id, production_line_version_id) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             content_id, round_id, topic.id, platform.value, title, body,
                             json.dumps(tags, ensure_ascii=False),
@@ -1494,6 +1515,11 @@ class RoundExecutor:
                             template_data["version"] if template_data else None,
                             json.dumps(template_data, ensure_ascii=False) if template_data else None,
                             production_task_id,
+                            self._round_plan_meta.get("master_plan_version_id"),
+                            self._round_plan_meta.get("sub_plan_id"),
+                            self._round_plan_meta.get("sub_plan_version_id"),
+                            self._round_plan_meta.get("sub_plan_stage_id"),
+                            self._round_plan_meta.get("production_line_version_id"),
                         ),
                     )
                     if production_task_id:
@@ -1567,9 +1593,14 @@ class RoundExecutor:
                 draft_id = f"draft-{uuid.uuid4().hex[:12]}"
                 with self.conn:
                     self.conn.execute(
-                        "INSERT INTO drafts (id, content_id, platform, status) "
-                        "VALUES (?, ?, ?, 'draft_pending')",
-                        (draft_id, content_id, platform.value),
+                        "INSERT INTO drafts (id, content_id, platform, status, "
+                        "master_plan_version_id, sub_plan_id, sub_plan_version_id, sub_plan_stage_id) "
+                        "VALUES (?, ?, ?, 'draft_pending', ?, ?, ?, ?)",
+                        (draft_id, content_id, platform.value,
+                         self._round_plan_meta.get("master_plan_version_id"),
+                         self._round_plan_meta.get("sub_plan_id"),
+                         self._round_plan_meta.get("sub_plan_version_id"),
+                         self._round_plan_meta.get("sub_plan_stage_id")),
                     )
 
                 rows.append({

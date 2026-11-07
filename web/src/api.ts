@@ -1361,6 +1361,13 @@ export interface SubPlanStageRecord {
   direction: string; target_count: number; start_date: string | null; end_date: string | null;
   completion_condition: string; completion_criteria?: string; status: "pending" | "in_progress" | "completed" | "paused" | "cancelled";
   notes: string; confirmed_published_count?: number;
+  progress?: {
+    basis: "metric" | "content_reference";
+    target_metric: string | null; target_value: number | null;
+    metric_scope?: string | null; baseline_value?: number | null;
+    current_value: number | null; achievement_rate: number | null;
+    confirmed_published_count: number | null; data_ready: boolean;
+  };
   strategy_goal?: string; current_problem?: string; execution_strategy?: string;
   prerequisites?: string; input_info?: string; expected_result?: string;
   effect_evaluation?: string; entry_condition?: string; entry_condition_met?: boolean;
@@ -1742,6 +1749,18 @@ let tenantContextInitialization: Promise<void> | null = null;
 // vite import.meta.env.BASE_URL 在 base: "/iterwave/" 时为 "/iterwave/"
 // 本地 vite dev 时 BASE_URL 为 "/"，去掉尾部斜杠 → ""，等价于原来的空字符串
 const API = import.meta.env.BASE_URL?.replace(/\/$/, "") ?? "";
+
+/**
+ * 把后端返回的站内相对路径补上部署子路径（如 /iterwave）。
+ * <img>/<a> 不会走 fetch 包装器，必须显式补前缀，否则子路径部署下会打到根路径的其他服务。
+ */
+export function assetUrl(path: string | null | undefined): string {
+  if (!path) return "";
+  if (/^(?:https?:|data:|blob:)/i.test(path)) return path;
+  if (!path.startsWith("/")) return path;
+  if (API && (path === API || path.startsWith(API + "/"))) return path;
+  return `${API}${path}`;
+}
 
 async function ensureTenantContext(): Promise<void> {
   if (activeTenantId) return;
@@ -2623,8 +2642,8 @@ export const api = {
       `/api/media/recommendations?content_id=${encodeURIComponent(content_id)}&usage_role=${usage_role}`,
     ),
   useMediaAsset: (asset_id: number, content_id: string, usage_role: "cover" | "illustration" | "background" = "illustration") =>
-    fetchJson<{ asset_id: number; content_id: string; platform: Platform; image_assigned: boolean; message: string }>(
-      `/api/media/${asset_id}/use`, { method: "POST", body: JSON.stringify({ content_id, usage_role }) },
+    fetchJson<{ asset_id: number; content_id: string; platform: Platform; image_assigned: boolean; already_assigned?: boolean; image_count?: number; message: string }>(
+      `/api/media/${asset_id}/use`, { method: "POST", body: JSON.stringify({ content_id, usage_role, mode: "append" }) },
     ),
   mediaGenerationSettings: () => fetchJson<MediaGenerationSettings>("/api/media/generation-settings"),
   saveMediaGenerationSettings: (data: Pick<MediaGenerationSettings, "enabled" | "prompt_prefix" | "model" | "size" | "fallback_enabled">) =>
@@ -2884,6 +2903,18 @@ export const api = {
     const query = params.toString();
     return `${API}/api/contents/${id}/images/${index}${query ? `?${query}` : ""}`;
   },
+  /** 把某张配图调整为第一张（首图）或最后一张（尾图）。 */
+  moveContentImage: (id: string, index: number, position: "first" | "last") =>
+    fetchJson<{ image_count: number; image_paths: string[]; message: string }>(
+      `/api/contents/${id}/images/${index}/move`,
+      { method: "POST", body: JSON.stringify({ position }) },
+    ),
+  /** 按文案对某张素材图做 AI 加工（换背景/加字等），结果就地替换该位置。 */
+  processContentImage: (id: string, index: number, prompt: string) =>
+    fetchJson<{ content_id: string; index: number; asset_id: number; image_count: number; image_paths: string[]; message: string }>(
+      `/api/contents/${id}/images/${index}/process`,
+      { method: "POST", body: JSON.stringify({ prompt }) },
+    ),
   updateContent: (id: string, data: { title?: string; body?: string; tags?: string[]; reason?: string }) =>
     fetchJson<{ id: string; changed: boolean; title: string; body: string; tags: string[] }>(
       `/api/contents/${id}`, { method: "PATCH", body: JSON.stringify(data) },

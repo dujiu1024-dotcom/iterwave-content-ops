@@ -711,6 +711,99 @@ def _persist_activation_sample_results(
     return len(results)
 
 
+_ROUND_PLAN_COLUMNS = (
+    "master_plan_version_id", "sub_plan_id", "sub_plan_version_id",
+    "sub_plan_stage_id", "production_line_version_id",
+)
+
+
+def _effective_master_version_id(conn: sqlite3.Connection) -> Optional[int]:
+    """当前生效母计划版本 ID；未启用计划版本体系的旧库返回 None。"""
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='master_plan_versions'"
+    ).fetchone() is None:
+        return None
+    row = conn.execute(
+        "SELECT id FROM master_plan_versions WHERE status='effective' AND deleted_at IS NULL "
+        "ORDER BY version_no DESC LIMIT 1"
+    ).fetchone()
+    return int(row["id"]) if row else None
+
+
+def _load_round_binding(conn: sqlite3.Connection, round_id: int) -> Optional[dict]:
+    """读取轮次及其计划归属；旧库缺少归属列时按 NULL 处理。"""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(spiral_rounds)").fetchall()}
+    present = [c for c in _ROUND_PLAN_COLUMNS if c in columns]
+    select_columns = ", ".join(["id", "status", *present])
+    row = conn.execute(
+        f"SELECT {select_columns} FROM spiral_rounds WHERE id=?", (round_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    result = {"id": row["id"], "status": row["status"]}
+    for column in _ROUND_PLAN_COLUMNS:
+        result[column] = row[column] if column in present else None
+    return result
+
+
+def _load_binding_snapshots(conn: sqlite3.Connection, req: "CreateRoundRequest") -> tuple[str, str]:
+    """读取轮次绑定的子计划版本快照与阶段快照；缺失即拒绝开轮（F1）。"""
+    version = conn.execute(
+        "SELECT snapshot_json FROM sub_plan_versions WHERE id=? AND sub_plan_id=?",
+        (req.sub_plan_version_id, req.sub_plan_id),
+    ).fetchone()
+    stage = conn.execute(
+        "SELECT * FROM sub_plan_stages WHERE id=? AND sub_plan_version_id=?",
+        (req.sub_plan_stage_id, req.sub_plan_version_id),
+    ).fetchone()
+    if (version is None or stage is None
+            or not str(version["snapshot_json"] or "").strip()):
+        raise HTTPException(409, {
+            "detail": "轮次绑定的子计划版本或阶段快照不存在",
+            "code": "PLAN_BINDING_INVALID",
+        })
+    return version["snapshot_json"], json.dumps(
+        dict(stage), ensure_ascii=False, sort_keys=True,
+    )
+
+
+def _assert_round_plan_binding(
+    conn: sqlite3.Connection, master_version_id: int, req: "CreateRoundRequest",
+) -> None:
+    """校验轮次计划绑定：母计划版本 + 子计划版本 + 阶段 + 生产线版本必须一致。"""
+    from src.core.plan_version_store import PlanVersionError, PlanVersionStore
+
+    def _invalid(detail: str) -> None:
+        raise HTTPException(409, {"detail": detail, "code": "PLAN_BINDING_INVALID"})
+
+    sub_plan = conn.execute(
+        "SELECT id,platform,status,current_version_id,master_plan_version_id "
+        "FROM sub_plans WHERE id=?",
+        (req.sub_plan_id,),
+    ).fetchone()
+    if sub_plan is None or sub_plan["status"] != "active":
+        _invalid("绑定的子计划不存在或未激活")
+    if sub_plan["master_plan_version_id"] is None or int(sub_plan["master_plan_version_id"]) != int(master_version_id):
+        _invalid("子计划不属于当前生效母计划版本")
+    if sub_plan["current_version_id"] is None or int(sub_plan["current_version_id"]) != int(req.sub_plan_version_id):
+        _invalid("绑定的子计划版本不是该子计划的当前生效版本")
+    line = conn.execute(
+        "SELECT 1 FROM production_line_versions v "
+        "JOIN production_lines l ON l.id = v.production_line_id "
+        "WHERE v.id=? AND v.status='effective' AND v.sub_plan_version_id=? "
+        "AND l.sub_plan_id=? AND l.status='active'",
+        (req.production_line_version_id, req.sub_plan_version_id, req.sub_plan_id),
+    ).fetchone()
+    if line is None:
+        _invalid("绑定的生产线版本无效或未生效")
+    try:
+        PlanVersionStore(conn).assert_stage_ready(
+            int(req.sub_plan_stage_id), int(req.sub_plan_version_id),
+        )
+    except PlanVersionError as exc:
+        _invalid(str(exc))
+
+
 def _build_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -739,6 +832,22 @@ def _build_app() -> FastAPI:
         active_tenant = tenant_registry.get(active_tenant_id)
         # 必须与 Worker 重建上下文使用完全相同的默认值重置，保证任务快照指纹一致。
         _reset_tenant_business_defaults(cfg, active_tenant_id)
+        # P1-2：启动时对齐所有账号组 schema，避免切换账号组后首次写入才暴露缺迁移。
+        for tenant in tenant_registry.list():
+            tenant_id = str(tenant.get("id") or "")
+            if not tenant_id or tenant_id == active_tenant_id:
+                continue
+            try:
+                paths = tenant_registry.paths(
+                    tenant_id, name=str(tenant.get("name") or tenant_id), create=True,
+                )
+                tenant_cfg = load_config()
+                tenant_cfg.paths.db_file = str(paths.db_file)
+                tenant_cfg.paths.data_dir = str(paths.data_dir)
+                tenant_db = Database(tenant_cfg)
+                tenant_db.initialize()
+            except Exception:
+                logger.exception("账号组 %s 数据库迁移失败，继续启动其余账号组", tenant_id)
         base_llm_config = cfg.llm.model_dump()
         if active_tenant_id != "default":
             tenant_paths = tenant_registry.paths(
@@ -1245,6 +1354,8 @@ class MediaAssetReviewRequest(BaseModel):
 class MediaAssetUseRequest(BaseModel):
     content_id: str = Field(min_length=1, max_length=128)
     usage_role: str = Field(default="illustration", pattern="^(cover|illustration|background)$")
+    # append：同一篇内容保留多张素材（封面角色置顶）；replace：保持旧的单图覆盖语义。
+    mode: Literal["append", "replace"] = "replace"
 
 
 class MediaAssetUploadRequest(BaseModel):
@@ -1411,6 +1522,11 @@ class CreateRoundRequest(BaseModel):
     # 内容计划 ID/版本仅参与请求去重键，不改变生产配置来源。
     content_plan_id: Optional[str] = None
     content_plan_version: Optional[int] = None
+    # 计划链绑定：存在生效母计划时必须全部提供（D1）。
+    sub_plan_id: Optional[str] = None
+    sub_plan_version_id: Optional[int] = None
+    sub_plan_stage_id: Optional[int] = None
+    production_line_version_id: Optional[int] = None
 
 class PublishConfirmRequest(BaseModel):
     """发布确认补充：实际发布时间、笔记链接及必要的质量/版本例外说明。"""
@@ -2288,19 +2404,37 @@ def _register_routes(app: FastAPI) -> None:
                 "VALUES (?, ?, 'activation_sample', ?, ?, 0)",
                 (topic_id, sample["angle"], sample["title"], now[:10]),
             )
-            conn.execute(
+            content_columns = {row[1] for row in conn.execute("PRAGMA table_info(contents)").fetchall()}
+            draft_columns = {row[1] for row in conn.execute("PRAGMA table_info(drafts)").fetchall()}
+            binding_row = _load_round_binding(conn, round_id) or {}
+            content_attr = [c for c in _ROUND_PLAN_COLUMNS if c in content_columns]
+            draft_attr = [c for c in _ROUND_PLAN_COLUMNS
+                          if c in draft_columns and c != "production_line_version_id"]
+            content_sql = (
                 "INSERT INTO contents (id, round_id, topic_id, platform, title, body, tags, image_paths, "
-                "word_count, card_style, guard_outcome, guard_reason, visual_status, visual_reason) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, 'knowledge', 'pass', ?, 'degraded', ?)",
+                "word_count, card_style, guard_outcome, guard_reason, visual_status, visual_reason"
+                + "".join(f", {c}" for c in content_attr)
+                + ") VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, 'knowledge', 'pass', ?, 'degraded', ?"
+                + ", ?" * len(content_attr) + ")"
+            )
+            conn.execute(
+                content_sql,
                 (
                     content_id, round_id, topic_id, platform, sample["title"], sample["body"],
                     json.dumps(tags, ensure_ascii=False), len(sample["body"] or ""),
                     outcome.reason, "体验样稿导入；图片卡片需在正式生产流程中生成",
+                    *[binding_row.get(column) for column in content_attr],
                 ),
             )
+            draft_sql = (
+                "INSERT INTO drafts (id, content_id, platform, status"
+                + "".join(f", {c}" for c in draft_attr)
+                + ") VALUES (?, ?, ?, 'draft_pending'" + ", ?" * len(draft_attr) + ")"
+            )
             conn.execute(
-                "INSERT INTO drafts (id, content_id, platform, status) VALUES (?, ?, ?, 'draft_pending')",
-                (draft_id, content_id, platform),
+                draft_sql,
+                (draft_id, content_id, platform,
+                 *[binding_row.get(column) for column in draft_attr]),
             )
             try:
                 topic_ids = json.loads(target_round["topic_ids"] or "[]")
@@ -3634,7 +3768,7 @@ def _register_routes(app: FastAPI) -> None:
         if asset["review_status"] != "approved":
             raise HTTPException(409, "该素材尚未通过人工审核，不能用于内容")
         content = conn.execute(
-            "SELECT id, round_id, platform, title FROM contents WHERE id = ?",
+            "SELECT id, round_id, platform, title, image_paths FROM contents WHERE id = ?",
             (req.content_id,),
         ).fetchone()
         if content is None:
@@ -3650,21 +3784,63 @@ def _register_routes(app: FastAPI) -> None:
         image_path = (paths.media_dir / asset["stored_filename"]).resolve()
         if not image_path.is_relative_to(paths.media_dir.resolve()) or not image_path.is_file():
             raise HTTPException(404, "素材文件不存在")
+        try:
+            existing_paths = json.loads(content["image_paths"] or "[]")
+        except (TypeError, json.JSONDecodeError):
+            existing_paths = []
+        if not isinstance(existing_paths, list):
+            existing_paths = []
+        existing_paths = [str(path) for path in existing_paths if path]
+        image_path_str = str(image_path)
+        usage_exists = conn.execute(
+            "SELECT 1 FROM media_asset_usages WHERE media_asset_id = ? AND content_id = ? LIMIT 1",
+            (asset_id, req.content_id),
+        ).fetchone() is not None
+        if image_path_str in existing_paths:
+            # 幂等：重复点击同一张图不改变顺序，也不重复写使用记录。
+            if not usage_exists:
+                conn.execute(
+                    "INSERT INTO media_asset_usages (media_asset_id, content_id, platform, usage_role) "
+                    "VALUES (?, ?, ?, ?)",
+                    (asset_id, req.content_id, content["platform"], req.usage_role),
+                )
+                conn.commit()
+            return {
+                "asset_id": asset_id, "content_id": req.content_id,
+                "platform": content["platform"], "image_assigned": False,
+                "already_assigned": True, "image_count": len(existing_paths),
+                "message": "该图片已在此内容中，未重复添加。",
+            }
+        if req.mode == "append":
+            next_paths = (
+                [image_path_str, *existing_paths]
+                if req.usage_role == "cover"
+                else [*existing_paths, image_path_str]
+            )
+        else:
+            next_paths = [image_path_str]
         conn.execute(
             "UPDATE contents SET image_paths = ?, visual_status = 'media_asset', "
             "visual_reason = NULL WHERE id = ?",
-            (json.dumps([str(image_path)], ensure_ascii=False), req.content_id),
+            (json.dumps(next_paths, ensure_ascii=False), req.content_id),
         )
-        conn.execute(
-            "INSERT INTO media_asset_usages (media_asset_id, content_id, platform, usage_role) "
-            "VALUES (?, ?, ?, ?)",
-            (asset_id, req.content_id, content["platform"], req.usage_role),
-        )
+        if not usage_exists:
+            conn.execute(
+                "INSERT INTO media_asset_usages (media_asset_id, content_id, platform, usage_role) "
+                "VALUES (?, ?, ?, ?)",
+                (asset_id, req.content_id, content["platform"], req.usage_role),
+            )
         conn.commit()
         return {
             "asset_id": asset_id, "content_id": req.content_id,
             "platform": content["platform"], "image_assigned": True,
-            "message": "已将素材设为该内容的图片。若平台草稿此前已保存，需重新同步平台草稿后再发布。",
+            "already_assigned": False, "image_count": len(next_paths),
+            "message": (
+                f"已追加为该内容的图片（当前共 {len(next_paths)} 张）。"
+                "若平台草稿此前已保存，需重新同步平台草稿后再发布。"
+                if req.mode == "append"
+                else "已将素材设为该内容的图片。若平台草稿此前已保存，需重新同步平台草稿后再发布。"
+            ),
         }
 
     @app.post("/api/media/{asset_id}/archive")
@@ -4933,7 +5109,20 @@ def _register_routes(app: FastAPI) -> None:
         active_subplans = int(conn.execute(
             "SELECT COUNT(*) FROM sub_plans WHERE status NOT IN ('archived','cancelled')"
         ).fetchone()[0])
-        if active_subplans:
+        effective_master = _effective_master_version_id(conn)
+        master_version_id = effective_master
+        binding = (req.sub_plan_id, req.sub_plan_version_id,
+                   req.sub_plan_stage_id, req.production_line_version_id)
+        if master_version_id is not None:
+            # D1：存在生效母计划时，禁止无绑定轮次绕过计划链。
+            if any(value in (None, "") for value in binding):
+                raise HTTPException(409, {
+                    "detail": "当前账号组已有生效母计划，创建轮次必须绑定子计划版本、阶段和生产线版本",
+                    "code": "PLAN_BINDING_REQUIRED",
+                })
+            _assert_round_plan_binding(conn, master_version_id, req)
+            sub_snapshot, stage_snapshot = _load_binding_snapshots(conn, req)
+        elif active_subplans:
             raise HTTPException(409, "当前账号组已启用平台子计划；请从对应子计划阶段创建生产轮次")
         key = "round:" + hashlib.sha256(req.model_dump_json().encode()).hexdigest()
 
@@ -4953,22 +5142,46 @@ def _register_routes(app: FastAPI) -> None:
             # SQLite CURRENT_TIMESTAMP rows remain naive UTC and are interpreted
             # column-by-column by the round detail serializer.
             created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            cursor = conn.execute(
-                "INSERT INTO spiral_rounds (goal_id, round_number, status, topic_ids, content_variants, created_at) "
-                "VALUES (?, ?, 'created', ?, ?, ?)",
-                (goal_id, round_number, "[]", "[]", created_at),
-            )
+            if master_version_id is not None:
+                cursor = conn.execute(
+                    "INSERT INTO spiral_rounds (goal_id, round_number, status, topic_ids, "
+                    "content_variants, created_at, master_plan_version_id, sub_plan_id, "
+                    "sub_plan_version_id, sub_plan_stage_id, production_line_version_id, "
+                    "sub_plan_snapshot, sub_plan_stage_snapshot, plan_attribution_status) "
+                    "VALUES (?, ?, 'created', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'resolved')",
+                    (goal_id, round_number, "[]", "[]", created_at, master_version_id,
+                     req.sub_plan_id, req.sub_plan_version_id, req.sub_plan_stage_id,
+                     req.production_line_version_id, sub_snapshot, stage_snapshot),
+                )
+            else:
+                cursor = conn.execute(
+                    "INSERT INTO spiral_rounds (goal_id, round_number, status, topic_ids, "
+                    "content_variants, created_at) VALUES (?, ?, 'created', ?, ?, ?)",
+                    (goal_id, round_number, "[]", "[]", created_at),
+                )
             # R18 / G-21：创建轮次与母计划签名必须处于同一事务。
             # 签名写入失败时回滚轮次，避免出现 UI 报错但数据库残留的幽灵轮次。
             try:
-                pvm = _g()["plan_version_manager"]
-                plan, _sig, _at, source = pvm.load_plan()
-                if source != "plan_settings":
-                    plan = pvm.build_plan(
-                        topic_count_per_platform=req.topic_count,
-                        platforms=req.platforms or _g()["cfg"].platforms.enabled_keys(),
+                if master_version_id is not None:
+                    from src.core.plan_version_store import PlanVersionStore
+                    master_row = conn.execute(
+                        "SELECT plan_snapshot FROM master_plan_versions WHERE id=?",
+                        (master_version_id,),
+                    ).fetchone()
+                    plan = json.loads(master_row["plan_snapshot"])
+                    plan.update(PlanVersionStore(conn).load_runtime_config(master_version_id))
+                    _g()["plan_version_manager"].record(
+                        cursor.lastrowid, plan, author="round_create",
                     )
-                pvm.record(cursor.lastrowid, plan, author="round_create")
+                else:
+                    pvm = _g()["plan_version_manager"]
+                    plan, _sig, _at, source = pvm.load_plan()
+                    if source != "plan_settings":
+                        plan = pvm.build_plan(
+                            topic_count_per_platform=req.topic_count,
+                            platforms=req.platforms or _g()["cfg"].platforms.enabled_keys(),
+                        )
+                    pvm.record(cursor.lastrowid, plan, author="round_create")
             except Exception:
                 conn.rollback()
                 raise
@@ -5014,16 +5227,30 @@ def _register_routes(app: FastAPI) -> None:
         from src.core.subplan_production import production_paused
         if production_paused(runtime_context["conn"]):
             raise HTTPException(409, "内容生产已暂停")
-        round_row = runtime_context["conn"].execute(
-            "SELECT id, status, sub_plan_id, sub_plan_version_id, sub_plan_stage_id FROM spiral_rounds WHERE id=?",
-            (round_id,),
-        ).fetchone()
+        round_row = _load_round_binding(runtime_context["conn"], round_id)
         if round_row is None:
             raise HTTPException(404, "当前账号组不存在该生产轮次")
         active_subplans = int(runtime_context["conn"].execute(
             "SELECT COUNT(*) FROM sub_plans WHERE status NOT IN ('archived','cancelled')"
         ).fetchone()[0])
-        if active_subplans and not all((
+        effective_master_id = _effective_master_version_id(runtime_context["conn"])
+        if effective_master_id is not None:
+            # D1：有生效母计划时，轮次必须完整绑定计划链，且绑定版本未过期。
+            if not all((
+                round_row["master_plan_version_id"], round_row["sub_plan_id"],
+                round_row["sub_plan_version_id"], round_row["sub_plan_stage_id"],
+                round_row["production_line_version_id"],
+            )):
+                raise HTTPException(409, {
+                    "detail": "新体系下生产轮次必须绑定母计划版本、子计划版本、阶段和生产线版本",
+                    "code": "PLAN_BINDING_REQUIRED",
+                })
+            if int(round_row["master_plan_version_id"]) != int(effective_master_id):
+                raise HTTPException(409, {
+                    "detail": "轮次绑定的母计划版本已失效，请按当前生效母计划重新开轮",
+                    "code": "PLAN_BINDING_STALE",
+                })
+        elif active_subplans and not all((
             round_row["sub_plan_id"], round_row["sub_plan_version_id"],
             round_row["sub_plan_stage_id"],
         )):
@@ -6029,6 +6256,10 @@ def _register_routes(app: FastAPI) -> None:
             "signature": signature,
             "updated_at": updated_at,
             "source": source,
+            "derived_warning": (
+                "当前无生效母计划，展示值由最近轮次推导，不可用于生产"
+                if source == "derived" else None
+            ),
             "per_platform": per_platform,
             "history": history,
             "stale_rounds": stale,
@@ -7048,6 +7279,99 @@ def _register_routes(app: FastAPI) -> None:
             "deduped": inserted.rowcount == 0,
         }
 
+    class ContentImageMoveRequest(BaseModel):
+        position: Literal["first", "last"]
+
+    class ContentImageProcessRequest(BaseModel):
+        prompt: str = Field(min_length=5, max_length=800)
+
+    def _editable_images(conn, content_id: str) -> tuple:
+        row = _content_row(conn, content_id)
+        draft = conn.execute(
+            "SELECT status FROM drafts WHERE content_id = ? AND platform = ? "
+            "ORDER BY rowid DESC LIMIT 1",
+            (content_id, row["platform"]),
+        ).fetchone()
+        if draft is None or draft["status"] not in ("draft_pending", "draft_saved"):
+            raise HTTPException(409, "只能编辑尚未发布的待存草稿或平台草稿的图片")
+        try:
+            paths = json.loads(row["image_paths"] or "[]")
+        except (TypeError, ValueError):
+            paths = []
+        if not isinstance(paths, list):
+            paths = []
+        return row, [str(path) for path in paths if path]
+
+    @app.post("/api/contents/{content_id}/images/{index}/move")
+    def move_content_image(content_id: str, index: int, req: ContentImageMoveRequest):
+        """把某张图设为首图或尾图（调整 image_paths 顺序，首图上传播时排第一）。"""
+        conn = _g()["conn"]
+        row, paths = _editable_images(conn, content_id)
+        if index < 0 or index >= len(paths):
+            raise HTTPException(404, "图片序号超出范围")
+        if len(paths) < 2:
+            return {"image_count": len(paths), "image_paths": paths, "message": "只有一张图，无需调整。"}
+        item = paths.pop(index)
+        if req.position == "first":
+            paths.insert(0, item)
+        else:
+            paths.append(item)
+        conn.execute(
+            "UPDATE contents SET image_paths = ? WHERE id = ?",
+            (json.dumps(paths, ensure_ascii=False), content_id),
+        )
+        conn.commit()
+        return {
+            "image_count": len(paths), "image_paths": paths,
+            "message": "已设为首图。" if req.position == "first" else "已设为尾图。",
+        }
+
+    @app.post("/api/contents/{content_id}/images/{index}/process")
+    @manages_own_transaction
+    def process_content_image(content_id: str, index: int, req: ContentImageProcessRequest):
+        """按文案对某一位置的素材图做 AI 加工（换背景/加字等），结果直接替换该位置。"""
+        conn = _g()["conn"]
+        registry = _g().get("tenant_registry")
+        tenant_id = _tenant_id()
+        row, paths = _editable_images(conn, content_id)
+        if index < 0 or index >= len(paths):
+            raise HTTPException(404, "图片序号超出范围")
+        target = Path(paths[index]).resolve()
+        asset = conn.execute(
+            "SELECT id FROM media_assets WHERE stored_filename = ?", (target.name,)
+        ).fetchone()
+        if asset is None:
+            raise HTTPException(409, "只有素材库中的图片支持 AI 加工，请先在素材库替换该图。")
+        title = (row["title"] or "内容配图")[:80]
+        result = _generate_media_asset(
+            MediaGenerationRequest(
+                prompt=req.prompt.strip(), title=f"{title}（AI 加工）", alt_text="", tags=[],
+            ),
+            source_asset_id=int(asset["id"]),
+        )
+        new_asset_id = int(result["id"])
+        conn.execute(
+            "UPDATE media_assets SET review_status = 'approved', "
+            "review_note = '内容配图 AI 加工自动通过' WHERE id = ?",
+            (new_asset_id,),
+        )
+        paths[index] = str(registry.paths(tenant_id).media_dir / result["original_filename"])
+        conn.execute(
+            "UPDATE contents SET image_paths = ?, visual_status = 'media_asset', visual_reason = NULL "
+            "WHERE id = ?",
+            (json.dumps(paths, ensure_ascii=False), content_id),
+        )
+        conn.execute(
+            "UPDATE media_asset_usages SET media_asset_id = ? WHERE content_id = ? AND media_asset_id = ?",
+            (new_asset_id, content_id, int(asset["id"])),
+        )
+        conn.commit()
+        return {
+            "content_id": content_id, "index": index, "asset_id": new_asset_id,
+            "image_count": len(paths), "image_paths": paths,
+            "message": "已按文案加工并替换该图。",
+        }
+
     @app.get("/api/contents/{content_id}/images/{index}")
     def get_content_image(content_id: str, index: int, download: bool = Query(False)):
         """G-36：读取已生成的卡片图（只允许该内容登记过、且在本项目 output 目录下的文件）。
@@ -7064,13 +7388,21 @@ def _register_routes(app: FastAPI) -> None:
         if not isinstance(paths, list) or index < 0 or index >= len(paths):
             raise HTTPException(404, "图片序号超出范围")
         root = cfg.resolve_path(cfg.paths.output_dir).resolve()
+        registry = _g().get("tenant_registry")
+        media_root = registry.paths(_tenant_id()).media_dir.resolve()
         path = Path(str(paths[index])).resolve()
-        if root not in path.parents or not path.is_file():
+        if not (path.is_relative_to(root) or path.is_relative_to(media_root)) or not path.is_file():
             raise HTTPException(404, "图片文件不存在（可能已被清理）")
+        import mimetypes
+
+        media_type = {
+            ".webp": "image/webp", ".png": "image/png", ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg", ".gif": "image/gif",
+        }.get(path.suffix.lower()) or mimetypes.guess_type(path.name)[0] or "image/png"
         if download:
-            return FileResponse(str(path), filename=path.name, media_type="image/png",
+            return FileResponse(str(path), filename=path.name, media_type=media_type,
                                 headers={"Cache-Control": "no-cache, max-age=0, must-revalidate"})
-        return FileResponse(str(path), media_type="image/png",
+        return FileResponse(str(path), media_type=media_type,
                             headers={"Cache-Control": "no-cache, max-age=0, must-revalidate"})
 
     @app.get("/api/contents/{content_id}/visual-versions")

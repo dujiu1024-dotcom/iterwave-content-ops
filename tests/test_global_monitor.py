@@ -12,6 +12,8 @@ from src.core.tenant_registry import TenantRegistry
 
 def _seed_tenant_db(db_path: Path, title: str, platform: str = "xhs") -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    # 新建账号组会自动建库并跑全量迁移；这里换成最小只读聚合 schema。
+    db_path.unlink(missing_ok=True)
     conn = sqlite3.connect(db_path)
     conn.executescript("""
         CREATE TABLE contents (id TEXT PRIMARY KEY, platform TEXT, created_at TEXT);

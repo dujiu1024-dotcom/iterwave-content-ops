@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import uuid
 from datetime import datetime
 
@@ -143,8 +144,28 @@ class RoundStateMachine:
                 )
                 return False
             self.db.commit()
+            if target in ("failed", "cancelled"):
+                self._mark_orphan_contents(round_id)
             logger.info("🔄 轮次 %s: %s → %s (%s)", round_id, current, target, reason)
             return True
+
+    def _mark_orphan_contents(self, round_id: int) -> None:
+        """轮次失败/取消后，把本轮未确认发布的内容标记为孤儿（D5）。
+
+        不删除内容：保留证据与可恢复性；只改变生命周期状态，避免静默残留。
+        """
+        try:
+            cursor = self.db.execute(
+                "UPDATE contents SET lifecycle_status='orphaned' "
+                "WHERE round_id=? AND lifecycle_status='active' "
+                "AND id NOT IN (SELECT content_id FROM drafts WHERE user_confirmed_at IS NOT NULL)",
+                (round_id,),
+            )
+            self.db.commit()
+            if cursor.rowcount:
+                logger.warning("轮次 %s 进入失败/取消，标记 %d 条孤儿内容", round_id, cursor.rowcount)
+        except sqlite3.Error:
+            logger.exception("标记轮次 %s 孤儿内容失败，状态迁移已生效", round_id)
 
     # ------------------------------------------------------------------
     # 轮次流转触发（R9/R10）
