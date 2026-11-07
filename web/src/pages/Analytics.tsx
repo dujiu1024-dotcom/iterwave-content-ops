@@ -120,7 +120,7 @@ export default function Analytics() {
       const result = await api.metricSnapshots(draftId);
       setSnapshotHistory((prev) => ({ ...prev, [draftId]: result.items }));
     } catch (e: any) {
-      setReportError(e?.message || "历史快照加载失败");
+      setReportError("历史快照加载失败，请稍后重试。");
     }
   };
 
@@ -171,7 +171,7 @@ export default function Analytics() {
       }}));
       setWeeklyReport(await api.weeklyReport());
     } catch (e: any) {
-      setReportError(e?.message || "保存失败");
+      setReportError("保存失败，请稍后重试。");
     } finally {
       setBackfillBusy(null);
     }
