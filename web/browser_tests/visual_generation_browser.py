@@ -187,6 +187,8 @@ def _mock_api(page, state):
 
 def test_production_visual_task_survives_reload_and_resumes_from_checkpoints():
     server, port = _serve_vite()
+    screenshot_dir = ROOT / "artifacts" / "ui-viewport"
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
     state = {
         "status": "running",
         "message": "图片正在生成。刷新页面或重新进入后，任务状态会继续同步。",
@@ -234,6 +236,23 @@ def test_production_visual_task_survives_reload_and_resumes_from_checkpoints():
             # Page labels also appear in image-card download metadata, so
             # avoid locating their parent rows by the non-unique label.
             assert page.get_by_text("已完成", exact=False).count() >= 3
+
+            for width in (1440, 1024, 768, 390):
+                page.set_viewport_size({"width": width, "height": 1000})
+                page.wait_for_timeout(150)
+                metrics = page.evaluate("""() => ({
+                    viewport: document.documentElement.clientWidth,
+                    document: document.documentElement.scrollWidth,
+                    main: document.querySelector('#main-content')?.scrollWidth ?? 0,
+                    mainClient: document.querySelector('#main-content')?.clientWidth ?? 0
+                })""")
+                assert metrics["document"] <= metrics["viewport"] + 1, (
+                    f"production document overflow at {width}px: {metrics}"
+                )
+                assert metrics["main"] <= metrics["mainClient"] + 1, (
+                    f"production content overflow at {width}px: {metrics}"
+                )
+                page.screenshot(path=str(screenshot_dir / f"production-{width}.png"), full_page=True)
             browser.close()
     finally:
         _stop_vite(server)
