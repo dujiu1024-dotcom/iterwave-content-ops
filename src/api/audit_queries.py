@@ -14,7 +14,12 @@ def build_audit_query_router(get_context: Callable[[], dict]) -> APIRouter:
     @router.get("/api/ai_calls")
     def list_ai_calls(limit: int = Query(200, ge=1, le=2000), step: str | None = None):
         conn = get_context()["conn"]
-        sql = "SELECT * FROM ai_calls"
+        # 明确对外契约字段，避免未来审计表新增内部列自动进入 API。
+        sql = (
+            "SELECT id, step, module, model, prompt_version, algo_version, input_digest, "
+            "tokens_in, tokens_out, latency_ms, duration_ms, output_valid, success, "
+            "attempt, called_at FROM ai_calls"
+        )
         args: list = []
         if step:
             sql += " WHERE step = ?"
@@ -27,7 +32,9 @@ def build_audit_query_router(get_context: Callable[[], dict]) -> APIRouter:
     def list_user_override(limit: int = Query(200, ge=1, le=2000)):
         conn = get_context()["conn"]
         rows = conn.execute(
-            "SELECT u.*, r.round_number FROM user_override u "
+            "SELECT u.id, u.round_id, u.ai_call_id, u.override_field, "
+            "u.original_value, u.override_value, u.reason, u.overridden_by, "
+            "u.overridden_at, r.round_number FROM user_override u "
             "LEFT JOIN spiral_rounds r ON r.id = u.round_id "
             "ORDER BY u.overridden_at DESC LIMIT ?",
             (limit,),

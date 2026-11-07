@@ -11,7 +11,11 @@ def _client():
     conn.row_factory = sqlite3.Row
     conn.executescript("""
         CREATE TABLE ai_calls (
-            id INTEGER PRIMARY KEY, step TEXT NOT NULL, called_at TEXT NOT NULL
+            id INTEGER PRIMARY KEY, step TEXT NOT NULL, module TEXT, model TEXT,
+            prompt_version TEXT, algo_version TEXT, input_digest TEXT,
+            tokens_in INTEGER, tokens_out INTEGER, latency_ms INTEGER,
+            duration_ms INTEGER, output_valid INTEGER, success INTEGER,
+            attempt INTEGER, called_at TEXT NOT NULL, internal_worker_trace TEXT
         );
         CREATE TABLE spiral_rounds (
             id INTEGER PRIMARY KEY, round_number INTEGER NOT NULL
@@ -19,7 +23,7 @@ def _client():
         CREATE TABLE user_override (
             id INTEGER PRIMARY KEY, round_id INTEGER, override_field TEXT,
             original_value TEXT, override_value TEXT, reason TEXT,
-            overridden_by TEXT, overridden_at TEXT NOT NULL
+            overridden_by TEXT, overridden_at TEXT NOT NULL, internal_audit_blob TEXT
         );
         INSERT INTO ai_calls(step, called_at) VALUES
             ('draft', '2026-11-02T10:00:00'),
@@ -64,5 +68,33 @@ def test_user_override_query_includes_business_round_number():
             "overridden_at": "2026-11-02T12:00:00",
             "round_number": 3,
         }]
+    finally:
+        conn.close()
+
+
+def test_audit_query_apis_do_not_leak_future_internal_columns():
+    client, conn = _client()
+    try:
+        conn.execute("ALTER TABLE ai_calls ADD COLUMN internal_worker_trace TEXT")
+        conn.execute("UPDATE ai_calls SET internal_worker_trace='private worker diagnostics'")
+        conn.execute("ALTER TABLE user_override ADD COLUMN internal_audit_blob TEXT")
+        conn.execute("UPDATE user_override SET internal_audit_blob='private override metadata'")
+        conn.commit()
+
+        ai = client.get("/api/ai_calls?limit=1")
+        assert ai.status_code == 200
+        assert "internal_worker_trace" not in ai.text
+        assert "private worker diagnostics" not in ai.text
+        assert set(ai.json()[0]) == {
+            "id", "step", "module", "model", "prompt_version", "algo_version",
+            "input_digest", "tokens_in", "tokens_out", "latency_ms",
+            "duration_ms", "output_valid", "success", "attempt", "called_at",
+        }
+
+        overrides = client.get("/api/user_override")
+        assert overrides.status_code == 200
+        assert "internal_audit_blob" not in overrides.text
+        assert "private override metadata" not in overrides.text
+        assert "round_number" in overrides.json()[0]
     finally:
         conn.close()
