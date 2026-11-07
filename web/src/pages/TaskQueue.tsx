@@ -501,7 +501,7 @@ export default function TaskQueue() {
                 <section style={{ marginTop: 16 }}>
                   <h3>操作审计</h3>
                   {detailAudit.length ? <div className="list">
-                    {detailAudit.map((entry) => <div className="task-row" key={entry.id}>
+                    {detailAudit.map((entry, index) => <div className="task-row" key={index}>
                       <div className="task-main">
                         <strong>{auditActionLabel(entry.action)}</strong>
                         <div className="tiny">{auditActorLabel(entry.actor)} · {timeLabel(entry.acted_at)}</div>

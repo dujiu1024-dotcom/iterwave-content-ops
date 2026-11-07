@@ -115,7 +115,6 @@ export interface GlobalTaskQueueItem {
 }
 
 export interface GlobalTaskQueueAuditItem {
-  id: number;
   action: string;
   actor: string;
   acted_at: string;
@@ -151,7 +150,7 @@ export interface GlobalTaskQueueSummary {
   by_status: { queued: number; running: number; succeeded: number; failed: number; cancelled: number; interrupted: number };
   daily: Array<{ date: string; total: number; succeeded: number; failed: number }>;
   average_duration_seconds: number | null;
-  filters: { date_from: string | null; date_to: string | null; tenant_id: string | null; task_type: string | null; status: string | null };
+  filters: { date_from: string | null; date_to: string | null; task_type: string | null; status: string | null };
 }
 
 export interface GlobalTaskQueueResponse {
@@ -161,7 +160,6 @@ export interface GlobalTaskQueueResponse {
   page_size?: number;
   pages?: number;
   status_counts?: { queued?: number; running?: number; failed?: number; interrupted?: number };
-  tenant_status_counts?: Record<string, { queued?: number; running?: number; failed?: number; interrupted?: number }>;
 }
 
 export interface GlobalTodoItem {
