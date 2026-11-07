@@ -363,7 +363,7 @@ def test_generate_image_bytes_reports_only_the_provider_that_returns_an_accepted
     monkeypatch.setattr(image_generation_budget, "has_active_article", lambda: True)
     monkeypatch.setattr(image_generation_budget, "provider_request", lambda: nullcontext(30))
     monkeypatch.setattr(visual_ocr, "preflight_ocr", lambda **_kwargs: {"status": "available"})
-    endpoint = SimpleNamespace(label="fallback", provider="fallback-provider", model="fallback-model")
+    endpoint = SimpleNamespace(label="fallback", provider="fallback-provider", model="fallback-model", base_url="https://fallback.example.test")
     monkeypatch.setattr(media_generation, "_endpoints", lambda *args, **kwargs: [endpoint])
     monkeypatch.setattr(
         media_generation, "_request_endpoint",
