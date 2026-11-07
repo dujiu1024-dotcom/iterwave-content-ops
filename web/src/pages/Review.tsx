@@ -12,7 +12,7 @@ function actionLabel(action: string): string {
   if (action === "approved") return "审核通过";
   if (action === "rejected") return "审核驳回";
   if (action === "edited") return "内容编辑";
-  return action;
+  return "其他操作（需确认）";
 }
 
 function statusLabel(status: string): string {
