@@ -17,6 +17,8 @@ data/*.db
 data/*.db-journal
 data/*.db-wal
 data/*.db-shm
+# Authentication rate-limit state is runtime data and may contain client IPs.
+config/.auth_rate_limits.sqlite3*
 # 注意：.gitignore 不支持行尾注释，注释必须单独成行，否则整行规则失效
 # 登录态 cookie / 状态文件 / 短信验证码（敏感）
 data/_login/
