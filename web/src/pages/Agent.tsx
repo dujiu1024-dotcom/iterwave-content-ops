@@ -549,8 +549,7 @@ function SkillsPane() {
           <label>版本<input className="field" value={skillVersion} onChange={(e) => setSkillVersion(e.target.value)} placeholder="1.0.0" /></label>
           <label>分类<input className="field" value={skillCategory} onChange={(e) => setSkillCategory(e.target.value)} placeholder="custom" /></label>
           <label className="skill-register-description">能力说明<input className="field" value={skillDescription} onChange={(e) => setSkillDescription(e.target.value)} maxLength={2000} placeholder="说明输入、输出和适用场景" /></label>
-          <label>输入 Schema（JSON 数组）<textarea className="field" rows={3} value={skillInputsJson} onChange={(e) => setSkillInputsJson(e.target.value)} spellCheck={false} /></label>
-          <label>输出 Schema（JSON 数组）<textarea className="field" rows={3} value={skillOutputsJson} onChange={(e) => setSkillOutputsJson(e.target.value)} spellCheck={false} /></label>
+          <details className="advanced-report-editor"><summary>高级配置：输入 / 输出 Schema 结构</summary><label>输入 Schema（JSON 数组）<textarea className="field" rows={3} value={skillInputsJson} onChange={(e) => setSkillInputsJson(e.target.value)} spellCheck={false} /></label><label>输出 Schema（JSON 数组）<textarea className="field" rows={3} value={skillOutputsJson} onChange={(e) => setSkillOutputsJson(e.target.value)} spellCheck={false} /></label></details>
           <div className="skill-permissions">
             <span>只读权限声明</span>
             {(["read_content", "read_plan", "read_drafts"] as const).map((permission) => (
