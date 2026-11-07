@@ -899,7 +899,6 @@ function TasksPane({ tasks, total, page, pages, onPageChange, onResolved, target
             )}
             {tasks.map((t) => (
               <tr key={t.id} style={(targetType === "round" ? t.task_type === "round_pipeline" && t.biz_id === String(targetId) : targetId === t.id) ? { background: "var(--surface-2)", outline: "2px solid var(--primary)" } : undefined}>
-                <td style={{ fontSize: 12, fontFamily: "monospace" }}>#{t.id}</td>
                 <td>{TYPE_LABEL[t.task_type] ?? displayTaskTypeLabel(t.task_type)}</td>
                 <td>{t.platform ? PLATFORM_NAME[t.platform] : "-"}</td>
                 <td><span className={`demo-status ${STATUS_CLS[t.status] ?? ""}`}>{STATUS_LABEL[t.status] ?? displayStatusLabel(t.status)}</span></td>
@@ -1030,7 +1029,7 @@ function SchedulerPane({ jobs, onTriggered }: {
               <i className={`task-prio ${j.enabled ? "blue" : "gray"}`} />
               <div className="task-main">
                 <div className="task-title">
-                  {j.name} <code style={{ fontSize: 10, color: "var(--muted)" }}>{j.id}</code>
+                  {j.name}
                   {!j.enabled && <span className="tag gray" style={{ marginLeft: 6 }}>已关闭</span>}
                 </div>
                 <div className="task-desc">
