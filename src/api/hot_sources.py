@@ -10,6 +10,8 @@ from typing import Callable
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.routing import APIRoute
 
+from src.core.redact import safe_error_summary
+
 logger = logging.getLogger(__name__)
 
 
@@ -160,7 +162,7 @@ def build_hot_sources_router(
         try:
             rows = collector._fetch_custom(source, label)
         except Exception as exc:  # noqa: BLE001 — diagnostic fetch must not abort other sources
-            safe_error = redact(str(exc))
+            safe_error = safe_error_summary(exc, "热点来源试抓取失败，请检查来源地址和访问权限后重试。")
             logger.warning("热点来源试抓取失败 %s: %s", redact(label), safe_error)
             rows = None
             fetch_error = safe_error
