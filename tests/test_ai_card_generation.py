@@ -49,7 +49,10 @@ def test_ai_card_generation_calls_image_api_for_cover_and_every_body_page(monkey
     ))
     monkeypatch.setattr(
         "src.core.visual_ocr.validate_rendered_pages",
-        lambda images, expected, report, **kwargs: {"status": "passed", "gate": "passed"},
+        lambda images, expected, report, **kwargs: {
+            "status": "passed", "gate": "passed",
+            "pages": [{"status": "passed"} for _ in images],
+        },
     )
     paths, pages = cards.generate_ai_card_set(
         title="测试标题", subtitle="运营", body="第一条内容。第二条内容。",
@@ -119,7 +122,10 @@ def test_ai_card_generation_reuses_compatible_validated_pages(monkeypatch, tmp_p
     ))
     monkeypatch.setattr(
         "src.core.visual_ocr.validate_rendered_pages",
-        lambda images, expected, report, **kwargs: {"status": "passed", "gate": "passed"},
+        lambda images, expected, report, **kwargs: {
+            "status": "passed", "gate": "passed",
+            "pages": [{"status": "passed"} for _ in images],
+        },
     )
     kwargs = dict(
         title="测试标题", subtitle="运营", body="第一条内容。第二条内容。",
@@ -178,7 +184,10 @@ def test_ai_card_generation_regenerates_corrupt_cached_page(monkeypatch, tmp_pat
     ))
     monkeypatch.setattr(
         "src.core.visual_ocr.validate_rendered_pages",
-        lambda images, expected, report, **kwargs: {"status": "passed", "gate": "passed"},
+        lambda images, expected, report, **kwargs: {
+            "status": "passed", "gate": "passed",
+            "pages": [{"status": "passed"} for _ in images],
+        },
     )
     kwargs = dict(
         title="测试标题", subtitle="运营", body="第一条内容。",
@@ -205,7 +214,10 @@ def test_ai_card_generation_reuses_completed_pages_on_retry(monkeypatch, tmp_pat
     ))
     monkeypatch.setattr(
         "src.core.visual_ocr.validate_rendered_pages",
-        lambda images, expected, report, **kwargs: {"status": "passed", "gate": "passed"},
+        lambda images, expected, report, **kwargs: {
+            "status": "passed", "gate": "passed",
+            "pages": [{"status": "passed"} for _ in images],
+        },
     )
     kwargs = dict(
         title="稳定任务", subtitle="运营", body="第一页内容。第二页内容。",
@@ -300,7 +312,10 @@ def test_visual_plan_generates_cover_body_ending_with_verified_reference_bytes(m
     ))
     monkeypatch.setattr(
         "src.core.visual_ocr.validate_rendered_pages",
-        lambda images, expected, report, **kwargs: {"status": "passed", "gate": "passed"},
+        lambda images, expected, report, **kwargs: {
+            "status": "passed", "gate": "passed",
+            "pages": [{"status": "passed"} for _ in images],
+        },
     )
 
     paths, pages = cards.generate_ai_card_set(
