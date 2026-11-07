@@ -50,7 +50,7 @@ function Stage({ stage }: { stage: ProductionMonitorStage }) {
         {stage.contents.map((content) => <div className="task-row" key={content.id}>
           <div className="task-main">
             <div className="task-title">{content.title}</div>
-            <div className="task-desc">{content.id} · {PLATFORM_LABEL[content.platform] ?? displayPlatformLabel(content.platform)} · {content.draft_count} 个草稿 · {content.review_rejected ? "已驳回" : content.draft_statuses || "无草稿状态"}</div>
+            <div className="task-desc">{PLATFORM_LABEL[content.platform] ?? displayPlatformLabel(content.platform)} · {content.draft_count} 个草稿 · {content.review_rejected ? "已驳回" : content.draft_statuses || "无草稿状态"}</div>
           </div>
           <button className="btn sm" onClick={() => navigate("production", "pipeline", { type: "content", id: content.id })}>查看内容</button>
         </div>)}
