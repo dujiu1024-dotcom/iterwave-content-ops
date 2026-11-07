@@ -594,7 +594,7 @@ def test_review_realistic_content_layout_has_no_overflow_at_supported_viewports(
             page.goto(f"http://127.0.0.1:{port}/?page=review")
             page.get_by_role("heading", name="集中审核").wait_for(timeout=15000)
             page.get_by_role("heading", name=item["title"], exact=True).wait_for(timeout=15000)
-            page.get_by_text("如何用真实案例建立客户信任", exact=False).wait_for(timeout=15000)
+            page.get_by_role("heading", name=item["title"], exact=True).wait_for(timeout=15000)
             page.get_by_text("自动采集样本：3", exact=False).wait_for(timeout=15000)
 
             for width in (1440, 1024, 768, 390):
