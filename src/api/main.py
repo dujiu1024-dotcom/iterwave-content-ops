@@ -4899,7 +4899,8 @@ def _register_routes(app: FastAPI) -> None:
                 "created_at": task.created_at, "available_at": task.available_at,
                 "started_at": task.started_at,
                 "finished_at": task.finished_at, "attempts": task.attempts,
-                "error_code": task.error_code, "error_message": task.error_message,
+                "error_code": safe_error_summary(task.error_code, "任务异常") if task.error_code else None,
+            "error_message": safe_task_error,
                 "retry_of_task_id": task.retry_of_task_id,
                 "retry_confirmed_by": task.retry_confirmed_by,
                 "retry_confirmation_note": task.retry_confirmation_note,
@@ -4972,15 +4973,18 @@ def _register_routes(app: FastAPI) -> None:
                     json.dumps(safe_detail, ensure_ascii=False, default=str) if safe_detail else ""
                 )
                 execution_log.append({
-                    "step": str(step_name)[:120],
-                    "status": str(step_status)[:40],
-                    "detail": str(detail)[:500],
+                    "step": safe_error_summary(step_name, f"步骤 {index}")[:120],
+                    "status": safe_error_summary(step_status, "状态未知")[:40],
+                    "detail": safe_error_summary(detail, "步骤已记录；详细诊断请联系管理员。")[:500] if detail else "",
                 })
-        if not execution_log and task.error_message:
+        safe_task_error = safe_error_summary(
+            task.error_message, "任务执行失败，请核对平台状态后再决定是否恢复。",
+        ) if task.error_message else None
+        if not execution_log and safe_task_error:
             execution_log.append({
                 "step": "任务执行失败",
                 "status": "failed",
-                "detail": task.error_message[:500],
+                "detail": safe_task_error,
             })
         return {
             "execution_log": execution_log,
