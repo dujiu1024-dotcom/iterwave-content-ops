@@ -13,7 +13,11 @@ import hashlib
 import json
 import sqlite3
 import tempfile
+import sys
 from pathlib import Path
+
+# Allow direct execution as: python scripts/audit_database_readonly.py
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.core.config import load_config
 from src.core.db import Database
