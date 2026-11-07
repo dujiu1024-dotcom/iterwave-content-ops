@@ -177,7 +177,7 @@ export default function OriginalAssetInventoryPanel() {
     </div>}
     {analysisResult && <div className="plan-stage-editor">
       <div className="panel-head"><b>AI 素材分析结果 · 待人工确认</b><button className="btn sm" onClick={() => setAnalysisResult(null)}>关闭</button></div>
-      <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxHeight: 320, overflow: "auto" }}>{JSON.stringify(analysisResult.result, null, 2)}</pre>
+      <StructuredDataView data={analysisResult.result} title="分析结果"/>
       <div className="plan-form-actions"><button className="btn" onClick={() => void reviewAnalysis("rejected")}>驳回分析结果</button><button className="btn primary" onClick={() => void reviewAnalysis("confirmed")}>确认分析结果</button></div>
     </div>}
     {history && <div className="plan-stage-editor">

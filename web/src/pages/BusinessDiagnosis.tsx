@@ -71,10 +71,10 @@ export default function BusinessDiagnosis() {
       <div className="panel-head"><div><div className="panel-title">报告状态</div><div className="panel-sub">源数据变化会使已确认报告失效；重新分析生成新版本。</div></div><span className="tag gray">{report ? report.status : "尚未分析"}</span></div>
       {report ? <><p>版本 V{report.version_no} · 模型 {report.model_name} · 创建于 {formatBusinessDateTime(report.created_at)}</p>
         <p>来源：经营目标 {report.source_snapshot.inventory_summary.business_goal_count} 项，业务档案 {report.source_snapshot.inventory_summary.registered_business_profile ? "已登记" : "未登记"}，产品/服务目录 {report.source_snapshot.inventory_summary.business_catalog_count ?? 0} 项，原始素材 {report.source_snapshot.inventory_summary.original_asset_count ?? 0} 项（可用 {report.source_snapshot.inventory_summary.original_asset_usable_count ?? 0} 项、待补缺口 {report.source_snapshot.inventory_summary.original_asset_open_gap_count ?? 0} 项），图片素材 {report.source_snapshot.inventory_summary.media_asset_count} 项，历史内容 {report.source_snapshot.inventory_summary.historical_content_count} 条。</p>
-        <p>数据指纹：<code>{report.source_fingerprint.slice(0, 20)}</code> · {report.status === "confirmed" ? (report.strategy_is_current ? (report.source_is_current ? "战略来源未变化" : "战略依据有效，生产期数据有更新") : "战略依据已变化，需重新分析") : report.source_is_current ? "来源未变化" : "来源已变化，需重新分析"}</p>
+        <p>{report.status === "confirmed" ? (report.strategy_is_current ? (report.source_is_current ? "战略来源未变化" : "战略依据有效，生产期数据有更新") : "战略依据已变化，需重新分析") : report.source_is_current ? "来源未变化" : "来源已变化，需重新分析"}</p>
         <div className="panel-sub">分析依据（{report.source_snapshot.source_references.length} 条）</div>
-        <div className="table-wrap"><table><thead><tr><th>来源类型</th><th>记录</th><th>标识</th></tr></thead><tbody>
-          {report.source_snapshot.source_references.slice(0, 100).map((ref, index) => <tr key={ref.source_type + ref.source_id + index}><td>{ref.source_type}</td><td>{ref.label}</td><td><code>{ref.source_id}</code></td></tr>)}
+        <div className="table-wrap"><table><thead><tr><th>来源类型</th><th>记录</th></tr></thead><tbody>
+          {report.source_snapshot.source_references.slice(0, 100).map((ref, index) => <tr key={ref.source_type + ref.source_id + index}><td>{ref.source_type}</td><td>{ref.label}</td></tr>)}
           {!report.source_snapshot.source_references.length && <tr><td colSpan={3}>没有可引用的业务资料</td></tr>}
         </tbody></table></div>
         <div className="notice">数据限制：系统已接入 T4 经营基础资料（业务档案及产品/服务目录）和 T5 原始素材盘点（素材状态、审核结果及缺口），分析会基于当前已录入记录。客户访谈库、竞品数据库和外部市场规模数据尚未接入；涉及这些领域的结论应作为假设或待验证事项，不应视为已核实事实。</div>
