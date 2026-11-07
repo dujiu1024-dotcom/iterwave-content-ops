@@ -13,11 +13,38 @@ const LABELS: Record<string, string> = {
   generated_at: "生成时间", model: "生成模型", version: "版本",
   field: "字段", message: "说明", code: "代码",
 };
-const HIDDEN_KEYS = /(^|_)(id|ids|tenant|worker|trace|request|execution|correlation|fingerprint|signature|raw|payload|error_code|stack|debug)(_|$)/i;
-const TECHNICAL_KEYS = /(^|_)(id|ids|tenant|worker|trace|request|execution|correlation|fingerprint|signature|raw|payload|error_code|stack|debug)(_|$)/i;
+
+const TECHNICAL_KEY_PATTERN = /(^|_)(id|ids|tenant|worker|trace|request|execution|correlation|fingerprint|signature|raw|payload|error_code|stack|debug)(_|$)/i;
+const SENSITIVE_KEY_PATTERN = /(^|_)(secret|token|password|passwd|authorization|cookie|api_key|credential|private_key)(_|$)/i;
+
+function normalizedKey(key: string): string {
+  return key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/[-\s]/g, "_").toLowerCase();
+}
+
+function isTechnicalKey(key: string): boolean {
+  return TECHNICAL_KEY_PATTERN.test(normalizedKey(key));
+}
+
+function isSensitiveKey(key: string): boolean {
+  return SENSITIVE_KEY_PATTERN.test(normalizedKey(key));
+}
 
 function labelFor(key: string): string {
-  return LABELS[key] ?? key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  const normalized = normalizedKey(key);
+  return LABELS[normalized] ?? normalized.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function collectTechnical(value: unknown, path = ""): Array<{ path: string; value: unknown }> {
+  if (Array.isArray(value)) {
+    return value.flatMap((item, index) => collectTechnical(item, path ? `${path}[${index}]` : `[${index}]`));
+  }
+  if (!value || typeof value !== "object") return [];
+  return Object.entries(value as Record<string, unknown>).flatMap(([key, item]) => {
+    if (isSensitiveKey(key)) return [];
+    const currentPath = path ? `${path}.${key}` : key;
+    if (isTechnicalKey(key)) return [{ path: currentPath, value: item }];
+    return collectTechnical(item, currentPath);
+  });
 }
 
 function Value({ value, depth = 0 }: { value: unknown; depth?: number }): ReactNode {
@@ -32,7 +59,7 @@ function Value({ value, depth = 0 }: { value: unknown; depth?: number }): ReactN
   }
   if (typeof value === "object") {
     const entries = Object.entries(value as Record<string, unknown>).filter(([key, item]) =>
-      !HIDDEN_KEYS.test(key) && item !== undefined && item !== null && item !== ""
+      !isTechnicalKey(key) && !isSensitiveKey(key) && item !== undefined && item !== null && item !== ""
     );
     if (!entries.length) return <span className="structured-data-empty">暂无可展示信息</span>;
     return <dl className={depth ? "structured-data-nested" : "structured-data-grid"}>
@@ -45,16 +72,17 @@ function Value({ value, depth = 0 }: { value: unknown; depth?: number }): ReactN
 }
 
 export default function StructuredDataView({ data, title }: { data: unknown; title?: string }) {
-  const technical = data && typeof data === "object" && !Array.isArray(data)
-    ? Object.entries(data as Record<string, unknown>).filter(([key]) => TECHNICAL_KEYS.test(key))
-    : [];
+  const technical = collectTechnical(data);
   return <section className="structured-data-view">
     {title && <h4 className="structured-data-title">{title}</h4>}
     <Value value={data} />
     {technical.length > 0 && <details className="structured-data-diagnostics">
       <summary>高级诊断信息（{technical.length} 项）</summary>
-      <dl className="structured-data-grid">{technical.map(([key, value]) =>
-        <div className="structured-data-field" key={key}><dt>{labelFor(key)}</dt><dd><code>{typeof value === "string" ? value : JSON.stringify(value)}</code></dd></div>
+      <dl className="structured-data-grid">{technical.map(({ path, value }) =>
+        <div className="structured-data-field" key={path}>
+          <dt>{path.split(".").map((part) => labelFor(part)).join(" / ")}</dt>
+          <dd><code>{typeof value === "string" ? value : JSON.stringify(value)}</code></dd>
+        </div>
       )}</dl>
     </details>}
   </section>;
