@@ -1837,7 +1837,7 @@ export default function Production() {
                   <div className="panel-title" style={{ fontSize: 13, marginBottom: 10 }}>✎ 单篇草稿（{roundDetail.drafts?.length || 0}）</div>
                   <div className="table-wrap">
                     <table>
-                      <thead><tr><th>草稿 ID</th><th>平台</th><th>状态</th><th>操作</th></tr></thead>
+                      <thead><tr><th>内容序号</th><th>平台</th><th>状态</th><th>操作</th></tr></thead>
                       <tbody>
                         {roundDetail.drafts?.length === 0 && (
                           <tr><td colSpan={4}>
