@@ -716,3 +716,108 @@ def test_global_operations_realistic_data_layout_has_no_overflow_at_supported_vi
             browser.close()
     finally:
         _stop_vite(server)
+
+
+def test_agent_realistic_orchestration_data_layout_has_no_overflow_at_supported_viewports():
+    """Render a populated orchestration timeline and verify desktop/tablet/mobile layout."""
+    server, port = _serve_vite()
+    screenshot_dir = ROOT / "artifacts" / "ui-viewport"
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    now = "2026-11-07T10:30:00+08:00"
+    orchestration = {
+        "updated_at": now,
+        "default": [{"id": "topic", "enabled": True}, {"id": "copy", "enabled": True}],
+        "steps": [
+            {"id": "topic", "enabled": True, "label": "① 选题研究", "skill": "topic-research",
+             "locked": False, "requires": [], "desc": "围绕品牌长期目标筛选高相关主题。",
+             "inputs": ["母计划", "经营目标"]},
+            {"id": "copy", "enabled": True, "label": "② 文案生成", "skill": "copywriting",
+             "locked": False, "requires": ["topic"], "desc": "生成符合账号定位的内容草稿。",
+             "inputs": ["选题", "品牌资料"]},
+            {"id": "quality_gate", "enabled": True, "label": "③ 内容质量门", "skill": "quality-gate",
+             "locked": True, "requires": ["copy"], "desc": "检查事实依据、表达质量和风险边界。",
+             "inputs": ["文案", "平台规范"]},
+            {"id": "image", "enabled": True, "label": "④ 配图生成", "skill": "image-generation",
+             "locked": False, "requires": ["quality_gate"], "desc": "按内容结构生成首图、内页和尾图。",
+             "inputs": ["文案", "素材资产"]},
+        ],
+    }
+    runs = [{
+        "round_id": 301, "round_number": 301, "status": "partial_completed",
+        "trigger_source": "manual", "created_at": now, "duration_seconds": 186,
+        "step_status": {
+            "topic": {"status": "success", "detail": "已筛选 8 个候选主题"},
+            "copy": {"status": "success", "detail": "已生成 4 篇内容草稿"},
+            "quality_gate": {"status": "failed", "detail": "有 1 篇内容缺少可核验事实依据"},
+            "image": {"status": "pending", "detail": "等待质量门通过"},
+        },
+        "errors": ["1 篇内容需要补充事实依据后重新审核。"], "has_report": True,
+    }]
+
+    def handler(route):
+        path = urlparse(route.request.url).path
+        if path == "/api/auth/status":
+            payload = {"configured": True, "authenticated": True, "needs_login": False}
+        elif path == "/api/tenants":
+            payload = {"runtime_tenant_id": "brand-main", "selected_tenant_id": "brand-main",
+                       "restart_required": False,
+                       "items": [{"id": "brand-main", "name": "主品牌运营账号组（长名称布局测试）",
+                                  "created_at": now, "is_active": True}]}
+        elif path == "/api/status":
+            payload = {"enabled_platforms": ["xhs", "douyin"],
+                       "platforms_without_login": ["douyin"], "logged_in_platforms": ["xhs"],
+                       "circuit_broken_platforms": [], "active_rounds": 1,
+                       "published_samples": 5, "scoring_mode": "default",
+                       "recovery": {"interrupted_tasks": 0, "requeued_data_fetch": [],
+                                    "stale_rounds": [], "pending_verify": 0}}
+        elif path == "/api/orchestration":
+            payload = orchestration
+        elif path == "/api/orchestration/runs":
+            payload = {"runs": runs}
+        else:
+            payload = {}
+        return route.fulfill(status=200, content_type="application/json",
+                             body=json.dumps(payload, ensure_ascii=False))
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 1000}, device_scale_factor=1)
+            page_errors = []
+            page.on("pageerror", lambda error: page_errors.append(str(error)))
+            page.route("**/api/**", handler)
+            page.goto(f"http://127.0.0.1:{port}/?page=agent")
+            page.get_by_role("heading", name="Agent 编排与诊断").wait_for(timeout=15000)
+            page.get_by_text("第 301 轮 · 部分完成", exact=False).wait_for(timeout=15000)
+            page.get_by_text("有 1 篇内容需要补充事实依据后重新审核。", exact=True).wait_for(timeout=15000)
+
+            for width in (1440, 1024, 768, 390):
+                page.set_viewport_size({"width": width, "height": 1000})
+                page.wait_for_timeout(150)
+                metrics = page.evaluate("""() => ({
+                    viewport: document.documentElement.clientWidth,
+                    document: document.documentElement.scrollWidth,
+                    body: document.body.scrollWidth,
+                    main: document.querySelector('#main-content')?.scrollWidth ?? 0,
+                    mainClient: document.querySelector('#main-content')?.clientWidth ?? 0,
+                    topbar: document.querySelector('.topbar')?.scrollWidth ?? 0,
+                    topbarClient: document.querySelector('.topbar')?.clientWidth ?? 0
+                })""")
+                assert metrics["document"] <= metrics["viewport"] + 1, (
+                    f"agent document overflow at {width}px: {metrics}"
+                )
+                assert metrics["body"] <= metrics["viewport"] + 1, (
+                    f"agent body overflow at {width}px: {metrics}"
+                )
+                assert metrics["main"] <= metrics["mainClient"] + 1, (
+                    f"agent content overflow at {width}px: {metrics}"
+                )
+                assert metrics["topbar"] <= metrics["topbarClient"] + 1, (
+                    f"agent topbar overflow at {width}px: {metrics}"
+                )
+                page.screenshot(path=str(screenshot_dir / f"agent-real-data-{width}.png"),
+                               full_page=True)
+            assert not page_errors, f"agent raised browser errors: {page_errors}"
+            browser.close()
+    finally:
+        _stop_vite(server)
