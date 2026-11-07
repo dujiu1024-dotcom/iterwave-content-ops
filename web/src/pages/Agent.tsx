@@ -730,6 +730,12 @@ function AuditPagination({ total, page, pageSize, onPageChange }: {
 }
 
 // ============================================================ AI 审计链
+const OVERRIDE_FIELD_LABEL: Record<string, string> = {
+  title: "标题", body: "正文", content: "内容", tags: "标签", cover: "封面",
+  image_paths: "配图", publish_time: "发布时间", platform: "发布平台",
+  topic_id: "选题", target_audience: "目标受众", content_angle: "内容角度",
+};
+
 function AuditPane() {
   const [aiCalls, setAiCalls] = useState<AiCallRecord[] | null>(null);
   const [aiCallsError, setAiCallsError] = useState<string | null>(null);
@@ -836,9 +842,9 @@ function AuditPane() {
                   <tbody>
                     {overrides.slice((auditPage - 1) * auditPageSize, auditPage * auditPageSize).map((r) => (
                       <tr key={r.id}>
-                        <td style={{ fontSize: 11, fontFamily: "monospace", color: "var(--subtle)" }}>{r.overridden_at}</td>
+                        <td style={{ fontSize: 11, color: "var(--subtle)" }}>{formatBusinessDateTime(r.overridden_at)}</td>
                         <td>{r.round_number != null ? `第 ${r.round_number} 轮` : r.round_id ? "关联轮次已归档" : <span style={{ color: "var(--subtle)" }}>—</span>}</td>
-                        <td style={{ fontFamily: "monospace", fontSize: 11 }}>{r.override_field ?? "—"}</td>
+                        <td style={{ fontFamily: "monospace", fontSize: 11 }}>{r.override_field ? (OVERRIDE_FIELD_LABEL[r.override_field] ?? "其他字段（需确认）") : "—"}</td>
                         <td style={{ maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.original_value ?? "—"}</td>
                         <td style={{ maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.override_value ?? "—"}</td>
                         <td>{r.overridden_by}</td>
@@ -870,14 +876,14 @@ function AuditPane() {
                   <tbody>
                     {redlines.slice((auditPage - 1) * auditPageSize, auditPage * auditPageSize).map((r) => (
                       <tr key={r.id}>
-                        <td style={{ fontSize: 11, fontFamily: "monospace", color: "var(--subtle)" }}>{r.created_at}</td>
+                        <td style={{ fontSize: 11, color: "var(--subtle)" }}>{formatBusinessDateTime(r.created_at)}</td>
                         <td>{r.round_number != null ? `第 ${r.round_number} 轮` : r.round_id ? "关联轮次已归档" : "—"}</td>
                         <td>{PLATFORM_LABEL[r.platform] ?? displayPlatformLabel(r.platform)}</td>
                         <td style={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title}</td>
                         <td>
                           {r.guard_outcome === "fail" ? <span className="tag red">✕ FAIL</span>
                            : r.guard_outcome === "warn" ? <span className="tag orange">! WARN</span>
-                           : <span className="tag gray">{r.guard_outcome}</span>}
+                           : <span className="tag gray">{r.guard_outcome === "error" ? "检查异常" : "其他结果（需确认）"}</span>}
                         </td>
                         <td style={{ maxWidth: 240, fontSize: 12 }}>{r.guard_reason ?? "—"}</td>
                       </tr>

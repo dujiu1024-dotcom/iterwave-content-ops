@@ -32,7 +32,8 @@ def build_audit_query_router(get_context: Callable[[], dict]) -> APIRouter:
     def list_user_override(limit: int = Query(200, ge=1, le=2000)):
         conn = get_context()["conn"]
         rows = conn.execute(
-            "SELECT u.id, u.round_id, u.ai_call_id, u.override_field, "
+            # round_id / ai_call_id 只用于 JOIN，不对浏览器暴露数据库关联键。
+            "SELECT u.id, u.override_field, "
             "u.original_value, u.override_value, u.reason, u.overridden_by, "
             "u.overridden_at, r.round_number FROM user_override u "
             "LEFT JOIN spiral_rounds r ON r.id = u.round_id "

@@ -59,7 +59,6 @@ def test_user_override_query_includes_business_round_number():
         assert response.status_code == 200
         assert response.json() == [{
             "id": 1,
-            "round_id": 7,
             "override_field": "title",
             "original_value": "old",
             "override_value": "new",
@@ -96,5 +95,7 @@ def test_audit_query_apis_do_not_leak_future_internal_columns():
         assert "internal_audit_blob" not in overrides.text
         assert "private override metadata" not in overrides.text
         assert "round_number" in overrides.json()[0]
+        assert "round_id" not in overrides.json()[0]
+        assert "ai_call_id" not in overrides.json()[0]
     finally:
         conn.close()
