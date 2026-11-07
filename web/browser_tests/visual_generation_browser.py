@@ -680,7 +680,7 @@ def test_global_operations_realistic_data_layout_has_no_overflow_at_supported_vi
             page.route("**/api/**", handler)
             page.goto("http://127.0.0.1:{}/?page=global-ops".format(port))
             page.locator("#main-content").wait_for(timeout=15000)
-            page.get_by_text("全局运营中心", exact=True).wait_for(timeout=15000)
+            page.get_by_role("heading", name="全局运营中心").wait_for(timeout=15000)
             page.get_by_text("主品牌运营账号组（长名称布局测试）", exact=False).first.wait_for(timeout=15000)
             page.get_by_text("如何用真实案例建立客户信任：从问题识别到方案落地", exact=True).wait_for(timeout=15000)
 
