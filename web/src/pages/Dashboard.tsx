@@ -165,7 +165,7 @@ export default function Dashboard() {
           <h1 className="page-title">运营总览</h1>
           <div className="page-desc">
             一个总体目标、各平台独立执行；Agent 负责发现机会、编排任务、汇总进展，关键决策由你确认。
-            {loadedAt && <span className="tiny" style={{ marginLeft: 8 }}>数据更新于 {formatBusinessDateTime(loadedAt)}</span>}
+            {loadedAt && <span className="tiny" style={{ marginLeft: 8 }}>数据更新于 {formatBusinessDateTime(loadedAt.toISOString())}</span>}
           </div>
         </div>
         <div className="head-actions">
