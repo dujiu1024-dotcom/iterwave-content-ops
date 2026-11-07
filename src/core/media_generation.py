@@ -269,6 +269,7 @@ def _request_endpoint(
     source_path: Path | None,
     source_mime_type: str | None,
     source_filename: str | None,
+    source_bytes: bytes | None = None,
     budget_timeout_seconds: float | None = None,
 ) -> tuple[bytes, str, str, int, int]:
     policy = cfg.media_generation
@@ -289,11 +290,21 @@ def _request_endpoint(
             timeout=httpx.Timeout(timeout_seconds, connect=connect_timeout),
             follow_redirects=False,
         ) as client:
-            if source_path:
-                source_bytes = source_path.read_bytes()
+            if source_path or source_bytes is not None:
+                max_reference_bytes = int(getattr(policy, "max_reference_bytes", 12 * 1024 * 1024))
+                if source_bytes is not None:
+                    image_bytes = source_bytes
+                else:
+                    if source_path.stat().st_size > max_reference_bytes:
+                        raise ImageGenerationError("参考图片超过允许大小，拒绝调用图片编辑接口")
+                    image_bytes = source_path.read_bytes()
+                if not image_bytes:
+                    raise ImageGenerationError("参考图片为空，拒绝调用图片编辑接口")
+                if len(image_bytes) > max_reference_bytes:
+                    raise ImageGenerationError("参考图片超过允许大小，拒绝调用图片编辑接口")
                 if sensenova:
                     mime_type = source_mime_type or "image/png"
-                    data_url = f"data:{mime_type};base64,{base64.b64encode(source_bytes).decode()}"
+                    data_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode()}"
                     body = {
                         **data,
                         "response_format": "b64_json",
@@ -306,8 +317,8 @@ def _request_endpoint(
                 else:
                     files = {
                         "image": (
-                            source_filename or source_path.name,
-                            source_bytes,
+                            source_filename or (source_path.name if source_path else "reference-image"),
+                            image_bytes,
                             source_mime_type or "application/octet-stream",
                         )
                     }
@@ -348,6 +359,7 @@ def generate_image_bytes(
     source_path: Path | None = None,
     source_mime_type: str | None = None,
     source_filename: str | None = None,
+    source_bytes: bytes | None = None,
     cfg=None,
     allow_fallback: bool | None = None,
 ) -> tuple[bytes, str, str, int, int]:
@@ -361,7 +373,7 @@ def generate_image_bytes(
         policy = cfg.media_generation
         with image_generation_run(max_calls=int(getattr(policy, "max_api_calls_per_run", 30)), timeout_seconds=int(getattr(policy, "hard_timeout_seconds", 300)), max_concurrency=int(getattr(policy, "max_concurrency", 2))):
             with article_budget(max_calls=int(getattr(policy, "max_api_calls_per_article", 27)), page_max_calls=int(getattr(policy, "max_api_calls_per_page", 3))):
-                return generate_image_bytes(prompt, model=model, size=size, source_path=source_path, source_mime_type=source_mime_type, source_filename=source_filename, cfg=cfg, allow_fallback=allow_fallback)
+                return generate_image_bytes(prompt, model=model, size=size, source_path=source_path, source_mime_type=source_mime_type, source_filename=source_filename, source_bytes=source_bytes, cfg=cfg, allow_fallback=allow_fallback)
     if not has_active_article():
         policy = cfg.media_generation
         with article_budget(max_calls=int(getattr(policy, "max_api_calls_per_article", 27)), page_max_calls=int(getattr(policy, "max_api_calls_per_page", 3))):
@@ -390,7 +402,7 @@ def generate_image_bytes(
                 result = _request_endpoint(
                     endpoint, prompt, size, cfg=cfg, source_path=source_path,
                     source_mime_type=source_mime_type, source_filename=source_filename,
-                    budget_timeout_seconds=remaining_seconds,
+                    source_bytes=source_bytes, budget_timeout_seconds=remaining_seconds,
                 )
             validate_target_image_spec(result[3], result[4], size, cfg=cfg)
             return result

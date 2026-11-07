@@ -8104,7 +8104,8 @@ def _register_routes(app: FastAPI) -> None:
             )
 
         from ..core.content_pipeline import image_generation_settings
-        from ..core.ai_card_generation import generate_ai_card_set
+        from ..core.ai_card_generation import generate_ai_card_set, _paginate_body
+        from ..core.visual_planning import build_visual_brief, build_visual_plan
         output_dir = cfg.resolve_path(cfg.paths.output_dir)
         subtitle = dimension or "知识卡片"
         tenant_id = _tenant_id()
@@ -8130,11 +8131,26 @@ def _register_routes(app: FastAPI) -> None:
             with image_generation_run(
                 max_concurrency=getattr(cfg.media_generation, "max_concurrency", 2),
             ) as budget:
+                body_pages = [
+                    "".join(page) for page in _paginate_body(
+                        body, max_chars=60, segments_per_page=3,
+                        max_pages=getattr(cfg.media_generation, "max_pages_per_article", 9),
+                    )
+                ]
+                visual_brief = build_visual_brief(
+                    platform=platform.value, topic=dimension or title,
+                    title=title, goal="informational", key_message=title,
+                    brand_profile=profile,
+                )
+                visual_plan = build_visual_plan(
+                    brief=visual_brief, title=title, subtitle=subtitle,
+                    body_pages=body_pages,
+                )
                 paths, pages = generate_ai_card_set(
                     title=title, subtitle=subtitle, body=body, output_dir=output_dir,
                     platform=platform, cfg=cfg, settings=settings,
                     allow_fallback=settings.get("fallback_enabled"),
-                    brand_profile=profile,
+                    brand_profile=profile, visual_plan=visual_plan,
                     task_id=f"manual-card-{job_id}",
                 )
             usage = budget.snapshot()

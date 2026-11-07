@@ -1131,6 +1131,9 @@ class RoundExecutor:
 
                 # Persist each strategy-step/topic/platform variant as an independently retryable task.
                 production_task_id = None
+                visual_reference_assets: dict[str, dict] = {}
+                tenant_id = None
+                tenant_media_dir = None
                 if task_store is not None:
                     stage = self._subplan_context["stage"]
                     strategy_step_id = str(stage.get("stage_key") or "").strip()
@@ -1221,28 +1224,49 @@ class RoundExecutor:
                         registry = TenantRegistry(PROJECT_ROOT, cfg=self.cfg)
                         registry.get(str(tenant_id))
                         tenant_paths = registry.paths(str(tenant_id), create=False)
-                        selected = await asyncio.to_thread(
-                            select_visual_assets,
-                            candidates=image_candidates,
-                            media_dir=tenant_paths.media_dir,
-                            topic=topic.title,
-                            body=topic.summary,
-                            usage_role="cover",
-                            limit=8,
-                            cfg=self.cfg,
-                        )
-                        visual_selection = {
-                            "selection_version": selected["selection_version"],
-                            "candidate_count": selected["candidate_count"],
-                            "verified_count": selected["verified_count"],
-                            "selected": [{
+                        tenant_media_dir = tenant_paths.media_dir
+                        role_selections = {}
+                        rejected_by_role = {}
+                        used_reference_hashes: set[str] = set()
+                        for usage_role in ("cover", "body", "ending"):
+                            role_candidates = [
+                                item for item in image_candidates
+                                if str(item.get("sha256") or "").lower() not in used_reference_hashes
+                            ]
+                            selected = await asyncio.to_thread(
+                                select_visual_assets,
+                                candidates=role_candidates,
+                                media_dir=tenant_paths.media_dir,
+                                topic=topic.title,
+                                body=topic.summary,
+                                usage_role=usage_role,
+                                limit=1,
+                                cfg=self.cfg,
+                            )
+                            role_items = selected["selected"]
+                            role_selections[usage_role] = [{
                                 "asset_id": item["asset_id"],
                                 "version_no": item["version_no"],
                                 "sha256": item["sha256"],
                                 "score": item["score"],
                                 "reasons": item["reasons"],
-                            } for item in selected["selected"]],
-                            "rejected": selected["rejected"],
+                            } for item in role_items]
+                            rejected_by_role[usage_role] = selected["rejected"]
+                            if role_items:
+                                item = role_items[0]
+                                used_reference_hashes.add(str(item["sha256"]).lower())
+                                visual_reference_assets[usage_role] = {
+                                    "asset_id": item["asset_id"],
+                                    "version_no": item["version_no"],
+                                    "sha256": item["sha256"],
+                                    "mime_type": item.get("mime_type"),
+                                    "path": str(item["verified_path"]),
+                                }
+                        visual_selection = {
+                            "selection_version": "visual-asset-selection-v1",
+                            "candidate_count": len(image_candidates),
+                            "selected_by_role": role_selections,
+                            "rejected_by_role": rejected_by_role,
                         }
                     task = task_store.create_task(
                         round_id=round_id,
@@ -1282,6 +1306,70 @@ class RoundExecutor:
                     # approval-time privacy and quality classifications for audit.
                     self.conn.commit()
                     existing = task_store.get_content_for_task(task["id"])
+                    if existing is None:
+                        # Reuse freshly verified paths only when this run selected exactly
+                        # the same IDs/versions/hashes as the immutable task snapshot.
+                        # Otherwise rehydrate the snapshot's exact selections on replay.
+                        task_input_snapshot = (task.get("input_snapshot") or {}).get("task_input") or {}
+                        persisted_selection = task_input_snapshot.get("visual_asset_selection") or {}
+                        persisted_roles = persisted_selection.get("selected_by_role") or {}
+                        if not persisted_roles:
+                            visual_reference_assets = {}
+                        elif persisted_selection != visual_selection:
+                            visual_reference_assets = {}
+                            if not tenant_id:
+                                raise RoundPreconditionError(
+                                    "任务快照包含已选视觉素材，但当前 Worker 缺少可信租户身份；拒绝跨租户恢复"
+                                )
+                            if tenant_media_dir is None:
+                                registry = TenantRegistry(PROJECT_ROOT, cfg=self.cfg)
+                                registry.get(str(tenant_id))
+                                tenant_media_dir = registry.paths(str(tenant_id), create=False).media_dir
+                            snapshot_assets = task_input_snapshot.get("original_assets") or []
+                            for usage_role in ("cover", "body", "ending"):
+                                role_items = persisted_roles.get(usage_role) or []
+                                if not role_items:
+                                    continue
+                                selected_item = role_items[0]
+                                candidate = next((
+                                    asset for asset in snapshot_assets
+                                    if int(asset.get("asset_id") or 0) == int(selected_item.get("asset_id") or 0)
+                                    and int(asset.get("version_no") or 0) == int(selected_item.get("version_no") or 0)
+                                    and str(asset.get("sha256") or "").lower() == str(selected_item.get("sha256") or "").lower()
+                                ), None)
+                                if candidate is None:
+                                    raise RoundPreconditionError(
+                                        f"任务快照中的 {usage_role} 参考素材版本不一致，拒绝使用"
+                                    )
+                                verified = await asyncio.to_thread(
+                                    select_visual_assets,
+                                    candidates=[candidate],
+                                    media_dir=tenant_media_dir,
+                                    topic=topic.title,
+                                    body=topic.summary,
+                                    usage_role=usage_role,
+                                    limit=1,
+                                    cfg=self.cfg,
+                                )
+                                verified_items = verified.get("selected") or []
+                                if (
+                                    len(verified_items) != 1
+                                    or str(verified_items[0].get("sha256") or "").lower()
+                                    != str(selected_item.get("sha256") or "").lower()
+                                ):
+                                    raise RoundPreconditionError(
+                                        f"任务快照中的 {usage_role} 参考素材无法重新验证，拒绝静默降级"
+                                    )
+                                item = verified_items[0]
+                                visual_reference_assets[usage_role] = {
+                                    "asset_id": item["asset_id"],
+                                    "version_no": item["version_no"],
+                                    "sha256": item["sha256"],
+                                    "mime_type": item.get("mime_type"),
+                                    "path": str(item["verified_path"]),
+                                }
+
+
                     if existing is not None:
                         if task["status"] == "succeeded":
                             pass
@@ -1341,6 +1429,7 @@ class RoundExecutor:
                 body_ai_count = 0
                 body_page_count = 0
                 pages: list = []
+                visual_plan_data: Optional[dict] = None
                 reject_reason: Optional[str] = None
                 visual_generation_attempts: list[dict] = []
                 for attempt in range(self.cfg.copy_generation.max_guard_retries + 1):
@@ -1374,16 +1463,36 @@ class RoundExecutor:
                             await asyncio.sleep(delay)
                     if card_first:
                         # 编排把出图排在质量门之前；候选版本也必须由图片 API 生成完整卡片。
-                        from .ai_card_generation import generate_ai_card_set
+                        from .ai_card_generation import generate_ai_card_set, _paginate_body
+                        from .visual_planning import build_visual_brief, build_visual_plan
                         image_settings, image_reason = self._image_settings()
                         if not image_settings:
                             raise RuntimeError(f"AI 图片生成未启用，拒绝模板降级：{image_reason}")
+                        visual_brief = build_visual_brief(
+                            platform=platform.value, topic=topic.title, title=title,
+                            goal="informational", key_message=title,
+                            brand_profile=self._visual_brand_profile(),
+                        )
+                        visual_plan = build_visual_plan(
+                            brief=visual_brief, title=title, subtitle=topic.dimension,
+                            body_pages=["".join(page) for page in _paginate_body(
+                                body, max_chars=60, segments_per_page=3,
+                                max_pages=getattr(self.cfg.media_generation, "max_pages_per_article", 9),
+                            )],
+                            reference_asset_ids={
+                                role: [asset["asset_id"]]
+                                for role, asset in visual_reference_assets.items()
+                            },
+                        )
+                        visual_plan_data = visual_plan.to_dict()
                         image_paths, pages = await asyncio.to_thread(
                             generate_ai_card_set, title=title, subtitle=topic.dimension,
                             body=body, output_dir=output_dir, platform=platform,
                             cfg=self.cfg, settings=image_settings,
                             allow_fallback=image_settings.get("fallback_enabled"),
                             brand_profile=self._visual_brand_profile(),
+                            visual_plan=visual_plan,
+                            reference_assets=visual_reference_assets,
                             task_id=hashlib.sha256(json.dumps({
                                 "round_id": round_id, "platform": platform.value, "topic_id": topic.id,
                                 "title": title, "subtitle": topic.dimension, "body": body, "image_settings": image_settings,
@@ -1391,10 +1500,10 @@ class RoundExecutor:
                             }, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
                         )
                         cover_path = str(image_paths[0])
-                        body_page_count = len(image_paths) - 1
+                        body_page_count = max(0, len(image_paths) - 2)
                         body_ai_count = body_page_count
                         visual_generation_attempts.extend({
-                            "kind": "cover" if index == 0 else "body",
+                            "kind": "cover" if index == 0 else "ending" if index == len(image_paths) - 1 else "body",
                             "status": "generated", "model": image_settings["model"],
                             "bytes": Path(path).stat().st_size,
                         } for index, path in enumerate(image_paths))
@@ -1454,16 +1563,36 @@ class RoundExecutor:
                     image_paths = []
                     if make_cards:
                         # 每一页均由图片 API 直接生成完整成品；API/质量门失败即终止本内容，不退回模板。
-                        from .ai_card_generation import generate_ai_card_set
+                        from .ai_card_generation import generate_ai_card_set, _paginate_body
+                        from .visual_planning import build_visual_brief, build_visual_plan
                         image_settings, image_reason = self._image_settings()
                         if not image_settings:
                             raise RuntimeError(f"AI 图片生成未启用，拒绝模板降级：{image_reason}")
+                        visual_brief = build_visual_brief(
+                            platform=platform.value, topic=topic.title, title=title,
+                            goal="informational", key_message=title,
+                            brand_profile=self._visual_brand_profile(),
+                        )
+                        visual_plan = build_visual_plan(
+                            brief=visual_brief, title=title, subtitle=topic.dimension,
+                            body_pages=["".join(page) for page in _paginate_body(
+                                body, max_chars=60, segments_per_page=3,
+                                max_pages=getattr(self.cfg.media_generation, "max_pages_per_article", 9),
+                            )],
+                            reference_asset_ids={
+                                role: [asset["asset_id"]]
+                                for role, asset in visual_reference_assets.items()
+                            },
+                        )
+                        visual_plan_data = visual_plan.to_dict()
                         image_paths, pages = await asyncio.to_thread(
                             generate_ai_card_set, title=title, subtitle=topic.dimension,
                             body=body, output_dir=output_dir, platform=platform,
                             cfg=self.cfg, settings=image_settings,
                             allow_fallback=image_settings.get("fallback_enabled"),
                             brand_profile=self._visual_brand_profile(),
+                            visual_plan=visual_plan,
+                            reference_assets=visual_reference_assets,
                             task_id=hashlib.sha256(json.dumps({
                                 "round_id": round_id, "platform": platform.value, "topic_id": topic.id,
                                 "title": title, "body": body, "image_settings": image_settings,
@@ -1471,10 +1600,10 @@ class RoundExecutor:
                             }, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
                         )
                         cover_path = str(image_paths[0])
-                        body_page_count = len(image_paths) - 1
+                        body_page_count = max(0, len(image_paths) - 2)
                         body_ai_count = body_page_count
                         visual_generation_attempts.extend({
-                            "kind": "cover" if index == 0 else "body",
+                            "kind": "cover" if index == 0 else "ending" if index == len(image_paths) - 1 else "body",
                             "status": "generated", "model": image_settings["model"],
                             "bytes": Path(path).stat().st_size,
                         } for index, path in enumerate(image_paths))
@@ -1550,7 +1679,7 @@ class RoundExecutor:
                 visual_status = "generated" if has_ai else "degraded"
                 if has_ai:
                     visual_reason = (
-                        f"图片 API 直接生成完整卡片：封面 + {body_ai_count} 张正文页；"
+                        f"图片 API 直接生成完整卡片：封面 + {body_ai_count} 张正文页 + 尾页；"
                         "无模板叠字、无背景图后期拼字"
                     )
                 else:
@@ -1613,10 +1742,15 @@ class RoundExecutor:
                                     "generation_mode": "ai_complete_card",
                                     "background_path": None,
                                     "body_pages": pages or None,
+                                    "visual_plan": visual_plan_data,
                                     "pages": [
-                                        {"page_index": index, "image_path": str(path),
-                                         "background_path": None,
-                                         "generation_mode": "ai_complete_card"}
+                                        {
+                                            "page_index": index,
+                                            "role": "cover" if index == 0 else "ending" if index == len(image_paths) - 1 else "body",
+                                            "image_path": str(path),
+                                            "background_path": None,
+                                            "generation_mode": "ai_complete_card",
+                                        }
                                         for index, path in enumerate(image_paths)
                                     ],
                                     "ocr": visual_ocr,
