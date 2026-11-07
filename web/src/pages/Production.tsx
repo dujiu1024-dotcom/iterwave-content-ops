@@ -1856,16 +1856,16 @@ export default function Production() {
                   <div className="panel-title" style={{ fontSize: 13, marginBottom: 10 }}>✎ 单篇草稿（{roundDetail.drafts?.length || 0}）</div>
                   <div className="table-wrap">
                     <table>
-                      <thead><tr><th>草稿 ID</th><th>平台</th><th>状态</th><th>操作</th></tr></thead>
+                      <thead><tr><th>序号</th><th>平台</th><th>状态</th><th>操作</th></tr></thead>
                       <tbody>
                         {roundDetail.drafts?.length === 0 && (
                           <tr><td colSpan={4}>
                             <EmptyHint className="" next="到「③ 生产线」点「▶ 运行本轮」生成内容并存草稿">该轮次暂无草稿</EmptyHint>
                           </td></tr>
                         )}
-                        {roundDetail.drafts?.map((d) => (
+                        {roundDetail.drafts?.map((d, index) => (
                           <tr key={d.id}>
-                            <td style={{ fontFamily: "monospace", fontSize: 11 }}>{d.id.slice(0, 16)}...</td>
+                            <td>{index + 1}</td>
                             <td>{PLATFORM_NAME[d.platform] ?? displayPlatformLabel(d.platform)}</td>
                             <td><span className={`tag ${STATUS_CLS[d.status] || "gray"}`}>{displayStatusLabel(d.status)}</span></td>
                             <td>

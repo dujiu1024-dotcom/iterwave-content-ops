@@ -1127,3 +1127,45 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
   .task-queue-status { justify-self: start; }
   .task-queue-actions .btn { white-space: normal; }
 }
+
+
+/* Settings navigation and access forms: keep controls usable without clipping on narrow screens. */
+.settings-tabs {
+  width: min(100%, 100%);
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  white-space: nowrap;
+  scrollbar-width: thin;
+}
+.settings-tabs .tab { flex: 0 0 auto; }
+.settings-access-fields > .field {
+  flex: 1 1 220px;
+  min-width: min(100%, 220px);
+  max-width: 100%;
+}
+.settings-webhook-row > .field {
+  flex: 1 1 180px;
+  min-width: min(100%, 180px);
+  max-width: 100%;
+}
+@media (max-width: 680px) {
+  .settings-tabs {
+    width: 100%;
+    align-self: stretch !important;
+  }
+  .settings-access-fields,
+  .settings-webhook-row {
+    align-items: stretch;
+  }
+  .settings-access-fields > .field,
+  .settings-webhook-row > .field {
+    flex-basis: 100%;
+    min-width: 0;
+    width: 100%;
+  }
+  .settings-access-fields > .btn,
+  .settings-webhook-row > .btn {
+    flex: 0 0 auto;
+  }
+}

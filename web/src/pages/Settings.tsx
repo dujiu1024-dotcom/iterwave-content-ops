@@ -242,7 +242,7 @@ export default function Settings() {
         </div>
       </div>
 
-      <div className="tabs" style={{ marginBottom: 16, alignSelf: "flex-start", display: "inline-flex" }}>
+      <div className="tabs settings-tabs" style={{ marginBottom: 16, alignSelf: "flex-start", display: "inline-flex" }}>
         {SETTINGS_TABS.map((t) => (
           <button key={t.k} type="button" className={`tab ${tab === t.k ? "active" : ""}`} onClick={() => setTab(t.k)}>{t.l}</button>
         ))}
@@ -765,7 +765,7 @@ function AccessNotifyPanel({ view, onSaved }: { view: SystemConfigView; onSaved:
               ? "已设置口令，接口需要登录后才能调用"
               : "首次设置仅允许本机直连；公网域名或反向代理部署需先在服务器配置 ITERWAVE_BOOTSTRAP_TOKEN，再在此输入引导口令。"}
           </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <div className="settings-access-fields" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <input
               className="field" type="password" placeholder="新口令（至少 8 位，混合大小写字母、数字和符号）"
               value={password} onChange={(e) => setPassword(e.target.value)}
@@ -797,7 +797,7 @@ function AccessNotifyPanel({ view, onSaved }: { view: SystemConfigView; onSaved:
             const value = channel === "wecom" ? wecom : feishu;
             const setValue = channel === "wecom" ? setWecom : setFeishu;
             return (
-              <div key={channel} style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+              <div key={channel} className="settings-webhook-row" style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
                 <input
                   className="field" style={{ flex: 1, minWidth: 160 }}
                   placeholder={channel === "wecom" ? "企微机器人 Webhook" : "飞书机器人 Webhook"}
