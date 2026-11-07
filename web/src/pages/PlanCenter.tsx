@@ -9,6 +9,7 @@ import OriginalAssetInventoryPanel from "../components/OriginalAssetInventoryPan
 import NorthStarResourcePanel from "../components/NorthStarResourcePanel";
 import SubgoalManager from "../components/SubgoalManager";
 import { businessCalendarDate, formatCalendarDate } from "../calendarDate.mjs";
+import StructuredDataView from "../components/StructuredDataView";
 
 type Tab = "master" | "platforms" | "stages" | "goals" | "production-line" | "assets" | "north-star";
 type StageStatus = "pending" | "active" | "completed" | "paused" | "cancelled";
@@ -701,14 +702,14 @@ export default function PlanCenter() {
         {aiGenerationError && <div className="note" role="alert" style={{ marginTop: 10, color: "var(--red)" }}>生成失败：{aiGenerationError}。当前编辑内容和已生效计划未被覆盖，可修复依据或配置后重试。</div>}
         {aiGeneration && <div className="plan-version-detail" style={{ marginTop: 14 }}>
           <div className="panel-head"><b>本次 AI 生成依据与待确认事项</b><span className="tag gray">仅草稿 · 待人工审核</span></div>
-          <div className="tiny">关联经营诊断：报告 v{aiGeneration.diagnosis_version_no}（记录 ID {aiGeneration.diagnosis_report_id}） · 账号组北极星 V{aiGeneration.north_star_version_no}（版本 ID {aiGeneration.north_star_version_id}） · 模型：{aiGeneration.model} · 生成时间：{aiGeneration.generated_at}</div>
+          <div className="tiny">经营诊断 v{aiGeneration.diagnosis_version_no} · 北极星 v{aiGeneration.north_star_version_no} · 模型：{aiGeneration.model} · 生成时间：{aiGeneration.generated_at}</div>
           <div className="tiny">资源基线：{String((aiGeneration.resource_baseline.summary as Record<string, number> | undefined)?.confirmed ?? 0)} 项已确认 / {String((aiGeneration.resource_baseline.summary as Record<string, number> | undefined)?.total ?? 0)} 项 · 版本指纹 {aiGeneration.strategy_fingerprint.slice(0, 12)}…</div>
           <div style={{ marginTop: 10 }}><b>制定摘要</b><p>{aiGeneration.summary}</p></div>
           <div className="grid two">
-            <div><b>业务资料与素材依据</b><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.resource_basis, null, 2)}</pre></div>
-            <div><b>风险提示</b><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.risks, null, 2)}</pre></div>
-            <div><b>前提与假设</b><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.assumptions, null, 2)}</pre></div>
-            <div><b>待用户确认</b><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.pending_confirmations, null, 2)}</pre></div>
+            <div><b>业务资料与素材依据</b><StructuredDataView data={aiGeneration.resource_basis} /></div>
+            <div><b>风险提示</b><StructuredDataView data={aiGeneration.risks} /></div>
+            <div><b>前提与假设</b><StructuredDataView data={aiGeneration.assumptions} /></div>
+            <div><b>待用户确认</b><StructuredDataView data={aiGeneration.pending_confirmations} /></div>
           </div>
         </div>}
       </div>
