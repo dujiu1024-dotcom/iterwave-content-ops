@@ -48,7 +48,7 @@ def _valid_generated_image(seed: str) -> bytes:
     from PIL import Image
 
     digest = sha256(seed.encode("utf-8")).digest()
-    image = Image.new("RGB", (320, 480), tuple(digest[:3]))
+    image = Image.new("RGB", (1024, 1536), tuple(digest[:3]))
     buffer = BytesIO()
     image.save(buffer, format="PNG")
     return buffer.getvalue()
@@ -57,7 +57,7 @@ def _valid_generated_image(seed: str) -> bytes:
 def test_ai_card_generation_calls_image_api_for_cover_and_every_body_page(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(cards, "generate_image_bytes", lambda prompt, **kwargs: (
-        calls.append(prompt) or (_valid_generated_image(prompt), "image/png", ".png", 320, 480)
+        calls.append(prompt) or (_valid_generated_image(prompt), "image/png", ".png", 1024, 1536)
     ))
     monkeypatch.setattr(
         "src.core.visual_ocr.validate_rendered_pages",
@@ -97,7 +97,7 @@ def test_ai_card_generation_fails_closed_when_ocr_does_not_pass(monkeypatch, tmp
 def test_ai_card_generation_fails_closed_when_ocr_becomes_unavailable(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(cards, "generate_image_bytes", lambda prompt, **kwargs: (
-        calls.append(prompt) or (_valid_generated_image(prompt), "image/png", ".png", 320, 480)
+        calls.append(prompt) or (_valid_generated_image(prompt), "image/png", ".png", 1024, 1536)
     ))
     monkeypatch.setattr(
         "src.core.visual_ocr.validate_rendered_pages",
@@ -130,7 +130,7 @@ def test_ai_card_generation_reuses_compatible_validated_pages(monkeypatch, tmp_p
     image_bytes = image_buffer.getvalue()
     calls = []
     monkeypatch.setattr(cards, "generate_image_bytes", lambda prompt, **kwargs: (
-        calls.append(prompt) or (_valid_generated_image(prompt), "image/png", ".png", 320, 480)
+        calls.append(prompt) or (_valid_generated_image(prompt), "image/png", ".png", 1024, 1536)
     ))
     monkeypatch.setattr(
         "src.core.visual_ocr.validate_rendered_pages",
@@ -192,7 +192,7 @@ def test_ai_card_generation_regenerates_corrupt_cached_page(monkeypatch, tmp_pat
     image_bytes = image_buffer.getvalue()
     calls = []
     monkeypatch.setattr(cards, "generate_image_bytes", lambda prompt, **kwargs: (
-        calls.append(prompt) or (_valid_generated_image(prompt), "image/png", ".png", 320, 480)
+        calls.append(prompt) or (_valid_generated_image(prompt), "image/png", ".png", 1024, 1536)
     ))
     monkeypatch.setattr(
         "src.core.visual_ocr.validate_rendered_pages",
@@ -222,7 +222,7 @@ def test_ai_card_generation_reuses_completed_pages_on_retry(monkeypatch, tmp_pat
     image_bytes = image_buffer.getvalue()
     calls = []
     monkeypatch.setattr(cards, "generate_image_bytes", lambda prompt, **kwargs: (
-        calls.append(prompt) or (image_bytes, "image/png", ".png", 1024, 1536)
+        calls.append(prompt) or (_valid_generated_image(prompt), "image/png", ".png", 1024, 1536)
     ))
     monkeypatch.setattr(
         "src.core.visual_ocr.validate_rendered_pages",
@@ -320,7 +320,7 @@ def test_visual_plan_generates_cover_body_ending_with_verified_reference_bytes(m
     )
     calls = []
     monkeypatch.setattr(cards, "generate_image_bytes", lambda prompt, **kwargs: (
-        calls.append((prompt, kwargs)) or (_valid_generated_image(prompt), "image/png", ".png", 320, 480)
+        calls.append((prompt, kwargs)) or (_valid_generated_image(prompt), "image/png", ".png", 1024, 1536)
     ))
     monkeypatch.setattr(
         "src.core.visual_ocr.validate_rendered_pages",
