@@ -35,7 +35,7 @@ const SCHEDULER_JOB_LABEL: Record<string, string> = {
   _job_autogrow_next_round: "自动闭环检查",
 };
 
-function aggregateLabel(task: GlobalTaskQueueItem) {
+function aggregateLabel(task: { aggregate_label: string }) {
   return task.aggregate_label || "—";
 }
 

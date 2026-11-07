@@ -5505,7 +5505,7 @@ def test_global_task_detail_sanitizes_step_and_task_errors(client, tmp_path, mon
     assert payload["error_message"] == "任务执行失败，请核对平台状态后再决定是否恢复。"
     assert payload["error_code"] == "任务异常"
     assert payload["execution_log"][0]["detail"] == "步骤已记录；详细诊断请联系管理员。"
-    assert payload["progress"]["detail"] == "步骤已记录；详细诊断请联系管理员。"
+    assert payload["progress"]["detail"] == "任务正在执行。"
     assert payload["progress"]["steps"][0]["detail"] == "步骤已记录；详细诊断请联系管理员。"
     assert payload["progress"]["percent"] == 50
     assert "/home/ubuntu" not in response.text
@@ -5543,7 +5543,7 @@ def test_global_task_queue_list_sanitizes_task_errors_and_keeps_list_working(cli
     item = next(row for row in response.json()["items"] if row["task_id"] == task.task_id)
     assert item["error_code"] == "任务异常"
     assert item["error_message"] == "任务执行失败，请进入任务详情核对。"
-    assert item["progress"]["detail"] == "步骤已记录；详细诊断请联系管理员。"
+    assert item["progress"]["detail"] == "任务正在执行。"
     assert item["progress"]["steps"][0]["detail"] == "步骤已记录；详细诊断请联系管理员。"
     assert "/home/ubuntu" not in response.text
     assert "sqlite3.OperationalError" not in response.text

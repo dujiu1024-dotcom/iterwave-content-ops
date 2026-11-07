@@ -300,11 +300,11 @@ def _safe_operator_note(value):
         return None
     raw = redact(str(value)).strip()
     raw = re.sub(
-        r"(?<![A-Za-z0-9:])/(?:home|root|tmp|var|opt|srv|app|Users|workspace|usr|etc|mnt)/[^\\s\"']+",
+        r"(?<![A-Za-z0-9:])/(?:home|root|tmp|var|opt|srv|app|Users|workspace|usr|etc|mnt)/[^\s\"']+",
         "服务器内部路径",
         raw,
     )
-    raw = re.sub(r"[A-Za-z]:\\\\[^\\s\"']+", "本地内部路径", raw)
+    raw = re.sub(r"[A-Za-z]:\\[^\s\"']+", "本地内部路径", raw)
     return raw[:500] or None
 
 
