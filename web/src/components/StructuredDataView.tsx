@@ -35,6 +35,18 @@ function labelFor(key: string): string {
 }
 
 function sanitizeDiagnosticValue(value: unknown): unknown {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        const parsed: unknown = JSON.parse(trimmed);
+        if (parsed && typeof parsed === "object") return sanitizeDiagnosticValue(parsed);
+      } catch {
+        // Keep non-JSON diagnostic text unchanged.
+      }
+    }
+    return value;
+  }
   if (Array.isArray(value)) return value.map(sanitizeDiagnosticValue);
   if (!value || typeof value !== "object") return value;
   return Object.fromEntries(
