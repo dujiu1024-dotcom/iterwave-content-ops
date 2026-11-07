@@ -421,3 +421,90 @@ def test_dashboard_layout_has_no_horizontal_overflow_at_supported_viewports():
             browser.close()
     finally:
         _stop_vite(server)
+
+ 
+def test_primary_pages_error_state_layout_has_no_overflow_at_supported_viewports():
+    """Exercise responsive layouts for primary pages while their APIs are unavailable."""
+    server, port = _serve_vite()
+    screenshot_dir = ROOT / "artifacts" / "ui-viewport"
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    page_routes = (
+        "global-ops", "plan-center", "review", "task-queue",
+        "calendar", "analytics", "agent",
+    )
+
+    def handler(route):
+        path = urlparse(route.request.url).path
+        if path == "/api/auth/status":
+            payload = {"configured": True, "authenticated": True, "needs_login": False}
+            return route.fulfill(status=200, content_type="application/json",
+                                 body=json.dumps(payload, ensure_ascii=False))
+        if path == "/api/tenants":
+            payload = {
+                "runtime_tenant_id": "default", "selected_tenant_id": "default",
+                "restart_required": False,
+                "items": [{"id": "default", "name": "默认账号组",
+                           "created_at": None, "is_active": True}],
+            }
+            return route.fulfill(status=200, content_type="application/json",
+                                 body=json.dumps(payload, ensure_ascii=False))
+        if path == "/api/status":
+            payload = {
+                "enabled_platforms": ["xhs"], "platforms_without_login": [],
+                "logged_in_platforms": ["xhs"], "circuit_broken_platforms": [],
+                "active_rounds": 0,
+            }
+            return route.fulfill(status=200, content_type="application/json",
+                                 body=json.dumps(payload, ensure_ascii=False))
+        return route.fulfill(
+            status=503, content_type="application/json",
+            body=json.dumps({"detail": "测试环境模拟服务暂不可用"}, ensure_ascii=False),
+        )
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            for page_name in page_routes:
+                page = browser.new_page(
+                    viewport={"width": 1440, "height": 1000}, device_scale_factor=1
+                )
+                page_errors = []
+                page.on("pageerror", lambda error: page_errors.append(str(error)))
+                page.route("**/api/**", handler)
+                page.goto("http://127.0.0.1:{}/?page={}".format(port, page_name))
+                page.locator("#main-content").wait_for(timeout=15000)
+                page.wait_for_timeout(350)
+
+                for width in (1440, 1024, 768, 390):
+                    page.set_viewport_size({"width": width, "height": 1000})
+                    page.wait_for_timeout(100)
+                    metrics = page.evaluate("""() => ({
+                        viewport: document.documentElement.clientWidth,
+                        document: document.documentElement.scrollWidth,
+                        body: document.body.scrollWidth,
+                        main: document.querySelector('#main-content')?.scrollWidth ?? 0,
+                        mainClient: document.querySelector('#main-content')?.clientWidth ?? 0,
+                        topbar: document.querySelector('.topbar')?.scrollWidth ?? 0,
+                        topbarClient: document.querySelector('.topbar')?.clientWidth ?? 0
+                    })""")
+                    assert metrics["document"] <= metrics["viewport"] + 1, (
+                        "{} document overflow at {}px: {}".format(page_name, width, metrics)
+                    )
+                    assert metrics["body"] <= metrics["viewport"] + 1, (
+                        "{} body overflow at {}px: {}".format(page_name, width, metrics)
+                    )
+                    assert metrics["main"] <= metrics["mainClient"] + 1, (
+                        "{} content overflow at {}px: {}".format(page_name, width, metrics)
+                    )
+                    assert metrics["topbar"] <= metrics["topbarClient"] + 1, (
+                        "{} topbar overflow at {}px: {}".format(page_name, width, metrics)
+                    )
+                    page.screenshot(
+                        path=str(screenshot_dir / "{}-error-{}.png".format(page_name, width)),
+                        full_page=True,
+                    )
+                assert not page_errors, "{} raised browser errors: {}".format(page_name, page_errors)
+                page.close()
+            browser.close()
+    finally:
+        _stop_vite(server)
