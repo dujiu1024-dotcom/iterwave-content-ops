@@ -1592,9 +1592,7 @@ export interface AiCallRecord {
 
 export interface UserOverrideRecord {
   id: number;
-  round_id?: number | null;
   round_number?: number | null;
-  ai_call_id?: number | null;
   override_field: string | null;
   original_value: string | null;
   override_value: string | null;
