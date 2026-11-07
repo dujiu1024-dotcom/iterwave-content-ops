@@ -5489,8 +5489,11 @@ def test_global_task_detail_sanitizes_step_and_task_errors(client, tmp_path, mon
             "result_json=?, progress_json=? WHERE task_id=?",
             ("sqlite3.OperationalError", internal,
              json.dumps({"steps": [{"step": "写入数据库", "status": "failed", "detail": internal}]}, ensure_ascii=False),
-             json.dumps({"steps": [{"id": "write", "label": "写入数据库", "status": "failed", "detail": internal}], "
-                            "current_step": "write", "current_label": "写入数据库", "detail": internal, "percent": 50}),
+             json.dumps({
+                "steps": [{"id": "write", "label": "写入数据库", "status": "failed", "detail": internal}],
+                "current_step": "write", "current_label": "写入数据库",
+                "detail": internal, "percent": 50,
+            }),
              task.task_id),
         )
     finally:
