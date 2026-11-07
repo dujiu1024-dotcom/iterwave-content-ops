@@ -600,9 +600,7 @@ export default function Settings() {
                       <div className="task-main">
                         <div className="task-title">{name} · {count} 条</div>
                         <div className="task-desc">
-                          {(health.governance.data_violation_examples[name] ?? []).map((item) =>
-                            String(item.record_id ?? item.draft_id ?? item.content_id ?? "记录")
-                          ).join("、") || "暂无样例 ID"}
+                          已采集 {(health.governance.data_violation_examples[name] ?? []).length} 条问题样例；记录标识保留在受控审计明细中。
                         </div>
                         <div className="task-desc" style={{ marginTop: 4 }}>
                           修复路径：{AUDIT_REMEDIATION_GUIDANCE[name] ?? "先导出完整违规明细，核对来源记录、租户归属及版本历史后人工制定修复方案。"}
