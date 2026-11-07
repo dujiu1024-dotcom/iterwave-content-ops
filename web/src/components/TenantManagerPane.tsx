@@ -113,12 +113,11 @@ export default function TenantManagerPane() {
         {loading && !data ? <div className="empty-state">正在加载账号组…</div> : (
           <div className="table-wrap">
             <table>
-              <thead><tr><th>账号组名称</th><th>标识</th><th>创建时间</th><th>状态</th><th>操作</th></tr></thead>
+              <thead><tr><th>账号组名称</th><th>创建时间</th><th>状态</th><th>操作</th></tr></thead>
               <tbody>
                 {(data?.items ?? []).map((item) => (
                   <tr key={item.id}>
                     <td>{item.name}</td>
-                    <td>{item.id === "default" ? "默认账号组" : <code>{item.id}</code>}</td>
                     <td>{item.created_at ? new Date(item.created_at).toLocaleString("zh-CN") : "—"}</td>
                     <td>
                       {item.id === data?.runtime_tenant_id
