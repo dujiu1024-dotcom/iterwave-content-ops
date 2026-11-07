@@ -796,6 +796,8 @@ class Database:
                 "idx_round_open_sub_plan_stage",
                 "idx_sub_goals_version_tree", "idx_sub_goals_stage_status",
                 "idx_sub_goal_dependencies_predecessor", "idx_sub_goal_evidence_goal",
+                # Production task asset consumption evidence (169).
+                "idx_production_task_asset_usage_generation_event",
             }
             existing_indexes = {
                 row[0] for row in conn.execute(
@@ -964,6 +966,7 @@ class Database:
                 ("production_task_attempts", ("task_id", "attempt_no")),
                 ("production_lines", ("sub_plan_id",)),
                 ("production_line_versions", ("production_line_id", "version_no")),
+                ("production_task_asset_usages", ("generation_event_id",)),
             }
             actual_unique_constraints = set()
             for table_name in existing:
@@ -1065,6 +1068,12 @@ class Database:
                     "status": "TEXT", "worker_id": "TEXT", "started_at": "TEXT",
                     "finished_at": "TEXT", "error_code": "TEXT",
                     "error_message": "TEXT", "output_content_id": "TEXT",
+                },
+                "production_task_asset_usages": {
+                    "provider": "TEXT", "model": "TEXT",
+                    "source_sha256": "TEXT", "result_sha256": "TEXT",
+                    "generation_event_id": "TEXT", "consumed_at": "TEXT",
+                    "page_role": "TEXT", "page_index": "INTEGER",
                 },
                 "strategy_step_condition_reviews": {
                     "id": "INTEGER", "stage_id": "INTEGER", "condition_type": "TEXT",

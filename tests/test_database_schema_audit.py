@@ -102,3 +102,77 @@ def test_schema_audit_detects_orphaned_cross_table_relationships():
     assert violations["production_line_current_versions"] == 1
     assert violations["production_line_version_subplans"] == 1
     assert violations["production_line_version_base_identity"] == 1
+
+
+def test_schema_audit_detects_missing_migration_169_asset_usage_columns_and_index():
+    # verify_schema() owns and closes the connection it opens. Keep a separate
+    # anchor connection alive so fresh audit connections share this in-memory DB.
+    uri = "file:migration_169_schema_audit?mode=memory&cache=shared"
+    anchor = sqlite3.connect(uri, uri=True)
+    anchor.execute(
+        """
+        CREATE TABLE production_task_asset_usages (
+            id INTEGER PRIMARY KEY,
+            provider TEXT,
+            model TEXT,
+            source_sha256 TEXT,
+            result_sha256 TEXT,
+            generation_event_id TEXT,
+            consumed_at TEXT,
+            page_role TEXT
+        )
+        """
+    )
+
+    def connect_shared():
+        connection = sqlite3.connect(uri, uri=True)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    database = object.__new__(Database)
+    database.connect = connect_shared
+    database._discover_migrations = lambda: []
+    try:
+        report = database.verify_schema()
+        assert report["missing_columns"] == [
+            ("production_task_asset_usages", "page_index")
+        ]
+        assert "idx_production_task_asset_usage_generation_event" in report[
+            "missing_indexes"
+        ]
+        assert (
+            "production_task_asset_usages", ("generation_event_id",)
+        ) in report["missing_unique_constraints"]
+
+        anchor.execute(
+            "ALTER TABLE production_task_asset_usages ADD COLUMN page_index INTEGER"
+        )
+        anchor.execute(
+            """
+            CREATE UNIQUE INDEX idx_production_task_asset_usage_generation_event
+            ON production_task_asset_usages(generation_event_id)
+            WHERE generation_event_id IS NOT NULL
+            """
+        )
+        report = database.verify_schema()
+        assert not any(
+            table == "production_task_asset_usages"
+            for table, _column in report["missing_columns"]
+        )
+        assert "idx_production_task_asset_usage_generation_event" not in report[
+            "missing_indexes"
+        ]
+        assert (
+            "production_task_asset_usages", ("generation_event_id",)
+        ) not in report["missing_unique_constraints"]
+
+        anchor.execute("DROP INDEX idx_production_task_asset_usage_generation_event")
+        report = database.verify_schema()
+        assert "idx_production_task_asset_usage_generation_event" in report[
+            "missing_indexes"
+        ]
+        assert (
+            "production_task_asset_usages", ("generation_event_id",)
+        ) in report["missing_unique_constraints"]
+    finally:
+        anchor.close()
