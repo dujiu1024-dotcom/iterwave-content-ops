@@ -49,7 +49,7 @@ export default function Activation() {
           await loadRun(s.latest_sample_run.id);
         }
       } catch (e: any) {
-        setError(e?.message || "快速体验状态加载失败");
+        setError("快速体验状态加载失败，请稍后重试。");
       } finally {
         setLoading(false);
       }
@@ -62,7 +62,7 @@ export default function Activation() {
       api.activationSamples(runId).then((data) => {
         setRun(data);
         if (["ready", "failed", "rejected"].includes(data.run.status)) setBusy(false);
-      }).catch((e) => setError(e.message));
+      }).catch(() => setError("体验任务状态读取失败，请稍后重试。"));
     }, 1400);
     return () => window.clearInterval(timer);
   }, [runId, run?.run.status]);
@@ -90,7 +90,7 @@ export default function Activation() {
       await loadSaved();
       if (result.status === "failed") setBusy(false);
     } catch (e: any) {
-      setError(e?.message || "创建体验任务失败");
+      setError("创建体验任务失败，请检查填写内容后重试。");
       setBusy(false);
     }
   };
@@ -130,7 +130,7 @@ export default function Activation() {
       await loadSaved();
       setToast("已保存到体验草稿区，可在下方「已保存样稿」中找回");
     } catch (e: any) {
-      setError(e.message || "保存失败");
+      setError("体验设置保存失败，请检查填写内容后重试。");
     }
   };
 
@@ -148,7 +148,7 @@ export default function Activation() {
       window.history.pushState({}, "", url.toString());
       window.dispatchEvent(new PopStateEvent("popstate"));
     } catch (e: any) {
-      const message = String(e?.message ?? "");
+      const message = "";
       if (message.includes("母计划") || message.includes("子计划阶段")) {
         setError("当前账号组已启用生效母计划：请先在「计划中心 → 子计划阶段」创建本阶段生产轮次，再导入体验样稿");
       } else {
@@ -170,7 +170,7 @@ export default function Activation() {
       setToast("本次体验记录已删除");
       setStatus(await api.activationStatus());
     } catch (e: any) {
-      setError(e?.message || "删除体验记录失败");
+      setError("删除体验记录失败，请稍后重试。");
     } finally {
       setDeleting(false);
     }
@@ -183,7 +183,7 @@ export default function Activation() {
       await loadRun(runId);
       setToast("反馈已记录，将用于改进体验");
     } catch (e: any) {
-      setError(e.message || "提交反馈失败");
+      setError("提交体验反馈失败，请稍后重试。");
     }
   };
 

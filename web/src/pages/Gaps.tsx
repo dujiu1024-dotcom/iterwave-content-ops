@@ -48,7 +48,7 @@ export default function Gaps() {
       setAnalysis(await api.gaps(rid ? Number(rid) : undefined));
       setSelected(new Set());
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError("缺口分析加载失败，请稍后重试。");
     } finally {
       setLoading(false);
     }
@@ -58,7 +58,7 @@ export default function Gaps() {
   useEffect(() => {
     api.roundsPage(1, 100)
       .then((page) => setRounds(page.items))
-      .catch((e) => setRoundsError(e instanceof Error ? e.message : String(e)));
+      .catch(() => setRoundsError("轮次列表加载失败，请稍后重试。"));
   }, []);
 
   const changeRound = (rid: string) => {
@@ -79,7 +79,7 @@ export default function Gaps() {
       showToast(msg, "success");
       await load();
     } catch (e) {
-      const msg = `采纳失败：${e instanceof Error ? e.message : String(e)}`;
+      const msg = "缺口采纳失败，请检查计划状态后重试。";
       setAdoptMsg(msg);
       showToast(msg, "error");
     } finally {
