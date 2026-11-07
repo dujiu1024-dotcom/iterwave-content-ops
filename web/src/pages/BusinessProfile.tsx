@@ -75,7 +75,7 @@ export default function BusinessProfilePage() {
     try {
       await api.saveBusinessItem(tab, { name, details: parsed, field_evidence: editingEvidence }, editing ?? undefined);
       resetEditor(); await load(); showToast("业务资料已保存", "success");
-    } catch (e) { showToast("保存失败：" + (e instanceof Error ? e.message : String(e)), "error"); }
+    } catch { showToast("业务资料保存失败，请检查填写内容后重试", "error"); }
     finally { setBusy(false); }
   };
   const archiveItem = async (id: string) => {
