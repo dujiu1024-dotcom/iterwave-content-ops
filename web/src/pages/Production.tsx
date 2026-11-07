@@ -1113,7 +1113,7 @@ export default function Production() {
                           <div className="task-main">
                             <div className="task-title">{c.title}</div>
                             <div className="task-desc">
-                              {c.topic_id ?? "—"} · {c.word_count ?? "—"} 字 · 卡片 {c.image_count} 张
+                              {c.topic_id ? "已关联选题" : "未关联选题"} · {c.word_count ?? "—"} 字 · 卡片 {c.image_count} 张
                               {c.draft_status && <> · 草稿 <span className={`tag ${STATUS_CLS[c.draft_status] ?? "gray"}`}>{c.draft_status}</span></>}
                             </div>
                           </div>
@@ -1481,7 +1481,7 @@ export default function Production() {
             {selectedContent && (
               <>
                 <div className="note" style={{ marginBottom: 8 }}>
-                  {PLATFORM_NAME[selectedContent.platform]} · {selectedContent.topic_id ?? "—"} · 卡片 {selectedContent.image_count} 张
+                  {PLATFORM_NAME[selectedContent.platform]} · {selectedContent.topic_id ? "已关联选题" : "未关联选题"} · 卡片 {selectedContent.image_count} 张
                   {selectedContent.draft_error && (
                     <span style={{ color: "var(--orange)" }}> · {selectedContent.draft_error}</span>
                   )}
