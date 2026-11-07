@@ -27,7 +27,7 @@ export function formatBusinessDateTime(value) {
 export function formatBusinessRelativeDateTime(value, now = new Date()) {
   if (!value) return "—";
   const raw = String(value).trim();
-  const naive = /^(\\d{4})-(\\d{2})-(\\d{2})[ T](\\d{2}):(\\d{2})(?::\\d{2}(?:\\.\\d+)?)?$/.exec(raw);
+  const naive = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::\d{2}(?:\\.\d+)?)?$/.exec(raw);
   let dateParts;
   if (naive) {
     dateParts = { year: naive[1], month: naive[2], day: naive[3], hour: naive[4], minute: naive[5] };
