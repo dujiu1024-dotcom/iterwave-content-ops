@@ -743,7 +743,7 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 .global-operations-page .table-wrap table { min-width: 1040px; }
 .global-scheduler-cell { display: grid; justify-items: start; gap: 4px; }
 @media (max-width: 760px) {
-  .global-operations-page .grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .global-operations-page .grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
   .global-operations-page .grid.two { grid-template-columns: 1fr; }
 }
 
