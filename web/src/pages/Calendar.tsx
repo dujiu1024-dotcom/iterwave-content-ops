@@ -469,7 +469,7 @@ export default function Calendar() {
             <div className="calendar-plan-detail-grid">
               <div><strong>生产轮次（{planDetail.rounds.length}）</strong>
                 {planDetail.rounds.length ? planDetail.rounds.map((round) => <div className="calendar-plan-detail-row" key={round.round_id}>
-                  {round.round_number != null ? `第 ${round.round_number} 轮` : "轮次信息不可用"} · {round.task_id ? `任务 ${round.task_id.slice(0, 8)}` : "尚未入队"}
+                  {round.round_number != null ? `第 ${round.round_number} 轮` : "轮次信息不可用"} · {round.task_id ? "已入队" : "尚未入队"}
                   {round.attribution_status === "attributed" && round.strategy_step_id ? ` · 策略步骤 ${round.strategy_step_id}` : " · 历史归属待核实"}
                   {round.production_line_version_id ? ` · 生产线版本 v${round.production_line_version_id}` : ""}
                 </div>) : <div className="note">尚未关联生产轮次</div>}

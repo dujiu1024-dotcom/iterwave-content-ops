@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import StructuredDataView from "./StructuredDataView";
 import { api, VisualBrandProfile, VisualCatalog, VisualVersionHistory } from "../api";
 import { useApp } from "../AppContext";
 import { displayStatusLabel, displayPlatformLabel } from "../displayLabels";
@@ -214,9 +215,7 @@ export default function VisualBrandPane() {
               <div className="panel-sub">源版本 v{String(item.source_version_id ?? "—")} → 新版本 v{String(item.output_version_id ?? "未生成")} · {String(item.created_at || "")}</div>
               <details style={{ marginTop: 6 }}>
                 <summary className="panel-sub" style={{ cursor: "pointer" }}>查看最终提示词与视觉基准</summary>
-                <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 11, maxHeight: 260, overflow: "auto" }}>
-                  {JSON.stringify({ final_prompts: item.final_prompts, style_baseline: item.style_baseline, reference_images: item.reference_images }, null, 2)}
-                </pre>
+                <StructuredDataView data={{ final_prompts: item.final_prompts, style_baseline: item.style_baseline, reference_images: item.reference_images }} title="品牌视觉配置"/>
               </details>
               {Boolean(item.error_message) && <div className="panel-sub" style={{ color: "var(--red)" }}>失败原因：{String(item.error_message)}</div>}
             </div>
