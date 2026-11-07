@@ -26,8 +26,8 @@ const warningText = (value: string) => ({
 const entityTypeLabel: Record<string, string> = { business: "企业业务", product: "产品", service: "服务", customer_case: "客户案例", content_topic: "内容主题", platform: "平台", plan: "计划" };
 const relationTypeLabel: Record<string, string> = { related: "关联", source: "来源", supports: "支持", derived_from: "派生自" };
 function askQualityChoice(title: string, choices: Array<[string, string]>, fallback: string): string | null {
-  const options = choices.map(([value, label], index) => `${index + 1}. ${label}`).join("\\n");
-  const answer = window.prompt(`${title}\\n${options}\\n请输入序号`, String(Math.max(0, choices.findIndex(([value]) => value === fallback)) + 1));
+  const options = choices.map(([value, label], index) => `${index + 1}. ${label}`).join("\n");
+  const answer = window.prompt(`${title}\n${options}\n请输入序号`, String(Math.max(0, choices.findIndex(([value]) => value === fallback)) + 1));
   if (answer === null) return null;
   const index = Number(answer.trim()) - 1;
   return Number.isInteger(index) && index >= 0 && index < choices.length ? choices[index][0] : null;

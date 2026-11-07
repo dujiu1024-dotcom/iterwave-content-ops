@@ -667,7 +667,7 @@ export default function PlanCenter() {
       if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") throw new Error("证据必须是 JSON 对象");
       evidence = parsed as Record<string, unknown>;
     } catch {
-      setConditionReviewError("证据格式错误：请输入有效的 JSON 对象，例如 {\\"指标\\": 12}。");
+      setConditionReviewError("证据格式错误：请输入有效的 JSON 对象（例如包含一个字段和值的对象）。");
       return;
     }
     if (!conditionReview.reason.trim() && Object.keys(evidence).length === 0) {
