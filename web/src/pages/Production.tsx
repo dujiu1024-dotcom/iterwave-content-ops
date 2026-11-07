@@ -201,7 +201,7 @@ export default function Production() {
       }
     } catch (e: any) {
       // G-12：首屏加载失败必须可见 + 可重试，不能只弹一个 toast
-      setLoadError(e?.message ?? "加载轮次失败");
+      setLoadError("生产轮次加载失败，请稍后刷新重试。");
     }
   };
 
@@ -842,7 +842,7 @@ export default function Production() {
                           showToast(result.message, "success");
                           await refresh();
                         } catch (e: any) {
-                          showToast(e?.message || "平台状态确认失败", "error");
+                          showToast("平台状态确认失败，请检查核实依据后重试", "error");
                         }
                       });
                     }}
@@ -864,7 +864,7 @@ export default function Production() {
                           showToast("孤儿草稿已重新关联，原内容 ID、操作人和核实说明已留审计记录", "success");
                           await refresh();
                         } catch (e: any) {
-                          showToast(e?.message || "孤儿草稿恢复失败", "error");
+                          showToast("孤儿草稿恢复失败，请核对关联内容后重试", "error");
                         }
                       });
                     }}

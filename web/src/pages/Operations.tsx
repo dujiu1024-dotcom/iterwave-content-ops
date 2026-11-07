@@ -259,7 +259,7 @@ export default function Operations() {
           try {
             await withPending(`cb:reset:${p}`, () => api.resetCb(p));
             showToast(`⚙ 已重置 ${p}`);
-          } catch (e: any) { showToast(e.message, "error"); }
+          } catch { showToast("平台熔断器操作失败，请刷新状态后重试", "error"); }
           await refresh();
         }} />
       )}
@@ -440,7 +440,7 @@ function LogsPane({ logs, total, page, pages, onPageChange, onResolved, targetId
       showToast(result.already_resolved ? "该日志已核实" : "运营日志已核实并记录审计", "success");
       onResolved?.();
     } catch (error) {
-      setResolveError(error instanceof Error ? error.message : String(error));
+      setResolveError("日志核实失败，请刷新记录后重试。");
     } finally {
       setBusyId(null);
     }
@@ -526,7 +526,7 @@ function PublishPane() {
       setPage(1);
       setError(null);
     } catch (e: any) {
-      setError(e?.message ?? "加载草稿失败");
+      setError("发布草稿加载失败，请稍后重试。");
     }
   };
 
@@ -561,8 +561,8 @@ function PublishPane() {
         await fetchDrafts();
       }
     } catch (e: any) {
-      setError(e?.message ?? "确认发布失败");
-      showToast(`确认失败: ${e?.message ?? "未知错误"}`, "error");
+      setError("发布确认失败，请检查草稿状态后重试。");
+      showToast("发布确认失败，请检查草稿状态后重试", "error");
     } finally {
       setPending(null);
     }
@@ -588,8 +588,8 @@ function PublishPane() {
         await fetchDrafts();
       }
     } catch (e: any) {
-      setError(e?.message ?? "确认平台版本同步失败");
-      showToast(`确认平台版本同步失败：${e?.message ?? "未知错误"}`, "error");
+      setError("平台版本同步确认失败，请稍后重试。");
+      showToast("平台版本同步确认失败，请稍后重试", "error");
     } finally {
       setPending(null);
     }
@@ -1154,7 +1154,7 @@ function RhythmPane({ rhythm, onSaved }: { rhythm: RhythmConfig | null; onSaved?
       showToast(`✓ 已保存 ${Object.keys(updates).length} 项节奏配置`, "success");
       onSaved?.();
     } catch (e: any) {
-      showToast(`保存失败: ${e?.message ?? e}`, "error");
+      showToast("运营节奏配置保存失败，请检查配置后重试", "error");
     } finally {
       setBusy(false);
     }
@@ -1263,7 +1263,7 @@ function NotificationsPane({ items, rules, total, page, pages, onPageChange, onC
       showToast("✓ 通知规则已新增", "success");
       onChanged?.();
     } catch (e: any) {
-      showToast(`新增失败: ${e?.message ?? e}`, "error");
+      showToast("通知规则新增失败，请检查配置后重试", "error");
     } finally { setBusy(false); }
   };
 
@@ -1273,7 +1273,7 @@ function NotificationsPane({ items, rules, total, page, pages, onPageChange, onC
         scenario: r.scenario, channel: r.channel, level: r.level, enabled: !r.enabled,
       });
       onChanged?.();
-    } catch (e: any) { showToast(`更新失败: ${e?.message ?? e}`, "error"); }
+    } catch { showToast("通知规则更新失败，请刷新后重试", "error"); }
   };
 
   const changeLevel = async (r: NotifyRule, next: string) => {
@@ -1290,7 +1290,7 @@ function NotificationsPane({ items, rules, total, page, pages, onPageChange, onC
       await api.deleteNotifyRule(r.id);
       showToast("已删除规则", "success");
       onChanged?.();
-    } catch (e: any) { showToast(`删除失败: ${e?.message ?? e}`, "error"); }
+    } catch { showToast("通知规则删除失败，请刷新后重试", "error"); }
   };
 
   return (

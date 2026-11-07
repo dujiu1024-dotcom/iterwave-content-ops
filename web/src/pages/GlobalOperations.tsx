@@ -281,7 +281,7 @@ export default function GlobalOperations() {
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span className="tag">{unreadNotificationCount ?? "—"} 条未读</span>
             <button className="btn sm" disabled={!unreadNotificationCount || loading} onClick={() => {
-              void api.markAllNotificationsRead().then(() => refresh()).catch((e) => setError(e instanceof Error ? e.message : String(e)));
+              void api.markAllNotificationsRead().then(() => refresh()).catch(() => setError("通知状态更新失败，请稍后重试。"));
             }}>全部标记已读</button>
           </div>
         </div>

@@ -267,9 +267,8 @@ export default function PlanCenter() {
       setSaved(true);
       showToast(`AI 已生成母计划草稿 v${result.draft.version_no}，尚未生效`, "success");
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      setAiGenerationError(message);
-      showToast("AI 母计划生成失败：" + message, "error");
+      setAiGenerationError("AI 母计划生成失败，请检查业务资料完整性后重试。");
+      showToast("AI 母计划生成失败，请检查业务资料完整性后重试", "error");
     } finally {
       setAiGenerating(false);
     }
@@ -329,7 +328,7 @@ export default function PlanCenter() {
           });
           showToast(partial ? "母计划已生效，子计划 rebase 部分成功" : `母计划已生效，已将 ${rebased.drafts.length} 个旧子计划 rebase 为新草稿`, partial ? "error" : "success");
         } catch (rebaseError) {
-          const errorMessage = rebaseError instanceof Error ? rebaseError.message : String(rebaseError);
+          const errorMessage = "子计划 rebase 未能完成，请查看子计划状态后重试。";
           let observed: Awaited<ReturnType<typeof inspectRebaseDrafts>> | null = null;
           try { observed = await inspectRebaseDrafts(reviewedVersionId); } catch { observed = null; }
           if (observed && observed.drafts.length > 0) {
@@ -434,7 +433,7 @@ export default function PlanCenter() {
       showToast(partial ? "子计划 rebase 部分成功" : `已生成 ${result.drafts.length} 个子计划 rebase 草稿，需逐项审核`, partial ? "error" : "success");
       await load();
     } catch (e) {
-      const errorMessage = e instanceof Error ? e.message : String(e);
+      const errorMessage = "子计划 rebase 未能完成，请查看子计划状态后重试。";
       let observed: Awaited<ReturnType<typeof inspectRebaseDrafts>> | null = null;
       try { observed = await inspectRebaseDrafts(masterVersionId); } catch { observed = null; }
       if (observed && observed.drafts.length > 0) {
@@ -510,8 +509,7 @@ export default function PlanCenter() {
         await api.aiDraftProductionLine(item.id);
         showToast("子计划已生效，AI 已自动生成生产线草稿；请检查并确认后才能开轮", "success");
       } catch (lineError) {
-        showToast("子计划已生效，但 AI 生产线生成失败；可在生产线管理中重试或手工配置：" +
-          (lineError instanceof Error ? lineError.message : String(lineError)), "error");
+        showToast("子计划已生效，但 AI 生产线生成失败；可在生产线管理中重试或手工配置。", "error");
       }
       await load(item.id);
     } catch (e) { showToast("审核失败：" + "请稍后重试", "error"); }
