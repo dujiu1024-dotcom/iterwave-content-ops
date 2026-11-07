@@ -1224,10 +1224,15 @@ class RoundExecutor:
                         tenant_paths = registry.paths(str(tenant_id), create=False)
                         role_selections = {}
                         rejected_by_role = {}
+                        used_reference_hashes: set[str] = set()
                         for usage_role in ("cover", "body", "ending"):
+                            role_candidates = [
+                                item for item in image_candidates
+                                if str(item.get("sha256") or "").lower() not in used_reference_hashes
+                            ]
                             selected = await asyncio.to_thread(
                                 select_visual_assets,
-                                candidates=image_candidates,
+                                candidates=role_candidates,
                                 media_dir=tenant_paths.media_dir,
                                 topic=topic.title,
                                 body=topic.summary,
@@ -1246,6 +1251,7 @@ class RoundExecutor:
                             rejected_by_role[usage_role] = selected["rejected"]
                             if role_items:
                                 item = role_items[0]
+                                used_reference_hashes.add(str(item["sha256"]).lower())
                                 visual_reference_assets[usage_role] = {
                                     "asset_id": item["asset_id"],
                                     "version_no": item["version_no"],
