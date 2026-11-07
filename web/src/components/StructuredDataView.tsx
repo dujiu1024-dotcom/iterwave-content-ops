@@ -14,6 +14,7 @@ const LABELS: Record<string, string> = {
   field: "字段", message: "说明", code: "代码",
 };
 const HIDDEN_KEYS = /(^|_)(id|ids|tenant|worker|trace|request|execution|correlation|fingerprint|signature|raw|payload)(_|$)/i;
+const TECHNICAL_KEYS = /(^|_)(id|ids|tenant|worker|trace|request|execution|correlation|fingerprint|signature|raw|payload|error_code|stack|debug)(_|$)/i;
 
 function labelFor(key: string): string {
   return LABELS[key] ?? key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
