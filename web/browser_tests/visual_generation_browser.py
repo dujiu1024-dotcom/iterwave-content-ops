@@ -805,6 +805,9 @@ def test_global_operations_realistic_data_layout_has_no_overflow_at_supported_vi
             page.locator("#main-content").wait_for(timeout=15000)
             page.get_by_role("heading", name="全局运营中心").wait_for(timeout=15000)
             page.get_by_text("主品牌运营账号组（长名称布局测试）", exact=False).first.wait_for(timeout=15000)
+            assert "brand-main" not in page.locator("body").inner_text()
+            assert "brand-test" not in page.locator("body").inner_text()
+            assert page.get_by_label("待办账号组筛选").locator("option").filter(has_text="区域测试账号组").count() == 1
             page.get_by_text("如何用真实案例建立客户信任：从问题识别到方案落地", exact=True).wait_for(timeout=15000)
             assert page.get_by_text("subplan-xhs", exact=True).count() == 0, "internal subplan identifier leaked into operations UI"
 
