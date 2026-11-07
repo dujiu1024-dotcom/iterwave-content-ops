@@ -94,7 +94,7 @@ export default function ContentProductionLinePanel() {
             <button className="btn sm" onClick={() => navigate("production", "pipeline", { type: "content", id: selected.content_id! })}>查看成品</button>
           </div>}
           {selected.task_status === "failed" && <>
-            <div className="note" role="alert" style={{ marginTop: 10 }}>{displayErrorLabel(selected.error_code ?? undefined)}：{selected.error_message || "未提供补充说明"}</div>
+            <div className="note" role="alert" style={{ marginTop: 10 }}>{displayErrorLabel(selected.error_code ?? undefined)}</div>
             <button className="btn primary" style={{ marginTop: 8 }} disabled={busy} onClick={() => void recover()}>{busy ? "提交中…" : "确认无外部副作用并恢复任务"}</button>
           </>}
         </div>
