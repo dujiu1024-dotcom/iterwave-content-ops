@@ -159,7 +159,7 @@ export default function GlobalOperations() {
             <table>
               <thead><tr><th>账号组</th><th>数据库</th><th>平台账号</th><th>平台登录</th><th>运行中</th><th>排队中</th><th>失败 / 中断</th><th>定时调度</th><th>活跃轮次</th><th>最近执行</th></tr></thead>
               <tbody>{(monitor.tenants ?? []).map((tenant) => {
-                const q = tenantCounts[tenant.tenant_id] ?? { queued: 0, running: 0, failed: 0 };
+                const q = tenantCounts[tenant.name] ?? { queued: 0, running: 0, failed: 0 };
                 return <tr key={tenant.tenant_id}>
                   <td><strong>{tenant.tenant_name}</strong></td>
                   <td><span className={tenant.db_status === "uninitialized" ? "tag gray" : tenant.db_available ? "tag green" : "tag red"}>{tenant.db_status === "uninitialized" ? "未初始化" : tenant.db_available ? "可读取" : "不可用"}</span></td>

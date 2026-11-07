@@ -5054,6 +5054,25 @@ def _register_routes(app: FastAPI) -> None:
             if scope == "active":
                 active_stats = _task_queue.status_counts(scope="active")
                 response["status_counts"] = active_stats["by_status"]
+                tenant_stats = active_stats["by_tenant"]
+            elif scope == "failed":
+                tenant_stats = _task_queue.status_counts(scope="failed")["by_tenant"]
+            else:
+                tenant_stats = {}
+            public_tenant_stats = {}
+            registry = _g().get("tenant_registry")
+            for tenant_id, counts in tenant_stats.items():
+                try:
+                    tenant_name = registry.get(tenant_id)["name"] if registry else "未登记账号组"
+                except TenantError:
+                    tenant_name = "未登记账号组"
+                current = public_tenant_stats.setdefault(
+                    tenant_name, {"queued": 0, "running": 0, "failed": 0, "interrupted": 0},
+                )
+                for key in current:
+                    current[key] += int(counts.get(key, 0) or 0)
+            if public_tenant_stats:
+                response["tenant_status_counts"] = public_tenant_stats
         return response
 
     @app.get("/api/task-queue/summary")
