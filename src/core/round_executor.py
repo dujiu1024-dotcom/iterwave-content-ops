@@ -1304,64 +1304,66 @@ class RoundExecutor:
                     # selected task assets are recorded by the task-assets authorization
                     # endpoint; this immutable input snapshot still preserves the
                     # approval-time privacy and quality classifications for audit.
-                    # Rehydrate references from the immutable task snapshot, not from
-                    # newly discovered live candidates on an idempotent replay. Re-verify
-                    # exact selected versions under the same trusted tenant directory.
-                    task_input_snapshot = (task.get("input_snapshot") or {}).get("task_input") or {}
-                    persisted_selection = task_input_snapshot.get("visual_asset_selection") or {}
-                    persisted_roles = persisted_selection.get("selected_by_role") or {}
-                    visual_reference_assets = {}
-                    if persisted_roles:
-                        if not tenant_id or tenant_media_dir is None:
-                            raise RoundPreconditionError(
-                                "任务快照包含已选视觉素材，但当前 Worker 缺少可信租户身份；拒绝跨租户恢复"
-                            )
-                        snapshot_assets = task_input_snapshot.get("original_assets") or []
-                        for usage_role in ("cover", "body", "ending"):
-                            role_items = persisted_roles.get(usage_role) or []
-                            if not role_items:
-                                continue
-                            selected_item = role_items[0]
-                            candidate = next((
-                                asset for asset in snapshot_assets
-                                if int(asset.get("asset_id") or 0) == int(selected_item.get("asset_id") or 0)
-                                and int(asset.get("version_no") or 0) == int(selected_item.get("version_no") or 0)
-                                and str(asset.get("sha256") or "").lower() == str(selected_item.get("sha256") or "").lower()
-                            ), None)
-                            if candidate is None:
-                                raise RoundPreconditionError(
-                                    f"任务快照中的 {usage_role} 参考素材版本不一致，拒绝使用"
-                                )
-                            verified = await asyncio.to_thread(
-                                select_visual_assets,
-                                candidates=[candidate],
-                                media_dir=tenant_media_dir,
-                                topic=topic.title,
-                                body=topic.summary,
-                                usage_role=usage_role,
-                                limit=1,
-                                cfg=self.cfg,
-                            )
-                            verified_items = verified.get("selected") or []
-                            if (
-                                len(verified_items) != 1
-                                or str(verified_items[0].get("sha256") or "").lower()
-                                != str(selected_item.get("sha256") or "").lower()
-                            ):
-                                raise RoundPreconditionError(
-                                    f"任务快照中的 {usage_role} 参考素材无法重新验证，拒绝静默降级"
-                                )
-                            item = verified_items[0]
-                            visual_reference_assets[usage_role] = {
-                                "asset_id": item["asset_id"],
-                                "version_no": item["version_no"],
-                                "sha256": item["sha256"],
-                                "mime_type": item.get("mime_type"),
-                                "path": str(item["verified_path"]),
-                            }
-
                     self.conn.commit()
                     existing = task_store.get_content_for_task(task["id"])
+                    if existing is None:
+                        # Rehydrate references from the immutable task snapshot, not from
+                        # newly discovered live candidates on an idempotent replay. Re-verify
+                        # exact selected versions under the same trusted tenant directory.
+                        task_input_snapshot = (task.get("input_snapshot") or {}).get("task_input") or {}
+                        persisted_selection = task_input_snapshot.get("visual_asset_selection") or {}
+                        persisted_roles = persisted_selection.get("selected_by_role") or {}
+                        visual_reference_assets = {}
+                        if persisted_roles:
+                            if not tenant_id or tenant_media_dir is None:
+                                raise RoundPreconditionError(
+                                    "任务快照包含已选视觉素材，但当前 Worker 缺少可信租户身份；拒绝跨租户恢复"
+                                )
+                            snapshot_assets = task_input_snapshot.get("original_assets") or []
+                            for usage_role in ("cover", "body", "ending"):
+                                role_items = persisted_roles.get(usage_role) or []
+                                if not role_items:
+                                    continue
+                                selected_item = role_items[0]
+                                candidate = next((
+                                    asset for asset in snapshot_assets
+                                    if int(asset.get("asset_id") or 0) == int(selected_item.get("asset_id") or 0)
+                                    and int(asset.get("version_no") or 0) == int(selected_item.get("version_no") or 0)
+                                    and str(asset.get("sha256") or "").lower() == str(selected_item.get("sha256") or "").lower()
+                                ), None)
+                                if candidate is None:
+                                    raise RoundPreconditionError(
+                                        f"任务快照中的 {usage_role} 参考素材版本不一致，拒绝使用"
+                                    )
+                                verified = await asyncio.to_thread(
+                                    select_visual_assets,
+                                    candidates=[candidate],
+                                    media_dir=tenant_media_dir,
+                                    topic=topic.title,
+                                    body=topic.summary,
+                                    usage_role=usage_role,
+                                    limit=1,
+                                    cfg=self.cfg,
+                                )
+                                verified_items = verified.get("selected") or []
+                                if (
+                                    len(verified_items) != 1
+                                    or str(verified_items[0].get("sha256") or "").lower()
+                                    != str(selected_item.get("sha256") or "").lower()
+                                ):
+                                    raise RoundPreconditionError(
+                                        f"任务快照中的 {usage_role} 参考素材无法重新验证，拒绝静默降级"
+                                    )
+                                item = verified_items[0]
+                                visual_reference_assets[usage_role] = {
+                                    "asset_id": item["asset_id"],
+                                    "version_no": item["version_no"],
+                                    "sha256": item["sha256"],
+                                    "mime_type": item.get("mime_type"),
+                                    "path": str(item["verified_path"]),
+                                }
+
+
                     if existing is not None:
                         if task["status"] == "succeeded":
                             pass
