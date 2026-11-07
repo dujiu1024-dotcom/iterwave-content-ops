@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import StructuredDataView from "../components/StructuredDataView";
 import { useApp } from "../AppContext";
 import { navigate } from "../nav";
 import { api, BusinessDiagnosisReport, Goal, MasterPlan, MasterPlanGenerationMetadata, MasterPlanVersion, PlanResponse, PlanSignatureHistory, SpiralAnalysis, SubPlanStageRecord } from "../api";
@@ -705,10 +706,10 @@ export default function PlanCenter() {
           <div className="tiny">资源基线：{String((aiGeneration.resource_baseline.summary as Record<string, number> | undefined)?.confirmed ?? 0)} 项已确认 / {String((aiGeneration.resource_baseline.summary as Record<string, number> | undefined)?.total ?? 0)} 项 · 版本指纹 {aiGeneration.strategy_fingerprint.slice(0, 12)}…</div>
           <div style={{ marginTop: 10 }}><b>制定摘要</b><p>{aiGeneration.summary}</p></div>
           <div className="grid two">
-            <div><b>业务资料与素材依据</b><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.resource_basis, null, 2)}</pre></div>
-            <div><b>风险提示</b><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.risks, null, 2)}</pre></div>
-            <div><b>前提与假设</b><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.assumptions, null, 2)}</pre></div>
-            <div><b>待用户确认</b><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.pending_confirmations, null, 2)}</pre></div>
+            <div><b>业务资料与素材依据</b><StructuredDataView data={aiGeneration.resource_basis} title="业务资料与素材依据"/></div>
+            <div><b>风险提示</b><StructuredDataView data={aiGeneration.risks} title="风险提示"/></div>
+            <div><b>前提与假设</b><StructuredDataView data={aiGeneration.assumptions} title="前提与假设"/></div>
+            <div><b>待用户确认</b><StructuredDataView data={aiGeneration.pending_confirmations} title="待用户确认"/></div>
           </div>
         </div>}
       </div>

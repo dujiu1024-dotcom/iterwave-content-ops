@@ -160,7 +160,7 @@ export default function GlobalOperations() {
               <tbody>{(monitor.tenants ?? []).map((tenant) => {
                 const q = tenantCounts[tenant.tenant_id] ?? { queued: 0, running: 0, failed: 0 };
                 return <tr key={tenant.tenant_id}>
-                  <td><strong>{tenant.tenant_name}</strong><div className="tiny">{tenant.tenant_id}</div></td>
+                  <td><strong>{tenant.tenant_name}</strong></td>
                   <td><span className={tenant.db_status === "uninitialized" ? "tag gray" : tenant.db_available ? "tag green" : "tag red"}>{tenant.db_status === "uninitialized" ? "未初始化" : tenant.db_available ? "可读取" : "不可用"}</span></td>
                   <td>{tenant.registered_accounts_active ?? tenant.registered_accounts ?? "—"} / {tenant.registered_accounts ?? "—"}</td>
                   <td>{tenant.runtime?.available ? (

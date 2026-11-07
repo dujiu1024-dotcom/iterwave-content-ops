@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import StructuredDataView from "../components/StructuredDataView";
 import EmptyHint from "../components/EmptyHint";
 import { useApp } from "../AppContext";
 import { navigate, useUrlTab } from "../nav";
@@ -520,7 +521,7 @@ function SkillsPane() {
                         <div className="tiny">{skill.skill_id}</div>
                         <details className="skill-manifest-preview">
                           <summary>预览能力定义</summary>
-                          <pre>{JSON.stringify(skill, null, 2)}</pre>
+                          <StructuredDataView data={skill} title="能力定义"/>
                         </details>
                       </td>
                       <td><span className="tag green">系统内置</span></td>
@@ -587,7 +588,7 @@ function SkillsPane() {
               <thead><tr><th>Skill</th><th>版本</th><th>分类</th><th>权限</th><th>安装</th><th>启用</th><th>可运行</th><th>操作</th></tr></thead>
               <tbody>{customSkills.map((skill) => (
                 <tr key={skill.skill_id}>
-                  <td><strong>{skill.name}</strong><div className="tiny">{skill.skill_id}</div><div className="tiny">{skill.description}</div><details className="skill-manifest-preview"><summary>预览 Manifest</summary><pre>{JSON.stringify(skill, null, 2)}</pre></details></td>
+                  <td><strong>{skill.name}</strong><div className="tiny">{skill.skill_id}</div><div className="tiny">{skill.description}</div><details className="skill-manifest-preview"><summary>预览 Manifest</summary><StructuredDataView data={skill} title="能力定义"/></details></td>
                   <td>{skill.version}</td>
                   <td>{skill.category}</td>
                   <td>{skill.permissions.length ? skill.permissions.join("、") : "无"}</td>
