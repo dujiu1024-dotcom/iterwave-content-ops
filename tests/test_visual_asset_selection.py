@@ -117,6 +117,8 @@ def test_rejects_missing_and_malformed_version_hashes(tmp_path):
     candidates = [
         _asset(10, "one.png", raw, sha256=""),
         _asset(11, "one.png", raw, sha256="not-a-sha256"),
+        # Business version labels are not content hashes and must not bypass SHA-256.
+        _asset(14, "one.png", raw, sha256="", source_version="v1"),
     ]
     result = select_visual_assets(
         candidates=candidates, media_dir=tmp_path, topic="产品", body="产品",
