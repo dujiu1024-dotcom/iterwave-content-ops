@@ -110,3 +110,33 @@ def test_rejects_missing_or_unrecognized_classifications(tmp_path):
     )
     assert result["selected"] == []
     assert result["rejected"][0]["reason"] == "review_status:pending"
+
+
+def test_rejects_missing_and_malformed_version_hashes(tmp_path):
+    raw = _png(tmp_path / "one.png")
+    candidates = [
+        _asset(10, "one.png", raw, sha256=""),
+        _asset(11, "one.png", raw, sha256="not-a-sha256"),
+    ]
+    result = select_visual_assets(
+        candidates=candidates, media_dir=tmp_path, topic="产品", body="产品",
+    )
+    assert result["selected"] == []
+    assert {item["reason"] for item in result["rejected"]} == {
+        "source_version_hash_missing_or_invalid"
+    }
+
+
+def test_accepts_matching_hash_and_rejects_mismatching_hash(tmp_path):
+    raw = _png(tmp_path / "one.png")
+    candidates = [
+        _asset(12, "one.png", raw, sha256=hashlib.sha256(raw).hexdigest()),
+        _asset(13, "one.png", raw, sha256="0" * 64),
+    ]
+    result = select_visual_assets(
+        candidates=candidates, media_dir=tmp_path, topic="产品", body="产品",
+    )
+    assert [item["asset_id"] for item in result["selected"]] == [12]
+    assert result["rejected"] == [
+        {"asset_id": 13, "reason": "source_version_hash_mismatch"}
+    ]
