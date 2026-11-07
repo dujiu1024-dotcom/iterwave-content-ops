@@ -1862,6 +1862,45 @@ def _register_routes(app: FastAPI) -> None:
         """Canonical aware UTC clock for persistence and API event timestamps."""
         return storage_now()
 
+    def _safe_task_progress(value):
+        """仅投影任务进度 UI 所需字段，并安全摘要所有可见文本。"""
+        if not isinstance(value, dict):
+            return None
+        allowed_statuses = {"pending", "running", "done", "failed", "skipped"}
+        raw_steps = value.get("steps")
+        steps = []
+        if isinstance(raw_steps, list):
+            for item in raw_steps[:100]:
+                if not isinstance(item, dict):
+                    continue
+                step_id = str(item.get("id") or "")[:80]
+                if not step_id:
+                    continue
+                status = str(item.get("status") or "pending")
+                steps.append({
+                    "id": step_id,
+                    "label": safe_error_summary(item.get("label"), "执行步骤")[:120],
+                    "status": status if status in allowed_statuses else "pending",
+                    "detail": safe_error_summary(
+                        item.get("detail"), "步骤已记录；详细诊断请联系管理员。",
+                    )[:200] if item.get("detail") else "",
+                })
+        try:
+            percent = max(0, min(100, int(value.get("percent", 0))))
+        except (TypeError, ValueError):
+            percent = 0
+        current_step = value.get("current_step")
+        return {
+            "steps": steps,
+            "current_step": str(current_step)[:80] if current_step else None,
+            "current_label": safe_error_summary(value.get("current_label"), "正在处理")[:120],
+            "detail": safe_error_summary(
+                value.get("detail"), "任务正在执行。",
+            )[:200] if value.get("detail") else "",
+            "percent": percent,
+            "updated_at": value.get("updated_at"),
+        }
+
     def _elapsed_seconds(value):
         """从持久化时间戳算出已运行秒数；无法解析时返回 None，不伪造 0。"""
         if not value:
@@ -4903,7 +4942,7 @@ def _register_routes(app: FastAPI) -> None:
                 "started_at": task.started_at,
                 "finished_at": task.finished_at, "attempts": task.attempts,
                 "error_code": safe_error_summary(task.error_code, "任务异常") if task.error_code else None,
-            "error_message": safe_task_error,
+                "error_message": safe_task_error,
                 "retry_of_task_id": task.retry_of_task_id,
                 "retry_confirmed_by": task.retry_confirmed_by,
                 "retry_confirmation_note": task.retry_confirmation_note,
@@ -4911,7 +4950,7 @@ def _register_routes(app: FastAPI) -> None:
                 "resolution_actor": task.resolution_actor,
                 "resolution_note": task.resolution_note,
                 "resolution_at": task.resolution_at,
-                "progress": task.progress,
+                "progress": _safe_task_progress(task.progress),
                 "elapsed_seconds": _elapsed_seconds(task.started_at or task.created_at),
             })
         response = {"items": items}
