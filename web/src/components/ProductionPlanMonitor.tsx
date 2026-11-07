@@ -31,7 +31,7 @@ function Stage({ stage }: { stage: ProductionMonitorStage }) {
       <span className="tag">{stage.production_task_count} 个生产任务</span>
     </div>
     <div className="tiny" style={{ marginTop: 6 }}>
-      前置依赖：{stage.dependencies_available ? (stage.dependencies?.length ? stage.dependencies.join("、") : "无") : "当前策略步骤模型尚未持久化依赖字段，需由策略模型 PR 补齐"}
+      前置依赖：{stage.dependencies_available ? (stage.dependencies?.length ? `${stage.dependencies.length} 项` : "无") : "当前策略步骤模型尚未提供依赖信息"}
     </div>
     <div className="tiny" style={{ marginTop: 6 }}>
       生产任务状态：{Object.entries(stage.production_task_status_counts ?? {}).filter(([, count]) => count > 0).map(([status, count]) => `${STATUS_LABEL[status] ?? displayStatusLabel(status)} ${count}`).join(" · ") || "暂无任务"}
@@ -60,14 +60,14 @@ function Stage({ stage }: { stage: ProductionMonitorStage }) {
       {stage.rounds.map((round) => <div className="task-row" key={round.id}>
         <div className="task-main">
           <div className="task-title">第 {round.round_number} 轮 · {STATUS_LABEL[round.status] ?? displayStatusLabel(round.status)}</div>
-          <div className="task-desc">轮次 #{round.id} · {round.created_at ? formatBusinessDateTime(round.created_at) : "时间未知"} · {displayCodeLabel(round.trigger_source, "来源未知")}</div>
+          <div className="task-desc">{round.created_at ? formatBusinessDateTime(round.created_at) : "时间未知"} · {displayCodeLabel(round.trigger_source, "来源未知")}</div>
         </div>
         <button className="btn sm" onClick={() => navigate("production", "rounds", { type: "round", id: round.id })}>查看轮次</button>
         <button className="btn sm" onClick={() => navigate("task-queue")}>查看任务队列</button>
       </div>)}
     </div>}
     {stage.round_count > stage.rounds.length && <div className="tiny" style={{ marginTop: 6 }}>仅展示最近 {stage.rounds.length} 轮；共 {stage.round_count} 轮。</div>}
-    <div className="tiny" style={{ marginTop: 6 }}>轮次状态：{Object.entries(stage.round_status_counts ?? {}).filter(([, count]) => count > 0).map(([status, count]) => `${STATUS_LABEL[status] ?? status} ${count}`).join(" · ") || "暂无轮次"}</div>
+    <div className="tiny" style={{ marginTop: 6 }}>轮次状态：{Object.entries(stage.round_status_counts ?? {}).filter(([, count]) => count > 0).map(([status, count]) => `${STATUS_LABEL[status] ?? displayStatusLabel(status)} ${count}`).join(" · ") || "暂无轮次"}</div>
   </div>;
 }
 
@@ -106,7 +106,7 @@ export default function ProductionPlanMonitor() {
       <div className="panel" style={{ padding: 12, marginBottom: 12 }}>
         {data.master_plan ? <>
           <div className="panel-title">当前母计划 V{data.master_plan.version_no}</div>
-          <div className="tiny">版本 #{data.master_plan.id} · 生效于 {data.master_plan.effective_at ? formatBusinessDateTime(data.master_plan.effective_at) : "时间未知"}</div>
+          <div className="tiny">生效于 {data.master_plan.effective_at ? formatBusinessDateTime(data.master_plan.effective_at) : "时间未知"}</div>
         </> : <div className="empty-state">当前没有生效中的母计划。</div>}
         <div className="grid four" style={{ gap: 8, marginTop: 12 }}>
           <Metric label="平台子计划" value={data.totals.subplans}/>
