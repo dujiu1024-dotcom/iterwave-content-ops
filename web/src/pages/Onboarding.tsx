@@ -311,7 +311,7 @@ export default function Onboarding() {
               <table>
                 <thead><tr><th>信号</th><th>值</th><th>状态</th></tr></thead>
                 <tbody>
-                  <tr><td>评分模式</td><td>{SCORING_MODE_LABELS[status.scoring_mode] ?? status.scoring_mode}</td><td><span className="tag green">✓</span></td></tr>
+                  <tr><td>评分模式</td><td>{SCORING_MODE_LABELS[status.scoring_mode] ?? displayCodeLabel(status.scoring_mode, "其他评分模式（需确认）")}</td><td><span className="tag green">✓</span></td></tr>
                   <tr><td>活跃轮次</td><td>{status.active_rounds}</td><td><span className={`tag ${status.active_rounds > 0 ? "blue" : "gray"}`}>{status.active_rounds > 0 ? "运行中" : "空闲（正常）"}</span></td></tr>
                   <tr><td>已发布样本</td><td>{status.published_samples}</td><td><span className={`tag ${status.published_samples >= 10 ? "green" : "orange"}`}>{status.published_samples >= 10 ? "样本充足" : "冷启动中"}</span></td></tr>
                   <tr><td>熔断平台</td><td>{status.circuit_broken_platforms.length > 0 ? status.circuit_broken_platforms.join(", ") : "—"}</td><td>{status.circuit_broken_platforms.length > 0 ? <span className="tag red">! 阻塞</span> : <span className="tag green">OK</span>}</td></tr>
