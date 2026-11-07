@@ -1283,8 +1283,11 @@ def test_analytics_realistic_business_metrics_has_no_overflow_at_supported_viewp
         "page": 1, "page_size": 20, "pages": 1,
     }
 
+    api_requests = []
+
     def handler(route):
         path = urlparse(route.request.url).path
+        api_requests.append(path)
         if path == "/api/auth/status":
             payload = {"configured": True, "authenticated": True, "needs_login": False}
         elif path == "/api/tenants":
