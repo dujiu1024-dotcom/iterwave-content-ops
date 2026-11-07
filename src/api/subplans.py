@@ -58,6 +58,45 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
             raise HTTPException(status, message) from exc
         raise exc
 
+    def _validate_stage_metric(stage: dict[str, Any]) -> None:
+        """阶段独立指标要么不配置，要么按 R21 口径配置完整。"""
+        fields = ("target_metric", "target_value", "metric_scope", "baseline_value",
+                  "baseline_at", "metric_period", "data_source", "goal_id")
+        if not any(stage.get(name) not in (None, "") for name in fields):
+            return
+        metric = str(stage.get("target_metric") or "").strip()
+        raw_target = stage.get("target_value")
+        if not metric or raw_target in (None, ""):
+            raise HTTPException(422, "阶段指标必须同时提供 target_metric 与 target_value")
+        if isinstance(raw_target, bool):
+            raise HTTPException(422, "target_value 必须是大于 0 的数字")
+        try:
+            target_value = float(raw_target)
+        except (TypeError, ValueError, OverflowError):
+            raise HTTPException(422, "target_value 必须是大于 0 的数字")
+        if target_value <= 0:
+            raise HTTPException(422, "target_value 必须是大于 0 的数字")
+        scope = str(stage.get("metric_scope") or "").strip()
+        if scope not in ("delta", "total"):
+            raise HTTPException(422, "metric_scope 只能是 delta 或 total")
+        if not str(stage.get("data_source") or "").strip():
+            raise HTTPException(422, "阶段指标必须提供 data_source，禁止人工估算")
+        raw_baseline = stage.get("baseline_value")
+        baseline_at = str(stage.get("baseline_at") or "").strip()
+        if (raw_baseline in (None, "")) != (not baseline_at):
+            raise HTTPException(422, "baseline_value 与 baseline_at 必须同时提供或同时为空")
+        if raw_baseline not in (None, ""):
+            if isinstance(raw_baseline, bool):
+                raise HTTPException(422, "baseline_value 必须是数字")
+            try:
+                float(raw_baseline)
+            except (TypeError, ValueError, OverflowError):
+                raise HTTPException(422, "baseline_value 必须是数字")
+        raw_goal = stage.get("goal_id")
+        if raw_goal not in (None, ""):
+            if isinstance(raw_goal, (dict, list, bool)) or not str(raw_goal).strip():
+                raise HTTPException(422, "goal_id 必须是有效的目标 ID")
+
     def _validate_stage_inputs(stages: list[dict[str, Any]]) -> None:
         if not stages:
             raise HTTPException(422, "子计划至少需要一个阶段")
@@ -93,6 +132,7 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
                         raise HTTPException(422, "阶段日期必须是 YYYY-MM-DD")
             if start and end and str(end) < str(start):
                 raise HTTPException(422, "阶段结束日期不能早于开始日期")
+            _validate_stage_metric(stage)
         if len(set(orders)) != len(orders):
             raise HTTPException(422, "阶段排序不能重复")
         keys = [str(stage.get("stage_key") or "").strip() for stage in stages if stage.get("stage_key")]
@@ -144,6 +184,10 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
         except (TypeError, ValueError):
             raise HTTPException(409, "子计划版本快照损坏")
         result["stages"] = _stages(version_id)
+        from src.core.plan_version_store import PlanVersionStore
+        progress_store = PlanVersionStore(get_runtime()["conn"])
+        for stage in result["stages"]:
+            stage["progress"] = progress_store.stage_progress(int(stage["id"]))
         from src.core.plan_change_audit import analyze_task_impact
         result["impact"] = analyze_task_impact(
             get_runtime()["conn"], "sub_plan", result.get("based_on_version_id"),
@@ -1609,11 +1653,15 @@ def register_subplan_routes(app: FastAPI, get_runtime) -> None:
                FROM sub_plan_stages s LEFT JOIN sub_plan_stage_publish_stats p ON p.stage_id=s.id
                WHERE s.sub_plan_version_id=? ORDER BY s.stage_order""", (current_id,),
         ).fetchall()
+        from src.core.plan_version_store import PlanVersionStore
+        progress_store = PlanVersionStore(conn)
         items = []
         current_stage = None
         for row in stages:
             item = dict(row)
             item["remaining_count"] = max(0, int(item["target_count"]) - int(item["confirmed_published_count"]))
+            # 阶段进度以独立计划指标为准；内容发布数仅作参考（D6/R21）。
+            item["progress"] = progress_store.stage_progress(int(item["id"]))
             if current_stage is None and item["status"] not in ("completed", "cancelled"):
                 current_stage = item["id"]
             items.append(item)

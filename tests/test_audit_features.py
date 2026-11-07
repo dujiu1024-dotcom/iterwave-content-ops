@@ -23,6 +23,29 @@ from src.core.state_machine import DraftStateMachine, RoundStateMachine
 from src.core.topic_pool import add_manual_topic, exclude_topics, list_topics, load_pool, purge_topics, restore_topics
 
 
+def _persist_plan(pvm: PlanVersionManager, plan: dict) -> None:
+    """测试内直接写当前计划投影（生产代码已停用 PlanVersionManager.save_plan）。"""
+    import json as _json
+    from datetime import datetime as _dt
+
+    signature = pvm.compute_signature(plan)
+    snapshot = _json.dumps(plan, ensure_ascii=False, sort_keys=True)
+    now = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+    pvm.conn.execute(
+        "INSERT INTO plan_settings (id, plan_snapshot, plan_signature, updated_at, updated_by) "
+        "VALUES (1, ?, ?, ?, 'test') ON CONFLICT(id) DO UPDATE SET "
+        "plan_snapshot=excluded.plan_snapshot, plan_signature=excluded.plan_signature, "
+        "updated_at=excluded.updated_at, updated_by=excluded.updated_by",
+        (snapshot, signature, now),
+    )
+    pvm.conn.execute(
+        "INSERT INTO signature_history (plan_signature, plan_snapshot, round_id, created_at, author) "
+        "VALUES (?, ?, NULL, ?, 'test')",
+        (signature, snapshot, now),
+    )
+    pvm.conn.commit()
+
+
 @pytest.fixture()
 def kb(cfg, tmp_path):
     """临时 CSV 选题库：A 维度 4 条、B 维度 3 条。"""
@@ -187,7 +210,7 @@ def test_executor_follows_plan(cfg, conn, seed, kb, monkeypatch):
     )
     _patch_ai_card_generation(monkeypatch)
     pvm = PlanVersionManager(cfg, conn)
-    pvm.save_plan(pvm.build_plan(
+    _persist_plan(pvm, pvm.build_plan(
         topic_count_per_platform=3, platforms=["xhs", "douyin"],
         dimension_allocation={"维度B": 2},
         per_platform={"douyin": {"topic_count": 1, "publish_slots": ["20:00"]}},

@@ -199,6 +199,15 @@ def create_round_record(
     platforms: Optional[list[str]] = None, trigger_source: str = "manual",
     applied_feedback: Optional[str] = None,
 ) -> dict:
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='master_plan_versions'"
+    ).fetchone():
+        effective = conn.execute(
+            "SELECT 1 FROM master_plan_versions WHERE status='effective' AND deleted_at IS NULL LIMIT 1"
+        ).fetchone()
+        if effective is not None:
+            # 有生效母计划时禁止旧旁路开轮，必须由子计划阶段调度绑定版本（D1）。
+            raise RuntimeError("账号组已启用生效母计划：自动开轮必须走子计划阶段调度")
     row = conn.execute("SELECT COALESCE(MAX(round_number), 0) FROM spiral_rounds").fetchone()
     round_number = (row[0] if row else 0) + 1
     if not goal_id:

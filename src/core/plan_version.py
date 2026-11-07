@@ -39,6 +39,23 @@ _SIGNATURE_FIELDS = (
 _ACTIVE_STATUSES = ("created", "producing", "awaiting_publish")
 
 
+def legacy_signature_with_platform_counts(plan: dict) -> str:
+    """升级兼容：167 之前的签名把平台分项篇数并入 hash。
+
+    只用于校验历史母计划草稿/生效版本的完整性，新代码不再生成该签名。
+    """
+    payload = {k: plan.get(k) for k in _SIGNATURE_FIELDS}
+    counts = {
+        p: c["topic_count"]
+        for p, c in (plan.get("per_platform") or {}).items()
+        if c.get("topic_count")
+    }
+    if counts:
+        payload["platform_topic_counts"] = counts
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 class PlanVersionManager:
     """母计划签名计算、持久化与下游失效标记。"""
 
@@ -102,16 +119,54 @@ class PlanVersionManager:
         return int((plan.get("per_platform") or {}).get(platform, {}).get("topic_count") or base)
 
     def compute_signature(self, plan: dict) -> str:
-        """对关键字段做规范化 JSON 后 sha256（平台分项篇数只在设置过时参与，旧签名保持稳定）。"""
+        """只对战略字段做规范化哈希。
+
+        平台分项篇数/发布时段属于平台执行配置，不参与母计划签名：
+        改一个平台的产能不应让其他平台的子计划一起失效（D3）。
+        """
         payload = {k: plan.get(k) for k in _SIGNATURE_FIELDS}
-        counts = {p: c["topic_count"] for p, c in (plan.get("per_platform") or {}).items() if c.get("topic_count")}
-        if counts:
-            payload["platform_topic_counts"] = counts
         canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def split_runtime_config(plan: dict) -> tuple[dict, dict]:
+        """把母计划拆成「战略快照」和「平台执行配置」。
+
+        战略快照写入 master_plan_versions.plan_snapshot（不可变、参与签名）；
+        平台执行配置写入 platform_plan_configs / master_plan_runtime_configs。
+        """
+        strategic = {
+            key: value for key, value in plan.items()
+            if key not in ("per_platform", "cadence")
+        }
+        runtime: dict = {}
+        per_platform = plan.get("per_platform")
+        if isinstance(per_platform, dict) and per_platform:
+            runtime["per_platform"] = {
+                str(p): dict(conf) for p, conf in per_platform.items() if isinstance(conf, dict)
+            }
+        cadence = plan.get("cadence")
+        if isinstance(cadence, dict) and cadence:
+            runtime["cadence"] = dict(cadence)
+        return strategic, runtime
+
+    @staticmethod
+    def platform_config_diff(previous: dict, current: dict) -> list[str]:
+        """返回平台执行配置发生变化的平台列表（只影响这些平台的子计划）。"""
+        prev_pp = previous.get("per_platform") or {}
+        next_pp = current.get("per_platform") or {}
+        changed: list[str] = []
+        for platform in sorted(set(prev_pp) | set(next_pp)):
+            if prev_pp.get(platform) != next_pp.get(platform):
+                changed.append(platform)
+        return changed
+
     def current_plan(self, topic_count_per_platform: Optional[int] = None) -> dict:
-        """推导当前母计划：选题数取最近一轮实际执行的选题条数，缺省 5。"""
+        """推导「冷启动」母计划：选题数取最近一轮实际执行的选题条数，缺省 5。
+
+        仅在账号组尚无生效母计划版本时使用（source='derived'），不可作为
+        生产轮次的计划来源；生产轮次必须绑定生效版本。
+        """
         if topic_count_per_platform is None:
             row = self.conn.execute(
                 "SELECT topic_ids FROM spiral_rounds ORDER BY id DESC LIMIT 1"
@@ -176,34 +231,11 @@ class PlanVersionManager:
         return plan, self.compute_signature(plan), None, "derived"
 
     def save_plan(self, plan: dict, author: str = "user") -> dict:
-        """保存母计划 → 写 plan_settings + signature_history + 触发下游失效（R18）。"""
-        signature = self.compute_signature(plan)
-        snapshot = json.dumps(plan, ensure_ascii=False, sort_keys=True)
-        now = business_now(self.cfg).strftime("%Y-%m-%d %H:%M:%S")
-
-        self.conn.execute(
-            "INSERT INTO plan_settings (id, plan_snapshot, plan_signature, updated_at, updated_by) "
-            "VALUES (1, ?, ?, ?, ?) "
-            "ON CONFLICT(id) DO UPDATE SET plan_snapshot = excluded.plan_snapshot, "
-            "plan_signature = excluded.plan_signature, updated_at = excluded.updated_at, "
-            "updated_by = excluded.updated_by",
-            (snapshot, signature, now, author),
+        """已停用：母计划必须走不可变版本 + 审核生效，禁止直写投影（P1-3）。"""
+        raise RuntimeError(
+            "save_plan 已停用：母计划必须通过 "
+            "PlanVersionStore.create_master_draft + activate_master_version 落库"
         )
-        self.conn.execute(
-            "INSERT INTO signature_history (plan_signature, plan_snapshot, round_id, created_at, author) "
-            "VALUES (?, ?, NULL, ?, ?)",
-            (signature, snapshot, now, author),
-        )
-        self.conn.commit()
-
-        invalidated = self.invalidate_changed_plans(plan)
-        logger.info("📌 母计划已保存：签名 %s，失效轮次 %s", signature[:12], invalidated["stale_rounds"])
-        return {
-            "signature": signature,
-            "updated_at": now,
-            "plan": plan,
-            "stale_rounds": invalidated["stale_rounds"],
-        }
 
     def _has_plan_settings(self) -> bool:
         row = self.conn.execute(
@@ -224,9 +256,17 @@ class PlanVersionManager:
         current_sig = self.compute_signature(plan)
 
         placeholders = ",".join("?" for _ in _ACTIVE_STATUSES)
+        # 已绑定母计划版本/子计划的轮次由版本机制处理，这里只处理历史未绑定轮次。
+        bound_filter = ""
+        round_columns = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(spiral_rounds)").fetchall()
+        }
+        if "master_plan_version_id" in round_columns:
+            bound_filter = " AND master_plan_version_id IS NULL"
         rows = self.conn.execute(
             f"SELECT id, status, plan_signature, transition_log FROM spiral_rounds "
-            f"WHERE status IN ({placeholders}) AND plan_signature IS NOT NULL AND sub_plan_id IS NULL",
+            f"WHERE status IN ({placeholders}) AND plan_signature IS NOT NULL "
+            f"AND sub_plan_id IS NULL{bound_filter}",
             _ACTIVE_STATUSES,
         ).fetchall()
 

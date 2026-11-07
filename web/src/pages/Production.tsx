@@ -123,6 +123,12 @@ export default function Production() {
   const [regenActive, setRegenActive] = useState(false);
   /** 当前弹层预览的卡片序号（null = 不展示预览层） */
   const [previewCard, setPreviewCard] = useState<number | null>(null);
+  /** 正在调整首/尾图的卡片序号（避免重复提交） */
+  const [movingCard, setMovingCard] = useState<number | null>(null);
+  /** 正在 AI 加工的卡片序号（null = 未打开加工面板） */
+  const [processingCard, setProcessingCard] = useState<number | null>(null);
+  const [processPrompt, setProcessPrompt] = useState("");
+  const [processing, setProcessing] = useState(false);
 
   // 运行本轮
   const [topicCount, setTopicCount] = useState(5);
@@ -354,7 +360,17 @@ export default function Production() {
       await refresh();
       setCurrentRoundId(res.id);
       setTab("pipeline");
-    } catch (e: any) { showToast(`创建失败: ${e.message}`, "error"); }
+    } catch (e: any) {
+      const message = String(e?.message ?? "");
+      if (message.includes("母计划") || message.includes("子计划阶段")) {
+        showToast(
+          "当前账号组已启用生效母计划：请在「计划中心 → 子计划阶段」点击「开始本阶段生产」创建轮次",
+          "error",
+        );
+      } else {
+        showToast(`创建失败: ${message}`, "error");
+      }
+    }
   };
 
   const handleRun = async () => {
@@ -683,6 +699,56 @@ export default function Production() {
     && !running && availableTopicCount !== null && availableTopicCount > 0
     && (usePlan || selPlatforms.length > 0);
   const selectedContent = contents.find((c) => c.id === selectedContentId) ?? null;
+
+  /** 重新拉取当前轮次内容，保留已选中的内容与预览位置。 */
+  const reloadRoundContents = async () => {
+    const roundId = selectedContent?.round_id ?? currentRoundId;
+    if (roundId) await loadRoundData(roundId);
+  };
+
+  const handleMoveCard = async (index: number, position: "first" | "last") => {
+    if (!selectedContent || movingCard !== null) return;
+    setMovingCard(index);
+    try {
+      const res = await api.moveContentImage(selectedContent.id, index, position);
+      setBrokenCards({});
+      showToast(res.message, "success");
+      await reloadRoundContents();
+    } catch (e: any) {
+      showToast(`调整首尾图失败: ${e?.message ?? "未知原因"}`, "error");
+    } finally {
+      setMovingCard(null);
+    }
+  };
+
+  const openProcessCard = (index: number) => {
+    setProcessingCard(index);
+    setProcessPrompt(
+      `以「${selectedContent?.title ?? "当前内容"}」为主题，保留画面前景主体，替换为干净有质感的背景，` +
+      `统一配色并加上标题文字，做成适合${index === 0 ? "首图" : "收尾"}的图文卡片。`,
+    );
+  };
+
+  const handleProcessCard = async () => {
+    if (!selectedContent || processingCard === null || processing) return;
+    const prompt = processPrompt.trim();
+    if (prompt.length < 5) {
+      showToast("请至少填写 5 个字的加工说明", "error");
+      return;
+    }
+    setProcessing(true);
+    try {
+      const res = await api.processContentImage(selectedContent.id, processingCard, prompt);
+      setBrokenCards({});
+      setProcessingCard(null);
+      showToast(res.message, "success");
+      await reloadRoundContents();
+    } catch (e: any) {
+      showToast(`AI 加工失败: ${e?.message ?? "未知原因"}`, "error");
+    } finally {
+      setProcessing(false);
+    }
+  };
   const filteredReviewContents = contents.filter((item) => {
     const query = reviewSearch.trim().toLowerCase();
     const matchesQuery = !query || [item.title, item.body, item.topic_id, ...item.tags].some((value) => String(value ?? "").toLowerCase().includes(query));
@@ -1552,8 +1618,33 @@ export default function Production() {
                             />
                           </button>
                         )}
-                        <div className="card-meta">
-                          <span>第 {i + 1} 张</span>
+                        <div className="card-meta" style={{ flexWrap: "wrap", gap: 4 }}>
+                          <span>
+                            第 {i + 1} 张
+                            {i === 0 && <span className="tag blue" style={{ marginLeft: 4 }}>首图</span>}
+                            {i === selectedContent.image_count - 1 && i !== 0 && <span className="tag purple" style={{ marginLeft: 4 }}>尾图</span>}
+                          </span>
+                          {i !== 0 && (
+                            <button
+                              className="btn sm"
+                              onClick={() => handleMoveCard(i, "first")}
+                              disabled={movingCard !== null || processing}
+                            >
+                              {movingCard === i ? "调整中…" : "设为首图"}
+                            </button>
+                          )}
+                          {i !== selectedContent.image_count - 1 && (
+                            <button
+                              className="btn sm"
+                              onClick={() => handleMoveCard(i, "last")}
+                              disabled={movingCard !== null || processing}
+                            >设为尾图</button>
+                          )}
+                          <button
+                            className="btn sm"
+                            onClick={() => openProcessCard(i)}
+                            disabled={processing}
+                          >✎ AI 加工</button>
                           <a
                             className="btn sm"
                             href={api.contentImageUrl(selectedContent.id, i, true, selectedContent.image_paths?.[i])}
@@ -1565,8 +1656,31 @@ export default function Production() {
                     );
                   })}
                 </div>
+                {processingCard !== null && (
+                  <div style={{ borderTop: "1px dashed var(--line)", marginTop: 10, paddingTop: 10 }}>
+                    <div className="panel-title" style={{ fontSize: 12, marginBottom: 6 }}>
+                      AI 加工第 {processingCard + 1} 张
+                      {processingCard === 0 ? "（首图）" : processingCard === selectedContent.image_count - 1 ? "（尾图）" : ""}
+                    </div>
+                    <textarea
+                      value={processPrompt}
+                      onChange={(e) => setProcessPrompt(e.target.value)}
+                      rows={3}
+                      disabled={processing}
+                      placeholder="描述加工方向，例如：换浅色背景、加上标题文字、拼成左右对比图"
+                      style={{ width: "100%" }}
+                    />
+                    <div style={{ display: "flex", gap: 8, marginTop: 6, justifyContent: "flex-end", alignItems: "center" }}>
+                      <span className="tiny" style={{ marginRight: "auto" }}>按当前文案改图，新图替换该位置，原图仍保留在素材库。</span>
+                      <button className="btn sm" onClick={() => setProcessingCard(null)} disabled={processing}>取消</button>
+                      <button className="btn sm primary" onClick={handleProcessCard} disabled={processing}>
+                        {processing ? "加工中…" : "开始加工并替换"}
+                      </button>
+                    </div>
+                  </div>
+                )}
                 <div className="note" style={{ marginTop: 10, fontSize: 12 }}>
-                  点缩略图可看大图预览；卡片图按当前标题 / 正文生成，改完文案后点「↻ 重新生成」，发布时按顺序上传。
+                  点缩略图可看大图预览；首图固定为第 1 张、尾图固定为最后一张，发布时按此顺序上传。
                 </div>
               </>
             )}
