@@ -1096,6 +1096,24 @@ def test_subplan_round_worker_persists_task_content_and_frozen_plan_lineage(
         assert candidate["privacy_status"] == "clear"
         assert "metadata" not in candidate
         assert "private_contact" not in json.dumps(production_task["input_snapshot"], ensure_ascii=False)
+        visual_selection = production_task["input_snapshot"]["task_input"]["visual_asset_selection"]
+        assert visual_selection["selection_version"] == "visual-asset-selection-v1"
+        assert visual_selection["candidate_count"] == 0  # this fixture is a manual, not media, asset
+
+        def assert_no_ephemeral_visual_data(value):
+            if isinstance(value, dict):
+                assert "verified_path" not in value
+                for nested in value.values():
+                    assert_no_ephemeral_visual_data(nested)
+            elif isinstance(value, (list, tuple)):
+                for nested in value:
+                    assert_no_ephemeral_visual_data(nested)
+            else:
+                assert not isinstance(value, (bytes, bytearray, memoryview))
+
+        # The persisted task snapshot contains only IDs and verification evidence,
+        # never worker-local file paths or raw image bytes.
+        assert_no_ephemeral_visual_data(production_task["input_snapshot"])
         # A linked candidate is not proof of actual consumption; it must not be
         # recorded as used until an explicit task-assets authorization is made.
         assert conn.execute(
