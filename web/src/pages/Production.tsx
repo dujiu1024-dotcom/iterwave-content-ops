@@ -800,8 +800,8 @@ export default function Production() {
           {orphanDrafts.map((draft) => (
             <div key={draft.id} className="task-row" style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
               <div>
-                <div style={{ fontWeight: 600 }}>{displayPlatformLabel(draft.platform)} · {draft.id}</div>
-                <div className="tiny">来源内容：{draft.content_id} · 草稿状态：{displayStatusLabel(draft.status)} · 创建：{draft.created_at || "未知"}</div>
+                <div style={{ fontWeight: 600 }}>{displayPlatformLabel(draft.platform)} · 孤儿草稿</div>
+                <div className="tiny">来源内容：待核实 · 草稿状态：{displayStatusLabel(draft.status)} · 创建：{draft.created_at || "未知"}</div>
                 <div className="tiny">处置建议：{({
                   manual_verification_required: "先人工核实平台是否已保存",
                   platform_state_must_be_preserved: "保留平台状态，不得自动清理",
@@ -886,7 +886,7 @@ export default function Production() {
               </div>
             </div>
             <div style={{ fontFamily: "monospace", fontSize: 11, color: "var(--muted)" }}>
-              版本 {plan?.signature ? plan.signature.slice(0, 8) : "—"}
+              计划版本已保存
               <span className={`tag ${plan?.source === "plan_settings" ? "green" : "gray"}`} style={{ marginLeft: 8 }}>
                 {plan?.source === "plan_settings" ? "已保存" : plan?.source === "derived" ? "推导值" : "—"}
               </span>
@@ -1050,7 +1050,7 @@ export default function Production() {
                       )}
                       {plan.history.map((h, i) => (
                         <tr key={i}>
-                          <td style={{ fontFamily: "monospace", fontSize: 11 }}>{h.plan_signature.slice(0, 16)}…</td>
+                          <td>已记录</td>
                           <td>{h.round_number != null ? `第 ${h.round_number} 轮` : h.round_id != null ? "关联轮次已归档" : "母计划"}</td>
                           <td>{AUTHOR_LABEL[(h.author ?? "").split(":")[0]] ?? displaySourceLabel(h.author)}</td>
                           <td style={{ fontSize: 11 }}>{h.created_at}</td>
@@ -1276,8 +1276,8 @@ export default function Production() {
                                 {s.step === "produce" && `产出 ${s.contents} 篇内容 · 目标检查拦截 ${s.guard_rejected} 次`}
                                 {s.step === "dry_run" && `${s.note}`}
                                 {s.step === "save_drafts" && `成功 ${s.saved} · 失败 ${s.failed}`}
-                                {s.step === "guard_reject" && `${displayPlatformLabel(String(s.platform))} / ${s.topic_id} · ${displayCodeLabel(String(s.result))} · ${s.reason}`}
-                                {s.step === "plan_signature" && `签名 ${s.signature}`}
+                                {s.step === "guard_reject" && `${displayPlatformLabel(String(s.platform))} · ${displayCodeLabel(String(s.result))} · ${s.reason}`}
+                                {s.step === "plan_signature" && "计划版本已记录"}
                                 {s.step === "draft_save" && `${displayPlatformLabel(String(s.platform))} · ${displayStatusLabel(s.status == null ? null : String(s.status))} ${s.error ?? ""}`}
                                 {s.step === "apply_feedback" && `吃进复盘结论：${Object.keys((s.dimension_bias as object) ?? {}).length} 个维度调整 · ${s.copy_hint_count} 条文案要点`}
                                 {s.step === "dimension_quota" && `维度配额 ${Object.entries((s.allocation as Record<string, number>) ?? {}).map(([d, n]) => `${d}×${n}`).join("、")}`}
