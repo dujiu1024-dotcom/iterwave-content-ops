@@ -5601,3 +5601,33 @@ def test_round_run_status_sanitizes_nested_report_and_progress(client, tmp_path,
     assert "/home/ubuntu" not in response.text
     assert "sqlite3.OperationalError" not in response.text
     assert "Traceback" not in response.text
+
+
+def test_round_run_status_memory_branch_uses_response_allowlist(client, monkeypatch):
+    tc, _conn, seed = client
+    round_id = seed.round(status="producing")
+    monkeypatch.setitem(api_main._round_job_status, round_id, {
+        "status": "running", "queued": False, "running": True,
+        "task_id": "internal-task-123", "task_type": "round_run",
+        "tenant_id": "tenant-private", "lease_owner": "worker-private",
+        "report": {"content": "完整的多行业务报告\\n第二行正文"},
+        "error": None, "error_code": None,
+        "progress": {"steps": [], "detail": "正在生成", "percent": 25},
+        "started_at": "2026-11-07T12:00:00+00:00", "elapsed_seconds": 15,
+        "private_debug": {"path": "/home/ubuntu/iterwave/data/private.db"},
+    })
+
+    response = tc.get(f"/api/rounds/{round_id}/run_status")
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert set(payload) == {
+        "round_id", "status", "queued", "running", "report", "error",
+        "error_code", "progress", "started_at", "elapsed_seconds",
+    }
+    assert payload["report"]["content"] == "完整的多行业务报告\\n第二行正文"
+    assert payload["progress"]["detail"] == "正在生成"
+    assert "internal-task-123" not in response.text
+    assert "tenant-private" not in response.text
+    assert "worker-private" not in response.text
+    assert "private_debug" not in response.text
+    assert "/home/ubuntu" not in response.text

@@ -5497,10 +5497,23 @@ def _register_routes(app: FastAPI) -> None:
                 }
         status = _round_job_status.get(round_id)
         if status is not None:
-            safe_status = dict(status)
-            safe_status["progress"] = _safe_task_progress(status.get("progress"))
-            safe_status["report"] = _safe_round_report(status.get("report"))
-            safe_status["error"] = safe_error_summary(status.get("error"), "本轮执行失败，请查看管理员诊断日志。") if status.get("error") else None
+            raw_status = status.get("status")
+            allowed_statuses = {"queued", "running", "succeeded", "failed", "cancelled", "interrupted"}
+            safe_status = {
+                "round_id": round_id,
+                "status": raw_status if raw_status in allowed_statuses else None,
+                "queued": bool(status.get("queued", raw_status == "queued")),
+                "running": bool(status.get("running", raw_status == "running")),
+                "report": _safe_round_report(status.get("report")),
+                "error": safe_error_summary(
+                    status.get("error"), "本轮执行失败，请查看管理员诊断日志。",
+                ) if status.get("error") else None,
+                "error_code": safe_error_summary(status.get("error_code"), "执行异常")
+                if status.get("error_code") else None,
+                "progress": _safe_task_progress(status.get("progress")),
+                "started_at": status.get("started_at"),
+                "elapsed_seconds": status.get("elapsed_seconds"),
+            }
             return safe_status
         row = _g()["conn"].execute(
             "SELECT status, run_report FROM spiral_rounds WHERE id = ?", (round_id,)
