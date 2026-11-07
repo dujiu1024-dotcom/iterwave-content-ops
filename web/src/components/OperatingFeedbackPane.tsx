@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   api, BusinessGapItem, Draft, MetricFactItem, PublishVerificationItem, ReviewTaskItem,
 } from "../api";
-import { displayPlatformLabel } from "../displayLabels";
+import { displayCodeLabel, displayPlatformLabel } from "../displayLabels";
 
 type VerificationForm = { platform_content_id: string; content_url: string; published_at: string; evidence_note: string };
 type CollectionForm = {
@@ -41,7 +41,7 @@ function statusText(value: string): string {
     partial: "部分成功", failed: "失败", completed: "已完成", cancelled: "已取消",
     delivered: "已关闭", active: "待解决", resolved: "已解决", not_required: "无需关闭",
   };
-  return labels[value] ?? value;
+  return labels[value] ?? displayCodeLabel(value);
 }
 function displayMetric(value: number, unit: string): string {
   return unit === "ratio" ? `${(value * 100).toFixed(2)}%` : value.toLocaleString();
@@ -50,7 +50,7 @@ function formatRunMetrics(value: unknown): string {
   if (!value || typeof value !== "object" || Array.isArray(value)) return "指标已记录";
   const labels: Record<string, string> = { views: "曝光", likes: "点赞", collects: "收藏", comments: "评论", shares: "分享" };
   const entries = Object.entries(value as Record<string, unknown>).filter(([, item]) => item != null && ["string", "number", "boolean"].includes(typeof item));
-  return entries.length ? entries.map(([key, item]) => `${labels[key] ?? key}: ${String(item)}`).join(" · ") : "指标已记录";
+  return entries.length ? entries.map(([key, item]) => `${labels[key] ?? displayCodeLabel(key)}: ${String(item)}`).join(" · ") : "指标已记录";
 }
 
 export default function OperatingFeedbackPane() {
@@ -141,7 +141,7 @@ export default function OperatingFeedbackPane() {
         evidence_source: "user_confirmed",
         evidence_note: form.evidence_note.trim(),
       });
-      setNotice(`发布核验已保存；独立复盘任务 ${result.verification.review_task_id ?? "已创建"}，生产线关闭事件等待任务3消费。`);
+      setNotice(`发布核验已保存；复盘任务已创建，生产线关闭事件等待后续处理。`);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "发布核验失败");
@@ -348,7 +348,7 @@ export default function OperatingFeedbackPane() {
             {runHistory[task.task_id] && <div style={{ marginTop: 6 }}>
               {runHistory[task.task_id].map((run, index) => <div key={String(run.run_id || index)} className="panel-sub">
                 {statusText(String(run.status || ""))} · {String(run.source || "")} · {String(run.window_start || "—")} 至 {String(run.window_end || "—")}
-                {run.error_message ? ` · ${String(run.error_message)}` : ""}
+                {run.error_message ? <details className="advanced-report-editor"><summary>查看采集诊断</summary><pre className="diagnostic-text">{String(run.error_message)}</pre></details> : ""}
                 {run.metrics ? ` · ${formatRunMetrics(run.metrics)}` : ""}
               </div>)}
             </div>}
