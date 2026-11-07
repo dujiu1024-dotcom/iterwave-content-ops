@@ -81,7 +81,7 @@ export default function ContentProductionLinePanel() {
           <div className="panel-head">
             <div><div className="panel-title">{LINE_STATUS[selected.status] ?? displayStatusLabel(selected.status)}</div>
               <div className="panel-sub">{displayPlatformLabel(selected.platform)} · 单内容生产任务</div></div>
-            <span className={"tag " + (selected.status === "failed" ? "red" : ACTIVE.has(selected.status) ? "orange" : "green")}>{LINE_STATUS[selected.status] ?? selected.status}</span>
+            <span className={"tag " + (selected.status === "failed" ? "red" : ACTIVE.has(selected.status) ? "orange" : "green")}>{LINE_STATUS[selected.status] ?? displayStatusLabel(selected.status)}</span>
           </div>
           <div className="grid four" style={{ gap: 8 }}>
             <div className="kpi-card"><div className="metric-label">执行尝试</div><div className="metric-val">{selected.attempt_count}/{selected.max_attempts}</div></div>
@@ -94,7 +94,7 @@ export default function ContentProductionLinePanel() {
             <button className="btn sm" onClick={() => navigate("production", "pipeline", { type: "content", id: selected.content_id! })}>查看成品</button>
           </div>}
           {selected.task_status === "failed" && <>
-            <div className="note" role="alert" style={{ marginTop: 10 }}>{displayErrorLabel(selected.error_code ?? undefined)}</div>
+            <div className="note" role="alert" style={{ marginTop: 10 }}>{displayErrorLabel(selected.error_code ?? undefined)}</div>{selected.error_message && <details className="advanced-report-editor"><summary>高级诊断：原始错误详情</summary><pre className="diagnostic-text">{selected.error_message}</pre></details>}
             <button className="btn primary" style={{ marginTop: 8 }} disabled={busy} onClick={() => void recover()}>{busy ? "提交中…" : "确认无外部副作用并恢复任务"}</button>
           </>}
         </div>
