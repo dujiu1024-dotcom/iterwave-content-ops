@@ -191,6 +191,11 @@ def _generate_ai_card_set(
         roles = [str(getattr(item, "role", "") or "") for item in plan_pages]
         if roles != ["cover", *("body" for _ in body_pages), "ending"]:
             raise ValueError("visual_plan_roles_invalid")
+        planned_body_texts = [
+            str(getattr(item, "source_text", "") or "") for item in plan_pages[1:-1]
+        ]
+        if planned_body_texts != page_texts:
+            raise ValueError("visual_plan_body_text_mismatch")
         page_specs = []
         for item in plan_pages:
             role = str(getattr(item, "role", "") or "")
