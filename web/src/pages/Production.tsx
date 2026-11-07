@@ -1823,7 +1823,7 @@ export default function Production() {
                         {i > 0 && <div className={`track-connector ${isPast ? "completed" : ""}`} />}
                         <div className={`track-node ${isCurrent ? "active" : ""} ${isPast ? "completed" : ""}`}>
                           <div className="dot" />
-                          <div className="label">{ROUND_STATUS_LABEL[s] ?? s}</div>
+                          <div className="label">{ROUND_STATUS_LABEL[s] ?? displayStatusLabel(s)}</div>
                         </div>
                       </Fragment>
                     );

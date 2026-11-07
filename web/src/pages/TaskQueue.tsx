@@ -50,7 +50,18 @@ function aggregateLabel(task: GlobalTaskQueueItem) {
   return label;
 }
 
-function auditActionLabel(value: string | null | undefined) {\n  const labels: Record<string, string> = { cancel: "取消任务", retry: "人工核验后重试", resolve_handled: "标记为已处理", resolve_ignored: "标记为已忽略" };\n  return value ? labels[value] ?? "其他管理操作" : "管理操作";\n}\n\nfunction auditActorLabel(value: string | null | undefined) {\n  if (!value) return "操作人未知";\n  if (value.startsWith("system:") || value.startsWith("service:")) return "系统";\n  return "操作人";\n}\n\nfunction timeLabel(value: string | null) {
+function auditActionLabel(value: string | null | undefined) {
+  const labels: Record<string, string> = { cancel: "取消任务", retry: "人工核验后重试", resolve_handled: "标记为已处理", resolve_ignored: "标记为已忽略" };
+  return value ? labels[value] ?? "其他管理操作" : "管理操作";
+}
+
+function auditActorLabel(value: string | null | undefined) {
+  if (!value) return "操作人未知";
+  if (value.startsWith("system:") || value.startsWith("service:")) return "系统";
+  return "操作人";
+}
+
+function timeLabel(value: string | null) {
   if (!value) return "—";
   return formatBusinessDateTime(value);
 }
@@ -111,7 +122,7 @@ function TaskRow({
             <div className="muted" style={{ fontSize: 12, maxWidth: 260 }}>
               <div>
                 {task.resolution_action === "handled" ? "已处理" : "已忽略"}
-                {task.resolution_actor ? " · " + task.resolution_actor : ""}
+                {task.resolution_actor ? " · " + auditActorLabel(task.resolution_actor) : ""}
               </div>
               {task.resolution_at && <div style={{ marginTop: 3 }}>{timeLabel(task.resolution_at)}</div>}
               {task.resolution_note && <div style={{ marginTop: 3, overflowWrap: "anywhere" }}>{task.resolution_note}</div>}

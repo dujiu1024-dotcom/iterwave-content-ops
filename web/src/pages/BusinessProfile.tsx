@@ -26,7 +26,8 @@ export default function BusinessProfilePage() {
   const [items, setItems] = useState<BusinessCatalogItem[]>([]);
   const [tab, setTab] = useState<EntityType>("product");
   const [name, setName] = useState("");
-  const [details, setDetails] = useState("{}");\n  const [detailsError, setDetailsError] = useState("");
+  const [details, setDetails] = useState("{}");
+  const [detailsError, setDetailsError] = useState("");
   const [editing, setEditing] = useState<string | null>(null);
   const [editingEvidence, setEditingEvidence] = useState<BusinessCatalogItem["field_evidence"]>({});
   const [analysis, setAnalysis] = useState<{ missing: Array<{ field: string; label: string }>; completeness: number } | null>(null);
@@ -68,7 +69,8 @@ export default function BusinessProfilePage() {
     try {
       parsed = JSON.parse(details);
       if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") throw new Error();
-    } catch (e) { const message = e instanceof Error ? e.message : "JSON 格式错误"; setDetailsError(message); showToast("资料详情 JSON 格式错误，请检查编辑器提示", "error"); return; }\n    setDetailsError("");
+    } catch (e) { const message = e instanceof Error ? e.message : "JSON 格式错误"; setDetailsError(message); showToast("资料详情 JSON 格式错误，请检查编辑器提示", "error"); return; }
+    setDetailsError("");
     setBusy(true);
     try {
       await api.saveBusinessItem(tab, { name, details: parsed, field_evidence: editingEvidence }, editing ?? undefined);
