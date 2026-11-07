@@ -344,7 +344,7 @@ details[open] > summary::before { content: "▾ "; }
   display: block; margin: 0 auto; max-width: 100%;
   max-height: calc(92vh - 110px); object-fit: contain; border-radius: 8px;
 }
-@media (max-width: 1500px) and (min-width: 1201px) {
+@media (max-width: 1500px) and (min-width: 1386px) {
   /* 1440px 桌面优先保证列表与筛选控件可用，不让三栏挤压搜索/下拉框。 */
   .review-layout { grid-template-columns: minmax(400px, 400px) minmax(420px, 1fr) minmax(260px, 310px); }
   .review-cardcol { grid-column: auto; }
@@ -402,7 +402,7 @@ details[open] > summary::before { content: "▾ "; }
   .queue-summary-grid { grid-template-columns: minmax(0, 1fr); }
 }
 .review-mobile-tabs { display: none; }
-@media (max-width: 1200px) and (min-width: 681px) {
+@media (max-width: 1385px) and (min-width: 681px) {
   .review-layout { grid-template-columns: minmax(220px, .8fr) minmax(0, 1.2fr); }
   .review-cardcol { grid-column: 1 / -1; }
 }
