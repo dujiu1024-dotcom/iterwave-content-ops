@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useState } from "react";
+import { formatBusinessDateTime } from "../businessTime.mjs";
 import { useApp } from "../AppContext";
 import { navigate, useUrlTab } from "../nav";
 import {
@@ -1762,7 +1763,7 @@ export default function Production() {
                   <i className={`task-prio ${STATUS_CLS[r.status]}`} />
                   <div className="task-main">
                     <div className="task-title">第 {r.round_number} 轮</div>
-                    <div className="task-desc">创建于 {new Date(r.created_at).toLocaleString("zh-CN")}</div>
+                    <div className="task-desc">创建于 {formatBusinessDateTime(r.created_at)}</div>
                   </div>
                   <span className={`tag ${STATUS_CLS[r.status]}`}>{ROUND_STATUS_LABEL[r.status] ?? displayStatusLabel(r.status)}</span>
                 </div>
