@@ -95,9 +95,8 @@ export interface GlobalTaskQueueItem {
   queue_order: number;
   task_id: string;
   task_type: string;
-  tenant_id: string;
   tenant_name: string;
-  aggregate_id: string | null;
+  aggregate_label: string;
   /** round_run 任务对应的业务轮次编号（spiral_rounds.round_number）；无法解析时为 null */
   round_number?: number | null;
   status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "interrupted";
@@ -108,8 +107,6 @@ export interface GlobalTaskQueueItem {
   attempts: number;
   error_code: string | null;
   error_message: string | null;
-  retry_of_task_id?: string | null;
-  retry_confirmed_by?: string | null;
   retry_confirmation_note?: string | null;
   resolution_action?: "handled" | "ignored" | null;
   resolution_actor?: string | null;
@@ -119,19 +116,17 @@ export interface GlobalTaskQueueItem {
 
 export interface GlobalTaskQueueAuditItem {
   id: number;
-  task_id: string;
   action: string;
   actor: string;
   acted_at: string;
-  details: Record<string, unknown>;
+  details: { note?: string | null; confirmation_note?: string | null };
 }
 
 export interface GlobalTaskQueueDetail {
   task_id: string;
   queue_order: number;
   task_type: string;
-  tenant_id: string;
-  aggregate_id: string | null;
+  aggregate_label: string;
   round_number: number | null;
   status: GlobalTaskQueueItem["status"];
   created_at: string;
@@ -141,8 +136,6 @@ export interface GlobalTaskQueueDetail {
   attempts: number;
   error_code: string | null;
   error_message: string | null;
-  retry_of_task_id: string | null;
-  retry_confirmed_by: string | null;
   retry_confirmation_note: string | null;
   resolution_action: "handled" | "ignored" | null;
   resolution_actor: string | null;

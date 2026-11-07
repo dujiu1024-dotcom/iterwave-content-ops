@@ -41,6 +41,7 @@ import inspect
 import io
 import json
 import os
+import re
 import sqlite3
 import logging
 import threading
@@ -255,6 +256,56 @@ def _round_id_from_aggregate(task_type: str, aggregate_id) -> Optional[int]:
         return None
     head = str(aggregate_id).split(":", 1)[0]
     return int(head) if head.isdigit() else None
+
+
+def _task_aggregate_label(task_type: str, aggregate_id, round_number=None) -> str:
+    """把内部 aggregate key 映射为面向运营者的业务标签，不向前端传递数据库关联键。"""
+    if not aggregate_id:
+        return "—"
+    parts = str(aggregate_id).split(":")
+    if task_type == "round_run":
+        operation = parts[1] if len(parts) > 1 else "run"
+        round_label = f"第 {round_number} 轮" if round_number is not None else "轮次"
+        return f"{round_label} · 恢复存草稿" if operation == "save_pending_drafts" else f"{round_label} · 内容生产"
+    if task_type == "scheduler_job":
+        labels = {
+            "_job_hot_topics_refresh": "热点采集与匹配",
+            "_job_publish_polling": "发布状态轮询",
+            "_job_data_fetch": "平台数据采集",
+            "_job_daily_ops": "每日主动运营",
+            "_job_comment_polling": "评论轮询",
+            "_job_cb_recovery": "平台连接恢复",
+            "_job_kb_scan": "选题库扫描",
+            "_job_kb_sync": "选题库同步",
+            "_job_data_retention_cleanup": "数据清理",
+            "_job_round_timeout_sweeper": "轮次超时检查",
+            "_job_round_review": "轮次复盘",
+            "_job_autogrow_next_round": "自动闭环检查",
+        }
+        method = parts[0]
+        label = labels.get(method, "账号组后台任务")
+        if method == "_job_data_fetch" and len(parts) > 2 and parts[2].isdigit():
+            return f"{label} · 第 {parts[2]} 次"
+        return label
+    return "关联业务任务"
+
+
+def _safe_operator_actor(value) -> str:
+    raw = str(value or "")
+    return "system:operator" if raw.startswith(("system:", "service:")) else "operator"
+
+
+def _safe_operator_note(value):
+    if value is None:
+        return None
+    raw = redact(str(value)).strip()
+    raw = re.sub(
+        r"(?<![A-Za-z0-9:])/(?:home|root|tmp|var|opt|srv|app|Users|workspace|usr|etc|mnt)/[^\\s\"']+",
+        "服务器内部路径",
+        raw,
+    )
+    raw = re.sub(r"[A-Za-z]:\\\\[^\\s\"']+", "本地内部路径", raw)
+    return raw[:500] or None
 
 
 def _resolve_task_round_numbers(registry, tasks) -> dict:
@@ -4974,21 +5025,21 @@ def _register_routes(app: FastAPI) -> None:
             items.append({
                 "queue_order": task.queue_order,
                 "task_id": task.task_id, "task_type": task.task_type,
-                "tenant_id": task.tenant_id, "tenant_name": tenant_name,
-                "aggregate_id": task.aggregate_id,
-                "round_number": round_numbers.get((task.tenant_id, round_id)) if round_id is not None else None,
+                "tenant_name": tenant_name,
+                "aggregate_label": _task_aggregate_label(
+                    task.task_type, task.aggregate_id,
+                    round_numbers.get((task.tenant_id, round_id)) if round_id is not None else None,
+                ),
                 "status": task.status,
                 "created_at": task.created_at, "available_at": task.available_at,
                 "started_at": task.started_at,
                 "finished_at": task.finished_at, "attempts": task.attempts,
                 "error_code": safe_error_summary(task.error_code, "任务异常") if task.error_code else None,
                 "error_message": safe_task_error,
-                "retry_of_task_id": task.retry_of_task_id,
-                "retry_confirmed_by": task.retry_confirmed_by,
-                "retry_confirmation_note": task.retry_confirmation_note,
+                "retry_confirmation_note": _safe_operator_note(task.retry_confirmation_note),
                 "resolution_action": task.resolution_action,
-                "resolution_actor": task.resolution_actor,
-                "resolution_note": task.resolution_note,
+                "resolution_actor": _safe_operator_actor(task.resolution_actor),
+                "resolution_note": _safe_operator_note(task.resolution_note),
                 "resolution_at": task.resolution_at,
                 "progress": _safe_task_progress(task.progress),
                 "elapsed_seconds": _elapsed_seconds(task.started_at or task.created_at),
@@ -5072,19 +5123,23 @@ def _register_routes(app: FastAPI) -> None:
             "execution_log": execution_log,
             "queue_order": task.queue_order,
             "task_id": task.task_id, "task_type": task.task_type,
-            "tenant_id": task.tenant_id, "aggregate_id": task.aggregate_id,
+            "aggregate_label": _task_aggregate_label(
+                task.task_type, task.aggregate_id,
+                round_numbers.get((task.tenant_id, round_id)) if round_id is not None else None,
+            ),
             "round_number": round_numbers.get((task.tenant_id, round_id)) if round_id is not None else None,
             "status": task.status,
             "created_at": task.created_at, "available_at": task.available_at,
             "started_at": task.started_at,
             "finished_at": task.finished_at, "attempts": task.attempts,
-            "error_code": task.error_code, "error_message": task.error_message,
-            "retry_of_task_id": task.retry_of_task_id,
-            "retry_confirmed_by": task.retry_confirmed_by,
-            "retry_confirmation_note": task.retry_confirmation_note,
+            "error_code": safe_error_summary(task.error_code, "任务异常") if task.error_code else None,
+            "error_message": safe_error_summary(
+                task.error_message, "任务执行失败，请核对平台状态后再决定是否恢复。",
+            ) if task.error_message else None,
+            "retry_confirmation_note": _safe_operator_note(task.retry_confirmation_note),
             "resolution_action": task.resolution_action,
-            "resolution_actor": task.resolution_actor,
-            "resolution_note": task.resolution_note,
+            "resolution_actor": _safe_operator_actor(task.resolution_actor),
+            "resolution_note": _safe_operator_note(task.resolution_note),
             "resolution_at": task.resolution_at,
         }
 
@@ -5106,7 +5161,14 @@ def _register_routes(app: FastAPI) -> None:
         except TaskQueueError as exc:
             message = str(exc)
             raise HTTPException(404 if "不存在" in message else 409, message) from exc
-        return {"task_id": task_id, **resolution, "created": created}
+        return {
+            "task_id": task_id,
+            "action": resolution.get("action"),
+            "actor": _safe_operator_actor(resolution.get("actor")),
+            "note": _safe_operator_note(resolution.get("note")),
+            "acted_at": resolution.get("acted_at"),
+            "created": created,
+        }
 
     @app.post("/api/task-queue/{task_id}/retry")
     def retry_global_task_after_manual_verification(task_id: str, body: dict, request: Request):
@@ -5131,13 +5193,11 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(status_code, message) from exc
         return {
             "task_id": task.task_id,
-            "retry_of_task_id": task.retry_of_task_id,
-            "tenant_id": task.tenant_id,
             "task_type": task.task_type,
             "status": task.status,
             "created": created,
-            "confirmed_by": task.retry_confirmed_by,
-            "confirmation_note": task.retry_confirmation_note,
+            "confirmed_by": _safe_operator_actor(task.retry_confirmed_by),
+            "confirmation_note": _safe_operator_note(task.retry_confirmation_note),
         }
 
     @app.get("/api/task-queue/{task_id}/audit")
@@ -5146,7 +5206,24 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(503, "全局任务队列尚未初始化")
         if _task_queue.get(task_id) is None:
             raise HTTPException(404, "任务不存在")
-        return {"items": _task_queue.list_admin_audit(task_id)}
+        items = []
+        for entry in _task_queue.list_admin_audit(task_id):
+            details = _safe_round_report(entry.get("details") or {})
+            if not isinstance(details, dict):
+                details = {}
+            details = {
+                key: _safe_operator_note(details.get(key))
+                for key in ("note", "confirmation_note")
+                if details.get(key) is not None
+            }
+            items.append({
+                "id": entry.get("id"),
+                "action": entry.get("action"),
+                "actor": _safe_operator_actor(entry.get("actor")),
+                "acted_at": entry.get("acted_at"),
+                "details": details,
+            })
+        return {"items": items}
 
     @app.post("/api/task-queue/{task_id}/cancel")
     def cancel_global_task(task_id: str, request: Request):

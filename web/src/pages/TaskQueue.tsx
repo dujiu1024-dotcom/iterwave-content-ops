@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, GlobalTaskQueueItem } from "../api";
 import { useApp } from "../AppContext";
 import { formatBusinessDateTime } from "../businessTime.mjs";
-import { roundTaskLabel } from "../roundLabel";
 import TaskDispatchMetrics from "../components/TaskDispatchMetrics";
 import TaskProgressPanel from "../components/TaskProgressPanel";
 import { displayCodeLabel, displayStatusLabel, displayStepLabel, displayTaskTypeLabel, displayErrorLabel } from "../displayLabels";
@@ -37,17 +36,7 @@ const SCHEDULER_JOB_LABEL: Record<string, string> = {
 };
 
 function aggregateLabel(task: GlobalTaskQueueItem) {
-  if (!task.aggregate_id) return "—";
-  if (task.task_type === "round_run") return roundTaskLabel(task);
-  if (task.task_type !== "scheduler_job") {
-    return "关联业务任务";
-  }
-  const [method, objectId, attempt] = task.aggregate_id.split(":");
-  const label = SCHEDULER_JOB_LABEL[method] || "账号组后台任务";
-  if (method === "_job_data_fetch" && objectId) {
-    return `${label}${attempt ? ` · 第 ${attempt} 次` : ""}`;
-  }
-  return label;
+  return task.aggregate_label || "—";
 }
 
 function auditActionLabel(value: string | null | undefined) {

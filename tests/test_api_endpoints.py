@@ -5631,3 +5631,81 @@ def test_round_run_status_memory_branch_uses_response_allowlist(client, monkeypa
     assert "worker-private" not in response.text
     assert "private_debug" not in response.text
     assert "/home/ubuntu" not in response.text
+
+
+def test_global_task_queue_detail_and_audit_use_public_safe_contract(client, tmp_path, monkeypatch):
+    from src.core.task_queue import GlobalTaskQueue
+
+    tc, _conn, _seed = client
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    monkeypatch.setattr(api_main, "_task_queue", queue)
+    task, _ = queue.enqueue(
+        task_type="scheduler_job", tenant_id="private-tenant",
+        aggregate_id="_job_data_fetch:internal-object:2", payload={},
+    )
+    internal = (
+        "sqlite3.OperationalError: unable to open /home/ubuntu/iterwave/data/private.db\\n"
+        "Traceback (most recent call last):"
+    )
+    conn = queue._connect()
+    try:
+        conn.execute(
+            "UPDATE global_task_queue SET status='failed', error_code=?, error_message=?, "
+            "retry_confirmation_note=?, result_json=? WHERE task_id=?",
+            ("sqlite3.OperationalError", internal,
+             "已核验 /home/ubuntu/iterwave/private.db，不含凭据。",
+             json.dumps({"steps": []}), task.task_id),
+        )
+    finally:
+        conn.close()
+    queue.resolve_failed_task(
+        task.task_id, action="handled", actor="session:private-user",
+        note="已检查 /home/ubuntu/iterwave/private.db 并完成处理",
+    )
+
+    detail_response = tc.get(f"/api/task-queue/{task.task_id}")
+    assert detail_response.status_code == 200, detail_response.text
+    detail = detail_response.json()
+    assert "tenant_id" not in detail
+    assert "aggregate_id" not in detail
+    assert "retry_of_task_id" not in detail
+    assert detail["aggregate_label"] == "平台数据采集 · 第 2 次"
+    assert detail["error_code"] == "任务异常"
+    assert detail["error_message"] == "任务执行失败，请核对平台状态后再决定是否恢复。"
+    assert "服务器内部路径" in detail["retry_confirmation_note"]
+    assert "服务器内部路径" in detail["resolution_note"]
+    assert "private-tenant" not in detail_response.text
+    assert "/home/ubuntu" not in detail_response.text
+    assert "sqlite3.OperationalError" not in detail_response.text
+
+    audit_response = tc.get(f"/api/task-queue/{task.task_id}/audit")
+    assert audit_response.status_code == 200, audit_response.text
+    audit = audit_response.json()["items"][0]
+    assert set(audit) == {"id", "action", "actor", "acted_at", "details"}
+    assert "tenant_id" not in audit
+    assert "queue_task_id" not in audit
+    assert "private-user" not in audit_response.text
+    assert "/home/ubuntu" not in audit_response.text
+    assert "服务器内部路径" in audit["details"]["note"]
+
+
+def test_global_task_queue_list_uses_business_label_without_internal_aggregate_key(client, tmp_path, monkeypatch):
+    from src.core.task_queue import GlobalTaskQueue
+
+    tc, _conn, _seed = client
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    monkeypatch.setattr(api_main, "_task_queue", queue)
+    task, _ = queue.enqueue(
+        task_type="scheduler_job", tenant_id="private-tenant",
+        aggregate_id="_job_data_fetch:internal-object:3", payload={},
+    )
+    response = tc.get("/api/task-queue?scope=active")
+    assert response.status_code == 200, response.text
+    item = next(row for row in response.json()["items"] if row["task_id"] == task.task_id)
+    assert item["aggregate_label"] == "平台数据采集 · 第 3 次"
+    assert "aggregate_id" not in item
+    assert "tenant_id" not in item
+    assert "internal-object" not in response.text
+    assert "private-tenant" not in response.text
