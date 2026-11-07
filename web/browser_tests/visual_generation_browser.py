@@ -1399,6 +1399,16 @@ def test_business_profile_realistic_data_layout_has_no_overflow_at_supported_vie
         seen_paths.append(path)
         if path == "/api/auth/status":
             payload = {"configured": True, "authenticated": True, "needs_login": False}
+        elif path == "/api/tenants":
+            payload = {"runtime_tenant_id": "brand-main", "selected_tenant_id": "brand-main",
+                       "restart_required": False,
+                       "items": [{"id": "brand-main", "name": "主品牌运营账号组", "created_at": now, "is_active": True}]}
+        elif path == "/api/status":
+            payload = {"enabled_platforms": ["xhs"], "platforms_without_login": [],
+                       "logged_in_platforms": ["xhs"], "circuit_broken_platforms": [],
+                       "active_rounds": 0, "published_samples": 0, "scoring_mode": "default",
+                       "recovery": {"interrupted_tasks": 0, "requeued_data_fetch": [],
+                                    "stale_rounds": [], "pending_verify": 0}}
         elif path == "/api/business-profile":
             payload = {
                 "business_name": "山岚户外装备",
@@ -1465,6 +1475,16 @@ def test_business_diagnosis_history_does_not_expose_model_names_or_overflow():
         seen_paths.append(path)
         if path == "/api/auth/status":
             payload = {"configured": True, "authenticated": True, "needs_login": False}
+        elif path == "/api/tenants":
+            payload = {"runtime_tenant_id": "brand-main", "selected_tenant_id": "brand-main",
+                       "restart_required": False,
+                       "items": [{"id": "brand-main", "name": "主品牌运营账号组", "created_at": now, "is_active": True}]}
+        elif path == "/api/status":
+            payload = {"enabled_platforms": ["xhs"], "platforms_without_login": [],
+                       "logged_in_platforms": ["xhs"], "circuit_broken_platforms": [],
+                       "active_rounds": 0, "published_samples": 0, "scoring_mode": "default",
+                       "recovery": {"interrupted_tasks": 0, "requeued_data_fetch": [],
+                                    "stale_rounds": [], "pending_verify": 0}}
         elif path == "/api/business-diagnosis":
             payload = {"report": None}
         elif path == "/api/business-diagnosis/versions":
