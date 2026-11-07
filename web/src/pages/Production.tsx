@@ -41,6 +41,22 @@ const PLATFORM_NAME: Record<Platform, string> = {
 
 const ALL_PLATFORMS: Platform[] = ["xhs", "douyin", "kuaishou", "wechat_channels"];
 
+function visualTaskMessage(value: string | null | undefined): string {
+  if (!value) return "";
+  if (/OCR|校验未通过/i.test(value)) return "OCR 校验未通过";
+  if (/超时|服务中断/i.test(value)) return "图片生成超时或服务中断，请人工核实已完成页面文件后再安全重试。";
+  if (/文件缺失|页面文件缺失/i.test(value)) return "检测到已完成页面文件缺失，请人工核实文件后再决定是否重新生成。";
+  return "视觉任务执行未完成，请查看任务状态。";
+}
+
+function visualPageMessage(value: string | null | undefined): string {
+  if (!value) return "";
+  if (/OCR|校验未通过|校验失败/i.test(value)) return "OCR 校验未通过";
+  if (/文件缺失/i.test(value)) return "页面文件缺失";
+  return "执行遇到问题";
+}
+
+
 const TABS = [
   { key: "plan", label: "总计划" },
   { key: "platforms", label: "平台分项计划" },
@@ -1452,7 +1468,7 @@ export default function Production() {
                     not_found: "",
                   }[visualTask.status]}
                 </div>
-                <div>{visualTask.message ? "视觉任务执行未完成，请查看任务状态。" : ""}</div>
+                <div>{visualTaskMessage(visualTask.message)}</div>
                 {visualTask.pages.length > 0 && (
                   <div style={{ display: "grid", gap: 4, marginTop: 8 }}>
                     {visualTask.pages.map((page) => {
@@ -1466,7 +1482,7 @@ export default function Production() {
                       return (
                         <div key={page.page_index} style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
                           <span>第 {page.page_index + 1} 张</span>
-                          <span>{labels[page.status]}{page.attempts ? ` · 尝试 ${page.attempts} 次` : ""}{page.message ? " · 执行遇到问题" : ""}</span>
+                          <span>{labels[page.status]}{page.attempts ? ` · 尝试 ${page.attempts} 次` : ""}{page.message ? ` · ${visualPageMessage(page.message)}` : ""}</span>
                         </div>
                       );
                     })}
