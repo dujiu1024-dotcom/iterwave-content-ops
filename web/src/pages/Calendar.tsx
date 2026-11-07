@@ -16,10 +16,6 @@ const PLAN_STATUS_LABEL: Record<ContentPlan["status"], string> = {
   failed: "失败，可重试",
 };
 
-const TASK_STATUS_LABEL: Record<string, string> = {
-  pending: "待执行", running: "执行中", succeeded: "已完成", failed: "失败", cancelled: "已取消",
-};
-
 export default function Calendar() {
   const { showToast, withPending, isPending } = useApp();
   const today = businessCalendarDate();
@@ -339,7 +335,7 @@ export default function Calendar() {
                     </button>
                     {loading && <div className="loading" style={{ marginTop: 6, fontSize: 11, color: "var(--muted)" }}><div className="spinner" />加载中...</div>}
                     {d.batches.slice(0, 2).map((batch) => (
-                      <button type="button" key={batch.round_id} className="calendar-plan-chip" title={`第 ${batch.round_number ?? batch.round_id} 轮 · ${batch.task_count} 个生产任务`} onClick={() => void openBatchDetails(batch.round_id)}>
+                      <button type="button" key={batch.round_id} className="calendar-plan-chip" title={`${batch.round_number != null ? `第 ${batch.round_number} 轮` : "历史轮次"} · ${batch.task_count} 个生产任务`} onClick={() => void openBatchDetails(batch.round_id)}>
                         <strong>生产批次</strong><span>{batch.sub_plan_title ?? "历史轮次"} · {batch.strategy_step_title ?? "策略步骤待核实"}</span>
                       </button>
                     ))}
@@ -383,7 +379,7 @@ export default function Calendar() {
                 {d.batches.map((batch) => (
                   <div className="calendar-agenda-plan" key={batch.round_id}>
                     <button className="calendar-plan-label" onClick={() => void openBatchDetails(batch.round_id)}>生产任务</button>
-                    <span className="calendar-agenda-copy"><strong>{batch.sub_plan_title ?? `第 ${batch.round_number ?? batch.round_id} 轮`}</strong><small>{batch.platform ? platformMeta(batch.platform).label : "平台待核实"} · {batch.strategy_step_title ?? "策略步骤待核实"} · {batch.task_count} 个任务 · {displayStatusLabel(batch.round_status)}</small></span>
+                    <span className="calendar-agenda-copy"><strong>{batch.sub_plan_title ?? (batch.round_number != null ? `第 ${batch.round_number} 轮` : "历史轮次")}</strong><small>{batch.platform ? platformMeta(batch.platform).label : "平台待核实"} · {batch.strategy_step_title ?? "策略步骤待核实"} · {batch.task_count} 个任务 · {displayStatusLabel(batch.round_status)}</small></span>
                   </div>
                 ))}
                 {d.plans.map((plan) => (
