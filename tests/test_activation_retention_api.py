@@ -426,6 +426,11 @@ def test_saved_sample_promotes_into_created_formal_round_idempotently(activation
     payload = response.json()
     assert payload["round_id"] == round_id
     assert payload["already_promoted"] is False
+    assert payload["visual_status"] == "degraded"
+    assert payload["visual_production_required"] is True
+    assert payload["image_generation_started"] is False
+    assert payload["publication_started"] is False
+    assert payload["next_step"]
     assert conn.execute(
         "SELECT COUNT(*) FROM contents WHERE id=? AND round_id=?",
         (payload["content_id"], round_id),
@@ -441,6 +446,9 @@ def test_saved_sample_promotes_into_created_formal_round_idempotently(activation
     assert repeated.status_code == 201, repeated.text
     assert repeated.json()["already_promoted"] is True
     assert repeated.json()["content_id"] == payload["content_id"]
+    assert repeated.json()["visual_production_required"] is True
+    assert repeated.json()["image_generation_started"] is False
+    assert repeated.json()["publication_started"] is False
     assert conn.execute(
         "SELECT COUNT(*) FROM contents WHERE round_id=?", (round_id,)
     ).fetchone()[0] == 1

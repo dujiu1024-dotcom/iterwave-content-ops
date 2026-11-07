@@ -2375,6 +2375,11 @@ def _register_routes(app: FastAPI) -> None:
                 "content_id": sample["promoted_content_id"],
                 "round_id": existing["round_id"] if existing else round_id,
                 "already_promoted": True,
+                "visual_status": "degraded",
+                "visual_production_required": True,
+                "image_generation_started": False,
+                "publication_started": False,
+                "next_step": "需要进入正式视觉生产流程；导入本身不会生成图片或发布",
             }
         target_round = conn.execute(
             "SELECT id, status, topic_ids FROM spiral_rounds WHERE id=?", (round_id,)
@@ -2463,6 +2468,11 @@ def _register_routes(app: FastAPI) -> None:
         return {
             "sample_content_id": sample_content_id, "content_id": content_id,
             "draft_id": draft_id, "round_id": round_id, "already_promoted": False,
+            "visual_status": "degraded",
+            "visual_production_required": True,
+            "image_generation_started": False,
+            "publication_started": False,
+            "next_step": "需要进入正式视觉生产流程；导入本身不会生成图片或发布",
         }
 
     @app.get("/api/activation/samples/{sample_run_id}")
