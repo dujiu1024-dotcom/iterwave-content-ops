@@ -48,7 +48,7 @@ export default function Agent() {
     try {
       const [s, o, r] = await Promise.all([api.status(), api.orchestration(), api.orchestrationRuns(10)]);
       setStatus(s); setOrch(o); setRuns(r.runs);
-    } catch (e: any) { setError(e.message); }
+    } catch { setError("智能助手数据加载失败，请稍后重试。"); }
   };
   useEffect(() => { load(); }, []);
 
