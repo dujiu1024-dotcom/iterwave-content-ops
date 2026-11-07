@@ -129,7 +129,7 @@ export default function Assets() {
         setError(`部分数据加载失败：${failures.join("、")} — 已展示成功部分`);
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError("资产数据加载失败，请稍后重试。");
     } finally {
       setLoading(false);
     }
@@ -145,7 +145,7 @@ export default function Assets() {
       setAssetTotals((current) => ({ ...current, [type]: result.total }));
       setAssetPageCounts((current) => ({ ...current, [type]: result.pages }));
     } catch (e) {
-      showToast(`资产列表加载失败：${e instanceof Error ? e.message : String(e)}`, "error");
+      showToast("资产列表加载失败，请稍后重试", "error");
     }
   };
 
@@ -156,7 +156,7 @@ export default function Assets() {
       await load();
       return true;
     } catch (e: any) {
-      showToast(`保存失败: ${e?.message ?? e}`, "error");
+      showToast("资产保存失败，请检查填写内容后重试", "error");
       return false;
     }
   };
@@ -167,7 +167,7 @@ export default function Assets() {
       setTemplateVersions(result.items);
       setViewingTemplateId(id);
     } catch (e) {
-      showToast(`模板版本历史加载失败：${e instanceof Error ? e.message : String(e)}`, "error");
+      showToast("模板版本历史加载失败，请稍后重试", "error");
     }
   };
 
@@ -178,7 +178,7 @@ export default function Assets() {
       setViewingTemplateId(null);
       await load();
     } catch (e) {
-      showToast(`模板版本恢复失败：${e instanceof Error ? e.message : String(e)}`, "error");
+      showToast("模板版本恢复失败，请刷新后重试", "error");
     }
   };
 
@@ -618,7 +618,7 @@ function TemplateEditor({ item, onCancel, onSaved }: {
       showToast("内容模板已更新；后续生产将使用新结构", "success");
       await onSaved();
     } catch (e) {
-      showToast(`更新失败：${(e as Error).message}`, "error");
+      showToast("资产更新失败，请检查填写内容后重试", "error");
     } finally { setBusy(false); }
   };
   return (

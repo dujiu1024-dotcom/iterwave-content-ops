@@ -106,7 +106,7 @@ export default function GlobalOperations() {
       },
     ])));
     const failures = results.flatMap((r, i) => r.status === "rejected"
-      ? [`${["账号组汇总", "活跃任务", "失败任务统计", "未读通知", "统一待办"][i]}：${r.reason instanceof Error ? r.reason.message : String(r.reason)}`]
+      ? [`${["账号组汇总", "活跃任务", "失败任务统计", "未读通知", "统一待办"][i]}暂时无法加载`]
       : []);
     setError(failures.join("；"));
     setUpdatedAt(new Date());
@@ -263,7 +263,7 @@ export default function GlobalOperations() {
               <div className="task-desc">{todo.tenant_name} · {todo.source_label} · {todo.detail} · {todo.created_at ? formatBusinessDateTime(todo.created_at) : "时间未知"}</div>
             </div>
             {todo.source === "notification" ? <button className="btn sm" disabled={loading} onClick={() => {
-              void api.markNotificationRead(Number(todo.record_id)).then(() => refresh()).catch((e) => setError(e instanceof Error ? e.message : String(e)));
+              void api.markNotificationRead(Number(todo.record_id)).then(() => refresh()).catch(() => setError("通知状态更新失败，请稍后重试。"));
             }}>标记已读</button> : <button className="btn sm" onClick={() => navigate(todo.target_page, todo.target_page === "operations" ? (todo.target_tab ?? undefined) : undefined)}>处理</button>}
           </div>)}
         </div> : <div className="empty-state">当前筛选条件下没有待处理事项。</div>}

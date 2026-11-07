@@ -161,11 +161,11 @@ export default function Operations() {
       const rejected = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
       setLoadError(
         rejected.length > 0
-          ? rejected.map((r) => r.reason instanceof Error ? r.reason.message : String(r.reason)).join("；")
+          ? `${rejected.length} 项数据暂时无法加载`
           : null,
       );
     } catch (e) {
-      setLoadError(e instanceof Error ? e.message : String(e));
+      setLoadError("运营数据加载失败，请稍后重试。");
     } finally {
       setLoading(false);
     }
@@ -182,7 +182,7 @@ export default function Operations() {
         "通道自检：" + Object.entries(r.results).map(([k, v]) => `${k}=${label[v] ?? v}`).join(" · "),
         "info",
       );
-    } catch (e: any) { showToast(e.message, "error"); }
+    } catch { showToast("通知通道自检失败，请稍后重试", "error"); }
     finally { setNotifBusy(false); }
   };
 
@@ -252,8 +252,8 @@ export default function Operations() {
           // G-11：同一平台的恢复/重置在请求中不可重复触发
           try {
             const r = await withPending(`cb:recover:${p}`, () => api.recoverCb(p));
-            if (r) showToast(r.passed ? "✓ 恢复通过" : `✕ ${r.reason}`, r.passed ? "success" : "error");
-          } catch (e: any) { showToast(e.message, "error"); }
+            if (r) showToast(r.passed ? "✓ 恢复通过" : "恢复未通过，请查看平台诊断记录", r.passed ? "success" : "error");
+          } catch { showToast("平台熔断器操作失败，请刷新状态后重试", "error"); }
           await refresh();
         }} onReset={async (p) => {
           try {
@@ -783,8 +783,7 @@ function BreakerPane({
               {evt && (
                 <>
                   <div style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.7 }}>
-                    触发：{evt.reason_label ?? evt.reason}
-                    <span style={{ opacity: .6 }}>（{evt.reason}）</span><br />
+                    触发：{evt.reason_label ?? "平台保护规则触发"}<br />
                     检测：{formatBusinessDateTime(evt.detected_at)}<br />
                     {evt.cooldown_until && (
                       <>冷却到期：{formatBusinessDateTime(evt.cooldown_until)}

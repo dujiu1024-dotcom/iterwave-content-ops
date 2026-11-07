@@ -614,7 +614,7 @@ export default function Production() {
         showToast(
           message.includes("已有图片生成任务正在执行")
             ? "已有图片生成任务正在执行，已切换为状态跟踪；不会重复发起图片生成。"
-            : `生成卡片失败: ${message}`,
+            : "生成卡片失败，请稍后重试或查看管理员诊断日志。",
           "error",
         );
       } finally {
@@ -631,7 +631,7 @@ export default function Production() {
         const res = await api.recheckContent(selectedContentId);
         setRecheck(res);
         showToast(
-          res.passes ? `✓ 目标检查通过（${res.result}）` : `✕ 目标检查未通过：${res.reason}`,
+          res.passes ? "目标检查通过" : "目标检查未通过，请查看规则提示并调整内容",
           res.passes ? "success" : "error",
         );
         await loadRoundData(currentRoundId!);
@@ -732,7 +732,7 @@ export default function Production() {
       showToast(res.message, "success");
       await reloadRoundContents();
     } catch (e: any) {
-      showToast(`调整首尾图失败: ${e?.message ?? "未知原因"}`, "error");
+      showToast("调整首尾图失败，请稍后重试", "error");
     } finally {
       setMovingCard(null);
     }
@@ -761,7 +761,7 @@ export default function Production() {
       showToast(res.message, "success");
       await reloadRoundContents();
     } catch (e: any) {
-      showToast(`AI 加工失败: ${e?.message ?? "未知原因"}`, "error");
+      showToast("AI 图片加工失败，请稍后重试", "error");
     } finally {
       setProcessing(false);
     }

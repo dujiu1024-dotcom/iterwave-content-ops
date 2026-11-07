@@ -64,7 +64,7 @@ export default function Review() {
       setSelectedId((current) => current && result.items.some((item) => item.id === current)
         ? current : result.items[0]?.id ?? null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "审核队列加载失败");
+      setError("审核队列加载失败，请稍后刷新重试。");
     } finally {
       setLoading(false);
     }
@@ -80,7 +80,7 @@ export default function Review() {
     void api.stageEffectFeedback(stageId).then((result) => {
       if (!cancelled) setEffectFeedback(result);
     }).catch((err) => {
-      if (!cancelled) setError(err instanceof Error ? err.message : "策略效果数据加载失败");
+      if (!cancelled) setError("策略效果数据暂时无法加载，请稍后重试。");
     });
     return () => { cancelled = true; };
   }, [selected?.sub_plan_stage_id]);
@@ -121,7 +121,7 @@ export default function Review() {
       }
       await load();
     } catch (err) {
-      const message = err instanceof Error ? err.message : "审核操作失败";
+      const message = "审核状态可能已变化，请刷新队列后重试。";
       // 409 通常意味着状态已被其他审核员改变，刷新后以服务端状态为准。
       await load();
       setError(message);
@@ -144,7 +144,7 @@ export default function Review() {
       setNotice("内容已保存，并已重新执行 G2 检查；需要重新审核。");
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "内容编辑失败");
+      setError("内容编辑失败，请检查内容后重试。");
     } finally { setBusyId(null); }
   };
 
@@ -156,7 +156,7 @@ export default function Review() {
       setPublishFailureReason("");
       setNotice("发布失败结果已记录；草稿仍保留，可在处理后重新发布。");
       await load();
-    } catch (err) { setError(err instanceof Error ? err.message : "发布结果记录失败"); }
+    } catch (err) { setError("发布结果记录失败，请稍后重试。"); }
     finally { setBusyId(null); }
   };
 
@@ -171,7 +171,7 @@ export default function Review() {
       const result = await api.stageEffectFeedback(selected.sub_plan_stage_id);
       setEffectFeedback(result);
       setNotice("策略效果评估已保存，历史记录不会被覆盖。");
-    } catch (err) { setError(err instanceof Error ? err.message : "策略评估保存失败"); }
+    } catch (err) { setError("策略评估保存失败，请检查填写内容后重试。"); }
   };
 
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -348,7 +348,7 @@ export default function Review() {
                 : <ol>{selected.review_history.map((event, index) => (
                   <li key={`${event.overridden_at}-${index}`}>
                     <strong>{actionLabel(event.override_field)}</strong>
-                    <span>{event.reason || event.override_value}</span>
+                    <span>{event.reason ? "已记录人工调整原因" : "—"}</span>
                     <small>{event.overridden_at} · {event.overridden_by}</small>
                   </li>
                 ))}</ol>}

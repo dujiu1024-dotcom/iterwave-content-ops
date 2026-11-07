@@ -20,7 +20,7 @@ export default function BusinessDiagnosis() {
       setVersions(history.items);
       setEditor(latest.report ? JSON.stringify(latest.report.report, null, 2) : "");
       setError("");
-    } catch (e) { setError(e instanceof Error ? e.message : "读取失败"); }
+    } catch { setError("经营分析报告读取失败，请稍后重试。"); }
   }
   useEffect(() => { void load(); }, []);
 
@@ -31,7 +31,7 @@ export default function BusinessDiagnosis() {
       setReport(result.report);
       setEditor(JSON.stringify(result.report.report, null, 2));
       await load();
-    } catch (e) { setError(e instanceof Error ? e.message : "AI 分析失败"); }
+    } catch { setError("AI 经营分析失败，请检查数据完整性后重试。"); }
     finally { setBusy(false); }
   }
   async function save() {
@@ -42,7 +42,7 @@ export default function BusinessDiagnosis() {
       setReport(result.report);
       setEditor(JSON.stringify(result.report.report, null, 2));
       await load();
-    } catch (e) { setError(e instanceof Error ? e.message : "保存失败，请检查 JSON"); }
+    } catch { setError("报告保存失败，请检查 JSON 格式和字段结构。"); }
     finally { setBusy(false); }
   }
   async function ignoreRecommendation() {
@@ -52,7 +52,7 @@ export default function BusinessDiagnosis() {
       const result = await api.ignoreBusinessDiagnosisRecommendation(report.id, ignoreKey.trim(), ignoreReason.trim());
       setReport(result.report); setEditor(JSON.stringify(result.report.report, null, 2));
       setIgnoreKey(""); setIgnoreReason(""); await load();
-    } catch (e) { setError(e instanceof Error ? e.message : "忽略建议失败"); }
+    } catch { setError("忽略建议记录失败，请稍后重试。"); }
     finally { setBusy(false); }
   }
 
@@ -60,7 +60,7 @@ export default function BusinessDiagnosis() {
     if (!report) return;
     setBusy(true);
     try { const result = await api.confirmBusinessDiagnosis(report.id); setReport(result.report); await load(); }
-    catch (e) { setError(e instanceof Error ? e.message : "确认失败"); }
+    catch { setError("报告确认失败，请刷新来源状态后重试。"); }
     finally { setBusy(false); }
   }
 
