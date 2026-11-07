@@ -646,6 +646,7 @@ def build_original_assets_router(get_context, *, route_class=None):
             """SELECT u.original_asset_id,u.asset_version_no,u.usage_role,u.permission_snapshot,
                       u.privacy_snapshot,u.asset_quality_snapshot,u.provider,u.model,
                       u.source_sha256,u.result_sha256,u.generation_event_id,u.consumed_at,
+                      u.page_role,u.page_index,
                       v.title,v.description
                FROM production_task_asset_usages u
                JOIN original_asset_versions v
