@@ -58,6 +58,7 @@ def test_reference_image_bytes_are_sent_to_provider_edit_endpoint(monkeypatch, t
 
     class _Response:
         status_code = 200
+        content = b"{}"
 
         def json(self):
             return {"data": [{"b64_json": "ignored-by-decoder"}]}
