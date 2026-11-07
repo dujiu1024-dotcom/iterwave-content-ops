@@ -215,7 +215,7 @@ export default function Review() {
           </label>
           <label>开始日期<input type="date" value={from} max={to || undefined} onChange={(e) => { setPage(1); setFrom(e.target.value); }} /></label>
           <label>结束日期<input type="date" value={to} min={from || undefined} onChange={(e) => { setPage(1); setTo(e.target.value); }} /></label>
-          <label>关键词<input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="标题 / 内容 ID / 轮次" /></label>
+          <label>关键词<input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="标题 / 主题 / 轮次" /></label>
         </div>
       </section>
 
