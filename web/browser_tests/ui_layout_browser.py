@@ -72,6 +72,23 @@ def test_compact_filter_and_form_layouts_at_four_viewports():
                   <div><textarea class="field"></textarea></div>
                   <div><input class="field"></div><div><input class="field"></div><div><input class="field"></div><div><input class="field"></div><div><input class="field"></div><div><input class="field"></div><div><input class="field"></div><div><input class="field"></div><div><input class="field"></div><div><input class="field"></div><div><input class="field"></div>
                 </section>
+                <section id="asset" class="grid asset-form-grid">
+                  <input class="field"><textarea class="field"></textarea><input class="field"><button class="btn">保存</button>
+                </section>
+                <section id="onboarding" class="grid three onboarding-goal-grid">
+                  <input class="field"><input class="field"><input class="field">
+                </section>
+                <section id="agent" class="agent-flow agent-flow-responsive" style="grid-template-columns:repeat(7,minmax(0,1fr))">
+                  <button class="flow-step">1</button><button class="flow-step">2</button><button class="flow-step">3</button>
+                  <button class="flow-step">4</button><button class="flow-step">5</button><button class="flow-step">6</button><button class="flow-step">7</button>
+                </section>
+                <section id="analytics" class="analytics-platform-filter">
+                  <button class="btn sm">全部平台</button><button class="btn sm">小红书</button><button class="btn sm">抖音</button>
+                  <button class="btn sm">快手</button><button class="btn sm">视频号</button>
+                </section>
+                <section id="plan" class="plan-hierarchy plan-hierarchy-responsive">
+                  <div>主计划</div><span>→</span><div>平台子计划</div><span>→</span><div>阶段</div><span>→</span><div>生产线</div><span>→</span><div>生产轮次</div>
+                </section>
               </main>
             """)
             page.add_style_tag(url=f"http://127.0.0.1:{port}/src/styles.css")
@@ -87,12 +104,19 @@ def test_compact_filter_and_form_layouts_at_four_viewports():
                   const overflow = document.documentElement.scrollWidth > window.innerWidth;
                   const goal = document.querySelector('#goal');
                   const goalChildren = [...goal.children].map(rect);
+                  const cols = (selector) => new Set([...document.querySelector(selector).children].map(el => Math.round(rect(el).x))).size;
+                  const agentCols = getComputedStyle(document.querySelector('#agent')).gridTemplateColumns.split(' ').length;
+                  const plan = document.querySelector('#plan');
                   return {
                     reviewCols: reviewCols.size,
                     reviewLabels: labels,
                     controlWidths: allInputs.map(x => rect(x).width),
                     overflow,
                     goalFirst: goalChildren[0],
+                    assetCols: cols('#asset'),
+                    onboardingCols: cols('#onboarding'),
+                    agentCols,
+                    planInnerOverflow: plan.scrollWidth > plan.clientWidth,
                     viewport: window.innerWidth
                   };
                 }""")
@@ -100,6 +124,11 @@ def test_compact_filter_and_form_layouts_at_four_viewports():
                 assert metrics["reviewCols"] == expected_review_cols, f"review grid columns wrong at {width}px: {metrics}"
                 assert all(w <= width for w in metrics["controlWidths"]), f"control wider than viewport at {width}px"
                 assert metrics["goalFirst"]["width"] <= width, f"goal description field overflow at {width}px"
+                assert metrics["assetCols"] == (3 if width >= 900 else 2 if width > 600 else 1), f"asset form columns wrong at {width}px: {metrics}"
+                assert metrics["onboardingCols"] == (3 if width > 900 else 2 if width > 600 else 1), f"onboarding form columns wrong at {width}px: {metrics}"
+                assert metrics["agentCols"] == (7 if width > 900 else 4 if width > 600 else 2), f"agent flow columns wrong at {width}px: {metrics}"
+                if width <= 600:
+                    assert metrics["planInnerOverflow"], f"plan hierarchy should scroll internally on narrow viewport: {metrics}"
             browser.close()
     finally:
         _stop_vite(server)
