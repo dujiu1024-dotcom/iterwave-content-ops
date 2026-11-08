@@ -189,8 +189,8 @@ export default function Review() {
 
       <div className="review-stats">
         <div className="review-stat"><span>当前筛选结果</span><strong>{total}</strong></div>
-        <div className="stat-card"><span>当前页</span><strong>{page} / {pages}</strong></div>
-        <div className="stat-card"><span>每页数量</span><strong>{PAGE_SIZE}</strong></div>
+        <div className="review-stat"><span>当前页</span><strong>{page} / {pages}</strong></div>
+        <div className="review-stat"><span>每页数量</span><strong>{PAGE_SIZE}</strong></div>
       </div>
 
       <section className="panel" style={{ marginBottom: 16 }}>
