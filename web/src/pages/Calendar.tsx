@@ -481,7 +481,7 @@ export default function Calendar() {
                 </div>) : <div className="note">尚未关联生产轮次</div>}
               </div>
               <div><strong>关联草稿（{planDetail.drafts.length}）</strong>
-                {planDetail.drafts.length ? planDetail.drafts.map((draft) => <div className="calendar-plan-detail-row" key={draft.draft_id}>{draft.title || "未命名草稿"} · {platformMeta(draft.platform).label} · {draft.status}</div>) : <div className="note">生产完成后自动回写草稿</div>}
+                {planDetail.drafts.length ? planDetail.drafts.map((draft) => <div className="calendar-plan-detail-row" key={draft.draft_id}>{/* Internal draft IDs stay out of business-facing fallback text. */}{draft.title || "未命名草稿"} · {platformMeta(draft.platform).label} · {draft.status}</div>) : <div className="note">生产完成后自动回写草稿</div>}
               </div>
             </div>
             {planDetailLoading && <div className="loading"><div className="spinner" />刷新中…</div>}
