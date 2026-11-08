@@ -335,7 +335,7 @@ export default function Onboarding() {
               <FormRow label="目标描述 *" value={goalForm.goal_text}
                 onChange={(v) => setGoalForm({ ...goalForm, goal_text: v })}
                 placeholder="如：小红书 30 天新增 500 粉" />
-              <div className="grid three">
+              <div className="grid three onboarding-goal-grid">
                 <div>
                   <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 4 }}>平台</div>
                   <select className="field" style={{ width: "100%" }} value={goalForm.target_platform}
