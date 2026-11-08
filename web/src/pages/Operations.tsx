@@ -1030,7 +1030,7 @@ function SchedulerPane({ jobs, onTriggered }: {
               <i className={`task-prio ${j.enabled ? "blue" : "gray"}`} />
               <div className="task-main">
                 <div className="task-title">
-                  {j.name} <code style={{ fontSize: 10, color: "var(--muted)" }}>{j.id}</code>
+                  {j.name}
                   {!j.enabled && <span className="tag gray" style={{ marginLeft: 6 }}>已关闭</span>}
                 </div>
                 <div className="task-desc">
