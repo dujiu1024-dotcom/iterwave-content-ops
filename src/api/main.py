@@ -7307,6 +7307,10 @@ def _register_routes(app: FastAPI) -> None:
         items: list[dict] = []
         for r in conn.execute(sql, params).fetchall():
             row = dict(r)
+            if row.get("draft_error"):
+                row["draft_error"] = safe_error_summary(
+                    row["draft_error"], "草稿保存失败，请查看草稿状态并重试。",
+                )
             try:
                 row["tags"] = json.loads(row["tags"]) if row["tags"] else []
             except (TypeError, ValueError):
@@ -7389,6 +7393,10 @@ def _register_routes(app: FastAPI) -> None:
         items = []
         for raw in rows:
             item = dict(raw)
+            if item.get("draft_error"):
+                item["draft_error"] = safe_error_summary(
+                    item["draft_error"], "草稿保存失败，请查看草稿状态并重试。",
+                )
             try:
                 item["tags"] = json.loads(item.get("tags") or "[]")
                 if not isinstance(item["tags"], list):
