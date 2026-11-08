@@ -1462,3 +1462,22 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
   max-width: 100%;
   overflow-wrap: anywhere;
 }
+
+
+/* Operations logs and task tracking: stable compact filter grids. */
+.ops-data-filters {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  align-items: center;
+  column-gap: 8px;
+  row-gap: 6px;
+  padding: 0 16px 10px;
+  min-width: 0;
+}
+.ops-data-filters > * { min-width: 0; max-width: 100%; }
+.ops-data-filters select,
+.ops-data-filters input { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; }
+.ops-data-filters > button { white-space: nowrap; }
+@media (max-width: 1100px) { .ops-data-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 720px) { .ops-data-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); } .ops-data-filters > button { justify-self: start; } }
+@media (max-width: 420px) { .ops-data-filters { grid-template-columns: minmax(0, 1fr); } }
