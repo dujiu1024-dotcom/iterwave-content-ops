@@ -1193,26 +1193,26 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 .kb-source-fields input.field[placeholder^="https://"] { flex: 1 1 280px; min-width: min(220px, 100%); }
 .kb-source-fields input.field[placeholder^="来源名称"] { flex: 0 1 180px; width: 180px; min-width: 140px; }
 .kb-source-fields select.field { flex: 0 0 120px; width: 120px; min-width: 110px; }
-.goal-form-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); grid-auto-flow: row dense; }
+.grid.four.goal-form-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); grid-auto-flow: row dense; }
 .goal-form-grid > div { min-width: 0; }
-.goal-form-grid > div:first-child { grid-column: span 2; }
+.grid.four.goal-form-grid > div:first-child { grid-column: span 2; }
 .goal-form-grid .field { min-width: 0; max-width: 100%; }
-.persona-compact-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.grid.three.persona-compact-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .persona-link-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
 .persona-link-row select.field { flex: 0 1 130px; width: 130px; min-width: 110px; }
 .persona-link-row input.field { flex: 1 1 180px; min-width: min(160px, 100%); }
 @media (max-width: 900px) {
-  .goal-form-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .persona-compact-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid.four.goal-form-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .grid.three.persona-compact-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 720px) {
-  .goal-form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .goal-form-grid > div:first-child { grid-column: 1 / -1; }
+  .grid.four.goal-form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid.four.goal-form-grid > div:first-child { grid-column: 1 / -1; }
   .calendar-toolbar .calendar-search { flex: 1 1 100%; max-width: none; }
 }
 @media (max-width: 520px) {
-  .goal-form-grid, .persona-compact-grid { grid-template-columns: minmax(0, 1fr); }
-  .goal-form-grid > div:first-child { grid-column: auto; }
+  .goal-form-grid, .grid.three.persona-compact-grid { grid-template-columns: minmax(0, 1fr); }
+  .grid.four.goal-form-grid > div:first-child { grid-column: auto; }
   .topic-pool-toolbar > div:last-child { margin-left: 0; }
   .topic-pool-toolbar > select.field,
   .topic-pool-toolbar > .filter-row { flex: 1 1 100%; }
