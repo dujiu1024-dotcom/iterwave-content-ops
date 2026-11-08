@@ -1276,3 +1276,45 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
     gap: 6px;
   }
 }
+
+
+/* Tablet-PC calendar toolbar: intentional compact grid instead of accidental wrapping. */
+@media (min-width: 761px) and (max-width: 1100px) {
+  .calendar-toolbar {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    width: min(100%, 460px);
+    gap: 6px;
+    align-items: center;
+  }
+  .calendar-toolbar > * {
+    min-width: 0;
+    width: 100%;
+  }
+  .calendar-toolbar .segmented-control {
+    display: flex;
+  }
+  .calendar-toolbar .segmented-control .btn {
+    flex: 1 1 0;
+    min-width: 0;
+    padding-inline: 6px;
+  }
+  .calendar-toolbar .calendar-date-picker,
+  .calendar-toolbar .calendar-search {
+    grid-column: span 2;
+    width: 100%;
+    min-width: 0;
+  }
+  .calendar-toolbar select.field {
+    width: 100%;
+    max-width: none !important;
+  }
+  .calendar-toolbar .calendar-plan-check {
+    justify-content: center;
+    white-space: nowrap;
+    font-size: 11px;
+  }
+  .calendar-toolbar > .btn {
+    padding-inline: 6px;
+  }
+}
