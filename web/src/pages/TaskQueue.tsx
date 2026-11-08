@@ -373,7 +373,7 @@ export default function TaskQueue() {
       <section className="panel">
         <div className="panel-head">
           <div><h2>最近任务</h2><div className="muted">支持按任务类型、状态、账号组名称、失败原因和日期筛选；系统后台调度任务可单独查看。</div></div>
-          <div className="filter-row" style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <div className="task-queue-filters filter-row" style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             {drilldown && <button className="btn sm soft" type="button" onClick={() => { setDrilldown(null); setHistoryPage(1); }}>清除图表钻取</button>}
             <select aria-label="历史任务类型" value={historyType} onChange={(event) => { setHistoryType(event.target.value as "all" | "round_run" | "scheduler_job"); setHistoryPage(1); }}>
               <option value="round_run">内容生产</option><option value="scheduler_job">系统后台任务</option><option value="all">全部任务类型</option>
