@@ -170,6 +170,26 @@ def test_all_routable_pages_at_required_viewports():
                             f"{route}@{width}: horizontal document overflow "
                             f"(document={result['documentWidth']}, body={result['bodyWidth']})"
                         )
+                    if route == "task-queue":
+                        filters = page.locator(".task-queue-filters")
+                        if filters.count() != 1 or not filters.is_visible():
+                            failures.append(f"{route}@{width}: compact history filters are missing")
+                        else:
+                            filter_rows = filters.evaluate(
+                                """element => {
+                                  const controls = [...element.children].slice(0, 6);
+                                  return new Set(controls.map(control =>
+                                    Math.round(control.getBoundingClientRect().top)
+                                  )).size;
+                                }"""
+                            )
+                            expected_rows = 1 if width > 1100 else 2 if width > 680 else 3
+                            if filter_rows != expected_rows:
+                                failures.append(
+                                    f"{route}@{width}: history filters use {filter_rows} rows "
+                                    f"(expected {expected_rows})"
+                                )
+
                     if route == "plan-center" and width <= 760:
                         hierarchy = page.locator(".plan-hierarchy")
                         hint = page.locator(".plan-hierarchy-hint")
