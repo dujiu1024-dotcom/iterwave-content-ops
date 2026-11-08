@@ -2767,7 +2767,7 @@ def test_global_task_retry_api_requires_platform_confirmation_and_preserves_snap
     assert response.status_code == 200
     result = response.json()
     assert result["created"] is True
-    assert result["retry_of_task_id"] == original.task_id
+    assert "retry_of_task_id" not in result
     retry = queue.get(result["task_id"])
     assert retry is not None
     assert retry.tenant_id == original.tenant_id
@@ -2822,12 +2822,13 @@ def test_global_task_resolution_api_records_actor_and_keeps_execution_status_imm
     assert task is not None
     assert task.status == "failed"
     assert task.resolution_action == "handled"
-    assert task.resolution_actor == body["actor"]
+    assert task.resolution_actor.startswith("session:")
+    assert body["actor"] == "operator"
     assert task.resolution_executing_actor == "service:api"
     assert task.resolution_tenant_id == "tenant-a"
     assert task.resolution_queue_task_id is None
     audit = queue.list_admin_audit(original.task_id)
-    assert audit[0]["actor"] == body["actor"]
+    assert audit[0]["actor"].startswith("session:")
     assert audit[0]["executing_actor"] == "service:api"
     assert audit[0]["tenant_id"] == "tenant-a"
     assert audit[0]["queue_task_id"] is None
@@ -5511,7 +5512,7 @@ def test_global_task_detail_sanitizes_step_and_task_errors(client, tmp_path, mon
     assert payload["error_message"] == "任务执行失败，请核对平台状态后再决定是否恢复。"
     assert payload["error_code"] == "任务异常"
     assert payload["execution_log"][0]["detail"] == "步骤已记录；详细诊断请联系管理员。"
-    assert payload["progress"]["detail"] == "任务正在执行。"
+    assert payload["progress"]["detail"] == "步骤已记录；详细诊断请联系管理员。"
     assert payload["progress"]["steps"][0]["detail"] == "步骤已记录；详细诊断请联系管理员。"
     assert payload["progress"]["percent"] == 50
     assert "/home/ubuntu" not in response.text
