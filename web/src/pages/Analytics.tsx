@@ -209,7 +209,7 @@ export default function Analytics() {
 
       {detailView === "overview" && <>
       {/* 总览只放经营指标：生产量、互动、粉丝增长、目标完成率。增长漏斗类（TTV、激活率、首次发布率等）不在此展示。 */}
-      <div className="flex" style={{ justifyContent: "flex-end", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+      <div className="flex filter-row analytics-window-filter" style={{ justifyContent: "flex-end", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
         <label htmlFor="business-kpi-window" className="tiny">经营统计周期</label>
         <select id="business-kpi-window" className="field" style={{ width: 130 }} value={businessDays} onChange={(e) => setBusinessDays(Number(e.target.value))}>
           <option value={7}>近 7 天</option>
@@ -436,7 +436,7 @@ export default function Analytics() {
               上方为平台读回的原始值，下方为和本平台平均水平的差距。
             </div>
           </div>
-          <div style={{ display: "flex", gap: 6 }}>
+          <div className="analytics-platform-filter">
             <button className={`btn sm ${platformFilter === "" ? "primary" : ""}`} onClick={() => { setPlatformFilter(""); setMetricsPage(1); }}>全部平台</button>
             {(Object.keys(PLATFORM_NAME) as Platform[]).map((p) => (
               <button key={p} className={`btn sm ${platformFilter === p ? "primary" : ""}`} onClick={() => { setPlatformFilter(p); setMetricsPage(1); }}>
