@@ -21,10 +21,9 @@ ROUTES = (
     "operations", "analytics", "gaps", "agent", "accounts", "onboarding",
     "settings", "task-queue", "business-diagnosis",
 )
-SCREENSHOT_ROUTES = {
-    "dashboard", "global-ops", "plan-center", "production", "review",
-    "settings", "task-queue",
-}
+# Capture all routable pages at every required viewport.
+# API fixtures fail closed, so screenshots validate layout without fabricating data.
+SCREENSHOT_ROUTES = set(ROUTES)
 
 
 def _serve_vite():
