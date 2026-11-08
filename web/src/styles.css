@@ -1136,3 +1136,25 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
   .filter-row > label,
   .toolbar > label { flex: 1 1 calc(50% - 6px); }
 }
+
+
+/* Compact search + paired controls used by asset inventory and media library. */
+.form-grid > label.full { grid-column: 1 / -1; }
+.form-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+.form-row > .field:first-child { flex: 1 1 240px; width: auto; min-width: min(180px, 100%); }
+.form-row > .field:not(:first-child) { flex: 0 1 190px; width: auto; min-width: 140px; }
+.ml-toolbar { min-width: 0; }
+.ml-toolbar .ml-search { width: min(240px, 100%); min-width: 160px; max-width: 100%; }
+@media (max-width: 600px) {
+  .ml-toolbar { align-items: stretch; }
+  .ml-filters { width: 100%; }
+  .ml-toolbar .ml-search { width: 100%; min-width: 0; }
+  .form-row > .field:first-child,
+  .form-row > .field:not(:first-child) { flex: 1 1 100%; min-width: 0; }
+}
