@@ -158,6 +158,7 @@ def test_all_routable_pages_at_required_viewports():
                             bodyWidth: document.body.scrollWidth,
                             mainRight: main ? Math.round(main.getBoundingClientRect().right) : null,
                             topbarRight: topbar ? Math.round(topbar.getBoundingClientRect().right) : null,
+                            topbarHeight: topbar ? Math.round(topbar.getBoundingClientRect().height) : null,
                             renderFailure: document.body.innerText.includes('页面渲染出错'),
                             visibleControlsOutsideViewport: overflowingControls.slice(0, 12),
                           };
@@ -168,6 +169,11 @@ def test_all_routable_pages_at_required_viewports():
                         failures.append(
                             f"{route}@{width}: horizontal document overflow "
                             f"(document={result['documentWidth']}, body={result['bodyWidth']})"
+                        )
+                    if width <= 760 and result["topbarHeight"] and result["topbarHeight"] > 80:
+                        failures.append(
+                            f"{route}@{width}: mobile topbar is too tall "
+                            f"({result['topbarHeight']}px; expected <= 80px)"
                         )
                     if result["renderFailure"]:
                         failures.append(f"{route}@{width}: React page boundary reported render failure")
