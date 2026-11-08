@@ -32,7 +32,7 @@ export default function TaskDispatchMetrics({ onDrilldown }: { onDrilldown?: (fi
       });
       setSummary(result);
     } catch (err) {
-      setError((err as Error).message || "任务统计加载失败");
+      setError("任务统计加载失败，请稍后重试。");
     } finally {
       setLoading(false);
     }
@@ -56,7 +56,7 @@ export default function TaskDispatchMetrics({ onDrilldown }: { onDrilldown?: (fi
       <div className="filter-row" style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "0 16px 14px" }}>
         <label>开始日期 <input type="date" value={dateFrom} max={dateTo || undefined} onChange={(event) => setDateFrom(event.target.value)} /></label>
         <label>结束日期 <input type="date" value={dateTo} min={dateFrom || undefined} onChange={(event) => setDateTo(event.target.value)} /></label>
-        <input aria-label="账号组 ID" value={tenantId} onChange={(event) => setTenantId(event.target.value)} placeholder="账号组 ID" style={{ width: 150 }} />
+        <input aria-label="账号组标识" value={tenantId} onChange={(event) => setTenantId(event.target.value)} placeholder="账号组标识" style={{ width: 150 }} />
         <select aria-label="任务类型" value={taskType} onChange={(event) => setTaskType(event.target.value)}>
           <option value="">全部任务类型</option>
           <option value="round_run">内容生产</option>
@@ -71,7 +71,7 @@ export default function TaskDispatchMetrics({ onDrilldown }: { onDrilldown?: (fi
         <button className="btn sm soft" type="button" onClick={() => {
           setDateFrom(""); setDateTo(""); setTenantId(""); setTaskType(""); setStatus("");
           setLoading(true);
-          void api.taskQueueSummary().then(setSummary).then(() => setError("")).catch((err) => setError((err as Error).message || "任务统计加载失败")).finally(() => setLoading(false));
+          void api.taskQueueSummary().then(setSummary).then(() => setError("")).catch((err) => setError("任务统计加载失败，请稍后重试。")).finally(() => setLoading(false));
         }}>
           清空筛选
         </button>
