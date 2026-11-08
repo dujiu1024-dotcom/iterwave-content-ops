@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 import signal
 import socket
 import subprocess
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen
 
 from playwright.sync_api import sync_playwright
@@ -77,6 +79,61 @@ def _install_api_fixtures(page):
                 status=200,
                 content_type="application/json",
                 body='{"runtime_tenant_id":"default","selected_tenant_id":"default","restart_required":false,"items":[{"id":"default","name":"Viewport test","created_at":null,"is_active":true}]}',
+            )
+        if path.endswith("/api/schedule") and route.request.method == "GET":
+            params = parse_qs(urlparse(route.request.url).query)
+            start_date = params.get("start_date", ["2026-11-08"])[0]
+            end_date = params.get("end_date", [start_date])[0]
+            return route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({
+                    "start_date": start_date, "end_date": end_date,
+                    "items": [], "total": 0, "unscheduled": [],
+                    "unscheduled_total": 0, "unscheduled_page": 1,
+                    "unscheduled_page_size": 50,
+                }),
+            )
+        if path.endswith("/api/content-plans/viewport-plan-1"):
+            return route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({
+                    "id": "viewport-plan-1",
+                    "title": "视觉验收计划：用于验证长标题与详情弹窗的窄屏换行",
+                    "topic": "测试主题：" + "长文本主题片段。" * 18,
+                    "platforms": ["xhs"], "planned_count": 3,
+                    "scheduled_date": "2026-11-08", "status": "planned",
+                    "notes": "测试备注：" + "长文本备注片段。" * 24,
+                    "version": 1, "created_at": "2026-11-08T10:00:00+08:00",
+                    "updated_at": "2026-11-08T10:00:00+08:00",
+                    "drafts": [{
+                        "draft_id": "internal-draft-id-should-not-show",
+                        "platform": "xhs", "status": "draft_pending",
+                        "title": "", "round_id": None, "round_number": None,
+                    }],
+                    "rounds": [],
+                }),
+            )
+        if path.endswith("/api/content-plans"):
+            params = parse_qs(urlparse(route.request.url).query)
+            start_date = params.get("start_date", ["2026-11-08"])[0]
+            return route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({
+                    "items": [{
+                        "id": "viewport-plan-1",
+                        "title": "视觉验收计划：用于验证长标题与详情弹窗的窄屏换行",
+                        "topic": "测试主题",
+                        "platforms": ["xhs"], "planned_count": 3,
+                        "scheduled_date": start_date, "status": "planned",
+                        "notes": "测试备注", "version": 1,
+                        "created_at": "2026-11-08T10:00:00+08:00",
+                        "updated_at": "2026-11-08T10:00:00+08:00",
+                    }],
+                    "total": 1,
+                }),
             )
         if path.endswith("/api/drafts"):
             return route.fulfill(
@@ -246,6 +303,38 @@ def test_all_routable_pages_at_required_viewports():
                             full_page=True,
                             animations="disabled",
                         )
+
+                    if route == "calendar":
+                        plan_chip = page.locator(".calendar-plan-chip").filter(has_text="视觉验收计划")
+                        if plan_chip.count() != 1:
+                            failures.append(f"calendar@{width}: deterministic content-plan fixture is missing")
+                        else:
+                            plan_chip.click()
+                            dialog = page.get_by_role("dialog", name="内容计划详情")
+                            dialog.wait_for(state="visible", timeout=10000)
+                            dialog.locator(".calendar-plan-detail-grid").wait_for(state="visible", timeout=10000)
+                            dialog_text = dialog.inner_text()
+                            if "未命名草稿" not in dialog_text:
+                                failures.append(f"calendar@{width}: missing-title draft fallback is not business-readable")
+                            if "internal-draft-id-should-not-show" in dialog_text:
+                                failures.append(f"calendar@{width}: internal draft ID leaked into visible plan details")
+                            modal_layout = dialog.evaluate(
+                                """element => {
+                                  const rect = element.getBoundingClientRect();
+                                  return {left: Math.round(rect.left), right: Math.round(rect.right),
+                                    width: Math.round(rect.width), scrollWidth: element.scrollWidth,
+                                    clientWidth: element.clientWidth};
+                                }"""
+                            )
+                            if modal_layout["left"] < -1 or modal_layout["right"] > width + 1:
+                                failures.append(f"calendar@{width}: plan detail modal exceeds viewport: {modal_layout}")
+                            if modal_layout["scrollWidth"] > modal_layout["clientWidth"] + 1:
+                                failures.append(f"calendar@{width}: plan detail modal has unexpected horizontal overflow: {modal_layout}")
+                            page.screenshot(
+                                path=str(ARTIFACTS / f"calendar-plan-detail-{width}.png"),
+                                full_page=False,
+                                animations="disabled",
+                            )
 
                 # Exercise the actual Operations > Publish confirmation pane.
                 # A deterministic pending draft makes the narrow verification inputs visible.
