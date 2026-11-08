@@ -272,6 +272,7 @@ class GlobalTaskQueue:
         self, *, task_type: str, tenant_id: str, payload: dict[str, Any],
         aggregate_id: str | None = None, max_attempts: int = 1,
         available_at: datetime | str | None = None,
+        dedupe_terminal: bool = False,
     ) -> tuple[QueuedTask, bool]:
         if not task_type or len(task_type) > 80:
             raise ValueError("task_type 无效")
@@ -307,10 +308,12 @@ class GlobalTaskQueue:
                 "SELECT COALESCE(MAX(queue_order), 0) + 1 FROM global_task_queue"
             ).fetchone()[0])
             if aggregate_id is not None:
+                status_filter = (
+                    "" if dedupe_terminal else "AND status IN ('queued','running') "
+                )
                 existing = conn.execute(
                     "SELECT * FROM global_task_queue WHERE tenant_id=? AND task_type=? "
-                    "AND aggregate_id=? AND status IN ('queued','running') "
-                    "ORDER BY created_at LIMIT 1",
+                    "AND aggregate_id=? " + status_filter + "ORDER BY created_at LIMIT 1",
                     (tenant_id, task_type, str(aggregate_id)),
                 ).fetchone()
                 if existing:
