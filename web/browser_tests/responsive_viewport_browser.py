@@ -255,6 +255,17 @@ def test_all_routable_pages_at_required_viewports():
                         if any(item['width'] < 1 or item['left'] < -1 or item['right'] > width + 1 for item in row_layout['children']):
                             failures.append(f"{route}@{width}: task row child is clipped or outside viewport: {row_layout}")
 
+                        # Capture the row itself, not only the page's empty/error-state screenshot.
+                        # The fixture is appended below the rendered content and must be scrolled
+                        # into view so reviewers can inspect the actual responsive arrangement.
+                        row_locator = page.locator("#main-content .task-queue-row")
+                        row_locator.scroll_into_view_if_needed()
+                        page.screenshot(
+                            path=str(ARTIFACTS / f"task-queue-row-{width}.png"),
+                            full_page=False,
+                            animations="disabled",
+                        )
+
                     if route == "plan-center" and width <= 760:
                         hierarchy = page.locator(".plan-hierarchy")
                         hint = page.locator(".plan-hierarchy-hint")
