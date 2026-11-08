@@ -688,7 +688,7 @@ export default function PlanCenter() {
         </div>
         {diagnosis ? <div className="grid two">
           <div className="plan-summary-card"><div className="tiny">当前经营诊断</div><b>报告 v{diagnosis.version_no}</b><div className="tiny">状态：{diagnosis.status === "confirmed" ? "已确认" : diagnosis.status === "stale" ? "已过期" : diagnosis.status === "superseded" ? "已被新版本替代" : "待确认"}</div><div className="tiny">确认时间：{diagnosis.confirmed_at ?? "尚未确认"}</div><div className="tiny">诊断模型：{diagnosis.model_name || "—"}</div></div>
-          <div className="plan-summary-card"><div className="tiny">依据完整性</div><b>{diagnosisStrategyCurrent ? "北极星与资源基线版本一致" : "战略依据已变化或缺少版本快照"}</b><div className="tiny">关联资料与素材：{diagnosis.source_snapshot?.source_references?.length ?? 0} 项</div><div className="tiny">依据摘要：{JSON.stringify(diagnosis.source_snapshot?.inventory_summary ?? {})}</div>{(diagnosis.source_snapshot?.source_references ?? []).map((source) => <div className="tiny" key={source.source_type + ":" + source.source_id}>{source.source_type} · {source.label}</div>)}</div>
+          <div className="plan-summary-card"><div className="tiny">依据完整性</div><b>{diagnosisStrategyCurrent ? "北极星与资源基线版本一致" : "战略依据已变化或缺少版本快照"}</b><div className="tiny">关联资料与素材：{diagnosis.source_snapshot?.source_references?.length ?? 0} 项</div><div className="tiny">已关联资料与素材：{diagnosis.source_snapshot?.source_references?.length ?? 0} 项</div>{(diagnosis.source_snapshot?.source_references ?? []).map((source) => <div className="tiny" key={source.source_type + ":" + source.source_id}>{source.source_type} · {source.label}</div>)}</div>
         </div> : <div className="note">尚无经营诊断报告。AI 生成需要先完成并确认经营分析；也可直接编辑下方母计划并保存人工草稿，该路径不依赖 AI 模型，但仍要求账号组北极星已建立并确认。</div>}
         {diagnosis && diagnosis.status !== "confirmed" && <div className="note" style={{ marginTop: 10, color: "var(--orange)" }}>最新诊断报告尚未确认。请返回 AI 经营分析页面完成确认，生成入口会在确认后开放。</div>}
         {diagnosis?.status === "confirmed" && !diagnosisStrategyCurrent && <div className="note" style={{ marginTop: 10, color: "var(--orange)" }}>诊断报告绑定的账号组北极星或资源基线已变化，或报告缺少战略版本快照。请重新分析并确认。</div>}
@@ -701,14 +701,15 @@ export default function PlanCenter() {
         {aiGenerationError && <div className="note" role="alert" style={{ marginTop: 10, color: "var(--red)" }}>生成失败：{aiGenerationError}。当前编辑内容和已生效计划未被覆盖，可修复依据或配置后重试。</div>}
         {aiGeneration && <div className="plan-version-detail" style={{ marginTop: 14 }}>
           <div className="panel-head"><b>本次 AI 生成依据与待确认事项</b><span className="tag gray">仅草稿 · 待人工审核</span></div>
-          <div className="tiny">关联经营诊断：报告 v{aiGeneration.diagnosis_version_no}（记录 ID {aiGeneration.diagnosis_report_id}） · 账号组北极星 V{aiGeneration.north_star_version_no}（版本 ID {aiGeneration.north_star_version_id}） · 模型：{aiGeneration.model} · 生成时间：{aiGeneration.generated_at}</div>
-          <div className="tiny">资源基线：{String((aiGeneration.resource_baseline.summary as Record<string, number> | undefined)?.confirmed ?? 0)} 项已确认 / {String((aiGeneration.resource_baseline.summary as Record<string, number> | undefined)?.total ?? 0)} 项 · 版本指纹 {aiGeneration.strategy_fingerprint.slice(0, 12)}…</div>
+          <div className="tiny">关联经营诊断：报告 v{aiGeneration.diagnosis_version_no} · 账号组北极星 V{aiGeneration.north_star_version_no} · 模型：{aiGeneration.model} · 生成时间：{aiGeneration.generated_at}</div>
+          <div className="tiny">资源基线：{String((aiGeneration.resource_baseline.summary as Record<string, number> | undefined)?.confirmed ?? 0)} 项已确认 / {String((aiGeneration.resource_baseline.summary as Record<string, number> | undefined)?.total ?? 0)} 项</div>
+          <details className="advanced-diagnostics"><summary>高级诊断信息（内部记录标识与版本指纹）</summary><div className="tiny">诊断记录 ID：{aiGeneration.diagnosis_report_id} · 北极星版本 ID：{aiGeneration.north_star_version_id} · 版本指纹：{aiGeneration.strategy_fingerprint}</div></details>
           <div style={{ marginTop: 10 }}><b>制定摘要</b><p>{aiGeneration.summary}</p></div>
           <div className="grid two">
-            <div><b>业务资料与素材依据</b><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.resource_basis, null, 2)}</pre></div>
-            <div><b>风险提示</b><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.risks, null, 2)}</pre></div>
-            <div><b>前提与假设</b><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.assumptions, null, 2)}</pre></div>
-            <div><b>待用户确认</b><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.pending_confirmations, null, 2)}</pre></div>
+            <details className="advanced-diagnostics"><summary>业务资料与素材依据（查看结构化详情）</summary><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.resource_basis, null, 2)}</pre></details>
+            <details className="advanced-diagnostics"><summary>风险提示（查看结构化详情）</summary><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.risks, null, 2)}</pre></details>
+            <details className="advanced-diagnostics"><summary>前提与假设（查看结构化详情）</summary><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.assumptions, null, 2)}</pre></details>
+            <details className="advanced-diagnostics"><summary>待用户确认（查看结构化详情）</summary><pre className="note" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(aiGeneration.pending_confirmations, null, 2)}</pre></details>
           </div>
         </div>}
       </div>
