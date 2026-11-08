@@ -87,7 +87,7 @@ export default function BusinessProfilePage() {
   const visibleItems = items.filter(item => item.entity_type === tab);
   if (loading) return <div className="page business-profile-page"><div className="page-head"><div><h1 className="page-title">经营资料</h1></div></div><p>正在加载业务档案…</p></div>;
   return (
-    <div className="page">
+    <div className="page business-profile-page">
       <div className="page-head">
         <div><h1 className="page-title">经营资料</h1><p className="page-desc">先明确经营什么、卖给谁，再制定战略计划。业务资料与计划版本独立管理。</p></div>
         <button className="btn" onClick={() => void load()}>刷新</button>
