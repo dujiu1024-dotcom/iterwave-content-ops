@@ -2571,6 +2571,15 @@ def _register_routes(app: FastAPI) -> None:
                     "execution_snapshot": execution_snapshot,
                 },
             )
+            if not created:
+                prior_payload = queued.payload if isinstance(queued.payload, dict) else {}
+                if (
+                    prior_payload.get("operation") != "activation_promote"
+                    or int(prior_payload.get("round_id") or 0) != round_id
+                    or prior_payload.get("sample_content_id") != sample_content_id
+                    or prior_payload.get("activation_sample_snapshot") != snapshot
+                ):
+                    raise HTTPException(409, "该样稿已有不同正式生产输入的队列任务，拒绝复用")
             now = _storage_now().isoformat(sep=" ", timespec="seconds")
             with conn:
                 conn.execute(
