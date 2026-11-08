@@ -50,7 +50,7 @@ function renderNext(next: string, to?: string, tab?: string): React.ReactNode {
 
 export default function EmptyHint({ children, next, className = "empty", to, tab }: EmptyHintProps) {
   return (
-    <div className={className || undefined} style={{ padding: "24px 16px", textAlign: "center" }}>
+    <div className={className || undefined} style={{ padding: className?.includes("analytics-empty-hint") ? "12px 14px" : "24px 16px", textAlign: "center" }}>
       <div style={{ fontSize: 13, color: "var(--subtle)" }}>{children}</div>
       <div style={{ marginTop: 6, fontSize: 12, color: "var(--muted)" }}>
         下一步建议：{renderNext(next, to, tab)}

@@ -106,7 +106,7 @@ export default function Goals() {
       setCfgView(await api.config());
       api.personas().then(setPersonas).catch(() => setPersonas(null));
       setError(null);
-    } catch (e: any) { setError(e.message); }
+    } catch { setError("目标数据加载失败，请稍后重试。"); }
   };
 
   useEffect(() => { load(); }, []);
@@ -146,7 +146,7 @@ export default function Goals() {
         setPlatformTouched(false);
         setCreating(false);
       }
-    } catch (e: any) { showToast(`创建失败: ${e.message}`, "error"); }
+    } catch { showToast("目标创建失败，请检查目标描述和统计口径", "error"); }
     finally { setSubmitting(false); }
   };
 
@@ -176,7 +176,7 @@ export default function Goals() {
         setEditing(null);
         await load();
       }
-    } catch (e: any) { showToast(`保存失败: ${e.message}`, "error"); }
+    } catch { showToast("目标保存失败，请检查填写内容后重试", "error"); }
     finally { setSavingEdit(false); }
   };
 
@@ -189,7 +189,7 @@ export default function Goals() {
         setSummary(res.summary);
         showToast(`↻ 已刷新 ${Object.keys(res.updated).length} 个目标进度`);
       }
-    } catch (e: any) { showToast(`刷新失败: ${e.message}`, "error"); }
+    } catch { showToast("目标进度刷新失败，请稍后重试", "error"); }
     finally { setRefreshing(false); }
   };
 
@@ -206,7 +206,7 @@ export default function Goals() {
       await api.addAccountSnapshot({ platform: p, followers: Math.round(n) });
       showToast(`✓ 已记录 ${platformMeta(p).label} 粉丝数 ${Math.round(n)}，目标进度已刷新`, "success");
       await load();
-    } catch (e: any) { showToast(`记录失败：${e?.message ?? e}`, "error"); }
+    } catch { showToast("粉丝数据记录失败，请稍后重试", "error"); }
   };
 
   const fillManualValue = async (g: Goal) => {
@@ -218,7 +218,7 @@ export default function Goals() {
       await api.setGoalManualValue(g.id, n);
       showToast("✓ 当前值已更新", "success");
       await load();
-    } catch (e: any) { showToast(`更新失败：${e?.message ?? e}`, "error"); }
+    } catch { showToast("目标当前值更新失败，请检查数据后重试", "error"); }
   };
 
   return (

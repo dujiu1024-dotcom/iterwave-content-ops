@@ -41,6 +41,7 @@ import inspect
 import io
 import json
 import os
+import re
 import sqlite3
 import logging
 import threading
@@ -101,7 +102,7 @@ from src.core.ops.engine import OperationsEngine
 from src.core import auth
 from src.core import kb_sources
 from src.core.env_store import env_file, read_env, write_env
-from src.core.redact import redact, redact_path
+from src.core.redact import redact, redact_path, safe_error_summary
 from src.core.notify import Notifier, set_active as set_active_notifier, macos_available
 from src.core.hot_topics import HotTopicCollector
 from src.core.recovery import RecoveryManager
@@ -255,6 +256,56 @@ def _round_id_from_aggregate(task_type: str, aggregate_id) -> Optional[int]:
         return None
     head = str(aggregate_id).split(":", 1)[0]
     return int(head) if head.isdigit() else None
+
+
+def _task_aggregate_label(task_type: str, aggregate_id, round_number=None) -> str:
+    """把内部 aggregate key 映射为面向运营者的业务标签，不向前端传递数据库关联键。"""
+    if not aggregate_id:
+        return "—"
+    parts = str(aggregate_id).split(":")
+    if task_type == "round_run":
+        operation = parts[1] if len(parts) > 1 else "run"
+        round_label = f"第 {round_number} 轮" if round_number is not None else "轮次"
+        return f"{round_label} · 恢复存草稿" if operation == "save_pending_drafts" else f"{round_label} · 内容生产"
+    if task_type == "scheduler_job":
+        labels = {
+            "_job_hot_topics_refresh": "热点采集与匹配",
+            "_job_publish_polling": "发布状态轮询",
+            "_job_data_fetch": "平台数据采集",
+            "_job_daily_ops": "每日主动运营",
+            "_job_comment_polling": "评论轮询",
+            "_job_cb_recovery": "平台连接恢复",
+            "_job_kb_scan": "选题库扫描",
+            "_job_kb_sync": "选题库同步",
+            "_job_data_retention_cleanup": "数据清理",
+            "_job_round_timeout_sweeper": "轮次超时检查",
+            "_job_round_review": "轮次复盘",
+            "_job_autogrow_next_round": "自动闭环检查",
+        }
+        method = parts[0]
+        label = labels.get(method, "账号组后台任务")
+        if method == "_job_data_fetch" and len(parts) > 2 and parts[2].isdigit():
+            return f"{label} · 第 {parts[2]} 次"
+        return label
+    return "关联业务任务"
+
+
+def _safe_operator_actor(value) -> str:
+    raw = str(value or "")
+    return "system:operator" if raw.startswith(("system:", "service:")) else "operator"
+
+
+def _safe_operator_note(value):
+    if value is None:
+        return None
+    raw = redact(str(value)).strip()
+    raw = re.sub(
+        r"(?<![A-Za-z0-9:])/(?:home|root|tmp|var|opt|srv|app|Users|workspace|usr|etc|mnt)/[^\s\"']+",
+        "服务器内部路径",
+        raw,
+    )
+    raw = re.sub(r"[A-Za-z]:\\[^\s\"']+", "本地内部路径", raw)
+    return raw[:500] or None
 
 
 def _resolve_task_round_numbers(registry, tasks) -> dict:
@@ -1861,6 +1912,85 @@ def _register_routes(app: FastAPI) -> None:
     def _storage_now():
         """Canonical aware UTC clock for persistence and API event timestamps."""
         return storage_now()
+
+    def _safe_task_progress(value):
+        """仅投影任务进度 UI 所需字段，并安全摘要所有可见文本。"""
+        if not isinstance(value, dict):
+            return None
+        allowed_statuses = {"pending", "running", "done", "failed", "skipped"}
+        raw_steps = value.get("steps")
+        steps = []
+        if isinstance(raw_steps, list):
+            for item in raw_steps[:100]:
+                if not isinstance(item, dict):
+                    continue
+                step_id = str(item.get("id") or "")[:80]
+                if not step_id:
+                    continue
+                status = str(item.get("status") or "pending")
+                steps.append({
+                    "id": step_id,
+                    "label": safe_error_summary(item.get("label"), "执行步骤")[:120],
+                    "status": status if status in allowed_statuses else "pending",
+                    "detail": safe_error_summary(
+                        item.get("detail"), "步骤已记录；详细诊断请联系管理员。",
+                    )[:200] if item.get("detail") else "",
+                })
+        try:
+            percent = max(0, min(100, int(value.get("percent", 0))))
+        except (TypeError, ValueError):
+            percent = 0
+        current_step = value.get("current_step")
+        return {
+            "steps": steps,
+            "current_step": str(current_step)[:80] if current_step else None,
+            "current_label": safe_error_summary(value.get("current_label"), "正在处理")[:120],
+            "detail": safe_error_summary(
+                value.get("detail"), "步骤已记录；详细诊断请联系管理员。",
+            )[:200] if value.get("detail") else "",
+            "percent": percent,
+            "updated_at": value.get("updated_at"),
+        }
+
+    def _safe_round_report(value, depth=0, field_name=""):
+        """按字段语义安全化轮次报告；保留业务正文，只摘要异常字段。"""
+        if depth > 8:
+            return None
+        error_fields = {
+            "error", "errors", "error_code", "error_message", "failure",
+            "failure_message", "exception", "exceptions", "traceback",
+            "stack_trace", "diagnostic", "diagnostics",
+        }
+        if isinstance(value, dict):
+            result = {}
+            for key, item in list(value.items())[:300]:
+                name = str(key)[:100]
+                lowered = name.lower()
+                if any(token in lowered for token in ("password", "secret", "token", "authorization", "traceback")):
+                    continue
+                if lowered in {"task_id", "tenant_id", "ai_call_id", "signature", "plan_signature"}:
+                    continue
+                if lowered.endswith("_id") and lowered not in {"round_id"}:
+                    continue
+                result[name] = _safe_round_report(item, depth + 1, lowered)
+            return result
+        if isinstance(value, list):
+            return [_safe_round_report(item, depth + 1, field_name) for item in value[:200]]
+        if isinstance(value, str):
+            if field_name in error_fields or field_name == "detail":
+                return safe_error_summary(value, "详细诊断已隐藏，请联系管理员。")[:2000]
+            # 普通业务文案、标题、正文和多行内容保持完整；只清理凭据与内部路径。
+            safe_text = redact(value)
+            safe_text = re.sub(
+                r"(?<![A-Za-z0-9:])/(?:home|root|tmp|var|opt|srv|app|Users|workspace|usr|etc|mnt)/[^\s\"']+",
+                "服务器内部路径",
+                safe_text,
+            )
+            safe_text = re.sub(r"[A-Za-z]:\\[^\s\"']+", "本地内部路径", safe_text)
+            return safe_text[:20000]
+        if isinstance(value, (int, float, bool)) or value is None:
+            return value
+        return redact(str(value))[:500]
 
     def _elapsed_seconds(value):
         """从持久化时间戳算出已运行秒数；无法解析时返回 None，不伪造 0。"""
@@ -4251,6 +4381,18 @@ def _register_routes(app: FastAPI) -> None:
                      severity: str, target_page: str, target_tab: str):
             if source and source != source_key:
                 return
+            # Detail is a presentation contract, not a raw diagnostic channel.
+            # Preserve user-authored business context, but never forward free-form
+            # circuit-breaker reasons or error-level notification bodies verbatim.
+            safe_title = str(title or "待处理事项")
+            safe_detail = str(detail or "")
+            if source_key == "circuit_breaker" and status != "login_expired":
+                safe_detail = "平台触发保护机制，暂不可继续执行；请查看平台熔断详情并在恢复条件满足后重试。"
+            elif source_key == "notification" and severity == "high":
+                safe_title = safe_error_summary(safe_title, "系统通知需要处理")
+                safe_detail = safe_error_summary(
+                    safe_detail, "有一条需要处理的系统通知，请进入通知详情查看。",
+                )
             items.append({
                 "id": f"{tenant['id']}:{source_key}:{item_id}",
                 "record_id": item_id,
@@ -4264,8 +4406,8 @@ def _register_routes(app: FastAPI) -> None:
                 }[source_key],
                 "tenant_id": tenant["id"],
                 "tenant_name": tenant.get("name") or tenant["id"],
-                "title": redact(str(title or "待处理事项"))[:160],
-                "detail": redact(str(detail or ""))[:240],
+                "title": redact(safe_title)[:160],
+                "detail": redact(safe_detail)[:240],
                 "status": status,
                 "created_at": created_at,
                 "severity": severity,
@@ -4300,7 +4442,7 @@ def _register_routes(app: FastAPI) -> None:
                         })
                         add_item(task_tenant, "global_queue", task.task_id,
                                  f"{task.task_type} · {task.status}",
-                                 task.error_message or "全局队列任务需要处理",
+                                 safe_error_summary(task.error_message, "全局队列任务执行失败，请进入任务队列查看详情。"),
                                  task.status, task.created_at,
                                  "high", "task-queue", "history")
                 except Exception as exc:  # noqa: BLE001 — 全局队列故障不能阻断其他账号组待办
@@ -4453,7 +4595,7 @@ def _register_routes(app: FastAPI) -> None:
                         status = str(row["status"])
                         add_item(tenant, "task_run", row["id"],
                                  f"{row['task_type']} · {status}",
-                                 f"{row['platform'] or '未指定平台'} · {row['error_msg'] or '需要检查任务结果'}",
+                                 f"{row['platform'] or '未指定平台'} · {safe_error_summary(row['error_msg'], '任务执行失败，请进入任务追踪查看详情。') if row['error_msg'] else '需要检查任务结果'}",
                                  status, row["todo_at"],
                                  "high" if status in ("failed", "interrupted") else "medium",
                                  "operations", "tasks")
@@ -4530,7 +4672,7 @@ def _register_routes(app: FastAPI) -> None:
                     capped = capped or total > fetch_limit
                     for row in rows:
                         add_item(tenant, "media_generation", row["id"], "AI 配图生成失败",
-                                 row["error_message"] or "请检查图片生成配置后重试", "failed",
+                                 safe_error_summary(row["error_message"], "AI 配图生成失败，请检查图片生成配置后重试。"), "failed",
                                  row["created_at"], "high", "assets", "media")
             except (sqlite3.Error, OSError) as exc:
                 logger.warning("todo scan skipped tenant=%s error=%s", tenant["id"], type(exc).__name__)
@@ -4885,29 +5027,34 @@ def _register_routes(app: FastAPI) -> None:
         round_numbers = _resolve_task_round_numbers(registry, tasks)
         for task in tasks:
             try:
-                tenant_name = registry.get(task.tenant_id)["name"] if registry else task.tenant_id
+                tenant_name = registry.get(task.tenant_id)["name"] if registry else "未登记账号组"
             except TenantError:
-                tenant_name = task.tenant_id
+                tenant_name = "未登记账号组"
             round_id = _round_id_from_aggregate(task.task_type, task.aggregate_id)
+            safe_task_error = safe_error_summary(
+                task.error_message, "任务执行失败，请进入任务详情核对。",
+            ) if task.error_message else None
             items.append({
                 "queue_order": task.queue_order,
                 "task_id": task.task_id, "task_type": task.task_type,
-                "tenant_id": task.tenant_id, "tenant_name": tenant_name,
-                "aggregate_id": task.aggregate_id,
+                "tenant_name": tenant_name,
+                "aggregate_label": _task_aggregate_label(
+                    task.task_type, task.aggregate_id,
+                    round_numbers.get((task.tenant_id, round_id)) if round_id is not None else None,
+                ),
                 "round_number": round_numbers.get((task.tenant_id, round_id)) if round_id is not None else None,
                 "status": task.status,
                 "created_at": task.created_at, "available_at": task.available_at,
                 "started_at": task.started_at,
                 "finished_at": task.finished_at, "attempts": task.attempts,
-                "error_code": task.error_code, "error_message": task.error_message,
-                "retry_of_task_id": task.retry_of_task_id,
-                "retry_confirmed_by": task.retry_confirmed_by,
-                "retry_confirmation_note": task.retry_confirmation_note,
+                "error_code": safe_error_summary(task.error_code, "任务异常") if task.error_code else None,
+                "error_message": safe_task_error,
+                "retry_confirmation_note": _safe_operator_note(task.retry_confirmation_note),
                 "resolution_action": task.resolution_action,
-                "resolution_actor": task.resolution_actor,
-                "resolution_note": task.resolution_note,
+                "resolution_actor": _safe_operator_actor(task.resolution_actor),
+                "resolution_note": _safe_operator_note(task.resolution_note),
                 "resolution_at": task.resolution_at,
-                "progress": task.progress,
+                "progress": _safe_task_progress(task.progress),
                 "elapsed_seconds": _elapsed_seconds(task.started_at or task.created_at),
             })
         response = {"items": items}
@@ -4920,9 +5067,25 @@ def _register_routes(app: FastAPI) -> None:
             if scope == "active":
                 active_stats = _task_queue.status_counts(scope="active")
                 response["status_counts"] = active_stats["by_status"]
-                response["tenant_status_counts"] = active_stats["by_tenant"]
+                tenant_stats = active_stats["by_tenant"]
             elif scope == "failed":
-                response["tenant_status_counts"] = _task_queue.status_counts(scope="failed")["by_tenant"]
+                tenant_stats = _task_queue.status_counts(scope="failed")["by_tenant"]
+            else:
+                tenant_stats = {}
+            public_tenant_stats = {}
+            registry = _g().get("tenant_registry")
+            for tenant_id, counts in tenant_stats.items():
+                try:
+                    tenant_name = registry.get(tenant_id)["name"] if registry else "未登记账号组"
+                except TenantError:
+                    tenant_name = "未登记账号组"
+                current = public_tenant_stats.setdefault(
+                    tenant_name, {"queued": 0, "running": 0, "failed": 0, "interrupted": 0},
+                )
+                for key in current:
+                    current[key] += int(counts.get(key, 0) or 0)
+            if public_tenant_stats:
+                response["tenant_status_counts"] = public_tenant_stats
         return response
 
     @app.get("/api/task-queue/summary")
@@ -4937,10 +5100,13 @@ def _register_routes(app: FastAPI) -> None:
         if _task_queue is None:
             raise HTTPException(503, "全局任务队列尚未初始化")
         try:
-            return _task_queue.dispatch_summary(
+            summary = _task_queue.dispatch_summary(
                 date_from=date_from, date_to=date_to,
                 tenant_id=tenant_id, task_type=task_type, status=status,
             )
+            if isinstance(summary.get("filters"), dict):
+                summary["filters"].pop("tenant_id", None)
+            return summary
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -4972,33 +5138,41 @@ def _register_routes(app: FastAPI) -> None:
                     json.dumps(safe_detail, ensure_ascii=False, default=str) if safe_detail else ""
                 )
                 execution_log.append({
-                    "step": str(step_name)[:120],
-                    "status": str(step_status)[:40],
-                    "detail": str(detail)[:500],
+                    "step": safe_error_summary(step_name, f"步骤 {index}")[:120],
+                    "status": safe_error_summary(step_status, "状态未知")[:40],
+                    "detail": safe_error_summary(detail, "步骤已记录；详细诊断请联系管理员。")[:500] if detail else "",
                 })
-        if not execution_log and task.error_message:
+        safe_task_error = safe_error_summary(
+            task.error_message, "任务执行失败，请核对平台状态后再决定是否恢复。",
+        ) if task.error_message else None
+        if not execution_log and safe_task_error:
             execution_log.append({
                 "step": "任务执行失败",
                 "status": "failed",
-                "detail": task.error_message[:500],
+                "detail": safe_task_error,
             })
         return {
             "execution_log": execution_log,
             "queue_order": task.queue_order,
             "task_id": task.task_id, "task_type": task.task_type,
-            "tenant_id": task.tenant_id, "aggregate_id": task.aggregate_id,
+            "aggregate_label": _task_aggregate_label(
+                task.task_type, task.aggregate_id,
+                round_numbers.get((task.tenant_id, round_id)) if round_id is not None else None,
+            ),
             "round_number": round_numbers.get((task.tenant_id, round_id)) if round_id is not None else None,
+            "progress": _safe_task_progress(task.progress),
             "status": task.status,
             "created_at": task.created_at, "available_at": task.available_at,
             "started_at": task.started_at,
             "finished_at": task.finished_at, "attempts": task.attempts,
-            "error_code": task.error_code, "error_message": task.error_message,
-            "retry_of_task_id": task.retry_of_task_id,
-            "retry_confirmed_by": task.retry_confirmed_by,
-            "retry_confirmation_note": task.retry_confirmation_note,
+            "error_code": safe_error_summary(task.error_code, "任务异常") if task.error_code else None,
+            "error_message": safe_error_summary(
+                task.error_message, "任务执行失败，请核对平台状态后再决定是否恢复。",
+            ) if task.error_message else None,
+            "retry_confirmation_note": _safe_operator_note(task.retry_confirmation_note),
             "resolution_action": task.resolution_action,
-            "resolution_actor": task.resolution_actor,
-            "resolution_note": task.resolution_note,
+            "resolution_actor": _safe_operator_actor(task.resolution_actor),
+            "resolution_note": _safe_operator_note(task.resolution_note),
             "resolution_at": task.resolution_at,
         }
 
@@ -5020,7 +5194,14 @@ def _register_routes(app: FastAPI) -> None:
         except TaskQueueError as exc:
             message = str(exc)
             raise HTTPException(404 if "不存在" in message else 409, message) from exc
-        return {"task_id": task_id, **resolution, "created": created}
+        return {
+            "task_id": task_id,
+            "action": resolution.get("action"),
+            "actor": _safe_operator_actor(resolution.get("actor")),
+            "note": _safe_operator_note(resolution.get("note")),
+            "acted_at": resolution.get("acted_at"),
+            "created": created,
+        }
 
     @app.post("/api/task-queue/{task_id}/retry")
     def retry_global_task_after_manual_verification(task_id: str, body: dict, request: Request):
@@ -5045,13 +5226,11 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(status_code, message) from exc
         return {
             "task_id": task.task_id,
-            "retry_of_task_id": task.retry_of_task_id,
-            "tenant_id": task.tenant_id,
             "task_type": task.task_type,
             "status": task.status,
             "created": created,
-            "confirmed_by": task.retry_confirmed_by,
-            "confirmation_note": task.retry_confirmation_note,
+            "confirmed_by": _safe_operator_actor(task.retry_confirmed_by),
+            "confirmation_note": _safe_operator_note(task.retry_confirmation_note),
         }
 
     @app.get("/api/task-queue/{task_id}/audit")
@@ -5060,7 +5239,23 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(503, "全局任务队列尚未初始化")
         if _task_queue.get(task_id) is None:
             raise HTTPException(404, "任务不存在")
-        return {"items": _task_queue.list_admin_audit(task_id)}
+        items = []
+        for entry in _task_queue.list_admin_audit(task_id):
+            details = _safe_round_report(entry.get("details") or {})
+            if not isinstance(details, dict):
+                details = {}
+            details = {
+                key: _safe_operator_note(details.get(key))
+                for key in ("note", "confirmation_note")
+                if details.get(key) is not None
+            }
+            items.append({
+                "action": entry.get("action"),
+                "actor": _safe_operator_actor(entry.get("actor")),
+                "acted_at": entry.get("acted_at"),
+                "details": details,
+            })
+        return {"items": items}
 
     @app.post("/api/task-queue/{task_id}/cancel")
     def cancel_global_task(task_id: str, request: Request):
@@ -5397,22 +5592,38 @@ def _register_routes(app: FastAPI) -> None:
             )
             if task is not None:
                 return {
-                    "round_id": round_id, "task_id": task.task_id,
-                    "task_type": task.payload.get("operation", "run"),
+                    "round_id": round_id,
                     "status": task.status,
                     "running": task.status in ("queued", "running"),
                     "queued": task.status == "queued",
-                    "progress": task.progress,
+                    "progress": _safe_task_progress(task.progress),
                     "started_at": task.started_at,
                     "queued_at": task.created_at,
                     "elapsed_seconds": _elapsed_seconds(task.started_at or task.created_at),
-                    "report": task.result,
-                    "error": task.error_message,
-                    "error_code": task.error_code,
+                    "report": _safe_round_report(task.result),
+                    "error": safe_error_summary(task.error_message, "本轮执行失败，请查看管理员诊断日志。") if task.error_message else None,
+                    "error_code": safe_error_summary(task.error_code, "执行异常") if task.error_code else None,
                 }
         status = _round_job_status.get(round_id)
         if status is not None:
-            return dict(status)
+            raw_status = status.get("status")
+            allowed_statuses = {"queued", "running", "succeeded", "failed", "cancelled", "interrupted"}
+            safe_status = {
+                "round_id": round_id,
+                "status": raw_status if raw_status in allowed_statuses else None,
+                "queued": bool(status.get("queued", raw_status == "queued")),
+                "running": bool(status.get("running", raw_status == "running")),
+                "report": _safe_round_report(status.get("report")),
+                "error": safe_error_summary(
+                    status.get("error"), "本轮执行失败，请查看管理员诊断日志。",
+                ) if status.get("error") else None,
+                "error_code": safe_error_summary(status.get("error_code"), "执行异常")
+                if status.get("error_code") else None,
+                "progress": _safe_task_progress(status.get("progress")),
+                "started_at": status.get("started_at"),
+                "elapsed_seconds": status.get("elapsed_seconds"),
+            }
+            return safe_status
         row = _g()["conn"].execute(
             "SELECT status, run_report FROM spiral_rounds WHERE id = ?", (round_id,)
         ).fetchone()
@@ -5426,7 +5637,7 @@ def _register_routes(app: FastAPI) -> None:
         return {
             "round_id": round_id,
             "running": row["status"] == "producing",
-            "report": report, "error": None,
+            "report": _safe_round_report(report), "error": None,
         }
 
     @app.post("/api/rounds/{round_id}/save_pending", status_code=202)
@@ -6997,12 +7208,28 @@ def _register_routes(app: FastAPI) -> None:
                                       - datetime.fromisoformat(rep_["started_at"])).total_seconds(), 1)
                 except ValueError:
                     duration = None
+            step_status = (rep_ or {}).get("step_status") or step_status_from_report(rep_, orch_now)
+            safe_step_status = {
+                key: {
+                    **value,
+                    "detail": safe_error_summary(
+                        value.get("detail"),
+                        "步骤执行异常，请进入任务详情查看。",
+                    ) if value.get("detail") else "",
+                }
+                for key, value in (step_status or {}).items()
+                if isinstance(value, dict)
+            }
+            safe_errors = [
+                safe_error_summary(error, "本轮执行存在异常，请进入任务详情查看。")
+                for error in (rep_ or {}).get("errors", [])[:5]
+            ]
             out.append({
                 "round_id": r["id"], "round_number": r["round_number"], "status": r["status"],
                 "trigger_source": r["trigger_source"], "created_at": r["created_at"],
                 "duration_seconds": duration,
-                "step_status": (rep_ or {}).get("step_status") or step_status_from_report(rep_, orch_now),
-                "errors": (rep_ or {}).get("errors", [])[:5],
+                "step_status": safe_step_status,
+                "errors": safe_errors,
                 "has_report": rep_ is not None,
             })
         return {"runs": out}
@@ -7092,6 +7319,10 @@ def _register_routes(app: FastAPI) -> None:
         items: list[dict] = []
         for r in conn.execute(sql, params).fetchall():
             row = dict(r)
+            if row.get("draft_error"):
+                row["draft_error"] = safe_error_summary(
+                    row["draft_error"], "草稿保存失败，请查看草稿状态并重试。",
+                )
             try:
                 row["tags"] = json.loads(row["tags"]) if row["tags"] else []
             except (TypeError, ValueError):
@@ -7174,6 +7405,10 @@ def _register_routes(app: FastAPI) -> None:
         items = []
         for raw in rows:
             item = dict(raw)
+            if item.get("draft_error"):
+                item["draft_error"] = safe_error_summary(
+                    item["draft_error"], "草稿保存失败，请查看草稿状态并重试。",
+                )
             try:
                 item["tags"] = json.loads(item.get("tags") or "[]")
                 if not isinstance(item["tags"], list):
@@ -9872,11 +10107,27 @@ def _register_routes(app: FastAPI) -> None:
         total = conn.execute("SELECT COUNT(*) FROM ops_logs" + where_sql, params).fetchone()[0]
         effective_limit = page_size if page is not None else limit
         effective_offset = (page - 1) * page_size if page is not None else 0
-        rows = [dict(r) for r in conn.execute(
+        source_rows = conn.execute(
             "SELECT * FROM ops_logs" + where_sql +
             " ORDER BY COALESCE(executed_at, schedule_time) DESC, id DESC LIMIT ? OFFSET ?",
             [*params, effective_limit, effective_offset],
-        ).fetchall()]
+        ).fetchall()
+        # task_run_id 等关联键仅用于服务端审计同步，不属于运营日志展示契约。
+        public_log_fields = (
+            "id", "round_id", "platform", "action_type", "target_url",
+            "target_author", "content", "schedule_time", "executed_at",
+            "status", "error_msg", "resolved_at", "resolved_by",
+            "resolution_action", "resolution_note", "rhythm_wait_seconds",
+        )
+        rows = []
+        for source_row in source_rows:
+            source = dict(source_row)
+            item = {key: source.get(key) for key in public_log_fields}
+            if item.get("error_msg"):
+                item["error_msg"] = safe_error_summary(
+                    item["error_msg"], "运营操作执行失败，请核对平台状态。",
+                )
+            rows.append(item)
         return {
             "items": rows, "total": total, "limit": effective_limit, "offset": effective_offset,
             **({
@@ -9982,11 +10233,27 @@ def _register_routes(app: FastAPI) -> None:
         total = conn.execute("SELECT COUNT(*) FROM task_runs" + where_sql, params).fetchone()[0]
         effective_limit = page_size if page is not None else limit
         effective_offset = (page - 1) * page_size if page is not None else 0
-        items = [dict(r) for r in conn.execute(
+        rows = conn.execute(
             "SELECT * FROM task_runs" + where_sql +
             " ORDER BY id DESC LIMIT ? OFFSET ?",
             [*params, effective_limit, effective_offset],
-        ).fetchall()]
+        ).fetchall()
+        # task_runs 包含 worker/租约等内部列；只向前端提供任务历史契约字段。
+        # error_msg 保留可读业务说明，但统一过滤 traceback、数据库异常和内部路径。
+        public_task_fields = (
+            "id", "task_type", "biz_id", "platform", "status", "attempt",
+            "max_attempts", "started_at", "finished_at", "next_run_at",
+            "error_msg", "created_at", "resolved_at", "resolved_by", "resolution_action",
+        )
+        items = []
+        for row in rows:
+            source = dict(row)
+            item = {key: source.get(key) for key in public_task_fields}
+            if item.get("error_msg"):
+                item["error_msg"] = safe_error_summary(
+                    item["error_msg"], "任务执行失败，请进入任务详情核对。",
+                )
+            items.append(item)
         if page is None:
             return items
         return {
@@ -10119,10 +10386,25 @@ def _register_routes(app: FastAPI) -> None:
             elif item.get("round_id") is not None:
                 target_type, target_id = "round", item["round_id"]
                 target_page, target_tab = "operations", "tasks"
-            item["target_page"] = target_page
-            item["target_tab"] = target_tab
-            item["target_type"] = target_type
-            item["target_id"] = target_id
+            # 明确投影公开字段：数据库关联 ID 仅用于上面的服务端深链计算，
+            # 不随 SELECT * 的结果返回给浏览器；未来新增列也不会自动暴露。
+            public_item = {
+                key: item.get(key)
+                for key in (
+                    "id", "level", "type", "platform", "title", "body",
+                    "channel", "sent_at", "read_at",
+                )
+            }
+            public_item["target_page"] = target_page
+            public_item["target_tab"] = target_tab
+            public_item["target_type"] = target_type
+            public_item["target_id"] = target_id
+            if item.get("type") in {"draft_failed", "data_fetch_failed", "login_expired"} and public_item.get("body"):
+                public_item["body"] = safe_error_summary(
+                    public_item["body"], "任务执行失败，详细诊断已隐藏。",
+                )
+            item.clear()
+            item.update(public_item)
         if page is None:
             return items
         return {

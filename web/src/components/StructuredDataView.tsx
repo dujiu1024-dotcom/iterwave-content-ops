@@ -1,0 +1,85 @@
+import type { ReactNode } from "react";
+
+const LABELS: Record<string, string> = {
+  summary: "摘要", description: "说明", title: "标题", name: "名称",
+  status: "状态", reason: "原因", detail: "详情", category: "类别",
+  source: "来源", evidence: "依据", impact: "影响", severity: "严重程度",
+  recommendation: "建议", action: "建议操作", next_step: "下一步",
+  risk: "风险", risks: "风险事项", assumption: "前提假设",
+  assumptions: "前提假设", resource: "资源", resource_basis: "资源依据",
+  pending_confirmations: "待确认事项", confirmed: "已确认", total: "总计",
+  platform: "平台", type: "类型", value: "数值", count: "数量",
+  date: "日期", created_at: "创建时间", updated_at: "更新时间",
+  generated_at: "生成时间", model: "生成模型", version: "版本",
+  field: "字段", message: "说明", code: "代码",
+  business_name: "业务名称", introduction: "业务介绍", industry: "所属行业", business_model: "商业模式",
+  business_stage: "业务阶段", operating_goal: "经营目标", entity_type: "业务对象类型", asset_type: "素材类型",
+  source_type: "来源类型", source_kind: "来源渠道", review_status: "审核状态", commercial_use_status: "商业使用权限",
+  readability_status: "可读性", completeness_status: "完整度", privacy_status: "隐私状态", priority: "优先级",
+  title_text: "标题", content: "内容", text: "文本", url: "链接", link: "链接",
+  start_date: "开始日期", end_date: "结束日期", target_count: "目标数量", actual_count: "实际数量",
+  expected_result: "预期结果", execution_strategy: "执行策略", current_problem: "当前问题", strategy_goal: "策略目标",
+};
+
+const TECHNICAL_KEY_PATTERN = /(^|_)(id|ids|tenant|worker|trace|request|execution|correlation|fingerprint|signature|raw|payload|error_code|stack|debug|model|model_name|provider|provider_name|prompt_version)(_|$)/i;
+const SENSITIVE_KEY_PATTERN = /(^|_)(secret|token|password|passwd|authorization|cookie|api_key|credential|private_key)(_|$)/i;
+
+function normalizedKey(key: string): string {
+  return key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/[-\s]/g, "_").toLowerCase();
+}
+
+function isTechnicalKey(key: string): boolean {
+  return TECHNICAL_KEY_PATTERN.test(normalizedKey(key));
+}
+
+function isSensitiveKey(key: string): boolean {
+  return SENSITIVE_KEY_PATTERN.test(normalizedKey(key));
+}
+
+function labelFor(key: string): string {
+  const normalized = normalizedKey(key);
+  return LABELS[normalized] ?? "其他信息";
+}
+
+function Value({ value, depth = 0 }: { value: unknown; depth?: number }): ReactNode {
+  if (value == null || value === "") return <span className="structured-data-empty">暂无</span>;
+  if (typeof value === "boolean") return <span>{value ? "是" : "否"}</span>;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        const parsed: unknown = JSON.parse(trimmed);
+        if (parsed && typeof parsed === "object") return <Value value={parsed} depth={depth} />;
+      } catch {
+        // Keep ordinary text unchanged when it is not valid structured JSON.
+      }
+    }
+    return <span className="structured-data-value">{value}</span>;
+  }
+  if (typeof value === "number") return <span className="structured-data-value">{String(value)}</span>;
+  if (Array.isArray(value)) {
+    if (!value.length) return <span className="structured-data-empty">暂无记录</span>;
+    return <div className="structured-data-list">{value.map((item, index) => (
+      <div className="structured-data-item" key={index}><Value value={item} depth={depth + 1} /></div>
+    ))}</div>;
+  }
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).filter(([key, item]) =>
+      !isTechnicalKey(key) && !isSensitiveKey(key) && item !== undefined && item !== null && item !== ""
+    );
+    if (!entries.length) return <span className="structured-data-empty">暂无可展示信息</span>;
+    return <dl className={depth ? "structured-data-nested" : "structured-data-grid"}>
+      {entries.map(([key, item]) => <div className="structured-data-field" key={key}>
+        <dt>{labelFor(key)}</dt><dd><Value value={item} depth={depth + 1} /></dd>
+      </div>)}
+    </dl>;
+  }
+  return <span>{String(value)}</span>;
+}
+
+export default function StructuredDataView({ data, title }: { data: unknown; title?: string }) {
+  return <section className="structured-data-view">
+    {title && <h4 className="structured-data-title">{title}</h4>}
+    <Value value={data} />
+  </section>;
+}

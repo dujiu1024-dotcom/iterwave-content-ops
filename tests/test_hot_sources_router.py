@@ -156,3 +156,19 @@ def test_hot_source_update_restores_url_for_matching_name_when_masked_urls_colli
         assert "other-secret" not in response.text
     finally:
         conn.close()
+
+
+def test_hot_source_fetch_error_hides_internal_paths_and_traceback_details():
+    client, conn, _cfg, _source = _client(
+        fetch_error="sqlite3.OperationalError: unable to open /home/ubuntu/iterwave/data/private.db\\nTraceback (most recent call last):",
+    )
+    try:
+        response = client.post("/api/hot_topics/sources/0/test")
+        assert response.status_code == 200
+        body = response.json()["message"]
+        assert body == "热点来源试抓取失败，请检查来源地址和访问权限后重试。"
+        assert "/home/ubuntu" not in response.text
+        stored = conn.execute("SELECT message FROM hot_source_test_history").fetchone()
+        assert stored["message"] == body
+    finally:
+        conn.close()

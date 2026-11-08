@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import StructuredDataView from "./StructuredDataView";
 import {
   api, BusinessGapItem, Draft, MetricFactItem, PublishVerificationItem, ReviewTaskItem,
 } from "../api";
@@ -98,7 +99,7 @@ export default function OperatingFeedbackPane() {
         return next;
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "经营复盘数据加载失败");
+      setError("经营复盘数据加载失败，请稍后重试");
     } finally {
       setLoading(false);
     }
@@ -135,10 +136,10 @@ export default function OperatingFeedbackPane() {
         evidence_source: "user_confirmed",
         evidence_note: form.evidence_note.trim(),
       });
-      setNotice(`发布核验已保存；独立复盘任务 ${result.verification.review_task_id ?? "已创建"}，生产线关闭事件等待任务3消费。`);
+      setNotice(`发布核验已保存；独立复盘任务已创建，生产线关闭事件等待任务3消费。`);
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "发布核验失败");
+      setError("发布核验失败，请稍后重试");
     } finally { setBusy(""); }
   };
 
@@ -176,7 +177,7 @@ export default function OperatingFeedbackPane() {
       setNotice("复盘数据已记录，原始采集批次保留。");
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "数据补采失败");
+      setError("数据补采失败，请稍后重试");
     } finally { setBusy(""); }
   };
 
@@ -192,7 +193,7 @@ export default function OperatingFeedbackPane() {
       setNotice("采集失败已留痕；没有把失败转换成 0。");
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "失败记录提交失败");
+      setError("失败记录提交失败，请稍后重试");
     } finally { setBusy(""); }
   };
 
@@ -204,7 +205,7 @@ export default function OperatingFeedbackPane() {
       setNotice("生产线关闭事件已重新排队，等待任务3消费。");
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "生产线关闭重试失败");
+      setError("生产线关闭重试失败，请稍后重试");
     } finally { setBusy(""); }
   };
 
@@ -212,7 +213,7 @@ export default function OperatingFeedbackPane() {
     try {
       const result = await api.reviewTaskDetail(taskId);
       setRunHistory((current) => ({ ...current, [taskId]: result.task.collection_runs }));
-    } catch (err) { setError(err instanceof Error ? err.message : "采集批次加载失败"); }
+    } catch (err) { setError("采集批次加载失败，请稍后重试"); }
   };
 
   const retry = async (task: ReviewTaskItem) => {
@@ -222,7 +223,7 @@ export default function OperatingFeedbackPane() {
       setNotice("复盘任务已重新排入待处理队列，历史采集记录保留。");
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "复盘任务重试失败");
+      setError("复盘任务重试失败，请稍后重试");
     } finally { setBusy(""); }
   };
 
@@ -251,7 +252,7 @@ export default function OperatingFeedbackPane() {
       setNotice("复盘结论和经营缺口变更已记录，历史版本不会被覆盖。");
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "复盘结论保存失败");
+      setError("复盘结论保存失败，请稍后重试");
     } finally { setBusy(""); }
   };
 
@@ -259,7 +260,7 @@ export default function OperatingFeedbackPane() {
     try {
       const result = await api.businessGapHistory(gapId);
       setHistory((current) => ({ ...current, [gapId]: result.items }));
-    } catch (err) { setError(err instanceof Error ? err.message : "缺口历史加载失败"); }
+    } catch (err) { setError("缺口历史加载失败，请稍后重试"); }
   };
 
   return (
@@ -343,7 +344,7 @@ export default function OperatingFeedbackPane() {
               {runHistory[task.task_id].map((run, index) => <div key={String(run.run_id || index)} className="panel-sub">
                 {statusText(String(run.status || ""))} · {String(run.source || "")} · {String(run.window_start || "—")} 至 {String(run.window_end || "—")}
                 {run.error_message ? ` · ${String(run.error_message)}` : ""}
-                {run.metrics ? ` · ${JSON.stringify(run.metrics)}` : ""}
+                {Boolean(run.metrics) && <StructuredDataView data={run.metrics} title="本批采集指标"/>}
               </div>)}
             </div>}
             <div className="form-grid" style={{ marginTop: 8 }}>

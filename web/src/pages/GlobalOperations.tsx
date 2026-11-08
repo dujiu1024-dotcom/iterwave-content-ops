@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, GlobalMonitorResponse, GlobalTaskQueueItem, GlobalTodoItem, NotificationItem } from "../api";
 import { navigate } from "../nav";
+import { formatBusinessDateTime } from "../businessTime.mjs";
 import { roundTaskLabel } from "../roundLabel";
 import ProductionPlanMonitor from "../components/ProductionPlanMonitor";
 import { displayStatusLabel } from "../displayLabels";
@@ -105,7 +106,7 @@ export default function GlobalOperations() {
       },
     ])));
     const failures = results.flatMap((r, i) => r.status === "rejected"
-      ? [`${["账号组汇总", "活跃任务", "失败任务统计", "未读通知", "统一待办"][i]}：${r.reason instanceof Error ? r.reason.message : String(r.reason)}`]
+      ? [`${["账号组汇总", "活跃任务", "失败任务统计", "未读通知", "统一待办"][i]}暂时无法加载`]
       : []);
     setError(failures.join("；"));
     setUpdatedAt(new Date());
@@ -158,9 +159,9 @@ export default function GlobalOperations() {
             <table>
               <thead><tr><th>账号组</th><th>数据库</th><th>平台账号</th><th>平台登录</th><th>运行中</th><th>排队中</th><th>失败 / 中断</th><th>定时调度</th><th>活跃轮次</th><th>最近执行</th></tr></thead>
               <tbody>{(monitor.tenants ?? []).map((tenant) => {
-                const q = tenantCounts[tenant.tenant_id] ?? { queued: 0, running: 0, failed: 0 };
+                const q = tenantCounts[tenant.tenant_name] ?? { queued: 0, running: 0, failed: 0 };
                 return <tr key={tenant.tenant_id}>
-                  <td><strong>{tenant.tenant_name}</strong><div className="tiny">{tenant.tenant_id}</div></td>
+                  <td><strong>{tenant.tenant_name}</strong></td>
                   <td><span className={tenant.db_status === "uninitialized" ? "tag gray" : tenant.db_available ? "tag green" : "tag red"}>{tenant.db_status === "uninitialized" ? "未初始化" : tenant.db_available ? "可读取" : "不可用"}</span></td>
                   <td>{tenant.registered_accounts_active ?? tenant.registered_accounts ?? "—"} / {tenant.registered_accounts ?? "—"}</td>
                   <td>{tenant.runtime?.available ? (
@@ -187,7 +188,7 @@ export default function GlobalOperations() {
                       </span>
                       {tenant.recent_execution.has_error_detail && <span className="tiny">诊断详情已记录</span>}
                       <span className="tiny">{tenant.recent_execution.finished_at || tenant.recent_execution.started_at || tenant.recent_execution.created_at
-                        ? new Date(tenant.recent_execution.finished_at || tenant.recent_execution.started_at || tenant.recent_execution.created_at!).toLocaleString("zh-CN")
+                        ? formatBusinessDateTime(tenant.recent_execution.finished_at || tenant.recent_execution.started_at || tenant.recent_execution.created_at!)
                         : "时间未知"}</span>
                     </div>
                   ) : <span className="muted">暂无执行记录</span>}</td>
@@ -214,7 +215,7 @@ export default function GlobalOperations() {
         <section className="panel">
           <div className="panel-head"><div><div className="panel-title">异常与待处理</div><div className="panel-sub">当前返回的队列记录中失败或中断的任务。</div></div><span className="tag">{failedCount ?? "—"} 项</span></div>
           {failed.length ? <div className="list">{failed.map((task) => <div className="task-row" key={task.task_id}>
-            <i className="task-prio red" /><div className="task-main"><div className="task-title">{task.tenant_name} · {task.task_type === "round_run" ? roundTaskLabel(task) : (TASK_TYPE_LABEL[task.task_type] ?? "账号组后台任务")} · {STATUS[task.status]}</div><div className="task-desc">{task.error_message || "未记录错误说明"}</div></div>
+            <i className="task-prio red" /><div className="task-main"><div className="task-title">{task.tenant_name} · {task.task_type === "round_run" ? roundTaskLabel(task) : (TASK_TYPE_LABEL[task.task_type] ?? "账号组后台任务")} · {STATUS[task.status]}</div><div className="task-desc">{task.error_message ? "任务执行失败，请查看任务详情。" : "未记录错误说明"}</div></div>
           </div>)}</div> : <div className="empty-state">当前没有失败或中断任务。</div>}
           {failedPages > 1 && <div className="pagination-row" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, paddingTop: 12 }}>
             <button className="btn sm" disabled={failedPage <= 1 || loading} onClick={() => setFailedPage((p) => Math.max(1, p - 1))}>上一页</button>
@@ -251,7 +252,7 @@ export default function GlobalOperations() {
             <option value="notification">通知</option>
             <option value="media_generation">AI 配图</option>
           </select>
-          <input aria-label="待办账号组筛选" value={todoTenantId} onChange={(event) => { setTodoTenantId(event.target.value); setTodoPage(1); }} placeholder="账号组 ID" style={{ width: 160 }} />
+          <input aria-label="待办账号组 ID 筛选" value={todoTenantId} onChange={(event) => { setTodoTenantId(event.target.value); setTodoPage(1); }} placeholder="输入账号组 ID 筛选" style={{ width: 180 }} />
           <span className="tiny">队列 {todoCounts.global_queue ?? 0} · 任务 {todoCounts.task_run ?? 0} · 日志 {todoCounts.ops_log ?? 0} · 熔断 {todoCounts.circuit_breaker ?? 0} · 热点 {todoCounts.hot_topic_source ?? 0} · 素材 {todoCounts.media_review ?? 0} · 通知 {todoCounts.notification ?? 0} · 配图 {todoCounts.media_generation ?? 0}</span>
         </div>
         {todos.length ? <div className="list">
@@ -259,10 +260,10 @@ export default function GlobalOperations() {
             <i className={`task-prio ${todo.severity === "high" ? "red" : "blue"}`} />
             <div className="task-main">
               <div className="task-title">{todo.title}</div>
-              <div className="task-desc">{todo.tenant_name} · {todo.source_label} · {todo.detail} · {todo.created_at ? new Date(todo.created_at).toLocaleString("zh-CN") : "时间未知"}</div>
+              <div className="task-desc">{todo.tenant_name} · {todo.source_label} · {todo.detail} · {todo.created_at ? formatBusinessDateTime(todo.created_at) : "时间未知"}</div>
             </div>
             {todo.source === "notification" ? <button className="btn sm" disabled={loading} onClick={() => {
-              void api.markNotificationRead(Number(todo.record_id)).then(() => refresh()).catch((e) => setError(e instanceof Error ? e.message : String(e)));
+              void api.markNotificationRead(Number(todo.record_id)).then(() => refresh()).catch(() => setError("通知状态更新失败，请稍后重试。"));
             }}>标记已读</button> : <button className="btn sm" onClick={() => navigate(todo.target_page, todo.target_page === "operations" ? (todo.target_tab ?? undefined) : undefined)}>处理</button>}
           </div>)}
         </div> : <div className="empty-state">当前筛选条件下没有待处理事项。</div>}
@@ -280,7 +281,7 @@ export default function GlobalOperations() {
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span className="tag">{unreadNotificationCount ?? "—"} 条未读</span>
             <button className="btn sm" disabled={!unreadNotificationCount || loading} onClick={() => {
-              void api.markAllNotificationsRead().then(() => refresh()).catch((e) => setError(e instanceof Error ? e.message : String(e)));
+              void api.markAllNotificationsRead().then(() => refresh()).catch(() => setError("通知状态更新失败，请稍后重试。"));
             }}>全部标记已读</button>
           </div>
         </div>
@@ -289,7 +290,7 @@ export default function GlobalOperations() {
             <i className={`task-prio ${notification.level === "critical" || notification.level === "error" ? "red" : notification.level === "warning" ? "blue" : "green"}`} />
             <div className="task-main">
               <div className="task-title">{notification.title}</div>
-              <div className="task-desc">{notification.body || notification.type} · {notification.platform ? (PLATFORMS[notification.platform] ?? notification.platform) : "系统"} · {new Date(notification.sent_at).toLocaleString("zh-CN")}</div>
+              <div className="task-desc">{notification.body || notification.type} · {notification.platform ? (PLATFORMS[notification.platform] ?? notification.platform) : "系统"} · {formatBusinessDateTime(notification.sent_at)}</div>
             </div>
             <button className="btn sm primary" disabled={loading} onClick={() => {
               void api.markNotificationRead(notification.id)
@@ -303,10 +304,10 @@ export default function GlobalOperations() {
                       : null,
                   );
                 })
-                .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+                .catch(() => setError("通知状态更新失败，请稍后重试。"));
             }}>查看并标记已读</button>
             <button className="btn sm" disabled={loading} onClick={() => {
-              void api.markNotificationRead(notification.id).then(() => refresh()).catch((e) => setError(e instanceof Error ? e.message : String(e)));
+              void api.markNotificationRead(notification.id).then(() => refresh()).catch(() => setError("通知状态更新失败，请稍后重试。"));
             }}>仅标记已读</button>
           </div>)}
         </div> : <div className="empty-state">当前没有未读通知。</div>}

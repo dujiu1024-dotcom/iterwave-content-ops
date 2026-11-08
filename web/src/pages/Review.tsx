@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, ReviewQueueItem } from "../api";
+import { formatBusinessDateTime } from "../businessTime.mjs";
 import { ALL_PLATFORMS, platformMeta, Platform } from "../platforms";
 
 const PAGE_SIZE = 30;
@@ -63,7 +64,7 @@ export default function Review() {
       setSelectedId((current) => current && result.items.some((item) => item.id === current)
         ? current : result.items[0]?.id ?? null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "审核队列加载失败");
+      setError("审核队列加载失败，请稍后刷新重试。");
     } finally {
       setLoading(false);
     }
@@ -79,7 +80,7 @@ export default function Review() {
     void api.stageEffectFeedback(stageId).then((result) => {
       if (!cancelled) setEffectFeedback(result);
     }).catch((err) => {
-      if (!cancelled) setError(err instanceof Error ? err.message : "策略效果数据加载失败");
+      if (!cancelled) setError("策略效果数据暂时无法加载，请稍后重试。");
     });
     return () => { cancelled = true; };
   }, [selected?.sub_plan_stage_id]);
@@ -120,7 +121,7 @@ export default function Review() {
       }
       await load();
     } catch (err) {
-      const message = err instanceof Error ? err.message : "审核操作失败";
+      const message = "审核状态可能已变化，请刷新队列后重试。";
       // 409 通常意味着状态已被其他审核员改变，刷新后以服务端状态为准。
       await load();
       setError(message);
@@ -143,7 +144,7 @@ export default function Review() {
       setNotice("内容已保存，并已重新执行 G2 检查；需要重新审核。");
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "内容编辑失败");
+      setError("内容编辑失败，请检查内容后重试。");
     } finally { setBusyId(null); }
   };
 
@@ -155,7 +156,7 @@ export default function Review() {
       setPublishFailureReason("");
       setNotice("发布失败结果已记录；草稿仍保留，可在处理后重新发布。");
       await load();
-    } catch (err) { setError(err instanceof Error ? err.message : "发布结果记录失败"); }
+    } catch (err) { setError("发布结果记录失败，请稍后重试。"); }
     finally { setBusyId(null); }
   };
 
@@ -170,7 +171,7 @@ export default function Review() {
       const result = await api.stageEffectFeedback(selected.sub_plan_stage_id);
       setEffectFeedback(result);
       setNotice("策略效果评估已保存，历史记录不会被覆盖。");
-    } catch (err) { setError(err instanceof Error ? err.message : "策略评估保存失败"); }
+    } catch (err) { setError("策略评估保存失败，请检查填写内容后重试。"); }
   };
 
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -188,8 +189,8 @@ export default function Review() {
 
       <div className="review-stats">
         <div className="review-stat"><span>当前筛选结果</span><strong>{total}</strong></div>
-        <div className="stat-card"><span>当前页</span><strong>{page} / {pages}</strong></div>
-        <div className="stat-card"><span>每页数量</span><strong>{PAGE_SIZE}</strong></div>
+        <div className="review-stat"><span>当前页</span><strong>{page} / {pages}</strong></div>
+        <div className="review-stat"><span>每页数量</span><strong>{PAGE_SIZE}</strong></div>
       </div>
 
       <section className="panel" style={{ marginBottom: 16 }}>
@@ -215,7 +216,7 @@ export default function Review() {
           </label>
           <label>开始日期<input type="date" value={from} max={to || undefined} onChange={(e) => { setPage(1); setFrom(e.target.value); }} /></label>
           <label>结束日期<input type="date" value={to} min={from || undefined} onChange={(e) => { setPage(1); setTo(e.target.value); }} /></label>
-          <label>关键词<input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="标题 / 内容 ID / 轮次" /></label>
+          <label>当前页关键词<input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="筛选本页标题 / 内容标识 / 轮次" /></label>
         </div>
       </section>
 
@@ -253,7 +254,6 @@ export default function Review() {
           {!selected ? <div className="empty-state">选择左侧内容查看详情和处理历史。</div> : <>
             <div className="review-detail">
               <h2>{selected.title || "未命名内容"}</h2>
-              <div className="muted">内容 ID：{selected.id}</div>
               <div className="review-detail-meta">
                 <span>{platformMeta(selected.platform).label}</span>
                 <span>生产轮次：{selected.round_number ?? "—"}</span>
@@ -305,7 +305,7 @@ export default function Review() {
                   <label>下一步调整建议<textarea value={effectRecommendation} onChange={(e) => setEffectRecommendation(e.target.value)} rows={3} maxLength={2000} placeholder="说明保留、调整或停止哪些策略动作" /></label>
                   <label>评估依据<textarea value={effectEvidence} onChange={(e) => setEffectEvidence(e.target.value)} rows={2} maxLength={2000} placeholder="补充样本范围、异常情况和判断理由" /></label>
                   <button className="btn primary" type="button" disabled={!effectRecommendation.trim()} onClick={() => void saveEffectReview()}>保存策略评估</button>
-                  {effectFeedback.reviews.length > 0 && <ol className="review-effect-history">{effectFeedback.reviews.map((entry) => <li key={entry.id}><strong>{entry.assessment}</strong> · {entry.recommendation}<small>{entry.created_at} · 置信度 {entry.confidence}</small></li>)}</ol>}
+                  {effectFeedback.reviews.length > 0 && <ol className="review-effect-history">{effectFeedback.reviews.map((entry) => <li key={entry.id}><strong>{entry.assessment}</strong> · {entry.recommendation}<small>{formatBusinessDateTime(entry.created_at)} · 置信度 {entry.confidence}</small></li>)}</ol>}
                 </> : <p className="muted">正在加载策略效果数据…</p>}
               </section>}
               {selected.guard_reason && <p className="muted">质量检查说明：{selected.guard_reason}</p>}
@@ -348,7 +348,7 @@ export default function Review() {
                 : <ol>{selected.review_history.map((event, index) => (
                   <li key={`${event.overridden_at}-${index}`}>
                     <strong>{actionLabel(event.override_field)}</strong>
-                    <span>{event.reason || event.override_value}</span>
+                    <span>{event.reason ? "已记录人工调整原因" : "—"}</span>
                     <small>{event.overridden_at} · {event.overridden_by}</small>
                   </li>
                 ))}</ol>}
@@ -366,8 +366,12 @@ export default function Review() {
         .review-stat { border: 1px solid var(--line); background: var(--surface); border-radius: 10px; padding: 12px 14px; display: grid; gap: 5px; }
         .review-stat span { color: var(--muted); font-size: 11px; } .review-stat strong { font-size: 20px; }
         .review-panel-head { padding: 14px 16px; border-bottom: 1px solid var(--line); font-weight: 700; }
-        .review-filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; padding: 14px 16px; }
-        .review-filters label { display: grid; gap: 5px; color: var(--muted); font-size: 11px; min-width: 140px; flex: 1 1 140px; }
+        .review-filters { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; align-items: end; padding: 12px 14px; }
+        .review-filters label { display: grid; gap: 5px; color: var(--muted); font-size: 11px; min-width: 0; }
+        .review-filters input, .review-filters select { height: 34px; padding-inline: 8px; font-size: 12px; }
+        @media (max-width: 1199px) and (min-width: 901px) { .review-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+        @media (max-width: 900px) and (min-width: 561px) { .review-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+        @media (max-width: 560px) { .review-filters { grid-template-columns: 1fr; } }
         .review-filters input, .review-filters select { width: 100%; min-width: 0; }
         .review-notice { padding: 10px 13px; border-radius: 8px; font-size: 12px; }
         .review-notice.success { background: var(--green-weak); color: var(--green); }

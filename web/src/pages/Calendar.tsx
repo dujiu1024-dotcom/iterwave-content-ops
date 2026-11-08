@@ -136,13 +136,13 @@ export default function Calendar() {
   const openPlanDetails = async (planId: string) => {
     setPlanDetailLoading(true);
     try { setPlanDetail(await api.contentPlan(planId)); }
-    catch (e: any) { showToast(`加载历史批次详情失败：${e?.message ?? e}`, "error"); }
+    catch (e: any) { showToast("加载历史批次详情失败，请稍后重试", "error"); }
     finally { setPlanDetailLoading(false); }
   };
 
   const openBatchDetails = async (roundId: number) => {
     try { setBatchDetail(await api.productionBatch(roundId)); }
-    catch (e: any) { showToast(`加载生产批次失败：${e?.message ?? e}`, "error"); }
+    catch (e: any) { showToast("加载生产批次失败，请稍后重试", "error"); }
   };
 
 
@@ -155,7 +155,7 @@ export default function Calendar() {
         api.schedule(_fmt(visibleStart), _fmt(visibleEndExclusive)),
         api.contentPlans(_fmt(visibleStart), endDate),
         api.productionBatches(_fmt(visibleStart), endDate).catch((batchError) => {
-          showToast(`加载生产批次失败：${batchError instanceof Error ? batchError.message : String(batchError)}`, "error");
+          showToast("生产批次暂时无法加载，请稍后重试", "error");
           return { items: [], total: 0 };
         }),
       ]);
@@ -166,7 +166,7 @@ export default function Calendar() {
       setUnscheduledTotal(r.unscheduled_total ?? (r.unscheduled ?? []).length);
       setUnscheduledPage(1);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError("日历数据加载失败，请稍后刷新重试。");
     } finally {
       setLoading(false);
     }
@@ -182,7 +182,7 @@ export default function Calendar() {
       setUnscheduledPage(result.page);
       setUnscheduledTotal(result.total);
     } catch (e) {
-      showToast(`加载更多待排期草稿失败：${e instanceof Error ? e.message : String(e)}`, "error");
+      showToast("加载更多待排期草稿失败，请稍后重试", "error");
     } finally {
       setLoadingMoreUnscheduled(false);
     }
@@ -217,7 +217,7 @@ export default function Calendar() {
       setPendingDraft((prev) => { const n = { ...prev }; delete n[draftId]; return n; });
       await load();
     } catch (e: any) {
-      showToast(`排期保存失败: ${e?.message ?? e}`, "error");
+      showToast("排期保存失败，请检查时间后重试", "error");
     }
   };
 
@@ -228,7 +228,7 @@ export default function Calendar() {
       setSelected(null);
       await load();
     } catch (e: any) {
-      showToast(`取消失败: ${e?.message ?? e}`, "error");
+      showToast("取消排期失败，请刷新后重试", "error");
     }
   };
 
@@ -373,7 +373,13 @@ export default function Calendar() {
             </div>
           </div>
         ) : (
-          <div className={`calendar-agenda ${viewMode === "week" ? "calendar-week-grid" : ""}`}>
+          <div
+            className={viewMode === "week" ? "calendar-week-scroll" : undefined}
+            role={viewMode === "week" ? "region" : undefined}
+            aria-label={viewMode === "week" ? "一周日历，可横向滚动" : undefined}
+            tabIndex={viewMode === "week" ? 0 : undefined}
+          >
+            <div className={`calendar-agenda ${viewMode === "week" ? "calendar-week-grid" : ""}`}>
             {days.map((d) => (
               <section className="calendar-agenda-day" key={d.key} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); const id = e.dataTransfer.getData("text/plain"); const event = events.find((item) => item.id === id); if (event) { const oldValue = _toLocalInput(event.scheduled || event.saved_at); const time = oldValue.includes("T") ? oldValue.slice(11, 16) : "09:00"; void saveSchedule(id, `${d.key}T${time}`); } }}>
                 <button className="calendar-agenda-date" onClick={() => { setCursorDate(d.date); setViewMode("day"); }}>
@@ -409,6 +415,7 @@ export default function Calendar() {
                 })}
               </section>
             ))}
+            </div>
           </div>
         )}
 
@@ -469,9 +476,8 @@ export default function Calendar() {
             <div className="calendar-plan-detail-grid">
               <div><strong>生产轮次（{planDetail.rounds.length}）</strong>
                 {planDetail.rounds.length ? planDetail.rounds.map((round) => <div className="calendar-plan-detail-row" key={round.round_id}>
-                  {round.round_number != null ? `第 ${round.round_number} 轮` : "轮次信息不可用"} · {round.task_id ? `任务 ${round.task_id.slice(0, 8)}` : "尚未入队"}
-                  {round.attribution_status === "attributed" && round.strategy_step_id ? ` · 策略步骤 ${round.strategy_step_id}` : " · 历史归属待核实"}
-                  {round.production_line_version_id ? ` · 生产线版本 v${round.production_line_version_id}` : ""}
+                  {round.round_number != null ? `第 ${round.round_number} 轮` : "轮次信息不可用"} · {round.task_id ? "已入队" : "尚未入队"}
+                  {round.attribution_status === "attributed" ? " · 策略归属已确认" : " · 历史归属待核实"}
                 </div>) : <div className="note">尚未关联生产轮次</div>}
               </div>
               <div><strong>关联草稿（{planDetail.drafts.length}）</strong>
@@ -498,17 +504,16 @@ export default function Calendar() {
             <div className="note">
               母计划版本：{batchDetail.batch.master_plan_version_id ?? "待核实"} ·
               子计划版本：{batchDetail.batch.sub_plan_version_id ?? "待核实"} ·
-              策略步骤：{batchDetail.batch.strategy_step_title ?? batchDetail.batch.strategy_step_id ?? "待核实"} ·
-              生产线版本：{batchDetail.batch.production_line_version_id ?? "待核实"} ·
+              策略步骤：{batchDetail.batch.strategy_step_title ?? "待核实"} ·
               归属：{batchDetail.batch.attribution_status === "attributed" ? "完整" : "待核实"}
             </div>
             <div className="calendar-plan-detail-grid">
               <div><strong>生产任务（{batchDetail.tasks.length}）</strong>
                 {batchDetail.tasks.length ? batchDetail.tasks.map((task) => (
                   <div className="calendar-plan-detail-row" key={task.id}>
-                    <strong>{task.content_title || task.id}</strong>
+                    <strong>{task.content_title || "未命名内容"}</strong>
                     <div>{platformMeta(task.platform).label} · {TASK_STATUS_LABEL[task.status] ?? task.status} · 尝试 {task.attempt_count}/{task.max_attempts}</div>
-                    {task.error_message && <div className="note">{task.error_message}</div>}
+                    {task.status === "failed" && <div className="note">任务执行失败，请查看生产监控中的诊断信息。</div>}
                   </div>
                 )) : <div className="note">该批次尚未生成独立生产任务</div>}
               </div>

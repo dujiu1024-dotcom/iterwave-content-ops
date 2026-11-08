@@ -357,11 +357,10 @@ export function LlmEditor({ view, onSaved }: {
         if (queued.length > 0) {
           const byTenant = new Map<string, { name: string; count: number }>();
           for (const task of queued) {
-            const current = byTenant.get(task.tenant_id) ?? {
-              name: task.tenant_name || task.tenant_id, count: 0,
-            };
+            const tenantName = task.tenant_name || "未命名账号组";
+            const current = byTenant.get(tenantName) ?? { name: tenantName, count: 0 };
             current.count += 1;
-            byTenant.set(task.tenant_id, current);
+            byTenant.set(tenantName, current);
           }
           const scope = [...byTenant.values()]
             .map((item) => `「${item.name}」${item.count} 个`)

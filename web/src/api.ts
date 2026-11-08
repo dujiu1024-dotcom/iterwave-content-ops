@@ -95,9 +95,8 @@ export interface GlobalTaskQueueItem {
   queue_order: number;
   task_id: string;
   task_type: string;
-  tenant_id: string;
   tenant_name: string;
-  aggregate_id: string | null;
+  aggregate_label: string;
   /** round_run 任务对应的业务轮次编号（spiral_rounds.round_number）；无法解析时为 null */
   round_number?: number | null;
   status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "interrupted";
@@ -108,8 +107,6 @@ export interface GlobalTaskQueueItem {
   attempts: number;
   error_code: string | null;
   error_message: string | null;
-  retry_of_task_id?: string | null;
-  retry_confirmed_by?: string | null;
   retry_confirmation_note?: string | null;
   resolution_action?: "handled" | "ignored" | null;
   resolution_actor?: string | null;
@@ -118,20 +115,17 @@ export interface GlobalTaskQueueItem {
 }
 
 export interface GlobalTaskQueueAuditItem {
-  id: number;
-  task_id: string;
   action: string;
   actor: string;
   acted_at: string;
-  details: Record<string, unknown>;
+  details: { note?: string | null; confirmation_note?: string | null };
 }
 
 export interface GlobalTaskQueueDetail {
   task_id: string;
   queue_order: number;
   task_type: string;
-  tenant_id: string;
-  aggregate_id: string | null;
+  aggregate_label: string;
   round_number: number | null;
   status: GlobalTaskQueueItem["status"];
   created_at: string;
@@ -141,8 +135,6 @@ export interface GlobalTaskQueueDetail {
   attempts: number;
   error_code: string | null;
   error_message: string | null;
-  retry_of_task_id: string | null;
-  retry_confirmed_by: string | null;
   retry_confirmation_note: string | null;
   resolution_action: "handled" | "ignored" | null;
   resolution_actor: string | null;
@@ -158,7 +150,7 @@ export interface GlobalTaskQueueSummary {
   by_status: { queued: number; running: number; succeeded: number; failed: number; cancelled: number; interrupted: number };
   daily: Array<{ date: string; total: number; succeeded: number; failed: number }>;
   average_duration_seconds: number | null;
-  filters: { date_from: string | null; date_to: string | null; tenant_id: string | null; task_type: string | null; status: string | null };
+  filters: { date_from: string | null; date_to: string | null; task_type: string | null; status: string | null };
 }
 
 export interface GlobalTaskQueueResponse {
@@ -1592,9 +1584,7 @@ export interface AiCallRecord {
 
 export interface UserOverrideRecord {
   id: number;
-  round_id?: number | null;
   round_number?: number | null;
-  ai_call_id?: number | null;
   override_field: string | null;
   original_value: string | null;
   override_value: string | null;
@@ -2184,7 +2174,7 @@ export const api = {
       method: "POST", body: JSON.stringify(data),
     }),
   roundRunStatus: (id: number) =>
-    fetchJson<{ round_id: number; task_id?: string; status?: GlobalTaskQueueItem["status"]; queued?: boolean; running: boolean; report: RunRoundReport | null; error: string | null; error_code?: string | null; progress?: TaskProgress | null; started_at?: string | null; elapsed_seconds?: number | null }>(
+    fetchJson<{ round_id: number; status?: GlobalTaskQueueItem["status"]; queued?: boolean; running: boolean; report: RunRoundReport | null; error: string | null; error_code?: string | null; progress?: TaskProgress | null; started_at?: string | null; elapsed_seconds?: number | null }>(
       `/api/rounds/${id}/run_status`,
     ),
   /** 恢复已生成、尚未存平台草稿的内容；不会重新生成或发布。 */

@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState } from "react";
 import { useApp } from "../AppContext";
 import { navigate, useUrlTab } from "../nav";
+import { formatBusinessDateTime } from "../businessTime.mjs";
 import {
   api, RunRoundReport, SpiralRound, Draft, Platform, AssetItem,
   PlanResponse, ContentItem, PipelineResponse, RecheckResult, Goal, AutogrowStatus,
@@ -39,6 +40,22 @@ const PLATFORM_NAME: Record<Platform, string> = {
 };
 
 const ALL_PLATFORMS: Platform[] = ["xhs", "douyin", "kuaishou", "wechat_channels"];
+
+function visualTaskMessage(value: string | null | undefined): string {
+  if (!value) return "";
+  if (/OCR|校验未通过/i.test(value)) return "OCR 校验未通过";
+  if (/超时|服务中断/i.test(value)) return "图片生成超时或服务中断，请人工核实已完成页面文件后再安全重试。";
+  if (/文件缺失|页面文件缺失/i.test(value)) return "检测到已完成页面文件缺失，请人工核实文件后再决定是否重新生成。";
+  return "视觉任务执行未完成，请查看任务状态。";
+}
+
+function visualPageMessage(value: string | null | undefined): string {
+  if (!value) return "";
+  if (/OCR|校验未通过|校验失败/i.test(value)) return "OCR 校验未通过";
+  if (/文件缺失/i.test(value)) return "页面文件缺失";
+  return "执行遇到问题";
+}
+
 
 const TABS = [
   { key: "plan", label: "总计划" },
@@ -184,7 +201,7 @@ export default function Production() {
       }
     } catch (e: any) {
       // G-12：首屏加载失败必须可见 + 可重试，不能只弹一个 toast
-      setLoadError(e?.message ?? "加载轮次失败");
+      setLoadError("生产轮次加载失败，请稍后刷新重试。");
     }
   };
 
@@ -207,7 +224,7 @@ export default function Production() {
         goal_id: p.plan.cadence?.goal_id ?? "",
       });
     } catch (e: any) {
-      setLoadError(`加载母计划失败：${e.message}`);
+      setLoadError(`加载母计划失败：请稍后重试`);
     }
   };
 
@@ -237,7 +254,7 @@ export default function Production() {
       .catch(() => { /* 用默认四平台 */ });
   }, []);
   useEffect(() => {
-    refresh().catch((e) => showToast(`加载轮次失败: ${e.message}`, "error"));
+    refresh().catch((e) => showToast(`加载轮次失败: 请稍后重试`, "error"));
   }, [roundsPage, roundStatusFilter]);
 
   useEffect(() => {
@@ -408,7 +425,7 @@ export default function Production() {
       setReport(res);
       const isDryRun = res.steps.some((s) => s.step === "dry_run");
       if (res.final_status === "failed") {
-        showToast(`✕ 本轮执行失败：${res.errors.join("；") || "未知原因"}`, "error");
+        showToast(`本轮执行失败，发现 ${res.errors.length} 条错误。请查看轮次诊断信息。`, "error");
       } else if (isDryRun) {
         showToast(`✓ 已产出 ${res.contents_created} 篇内容（本次未执行存草稿）`, "success");
       } else {
@@ -417,8 +434,8 @@ export default function Production() {
       await refresh();
       await loadRoundData(currentRoundId);
     } catch (e: any) {
-      setRunError(e.message);
-      showToast(`运行失败: ${e.message}`, "error");
+      setRunError("本轮执行未能完成，请检查轮次状态并查看管理员诊断日志。");
+      showToast(`运行失败: 请稍后重试`, "error");
     } finally {
       setRunning(false);
       setRunQueued(false);
@@ -432,7 +449,7 @@ export default function Production() {
       showToast(`↻ 状态已变更为 ${target}`);
       await refresh();
       await loadRoundData(currentRoundId);
-    } catch (e: any) { showToast(`变更失败: ${e.message}`, "error"); }
+    } catch (e: any) { showToast(`变更失败: 请稍后重试`, "error"); }
   };
 
   const confirmPublish = async (draftId: string) => {
@@ -444,7 +461,7 @@ export default function Production() {
       showToast(noteUrl.trim() ? "✓ 已确认发布并保存链接" : "✓ 已确认发布；发布时间已记录或标记为确认时间");
       await refresh();
       if (currentRoundId) await loadRoundData(currentRoundId);
-    } catch (e: any) { showToast(`确认失败: ${e.message}`, "error"); }
+    } catch (e: any) { showToast(`确认失败: 请稍后重试`, "error"); }
   };
 
   const verifyDraftSave = async (draftId: string, saved: boolean) => {
@@ -463,7 +480,7 @@ export default function Production() {
       await refresh();
       if (currentRoundId) await loadRoundData(currentRoundId);
     } catch (e: any) {
-      showToast(`核实失败: ${e.message}`, "error");
+      showToast(`核实失败: 请稍后重试`, "error");
     }
   };
 
@@ -474,7 +491,7 @@ export default function Production() {
       showToast("已取消该草稿");
       await refresh();
       if (currentRoundId) await loadRoundData(currentRoundId);
-    } catch (e: any) { showToast(`取消失败: ${e.message}`, "error"); }
+    } catch (e: any) { showToast(`取消失败: 请稍后重试`, "error"); }
   };
 
   const recollectFailedMetrics = async (draft: Draft) => {
@@ -486,7 +503,7 @@ export default function Production() {
       showToast(result.recollect_scheduled ? "已提交指标重新采集任务" : "重新采集任务未提交", result.recollect_scheduled ? "success" : "error");
       await refresh();
       if (currentRoundId) await loadRoundData(currentRoundId);
-    } catch (e: any) { showToast(`重新采集失败: ${e.message}`, "error"); }
+    } catch (e: any) { showToast(`重新采集失败: 请稍后重试`, "error"); }
   };
 
   const handleSavePlan = async () => {
@@ -538,7 +555,7 @@ export default function Production() {
         await loadPlan();
         await refresh();
       } catch (e: any) {
-        showToast(`保存母计划失败: ${e.message}`, "error");
+        showToast(`保存母计划失败: 请稍后重试`, "error");
       }
     });
   };
@@ -554,7 +571,7 @@ export default function Production() {
         showToast(res.changed ? "✓ 文案已保存（user_override 已留痕）" : "内容无变化", "success");
         await loadRoundData(currentRoundId!);
       } catch (e: any) {
-        showToast(`保存失败: ${e.message}`, "error");
+        showToast(`保存失败: 请稍后重试`, "error");
       }
     });
   };
@@ -597,7 +614,7 @@ export default function Production() {
         showToast(
           message.includes("已有图片生成任务正在执行")
             ? "已有图片生成任务正在执行，已切换为状态跟踪；不会重复发起图片生成。"
-            : `生成卡片失败: ${message}`,
+            : "生成卡片失败，请稍后重试或查看管理员诊断日志。",
           "error",
         );
       } finally {
@@ -614,12 +631,12 @@ export default function Production() {
         const res = await api.recheckContent(selectedContentId);
         setRecheck(res);
         showToast(
-          res.passes ? `✓ 目标检查通过（${res.result}）` : `✕ 目标检查未通过：${res.reason}`,
+          res.passes ? "目标检查通过" : "目标检查未通过，请查看规则提示并调整内容",
           res.passes ? "success" : "error",
         );
         await loadRoundData(currentRoundId!);
       } catch (e: any) {
-        showToast(`重检失败: ${e.message}`, "error");
+        showToast(`重检失败: 请稍后重试`, "error");
       }
     });
   };
@@ -634,7 +651,7 @@ export default function Production() {
         setRejectReason("");
         await loadRoundData(currentRoundId!);
       } catch (e: any) {
-        showToast(`驳回失败: ${e.message}`, "error");
+        showToast(`驳回失败: 请稍后重试`, "error");
       }
     });
   };
@@ -653,7 +670,7 @@ export default function Production() {
         }));
         setSuggestNotes(r.notes);
         showToast("已按目标填好建议，确认后点「保存母计划」生效", "success");
-      } catch (e: any) { showToast(`拆分失败：${e.message}`, "error"); }
+      } catch (e: any) { showToast(`拆分失败：请稍后重试`, "error"); }
     });
   };
 
@@ -665,11 +682,11 @@ export default function Production() {
     await withPending("delete-content", async () => {
       try {
         const r = await api.deleteContents([selectedContentId]);
-        if (r.blocked.length) { showToast(r.blocked[0].reason, "error"); return; }
+        if (r.blocked.length) { showToast(`有 ${r.blocked.length} 条内容因状态或规则限制无法删除，请检查内容状态。`, "error"); return; }
         showToast("已删除这篇内容", "success");
         setSelectedContentId(null);
         if (currentRoundId) await loadRoundData(currentRoundId);
-      } catch (e: any) { showToast(`删除失败：${e.message}`, "error"); }
+      } catch (e: any) { showToast(`删除失败：请稍后重试`, "error"); }
     });
   };
 
@@ -683,7 +700,7 @@ export default function Production() {
         setCurrentRoundId(null);
         setRoundDetail(null);
         await refresh();
-      } catch (e: any) { showToast(`删除失败：${e.message}`, "error"); }
+      } catch (e: any) { showToast(`删除失败：请稍后重试`, "error"); }
     });
   };
 
@@ -715,7 +732,7 @@ export default function Production() {
       showToast(res.message, "success");
       await reloadRoundContents();
     } catch (e: any) {
-      showToast(`调整首尾图失败: ${e?.message ?? "未知原因"}`, "error");
+      showToast("调整首尾图失败，请稍后重试", "error");
     } finally {
       setMovingCard(null);
     }
@@ -744,7 +761,7 @@ export default function Production() {
       showToast(res.message, "success");
       await reloadRoundContents();
     } catch (e: any) {
-      showToast(`AI 加工失败: ${e?.message ?? "未知原因"}`, "error");
+      showToast("AI 图片加工失败，请稍后重试", "error");
     } finally {
       setProcessing(false);
     }
@@ -800,8 +817,8 @@ export default function Production() {
           {orphanDrafts.map((draft) => (
             <div key={draft.id} className="task-row" style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
               <div>
-                <div style={{ fontWeight: 600 }}>{displayPlatformLabel(draft.platform)} · {draft.id}</div>
-                <div className="tiny">来源内容：{draft.content_id} · 草稿状态：{displayStatusLabel(draft.status)} · 创建：{draft.created_at || "未知"}</div>
+                <div style={{ fontWeight: 600 }}>{displayPlatformLabel(draft.platform)} · 待核实草稿</div>
+                <div className="tiny">草稿状态：{displayStatusLabel(draft.status)} · 创建：{draft.created_at ? formatBusinessDateTime(draft.created_at) : "未知"}</div>
                 <div className="tiny">处置建议：{({
                   manual_verification_required: "先人工核实平台是否已保存",
                   platform_state_must_be_preserved: "保留平台状态，不得自动清理",
@@ -825,7 +842,7 @@ export default function Production() {
                           showToast(result.message, "success");
                           await refresh();
                         } catch (e: any) {
-                          showToast(e?.message || "平台状态确认失败", "error");
+                          showToast("平台状态确认失败，请检查核实依据后重试", "error");
                         }
                       });
                     }}
@@ -847,7 +864,7 @@ export default function Production() {
                           showToast("孤儿草稿已重新关联，原内容 ID、操作人和核实说明已留审计记录", "success");
                           await refresh();
                         } catch (e: any) {
-                          showToast(e?.message || "孤儿草稿恢复失败", "error");
+                          showToast("孤儿草稿恢复失败，请核对关联内容后重试", "error");
                         }
                       });
                     }}
@@ -1026,7 +1043,7 @@ export default function Production() {
                   {isPending("save-plan") ? "提交中…" : "✓ 保存母计划"}
                 </button>
                 <span className="note">
-                  {plan.updated_at ? `上次保存 ${plan.updated_at}` : "尚未在 UI 保存过（当前为推导值）"}
+                  {plan.updated_at ? `上次保存 ${formatBusinessDateTime(plan.updated_at)}` : "尚未在 UI 保存过（当前为推导值）"}
                 </span>
               </div>
 
@@ -1053,7 +1070,7 @@ export default function Production() {
                           <td style={{ fontFamily: "monospace", fontSize: 11 }}>{h.plan_signature.slice(0, 16)}…</td>
                           <td>{h.round_number != null ? `第 ${h.round_number} 轮` : h.round_id != null ? "关联轮次已归档" : "母计划"}</td>
                           <td>{AUTHOR_LABEL[(h.author ?? "").split(":")[0]] ?? displaySourceLabel(h.author)}</td>
-                          <td style={{ fontSize: 11 }}>{h.created_at}</td>
+                          <td style={{ fontSize: 11 }}>{formatBusinessDateTime(h.created_at)}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -1276,9 +1293,9 @@ export default function Production() {
                                 {s.step === "produce" && `产出 ${s.contents} 篇内容 · 目标检查拦截 ${s.guard_rejected} 次`}
                                 {s.step === "dry_run" && `${s.note}`}
                                 {s.step === "save_drafts" && `成功 ${s.saved} · 失败 ${s.failed}`}
-                                {s.step === "guard_reject" && `${displayPlatformLabel(String(s.platform))} / ${s.topic_id} · ${displayCodeLabel(String(s.result))} · ${s.reason}`}
+                                {s.step === "guard_reject" && `${displayPlatformLabel(String(s.platform))} · ${displayCodeLabel(String(s.result))} · 已被目标规则拦截`}
                                 {s.step === "plan_signature" && `签名 ${s.signature}`}
-                                {s.step === "draft_save" && `${displayPlatformLabel(String(s.platform))} · ${displayStatusLabel(s.status == null ? null : String(s.status))} ${s.error ?? ""}`}
+                                {s.step === "draft_save" && `${displayPlatformLabel(String(s.platform))} · ${displayStatusLabel(s.status == null ? null : String(s.status))}${s.error ? " · 保存失败，查看轮次错误汇总" : ""}`}
                                 {s.step === "apply_feedback" && `吃进复盘结论：${Object.keys((s.dimension_bias as object) ?? {}).length} 个维度调整 · ${s.copy_hint_count} 条文案要点`}
                                 {s.step === "dimension_quota" && `维度配额 ${Object.entries((s.allocation as Record<string, number>) ?? {}).map(([d, n]) => `${d}×${n}`).join("、")}`}
                                 {s.step === "auto_schedule" && `自动排期 ${s.scheduled} 篇`}
@@ -1297,7 +1314,7 @@ export default function Production() {
                     </div>
                     {report.errors.length > 0 && (
                       <div className="note" style={{ marginTop: 8, color: "var(--red)" }}>
-                        ! {report.errors.join("；")}
+                        ! 存在 {report.errors.length} 条执行错误。为避免展示内部异常细节，请查看管理员诊断日志。
                       </div>
                     )}
                   </div>
@@ -1451,7 +1468,7 @@ export default function Production() {
                     not_found: "",
                   }[visualTask.status]}
                 </div>
-                <div>{visualTask.message}</div>
+                <div>{visualTaskMessage(visualTask.message)}</div>
                 {visualTask.pages.length > 0 && (
                   <div style={{ display: "grid", gap: 4, marginTop: 8 }}>
                     {visualTask.pages.map((page) => {
@@ -1465,7 +1482,7 @@ export default function Production() {
                       return (
                         <div key={page.page_index} style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
                           <span>第 {page.page_index + 1} 张</span>
-                          <span>{labels[page.status]}{page.attempts ? ` · 尝试 ${page.attempts} 次` : ""}{page.message ? ` · ${page.message}` : ""}</span>
+                          <span>{labels[page.status]}{page.attempts ? ` · 尝试 ${page.attempts} 次` : ""}{page.message ? ` · ${visualPageMessage(page.message)}` : ""}</span>
                         </div>
                       );
                     })}
@@ -1541,8 +1558,8 @@ export default function Production() {
                     }}
                   >
                     重检结果：<b>{recheck.result}</b> · {recheck.passes ? "通过" : "未通过"}
-                    {recheck.reason && <> · 原因：{recheck.reason}</>}
-                    {recheck.redline_hits.length > 0 && <> · 红线命中：{recheck.redline_hits.join("、")}</>}
+                    {recheck.reason && <> · 目标检查未通过，请按检查规则调整内容。</>}
+                    {recheck.redline_hits.length > 0 && <> · 红线命中：{recheck.redline_hits.map((code) => displayCodeLabel(String(code))).join("、")}</>}
                   </div>
                 )}
 
@@ -1762,7 +1779,7 @@ export default function Production() {
                   <i className={`task-prio ${STATUS_CLS[r.status]}`} />
                   <div className="task-main">
                     <div className="task-title">第 {r.round_number} 轮</div>
-                    <div className="task-desc">创建于 {new Date(r.created_at).toLocaleString("zh-CN")}</div>
+                    <div className="task-desc">创建于 {formatBusinessDateTime(r.created_at)}</div>
                   </div>
                   <span className={`tag ${STATUS_CLS[r.status]}`}>{ROUND_STATUS_LABEL[r.status] ?? displayStatusLabel(r.status)}</span>
                 </div>
@@ -1784,7 +1801,7 @@ export default function Production() {
               <div>
                 <div className="panel-title">
                   <span className="icon">⎇</span>当前轮次
-                  {roundDetail && <span className={`tag ${STATUS_CLS[roundDetail.status]}`} style={{ marginLeft: 10 }}>{ROUND_STATUS_LABEL[roundDetail.status] ?? roundDetail.status}</span>}
+                  {roundDetail && <span className={`tag ${STATUS_CLS[roundDetail.status]}`} style={{ marginLeft: 10 }}>{ROUND_STATUS_LABEL[roundDetail.status] ?? displayStatusLabel(roundDetail.status)}</span>}
                 </div>
                 <div className="panel-sub">合法迁移按钮由后端状态机校验生成</div>
               </div>
@@ -1806,7 +1823,7 @@ export default function Production() {
                         {i > 0 && <div className={`track-connector ${isPast ? "completed" : ""}`} />}
                         <div className={`track-node ${isCurrent ? "active" : ""} ${isPast ? "completed" : ""}`}>
                           <div className="dot" />
-                          <div className="label">{ROUND_STATUS_LABEL[s] ?? s}</div>
+                          <div className="label">{ROUND_STATUS_LABEL[s] ?? displayStatusLabel(s)}</div>
                         </div>
                       </Fragment>
                     );
@@ -1823,7 +1840,7 @@ export default function Production() {
                 <div style={{ marginTop: 14, display: "flex", flexWrap: "wrap", gap: 8 }}>
                   <span style={{ fontSize: 11, color: "var(--muted)", marginRight: 4 }}>可迁移到：</span>
                   {(ROUND_TARGETABLE[roundDetail.status] || []).map((t) => (
-                    <button key={t} className="btn sm" onClick={() => handleTransition(t)}>→ {t}</button>
+                    <button key={t} className="btn sm" onClick={() => handleTransition(t)}>→ {displayStatusLabel(t)}</button>
                   ))}
                   {(ROUND_TARGETABLE[roundDetail.status] || []).length === 0 && (
                     <span style={{ fontSize: 12, color: "var(--subtle)" }}>当前状态无合法迁移（终态）</span>
@@ -1839,16 +1856,16 @@ export default function Production() {
                   <div className="panel-title" style={{ fontSize: 13, marginBottom: 10 }}>✎ 单篇草稿（{roundDetail.drafts?.length || 0}）</div>
                   <div className="table-wrap">
                     <table>
-                      <thead><tr><th>草稿 ID</th><th>平台</th><th>状态</th><th>操作</th></tr></thead>
+                      <thead><tr><th>序号</th><th>平台</th><th>状态</th><th>操作</th></tr></thead>
                       <tbody>
                         {roundDetail.drafts?.length === 0 && (
                           <tr><td colSpan={4}>
                             <EmptyHint className="" next="到「③ 生产线」点「▶ 运行本轮」生成内容并存草稿">该轮次暂无草稿</EmptyHint>
                           </td></tr>
                         )}
-                        {roundDetail.drafts?.map((d) => (
+                        {roundDetail.drafts?.map((d, index) => (
                           <tr key={d.id}>
-                            <td style={{ fontFamily: "monospace", fontSize: 11 }}>{d.id.slice(0, 16)}...</td>
+                            <td>{index + 1}</td>
                             <td>{PLATFORM_NAME[d.platform] ?? displayPlatformLabel(d.platform)}</td>
                             <td><span className={`tag ${STATUS_CLS[d.status] || "gray"}`}>{displayStatusLabel(d.status)}</span></td>
                             <td>
@@ -1897,7 +1914,7 @@ function RoundPicker({ rounds, value, onChange }: {
       style={{ fontSize: 12 }}
     >
       {rounds.map((r) => (
-        <option key={r.id} value={r.id}>第 {r.round_number} 轮 · {ROUND_STATUS_LABEL[r.status] ?? r.status}</option>
+        <option key={r.id} value={r.id}>第 {r.round_number} 轮 · {ROUND_STATUS_LABEL[r.status] ?? displayStatusLabel(r.status)}</option>
       ))}
     </select>
   );

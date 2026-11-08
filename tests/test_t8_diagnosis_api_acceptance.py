@@ -464,3 +464,32 @@ def test_business_summary_includes_manual_metric_facts(diagnosis_client, seed, c
     assert evidence["manual_metric_sample_count"] == 1
     assert evidence["views_total"] == 1234
     assert evidence["likes_total"] == 87
+
+
+def test_orchestration_run_errors_and_step_details_are_sanitized(diagnosis_client):
+    client, conn = diagnosis_client
+    now = "2026-11-07T12:00:00"
+    report = {
+        "errors": ["sqlite3.OperationalError: unable to open /home/ubuntu/iterwave/data/private.db\\nTraceback (most recent call last):"],
+        "step_status": {
+            "topic_eval": {
+                "status": "failed",
+                "detail": "sqlite3.OperationalError: unable to open /home/ubuntu/iterwave/data/private.db\\nTraceback (most recent call last):",
+            },
+        },
+    }
+    cursor = conn.execute(
+        "INSERT INTO spiral_rounds(round_number,status,topic_ids,content_variants,trigger_source,created_at,run_report) "
+        "VALUES(?,?,?,?,?,?,?)",
+        (987654, "failed", "[]", "[]", "manual", now, json.dumps(report)),
+    )
+    conn.commit()
+    response = client.get("/api/orchestration/runs?limit=50")
+    assert response.status_code == 200, response.text
+    run = next(item for item in response.json()["runs"] if item["round_id"] == cursor.lastrowid)
+    serialized = json.dumps(run, ensure_ascii=False)
+    assert "/home/ubuntu" not in serialized
+    assert "sqlite3.OperationalError" not in serialized
+    assert "Traceback" not in serialized
+    assert "步骤执行异常，请进入任务详情查看。" in run["step_status"]["topic_eval"]["detail"]
+    assert "本轮执行存在异常，请进入任务详情查看。" in run["errors"][0]
