@@ -128,7 +128,7 @@ export default function StructuredDataView({ data, title }: { data: unknown; tit
       <summary>高级诊断信息（{technical.length} 项）</summary>
       <dl className="structured-data-grid">{technical.map(({ path, value }) =>
         <div className="structured-data-field" key={path}>
-          <dt>{path.split(".").map(labelFor).join(" / ")}</dt>
+          <dt><code>{path}</code></dt>
           <dd><code>{typeof value === "string" ? value : JSON.stringify(value)}</code></dd>
         </div>
       )}</dl>
