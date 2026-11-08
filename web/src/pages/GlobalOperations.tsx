@@ -160,7 +160,7 @@ export default function GlobalOperations() {
               <tbody>{(monitor.tenants ?? []).map((tenant) => {
                 const q = tenantCounts[tenant.tenant_id] ?? { queued: 0, running: 0, failed: 0 };
                 return <tr key={tenant.tenant_id}>
-                  <td><strong>{tenant.tenant_name}</strong><div className="tiny">{tenant.tenant_id}</div></td>
+                  <td><strong>{tenant.tenant_name}</strong><details className="advanced-diagnostics"><summary>技术标识</summary><code>{tenant.tenant_id}</code></details></td>
                   <td><span className={tenant.db_status === "uninitialized" ? "tag gray" : tenant.db_available ? "tag green" : "tag red"}>{tenant.db_status === "uninitialized" ? "未初始化" : tenant.db_available ? "可读取" : "不可用"}</span></td>
                   <td>{tenant.registered_accounts_active ?? tenant.registered_accounts ?? "—"} / {tenant.registered_accounts ?? "—"}</td>
                   <td>{tenant.runtime?.available ? (
@@ -214,7 +214,7 @@ export default function GlobalOperations() {
         <section className="panel">
           <div className="panel-head"><div><div className="panel-title">异常与待处理</div><div className="panel-sub">当前返回的队列记录中失败或中断的任务。</div></div><span className="tag">{failedCount ?? "—"} 项</span></div>
           {failed.length ? <div className="list">{failed.map((task) => <div className="task-row" key={task.task_id}>
-            <i className="task-prio red" /><div className="task-main"><div className="task-title">{task.tenant_name} · {task.task_type === "round_run" ? roundTaskLabel(task) : (TASK_TYPE_LABEL[task.task_type] ?? "账号组后台任务")} · {STATUS[task.status]}</div><div className="task-desc">{task.error_message || "未记录错误说明"}</div></div>
+            <i className="task-prio red" /><div className="task-main"><div className="task-title">{task.tenant_name} · {task.task_type === "round_run" ? roundTaskLabel(task) : (TASK_TYPE_LABEL[task.task_type] ?? "账号组后台任务")} · {STATUS[task.status]}</div><div className="task-desc">{task.error_message ? "已记录故障详情，请进入任务队列查看诊断信息。" : "未记录错误说明"}</div></div>
           </div>)}</div> : <div className="empty-state">当前没有失败或中断任务。</div>}
           {failedPages > 1 && <div className="pagination-row" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, paddingTop: 12 }}>
             <button className="btn sm" disabled={failedPage <= 1 || loading} onClick={() => setFailedPage((p) => Math.max(1, p - 1))}>上一页</button>

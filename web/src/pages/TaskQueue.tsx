@@ -464,9 +464,9 @@ export default function TaskQueue() {
             {detailLoading ? <div className="empty-state">正在读取任务详情…</div> : detailError ? <div className="notice danger" role="alert">{detailError}</div> : detailTask && (
               <>
                 <div className="grid two">
-                  <div><div className="muted">任务 ID</div><code>{detailTask.task_id}</code></div>
+                  <div><div className="muted">任务队列</div><strong>后台任务</strong></div>
                   <div><div className="muted">队列序号</div><strong>#{detailTask.queue_order}</strong></div>
-                  <div><div className="muted">所属账号组</div><strong>{detailTask.tenant_id}</strong></div>
+                  <div><div className="muted">所属账号组</div><strong>{detailTask.tenant_name || "当前账号组"}</strong></div>
                   <div><div className="muted">任务类型 / 状态</div><strong>{displayTaskTypeLabel(detailTask.task_type)} · {STATUS_LABEL[detailTask.status] ?? displayStatusLabel(detailTask.status)}</strong></div>
                   <div><div className="muted">创建时间</div>{timeLabel(detailTask.created_at)}</div>
                   <div><div className="muted">开始时间</div>{timeLabel(detailTask.started_at)}</div>
@@ -480,9 +480,9 @@ export default function TaskQueue() {
                     queued={detailTask.status === "queued"}
                   />
                 )}
-                {detailTask.error_code && <div className="notice danger" style={{ marginTop: 14 }}>错误说明：{displayErrorLabel(detailTask.error_code)} <code style={{ marginLeft: 6 }}>{detailTask.error_code}</code></div>}
-                {detailTask.error_message && <div style={{ marginTop: 10, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{detailTask.error_message}</div>}
-                {detailTask.retry_of_task_id && <div className="muted" style={{ marginTop: 12 }}>恢复自任务：{detailTask.retry_of_task_id}</div>}
+                {detailTask.error_code && <div className="notice danger" style={{ marginTop: 14 }}>处理建议：{displayErrorLabel(detailTask.error_code)}</div>}
+                {detailTask.retry_of_task_id && <div className="muted" style={{ marginTop: 12 }}>该任务由一次恢复操作创建。</div>}
+                <details className="advanced-diagnostics" style={{ marginTop: 12 }}><summary>高级诊断信息</summary><div className="tiny">任务标识：{detailTask.task_id} · 账号组标识：{detailTask.tenant_id}</div>{detailTask.error_code && <div className="tiny">错误代码：{detailTask.error_code}</div>}{detailTask.error_message && <pre className="note" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{detailTask.error_message}</pre>}{detailTask.retry_of_task_id && <div className="tiny">来源任务标识：{detailTask.retry_of_task_id}</div>}</details>
                 {detailTask.retry_confirmation_note && <div className="muted" style={{ marginTop: 6 }}>恢复核验：{detailTask.retry_confirmation_note}</div>}
                 {detailTask.resolution_action && <div className="muted" style={{ marginTop: 12 }}>
                   处理记录：{detailTask.resolution_action === "handled" ? "已处理" : "已忽略"} · {detailTask.resolution_actor || "操作人未知"} · {timeLabel(detailTask.resolution_at)}
@@ -509,7 +509,7 @@ export default function TaskQueue() {
                         <div className="tiny">{entry.actor} · {timeLabel(entry.acted_at)}</div>
                         {typeof entry.details.note === "string" && <div className="tiny">{entry.details.note}</div>}
                         {typeof entry.details.confirmation_note === "string" && <div className="tiny">恢复核验：{entry.details.confirmation_note}</div>}
-                        {typeof entry.details.retry_task_id === "string" && <div className="tiny">恢复任务：{entry.details.retry_task_id}</div>}
+                        {typeof entry.details.retry_task_id === "string" && <div className="tiny">已创建恢复任务</div>}
                       </div>
                     </div>)}
                   </div> : <div className="empty-state">暂无管理操作审计记录。</div>}
