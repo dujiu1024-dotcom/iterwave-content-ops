@@ -48,7 +48,6 @@ def test_compact_filter_and_form_layouts_at_four_viewports():
             browser = playwright.chromium.launch()
             page = browser.new_page(viewport={"width": 1440, "height": 1000})
             page.goto(f"http://127.0.0.1:{port}/")
-            page.add_style_tag(url=f"http://127.0.0.1:{port}/src/styles.css")
             page.set_content("""
               <main style="width:100%;max-width:1200px;margin:auto">
                 <section id="review" class="review-filters">
@@ -75,6 +74,7 @@ def test_compact_filter_and_form_layouts_at_four_viewports():
                 </section>
               </main>
             """)
+            page.add_style_tag(url=f"http://127.0.0.1:{port}/src/styles.css")
             for width, expected_review_cols in [(1440, 6), (1024, 6), (768, 3), (390, 2)]:
                 page.set_viewport_size({"width": width, "height": 1000})
                 page.wait_for_timeout(80)
