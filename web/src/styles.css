@@ -1250,7 +1250,7 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
   .task-queue-history-filters > span { grid-column: 1 / -1; }
 }
 @media (max-width: 420px) {
-  .task-queue-history-filters { grid-template-columns: minmax(0, 1fr); }
+  .task-queue-history-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .task-queue-history-filters > button:last-of-type,
   .task-queue-history-filters > span { grid-column: auto; }
 }
