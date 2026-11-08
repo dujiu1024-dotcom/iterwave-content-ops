@@ -663,14 +663,14 @@ function PublishPane() {
                   </div>
                 )}
               </div>
-              <div className="task-actions" style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+              <div className="task-actions ops-task-verification-actions" style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
                 {(d.status === "draft_pending" || d.status === "draft_saved") && (
                   <>
                     <input
                       value={noteUrls[d.id] ?? d.platform_note_url ?? ""}
                       onChange={(e) => setNoteUrls((prev) => ({ ...prev, [d.id]: e.target.value }))}
                       placeholder="已发布笔记链接（可选；用于定位采集）"
-                      style={{ width: 240, fontSize: 12 }}
+                      className="ops-verification-input ops-verification-url"
                       disabled={pending !== null}
                     />
                     {d.guard_confirmation_allowed !== true && (
@@ -680,7 +680,7 @@ function PublishPane() {
                         placeholder={d.review_rejected
                           ? "若已发布但被驳回，填写例外原因（必填）"
                           : "若已发布但质检未过，填写例外原因（必填）"}
-                        style={{ width: 260, fontSize: 12 }}
+                        className="ops-verification-input"
                         disabled={pending !== null}
                         aria-label={`${d.title ?? d.id} 的发布质检例外原因`}
                       />
@@ -691,7 +691,7 @@ function PublishPane() {
                           value={platformSyncReasons[d.id] ?? ""}
                           onChange={(e) => setPlatformSyncReasons((prev) => ({ ...prev, [d.id]: e.target.value }))}
                           placeholder="尚未发布：说明已在平台同步为当前版本（必填）"
-                          style={{ width: 280, fontSize: 12 }}
+                          className="ops-verification-input"
                           disabled={pending !== null}
                           aria-label={`${d.title ?? d.id} 的平台版本同步说明`}
                         />

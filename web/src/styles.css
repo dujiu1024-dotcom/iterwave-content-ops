@@ -1529,3 +1529,26 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
   .calendar-toolbar select.field { width: 150px; max-width: 150px !important; }
   .calendar-toolbar .calendar-plan-check { white-space: nowrap; }
 }
+
+/* Operations publish verification: inputs yield to available card width and wrap predictably. */
+.ops-task-verification-actions { min-width: 0; max-width: 100%; }
+.ops-task-verification-actions .ops-verification-input {
+  box-sizing: border-box;
+  flex: 1 1 220px;
+  width: auto;
+  min-width: min(100%, 220px);
+  max-width: 280px;
+  min-height: 34px;
+  font-size: 12px;
+}
+.ops-task-verification-actions .ops-verification-url { flex-basis: 200px; }
+@media (max-width: 760px) {
+  .ops-task-verification-actions { justify-content: stretch !important; }
+  .ops-task-verification-actions .ops-verification-input {
+    flex: 1 1 100%;
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+  }
+  .ops-task-verification-actions > .btn { flex: 0 0 auto; }
+}
