@@ -620,7 +620,7 @@ function PublishPane() {
       ) : (
         <div className="list">
           {visibleDrafts.map((d) => (
-            <div key={d.id} className="task-row">
+            <div key={d.id} className="task-row ops-task-verification-row">
               <i className={`task-prio ${d.status === "user_published" ? "green" : "orange"}`} />
               <div className="task-main">
                 <div className="task-title">{PLATFORM_NAME[d.platform as Platform]} · {d.title || "未命名内容"}</div>
