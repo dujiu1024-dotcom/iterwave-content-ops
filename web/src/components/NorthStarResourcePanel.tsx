@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { formatBusinessDateTime } from "../businessTime.mjs";
+import { displaySourceLabel, displayStatusLabel } from "../displayLabels";
 
 const fields = [
   ["positioning", "账号组定位"],
@@ -33,7 +34,7 @@ export default function NorthStarResourcePanel({ onOpenAssets }: { onOpenAssets?
       setResources(baseline.resources);
       setGaps(baseline.gaps);
       setSummary(baseline.summary);
-    } catch(e) { setError(e instanceof Error ? e.message : String(e)); }
+    } catch(e) { setError("北极星数据操作失败，请稍后重试"); }
   };
   useEffect(() => { void load(); }, []);
 
@@ -43,12 +44,14 @@ export default function NorthStarResourcePanel({ onOpenAssets }: { onOpenAssets?
       await api.saveNorthStar({...snapshot,change_reason:reason});
       setReason("");
       await load();
-    } catch(e) { setError(e instanceof Error ? e.message : String(e)); }
+    } catch(e) { setError("北极星数据操作失败，请稍后重试"); }
     finally { setBusy(false); }
   };
 
   const labels:Record<string,string> = {total:"资源条目",confirmed:"已确认",pending:"待审核",restricted:"受限",rejected:"已拒绝",missing:"缺失",unknown:"未接入",gaps:"资源缺口"};
   const statuses:Record<string,string> = {confirmed:"已确认且允许使用",pending:"待审核",restricted:"使用受限",rejected:"已拒绝/禁止使用",missing:"缺失",unknown:"未接入"};
+  const categories:Record<string,string> = {business_profile:"业务档案",product:"产品",service:"服务",business:"企业业务",customer_case:"客户案例",content_topic:"内容主题",platform:"平台",plan:"计划",internal_reference:"内部参考",external_reference:"外部参考",original_image:"原始图片",historical_content:"历史内容",original_asset:"原始素材",original_asset_gap:"素材缺口",historical_output:"历史产出",historical_performance:"历史表现",template_tool:"模板与工具",production_capacity:"生产能力"};
+  const priorities:Record<string,string> = {low:"低",normal:"普通",high:"高",critical:"紧急"};
   return <div className="stack">
     <section className="panel">
       <div className="panel-head"><div><div className="panel-title">账号组北极星</div><div className="panel-sub">独立于目标进度树的长期定位档案。每次保存都会建立新版本，旧版本保留。</div></div><span className="tag gray">{history.length ? "当前版本 V"+(history.find(x=>x.status==="effective")?.version_no ?? "—") : "尚未建立"}</span></div>
@@ -62,14 +65,14 @@ export default function NorthStarResourcePanel({ onOpenAssets }: { onOpenAssets?
     </section>
     <section className="panel">
       <div className="panel-head"><div><div className="panel-title">北极星版本历史</div><div className="panel-sub">母计划绑定的是创建时的北极星版本，不会随当前版本变化。</div></div></div>
-      {history.length ? <div className="table-wrap"><table><thead><tr><th>版本</th><th>状态</th><th>修改原因</th><th>操作者</th><th>时间</th><th>快照</th></tr></thead><tbody>{history.map(v=><tr key={v.id}><td>V{v.version_no}</td><td>{v.status==="effective"?"当前生效":"历史版本"}</td><td>{v.change_reason}</td><td>{v.created_by}</td><td>{formatBusinessDateTime(v.created_at)}</td><td><button className="btn sm" onClick={async()=>{try{const item=await api.northStarVersion(v.id);setSelectedVersion({version_no:item.version_no,snapshot:item.snapshot});}catch(e){setError(e instanceof Error?e.message:String(e));}}}>查看快照</button></td></tr>)}</tbody></table></div> : <div className="note">尚无北极星版本。建立北极星后，新的母计划草稿会自动绑定当前版本。</div>}
-      {selectedVersion && <div className="note" style={{marginTop:12}}><b>北极星 V{selectedVersion.version_no} 快照</b>{fields.map(([key,label])=><div key={key} className="tiny">{label}：{selectedVersion.snapshot[key] || "—"}</div>)}<button className="btn sm" style={{marginTop:8}} onClick={()=>setSelectedVersion(null)}>关闭快照</button></div>}
+      {history.length ? <div className="table-wrap"><table><thead><tr><th>版本</th><th>状态</th><th>修改原因</th><th>操作者</th><th>时间</th><th>快照</th></tr></thead><tbody>{history.map(v=><tr key={v.id}><td>V{v.version_no}</td><td>{v.status==="effective"?"当前生效":"历史版本"}</td><td>{v.change_reason}</td><td>{v.created_by === "user" ? "用户" : v.created_by === "system" ? "系统" : "其他操作方"}</td><td>{formatBusinessDateTime(v.created_at)}</td><td><button className="btn sm" onClick={async()=>{try{const item=await api.northStarVersion(v.id);setSelectedVersion({version_no:item.version_no,snapshot:item.snapshot});}catch(e){setError("北极星版本读取失败，请稍后重试。");}}}>查看快照</button></td></tr>)}</tbody></table></div> : <div className="note">尚无北极星版本。建立北极星后，新的母计划草稿会自动绑定当前版本。</div>}
+      {selectedVersion && <div className="note" style={{marginTop:12}}><b>北极星 V{selectedVersion.version_no} 快照</b>{<dl className="structured-data-grid" style={{marginTop:10}}>{fields.map(([key,label])=><div key={key} className="structured-data-field"><dt>{label}</dt><dd className="structured-data-value">{selectedVersion.snapshot[key] || "—"}</dd></div>)}</dl>}<button className="btn sm" style={{marginTop:8}} onClick={()=>setSelectedVersion(null)}>关闭快照</button></div>}
     </section>
     <section className="panel">
       <div className="panel-head"><div><div className="panel-title">母计划资源基准盘点</div><div className="panel-sub">展示现有来源的真实状态；待审核、缺失或未接入的来源不会标记为已具备。</div></div></div>
-      <div className="grid four">{Object.entries(summary).map(([key,value])=><div className="plan-summary-card" key={key}><div className="tiny">{labels[key] ?? key}</div><b>{value}</b></div>)}</div>
-      <div className="table-wrap" style={{marginTop:12}}><table><thead><tr><th>类别</th><th>资源</th><th>来源</th><th>状态</th><th>更新时间</th></tr></thead><tbody>{resources.map((item,index)=><tr key={item.source_type+":"+item.source_id+":"+index}><td>{item.category}</td><td>{item.title}</td><td>{item.source_type} / {item.source_id}{(item as any).source_uri ? <div className="tiny">{(item as any).source_uri}</div> : null}</td><td>{statuses[item.status] ?? item.status}</td><td>{formatBusinessDateTime(item.updated_at)}</td></tr>)}</tbody></table></div>
-      {gaps.length>0 && <><div className="note" style={{marginTop:12}}>当前有 {gaps.length} 项资源缺口或待确认事项；缺口登记、素材补充与审核可在素材盘点中维护。</div><div className="table-wrap"><table><thead><tr><th>类别</th><th>缺口</th><th>状态</th><th>优先级</th></tr></thead><tbody>{gaps.map((gap,index)=><tr key={String(gap.id ?? index)}><td>{String(gap.category ?? gap.entity_type ?? "资源")}</td><td>{String(gap.title ?? "待确认")}</td><td>{String(gap.status ?? "open")}</td><td>{String(gap.priority ?? "—")}</td></tr>)}</tbody></table></div><button className="btn sm" style={{marginTop:10}} onClick={onOpenAssets}>前往素材盘点与缺口维护</button></>}
+      <div className="grid four">{Object.entries(summary).map(([key,value])=><div className="plan-summary-card" key={key}><div className="tiny">{labels[key] ?? "其他资源类别"}</div><b>{value}</b></div>)}</div>
+      <div className="table-wrap" style={{marginTop:12}}><table><thead><tr><th>类别</th><th>资源</th><th>来源</th><th>状态</th><th>更新时间</th></tr></thead><tbody>{resources.map((item,index)=><tr key={item.source_type+":"+item.source_id+":"+index}><td>{categories[item.category] ?? "其他资源"}</td><td>{item.title}</td><td>{displaySourceLabel(item.source_type)}</td><td>{statuses[item.status] ?? displayStatusLabel(item.status)}</td><td>{formatBusinessDateTime(item.updated_at)}</td></tr>)}</tbody></table></div>
+      {gaps.length>0 && <><div className="note" style={{marginTop:12}}>当前有 {gaps.length} 项资源缺口或待确认事项；缺口登记、素材补充与审核可在素材盘点中维护。</div><div className="table-wrap"><table><thead><tr><th>类别</th><th>缺口</th><th>状态</th><th>优先级</th></tr></thead><tbody>{gaps.map((gap,index)=><tr key={String(gap.id ?? index)}><td>{categories[String(gap.category ?? gap.entity_type ?? "")] ?? "其他资源"}</td><td>{String(gap.title ?? "待确认")}</td><td>{displayStatusLabel(String(gap.status ?? "open"))}</td><td>{gap.priority == null ? "—" : priorities[String(gap.priority)] ?? "普通"}</td></tr>)}</tbody></table></div><button className="btn sm" style={{marginTop:10}} onClick={onOpenAssets}>前往素材盘点与缺口维护</button></>}
     </section>
   </div>;
 }

@@ -58,7 +58,7 @@ _EVENT_CATALOG: dict[str, tuple[str, str, str]] = {
 _APP_TITLE = "四平台运营 Agent"
 
 # R23 脱敏工具：统一走 src.core.redact（避免多模块各写一份）
-from ..redact import redact as _redact  # noqa: F401 — 对外兼容 _redact 名字
+from ..redact import redact as _redact, safe_error_summary as _safe_error_summary  # noqa: F401
 
 
 def _as_escape(text: str) -> str:
@@ -152,8 +152,12 @@ class Notifier:
             if level is None and active[0][1] in LEVELS:
                 final_level = active[0][1]
 
-        # R23：正文统一脱敏
+        # R23：正文统一脱敏；错误类通知不允许把 traceback / 数据库异常回显到通知通道。
         body = _redact(message or "")
+        if event in {"draft_failed", "data_fetch_failed", "login_expired"}:
+            body = _safe_error_summary(
+                body, "任务执行失败，详细诊断已隐藏。",
+            )
         head = _redact(title or default_title)  # R23：标题同样脱敏（手机号/微信号等）
         if self.tenant_name:
             head = f"{self.tenant_name} · {head}"

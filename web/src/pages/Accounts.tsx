@@ -51,7 +51,7 @@ export default function Accounts() {
           notes: item.notes ?? "",
         }]),
       ));
-    } catch (e: any) { setErr(e.message); }
+    } catch { setErr("账号与平台状态加载失败，请稍后重试。"); }
   };
 
   useEffect(() => { load(); }, []);
@@ -94,7 +94,7 @@ export default function Accounts() {
       const st = await api.startLogin(p, true);
       setLoginStatus(st);
     } catch (e: any) {
-      setLoginStatus({ platform: p, platform_display: PLATFORM_EMOJI[p], state: "error", message: e.message, ts: Date.now() });
+      setLoginStatus({ platform: p, platform_display: PLATFORM_EMOJI[p], state: "error", message: "登录启动失败，请检查平台连接并重试。", ts: Date.now() });
     }
   };
 
@@ -105,7 +105,7 @@ export default function Accounts() {
       await api.submitLoginSms(activeLogin, smsCode);
       setSmsCode("");
     } catch (e: any) {
-      alert("验证码提交失败：" + e.message);
+      alert("验证码提交失败，请检查验证码后重试。");
     } finally {
       setSmsSubmitting(false);
     }
@@ -119,7 +119,7 @@ export default function Accounts() {
         platform: p, logged_in: false, name: "", avatar_url: null, error: "已退出登录",
       } }));
       load();
-    } catch (e: any) { alert("退出失败：" + e.message); }
+    } catch { alert("退出登录失败，请稍后重试。"); }
   };
 
   const readIdentity = async (platform: Platform) => {
@@ -145,7 +145,7 @@ export default function Accounts() {
     } catch (e: any) {
       setPlatformIdentities((prev) => ({ ...prev, [platform]: {
         platform, logged_in: false, name: "", avatar_url: null,
-        error: e?.message || "读取平台身份失败",
+        error: "读取平台身份失败，请重新验证登录状态。",
       } }));
     } finally {
       setIdentityLoading(null);
@@ -175,7 +175,7 @@ export default function Accounts() {
         notes: saved.notes,
       } }));
     } catch (e: any) {
-      alert("保存账号身份失败：" + e.message);
+      alert("保存账号身份失败，请检查填写内容后重试。");
     } finally {
       setSavingIdentity(null);
     }
@@ -189,7 +189,7 @@ export default function Accounts() {
       setRegisteredAccounts((prev) => prev.filter((item) => item.id !== existing.id));
       setIdentityDrafts((prev) => ({ ...prev, [platform]: { account_handle: "", display_name: "", notes: "" } }));
     } catch (e: any) {
-      alert("清除账号身份失败：" + e.message);
+      alert("清除账号身份失败，请稍后重试。");
     }
   };
 
@@ -369,7 +369,7 @@ export default function Accounts() {
         }}>
           <div
             style={{
-              background: "#fff", borderRadius: 14, padding: 24, width: "min(440px, calc(100vw - 24px))", minWidth: 0, maxWidth: 440,
+              background: "#fff", borderRadius: 14, padding: 28, minWidth: 380, maxWidth: 440,
               boxShadow: "0 20px 60px rgba(0,0,0,0.3)", textAlign: "center",
             }}
             onClick={(e) => e.stopPropagation()}

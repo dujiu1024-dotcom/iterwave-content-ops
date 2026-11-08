@@ -31,7 +31,7 @@ function Stage({ stage }: { stage: ProductionMonitorStage }) {
       <span className="tag">{stage.production_task_count} 个生产任务</span>
     </div>
     <div className="tiny" style={{ marginTop: 6 }}>
-      前置依赖：{stage.dependencies_available ? (stage.dependencies?.length ? stage.dependencies.join("、") : "无") : "当前策略步骤模型尚未持久化依赖字段，需由策略模型 PR 补齐"}
+      前置依赖：{stage.dependencies_available ? (stage.dependencies?.length ? stage.dependencies.map((dependency) => displayStepLabel(dependency)).join("、") : "无") : "当前策略步骤模型尚未持久化依赖字段，需由策略模型 PR 补齐"}
     </div>
     <div className="tiny" style={{ marginTop: 6 }}>
       生产任务状态：{Object.entries(stage.production_task_status_counts ?? {}).filter(([, count]) => count > 0).map(([status, count]) => `${STATUS_LABEL[status] ?? displayStatusLabel(status)} ${count}`).join(" · ") || "暂无任务"}
@@ -49,8 +49,8 @@ function Stage({ stage }: { stage: ProductionMonitorStage }) {
       <div className="list">
         {stage.contents.map((content) => <div className="task-row" key={content.id}>
           <div className="task-main">
-            <div className="task-title">{content.title}</div>
-            <div className="task-desc">{content.id} · {PLATFORM_LABEL[content.platform] ?? displayPlatformLabel(content.platform)} · {content.draft_count} 个草稿 · {content.review_rejected ? "已驳回" : content.draft_statuses || "无草稿状态"}</div>
+            <div className="task-title">{content.title || "未命名内容"}</div>
+            <div className="task-desc">{PLATFORM_LABEL[content.platform] ?? displayPlatformLabel(content.platform)} · {content.draft_count} 个草稿 · {content.review_rejected ? "已驳回" : content.draft_statuses || "无草稿状态"}</div>
           </div>
           <button className="btn sm" onClick={() => navigate("production", "pipeline", { type: "content", id: content.id })}>查看内容</button>
         </div>)}
@@ -60,7 +60,7 @@ function Stage({ stage }: { stage: ProductionMonitorStage }) {
       {stage.rounds.map((round) => <div className="task-row" key={round.id}>
         <div className="task-main">
           <div className="task-title">第 {round.round_number} 轮 · {STATUS_LABEL[round.status] ?? displayStatusLabel(round.status)}</div>
-          <div className="task-desc">轮次 #{round.id} · {round.created_at ? formatBusinessDateTime(round.created_at) : "时间未知"} · {displayCodeLabel(round.trigger_source, "来源未知")}</div>
+          <div className="task-desc">{round.created_at ? formatBusinessDateTime(round.created_at) : "时间未知"} · {displayCodeLabel(round.trigger_source, "来源未知")}</div>
         </div>
         <button className="btn sm" onClick={() => navigate("production", "rounds", { type: "round", id: round.id })}>查看轮次</button>
         <button className="btn sm" onClick={() => navigate("task-queue")}>查看任务队列</button>
@@ -88,7 +88,7 @@ export default function ProductionPlanMonitor() {
       setFailedTasks(tasks.items ?? []);
       setTaskError("");
     }
-    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    catch { setError("生产监控数据加载失败，请稍后重试。"); }
     finally { setLoading(false); }
   }, []);
   useEffect(() => { void load(); }, [load]);
@@ -106,7 +106,7 @@ export default function ProductionPlanMonitor() {
       <div className="panel" style={{ padding: 12, marginBottom: 12 }}>
         {data.master_plan ? <>
           <div className="panel-title">当前母计划 V{data.master_plan.version_no}</div>
-          <div className="tiny">版本 #{data.master_plan.id} · 生效于 {data.master_plan.effective_at ? formatBusinessDateTime(data.master_plan.effective_at) : "时间未知"}</div>
+          <div className="tiny">生效于 {data.master_plan.effective_at ? formatBusinessDateTime(data.master_plan.effective_at) : "时间未知"}</div>
         </> : <div className="empty-state">当前没有生效中的母计划。</div>}
         <div className="grid four" style={{ gap: 8, marginTop: 12 }}>
           <Metric label="平台子计划" value={data.totals.subplans}/>
@@ -129,18 +129,17 @@ export default function ProductionPlanMonitor() {
         {taskError && <div role="alert" className="tiny" style={{ color: "var(--orange)" }}>{taskError}</div>}
         {failedTasks.length === 0 ? <div className="empty-state">当前没有失败的独立生产任务。</div> : <div className="list">
           {failedTasks.map((task) => <div className="task-row" key={task.id}>
-            <div className="task-main"><div className="task-title">{PLATFORM_LABEL[task.platform] ?? displayPlatformLabel(task.platform)} · {data.platforms.flatMap((subplan) => subplan.stages).find((stage) => stage.stage_key === task.strategy_step_id)?.title ?? displayStepLabel(task.strategy_step_id)}</div><div className="task-desc">失败原因：{displayErrorLabel(task.error_code)} · 尝试 {task.attempt_count}/{task.max_attempts}</div><details className="advanced-diagnostics"><summary>技术诊断</summary><div className="tiny">任务标识：{task.id} · 轮次标识：{task.round_id} · 成品标识：{task.content_id || "无"}</div><div className="tiny">错误代码：{task.error_code || "无"} · {task.error_message || "未提供原始错误信息"}</div></details></div>
-            <button className="btn sm" disabled={taskBusy} onClick={async () => { setTaskBusy(true); try { setSelectedTask(await api.productionTask(task.id)); } catch (err) { setTaskError(err instanceof Error ? err.message : String(err)); } finally { setTaskBusy(false); } }}>查看详情</button>
+            <div className="task-main"><div className="task-title">生产任务</div><div className="task-desc">{PLATFORM_LABEL[task.platform] ?? displayPlatformLabel(task.platform)} · 策略步骤 {data.platforms.flatMap((subplan) => subplan.stages).find((stage) => stage.stage_key === task.strategy_step_id)?.title ?? displayStepLabel(task.strategy_step_id)} · 尝试 {task.attempt_count}/{task.max_attempts}</div><div className="task-desc">{displayErrorLabel(task.error_code)}：请查看任务详情或联系管理员。</div></div>
+            <button className="btn sm" disabled={taskBusy} onClick={async () => { setTaskBusy(true); try { setSelectedTask(await api.productionTask(task.id)); } catch { setTaskError("任务操作失败，请稍后重试。"); } finally { setTaskBusy(false); } }}>查看详情</button>
           </div>)}
         </div>}
         {selectedTask && <div className="panel" style={{ marginTop: 12, padding: 12 }}>
           <div className="panel-head"><div><strong>生产任务详情</strong><div className="tiny">状态 {STATUS_LABEL[selectedTask.task.status] ?? displayStatusLabel(selectedTask.task.status)} · {selectedTask.task.attempt_count}/{selectedTask.task.max_attempts} 次尝试</div></div><button className="btn sm" onClick={() => setSelectedTask(null)}>关闭</button></div>
-          <div className="tiny">失败原因：{displayErrorLabel(selectedTask.task.error_code)}</div>
-          <details className="advanced-diagnostics"><summary>高级诊断信息</summary><div className="tiny">任务标识：{selectedTask.task.id} · 错误代码：{selectedTask.task.error_code || "—"} · 原始错误：{selectedTask.task.error_message || "—"}</div></details>
-          {selectedTask.content && <div className="task-row"><div className="task-main"><div className="task-title">{selectedTask.content.title || selectedTask.content.id}</div><div className="task-desc">成品 {selectedTask.content.id}</div></div><button className="btn sm" onClick={() => navigate("production", "pipeline", { type: "content", id: selectedTask.content!.id })}>定位成品</button></div>}
+          <div className="tiny">失败原因：{displayErrorLabel(selectedTask.task.error_code)}。请核对平台状态后再执行恢复。</div>
+          {selectedTask.content && <div className="task-row"><div className="task-main"><div className="task-title">{selectedTask.content.title || "关联内容"}</div><div className="task-desc">{selectedTask.content.platform ? displayPlatformLabel(selectedTask.content.platform) : "内容成品"}</div></div><button className="btn sm" onClick={() => navigate("production", "pipeline", { type: "content", id: selectedTask.content!.id })}>定位成品</button></div>}
           <div className="tiny" style={{ fontWeight: 700, marginTop: 10 }}>执行尝试记录</div>
-          {selectedTask.attempts.map((attempt) => <div className="task-row" key={attempt.id}><div className="task-main"><div className="task-title">第 {attempt.attempt_no} 次 · {STATUS_LABEL[attempt.status] ?? displayStatusLabel(attempt.status)} · 执行器状态已记录</div><div className="task-desc">{attempt.started_at} → {attempt.finished_at || "未结束"}</div>{attempt.error_message && <div className="task-desc">{displayErrorLabel(attempt.error_code)}（{attempt.error_code}）：{attempt.error_message}</div>}{attempt.output_content_id && <details className="advanced-diagnostics"><summary>输出成品技术标识</summary><code>{attempt.output_content_id}</code></details>}</div></div>)}
-          {["failed", "pending"].includes(selectedTask.task.status) && <button className="btn sm" disabled={taskBusy} onClick={async () => { const ok = window.confirm("确认已检查相关内容成品及外部平台，确定没有未完成的外部副作用？如果已存在成品，系统会优先关联而不会重新生成。"); if (!ok) return; setTaskBusy(true); try { await api.recoverProductionTask(selectedTask.task.id, true); setSelectedTask(await api.productionTask(selectedTask.task.id)); await load(); } catch (err) { setTaskError(err instanceof Error ? err.message : String(err)); } finally { setTaskBusy(false); } }}>人工核实并恢复任务</button>}
+          {selectedTask.attempts.map((attempt) => <div className="task-row" key={attempt.id}><div className="task-main"><div className="task-title">第 {attempt.attempt_no} 次 · {STATUS_LABEL[attempt.status] ?? displayStatusLabel(attempt.status)}</div><div className="task-desc">{formatBusinessDateTime(attempt.started_at)} → {formatBusinessDateTime(attempt.finished_at)}</div>{attempt.error_code && <div className="task-desc">{displayErrorLabel(attempt.error_code)}</div>}</div></div>)}
+          {["failed", "pending"].includes(selectedTask.task.status) && <button className="btn sm" disabled={taskBusy} onClick={async () => { const ok = window.confirm("确认已检查相关内容成品及外部平台，确定没有未完成的外部副作用？如果已存在成品，系统会优先关联而不会重新生成。"); if (!ok) return; setTaskBusy(true); try { await api.recoverProductionTask(selectedTask.task.id, true); setSelectedTask(await api.productionTask(selectedTask.task.id)); await load(); } catch { setTaskError("任务操作失败，请稍后重试。"); } finally { setTaskBusy(false); } }}>人工核实并恢复任务</button>}
         </div>}
       </div>
       <div className="panel" style={{ padding: 12, marginBottom: 12 }}>
@@ -159,7 +158,7 @@ export default function ProductionPlanMonitor() {
         <strong>异常与一致性检查 · {data.consistency_checks.length} 项</strong>
         {data.consistency_checks.map((item, index) => <div className="task-row" key={`${item.code}-${index}`}>
           <i className={`task-prio ${item.severity === "critical" ? "red" : "blue"}`}/>
-          <div className="task-main"><div className="task-title">{item.message}</div><div className="task-desc">{displayErrorLabel(item.code)}（{item.code}）{item.round_id ? ` · 轮次 #${item.round_id}` : ""}{item.count ? ` · ${item.count} 条` : ""}</div></div>
+          <div className="task-main"><div className="task-title">{item.message}</div><div className="task-desc">{displayErrorLabel(item.code)}{item.count ? ` · ${item.count} 条` : ""}</div></div>
           {item.round_id && <button className="btn sm" onClick={() => navigate("production", "rounds", { type: "round", id: item.round_id! })}>定位轮次</button>}
         </div>)}
       </div>}
@@ -169,7 +168,7 @@ export default function ProductionPlanMonitor() {
         return <div className="panel" style={{ padding: 12, marginTop: 12 }} key={subplan.id}>
         <div className="panel-head">
           <div><div className="panel-title">{PLATFORM_LABEL[subplan.platform] ?? subplan.platform} · {subplan.title}</div>
-            <div className="panel-sub">子计划 {subplan.id} · V{subplan.version_no ?? "—"} · {STATUS_LABEL[subplan.status] ?? subplan.status} · {subplan.stage_count} 个策略步骤 · {subplan.round_count} 轮 · 当前执行：{currentStage?.title ?? "暂无待执行步骤"}</div>
+            <div className="panel-sub">V{subplan.version_no ?? "—"} · {STATUS_LABEL[subplan.status] ?? displayStatusLabel(subplan.status)} · {subplan.stage_count} 个策略步骤 · {subplan.round_count} 轮 · 当前执行：{currentStage?.title ?? "暂无待执行步骤"}</div>
           </div>
           <button className="btn sm" onClick={() => navigate("production", "pipeline")}>查看生产线</button>
         </div>

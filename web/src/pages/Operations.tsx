@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { formatBusinessDateTime } from "../businessTime.mjs";
 import { useApp } from "../AppContext";
 import { useUrlTab } from "../nav";
 import DemoBadge from "../components/DemoBadge";
@@ -160,11 +161,11 @@ export default function Operations() {
       const rejected = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
       setLoadError(
         rejected.length > 0
-          ? rejected.map((r) => r.reason instanceof Error ? r.reason.message : String(r.reason)).join("；")
+          ? `${rejected.length} 项数据暂时无法加载`
           : null,
       );
     } catch (e) {
-      setLoadError(e instanceof Error ? e.message : String(e));
+      setLoadError("运营数据加载失败，请稍后重试。");
     } finally {
       setLoading(false);
     }
@@ -181,7 +182,7 @@ export default function Operations() {
         "通道自检：" + Object.entries(r.results).map(([k, v]) => `${k}=${label[v] ?? v}`).join(" · "),
         "info",
       );
-    } catch (e: any) { showToast(e.message, "error"); }
+    } catch { showToast("通知通道自检失败，请稍后重试", "error"); }
     finally { setNotifBusy(false); }
   };
 
@@ -251,14 +252,14 @@ export default function Operations() {
           // G-11：同一平台的恢复/重置在请求中不可重复触发
           try {
             const r = await withPending(`cb:recover:${p}`, () => api.recoverCb(p));
-            if (r) showToast(r.passed ? "✓ 恢复通过" : `✕ ${r.reason}`, r.passed ? "success" : "error");
-          } catch (e: any) { showToast(e.message, "error"); }
+            if (r) showToast(r.passed ? "✓ 恢复通过" : "恢复未通过，请查看平台诊断记录", r.passed ? "success" : "error");
+          } catch { showToast("平台熔断器操作失败，请刷新状态后重试", "error"); }
           await refresh();
         }} onReset={async (p) => {
           try {
             await withPending(`cb:reset:${p}`, () => api.resetCb(p));
             showToast(`⚙ 已重置 ${p}`);
-          } catch (e: any) { showToast(e.message, "error"); }
+          } catch { showToast("平台熔断器操作失败，请刷新状态后重试", "error"); }
           await refresh();
         }} />
       )}
@@ -439,7 +440,7 @@ function LogsPane({ logs, total, page, pages, onPageChange, onResolved, targetId
       showToast(result.already_resolved ? "该日志已核实" : "运营日志已核实并记录审计", "success");
       onResolved?.();
     } catch (error) {
-      setResolveError(error instanceof Error ? error.message : String(error));
+      setResolveError("日志核实失败，请刷新记录后重试。");
     } finally {
       setBusyId(null);
     }
@@ -453,15 +454,15 @@ function LogsPane({ logs, total, page, pages, onPageChange, onResolved, targetId
         </div>
       </div>
       {resolveError && <div className="panel-sub" style={{ padding: "0 16px 8px", color: "var(--red)" }}>{resolveError}</div>}
-      <div className="filter-row" style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "0 16px 12px" }}>
-        <select style={{ width: 150, maxWidth: "100%", flex: "0 1 150px" }} aria-label="运营日志平台" value={platform} onChange={(e) => onFiltersChange({ platform: e.target.value as Platform | "", status, dateFrom, dateTo })}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "0 16px 12px" }}>
+        <select aria-label="运营日志平台" value={platform} onChange={(e) => onFiltersChange({ platform: e.target.value as Platform | "", status, dateFrom, dateTo })}>
           <option value="">全部平台</option><option value="xhs">小红书</option><option value="douyin">抖音</option><option value="kuaishou">快手</option><option value="wechat_channels">视频号</option>
         </select>
-        <select style={{ width: 150, maxWidth: "100%", flex: "0 1 150px" }} aria-label="运营日志状态" value={status} onChange={(e) => onFiltersChange({ platform, status: e.target.value, dateFrom, dateTo })}>
+        <select aria-label="运营日志状态" value={status} onChange={(e) => onFiltersChange({ platform, status: e.target.value, dateFrom, dateTo })}>
           <option value="">全部状态</option><option value="success">成功</option><option value="failed">失败</option><option value="pending_verify">待核实</option><option value="skipped">跳过</option><option value="circuit_broken">熔断拦截</option>
         </select>
-        <input style={{ width: 150, maxWidth: "100%", flex: "0 1 150px" }} aria-label="运营日志开始日期" type="date" value={dateFrom} onChange={(e) => onFiltersChange({ platform, status, dateFrom: e.target.value, dateTo })} />
-        <input style={{ width: 150, maxWidth: "100%", flex: "0 1 150px" }} aria-label="运营日志结束日期" type="date" value={dateTo} onChange={(e) => onFiltersChange({ platform, status, dateFrom, dateTo: e.target.value })} />
+        <input aria-label="运营日志开始日期" type="date" value={dateFrom} onChange={(e) => onFiltersChange({ platform, status, dateFrom: e.target.value, dateTo })} />
+        <input aria-label="运营日志结束日期" type="date" value={dateTo} onChange={(e) => onFiltersChange({ platform, status, dateFrom, dateTo: e.target.value })} />
         <button className="btn sm ghost" onClick={() => onFiltersChange({ platform: "", status: "", dateFrom: "", dateTo: "" })}>清空筛选</button>
       </div>
       <div className="table-wrap">
@@ -478,7 +479,7 @@ function LogsPane({ logs, total, page, pages, onPageChange, onResolved, targetId
             {logs.map((l) => (
               <tr key={l.id} style={targetId === l.id ? { background: "var(--surface-2)", outline: "2px solid var(--primary)" } : undefined}>
                 <td style={{ fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>
-                  {l.executed_at ? new Date(l.executed_at).toLocaleString("zh-CN") : l.schedule_time ? "待执行" : "-"}
+                  {l.executed_at ? formatBusinessDateTime(l.executed_at) : l.schedule_time ? "待执行" : "-"}
                 </td>
                 <td>{PLATFORM_NAME[l.platform]}</td>
                 <td><span className="tag gray">{ACTION_LABEL[l.action_type] ?? l.action_type}</span></td>
@@ -489,7 +490,7 @@ function LogsPane({ logs, total, page, pages, onPageChange, onResolved, targetId
                 <td>{l.status === "pending_verify" ? <div style={{ display: "flex", gap: 6 }}>
                   <button className="btn sm" disabled={busyId === l.id} onClick={() => void resolve(l.id, "sent")}>已发出</button>
                   <button className="btn sm ghost" disabled={busyId === l.id} onClick={() => void resolve(l.id, "not_sent")}>未发出</button>
-                </div> : l.resolution_action ? <span className="muted" title={l.resolution_note ?? ""}>已核实 · {l.resolved_at ? new Date(l.resolved_at).toLocaleString("zh-CN") : ""}</span> : "—"}</td>
+                </div> : l.resolution_action ? <span className="muted" title={l.resolution_note ?? ""}>已核实 · {l.resolved_at ? formatBusinessDateTime(l.resolved_at) : ""}</span> : "—"}</td>
               </tr>
             ))}
           </tbody>
@@ -525,7 +526,7 @@ function PublishPane() {
       setPage(1);
       setError(null);
     } catch (e: any) {
-      setError(e?.message ?? "加载草稿失败");
+      setError("发布草稿加载失败，请稍后重试。");
     }
   };
 
@@ -560,8 +561,8 @@ function PublishPane() {
         await fetchDrafts();
       }
     } catch (e: any) {
-      setError(e?.message ?? "确认发布失败");
-      showToast(`确认失败: ${e?.message ?? "未知错误"}`, "error");
+      setError("发布确认失败，请检查草稿状态后重试。");
+      showToast("发布确认失败，请检查草稿状态后重试", "error");
     } finally {
       setPending(null);
     }
@@ -587,8 +588,8 @@ function PublishPane() {
         await fetchDrafts();
       }
     } catch (e: any) {
-      setError(e?.message ?? "确认平台版本同步失败");
-      showToast(`确认平台版本同步失败：${e?.message ?? "未知错误"}`, "error");
+      setError("平台版本同步确认失败，请稍后重试。");
+      showToast("平台版本同步确认失败，请稍后重试", "error");
     } finally {
       setPending(null);
     }
@@ -622,12 +623,12 @@ function PublishPane() {
             <div key={d.id} className="task-row">
               <i className={`task-prio ${d.status === "user_published" ? "green" : "orange"}`} />
               <div className="task-main">
-                <div className="task-title">{PLATFORM_NAME[d.platform as Platform]} · {d.title ?? d.id}</div>
+                <div className="task-title">{PLATFORM_NAME[d.platform as Platform]} · {d.title || "未命名内容"}</div>
                 <div className="task-desc">
                   状态：<strong>{displayStatusLabel(d.status)}</strong>
                   {d.status === "draft_pending"
                     ? " · 仅保存在 IterWave，本内容尚未存入平台"
-                    : d.saved_at ? ` · 存草稿 ${new Date(d.saved_at).toLocaleString("zh-CN")}` : ""}
+                    : d.saved_at ? ` · 存草稿 ${formatBusinessDateTime(d.saved_at)}` : ""}
                 </div>
                 {d.status === "pending_verify" && (
                   <div className="note" style={{ marginTop: 6, color: "var(--orange)" }}>
@@ -782,11 +783,10 @@ function BreakerPane({
               {evt && (
                 <>
                   <div style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.7 }}>
-                    触发：{evt.reason_label ?? evt.reason}
-                    <span style={{ opacity: .6 }}>（{evt.reason}）</span><br />
-                    检测：{new Date(evt.detected_at).toLocaleString("zh-CN")}<br />
+                    触发：{evt.reason_label ?? "平台保护规则触发"}<br />
+                    检测：{formatBusinessDateTime(evt.detected_at)}<br />
                     {evt.cooldown_until && (
-                      <>冷却到期：{new Date(evt.cooldown_until).toLocaleString("zh-CN")}
+                      <>冷却到期：{formatBusinessDateTime(evt.cooldown_until)}
                         {evt.cooldown_expired
                           ? <span className="tag green" style={{ marginLeft: 6 }}>已到期</span>
                           : <span className="tag orange" style={{ marginLeft: 6 }}>冷却中</span>}
@@ -823,7 +823,7 @@ function BreakerPane({
               )}
               {cb?.events.map((e) => (
                 <tr key={e.id}>
-                  <td style={{ fontSize: 12, color: "var(--muted)" }}>{new Date(e.detected_at).toLocaleString("zh-CN")}</td>
+                  <td style={{ fontSize: 12, color: "var(--muted)" }}>{formatBusinessDateTime(e.detected_at)}</td>
                   <td>{displayPlatformLabel(e.platform)}</td>
                   <td><span className="tag orange">{e.reason_label ?? e.reason}</span></td>
                   <td>{e.resolved_at ? <span className="tag green">已恢复</span> : <span className="tag red">熔断中</span>}</td>
@@ -860,7 +860,7 @@ function TasksPane({ tasks, total, page, pages, onPageChange, onResolved, target
       await api.resolveTaskRun(id, action);
       onResolved?.();
     } catch (e: any) {
-      setErr(`核实失败: ${e.message}`);
+      setErr(`核实失败: 请稍后重试`);
     } finally {
       setBusyId(null);
     }
@@ -874,39 +874,39 @@ function TasksPane({ tasks, total, page, pages, onPageChange, onResolved, target
         </div>
       </div>
       {err && <div className="panel-sub" style={{ padding: "0 16px 8px", color: "var(--red)" }}>{err}</div>}
-      <div className="filter-row" style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "0 16px 12px" }}>
-        <select style={{ width: 150, maxWidth: "100%", flex: "0 1 150px" }} aria-label="任务平台筛选" value={platform} onChange={(e) => onFiltersChange({ platform: e.target.value as Platform | "", status, taskType, dateFrom, dateTo })}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "0 16px 12px" }}>
+        <select aria-label="任务平台筛选" value={platform} onChange={(e) => onFiltersChange({ platform: e.target.value as Platform | "", status, taskType, dateFrom, dateTo })}>
           <option value="">全部平台</option><option value="xhs">小红书</option><option value="douyin">抖音</option><option value="kuaishou">快手</option><option value="wechat_channels">视频号</option>
         </select>
-        <select style={{ width: 150, maxWidth: "100%", flex: "0 1 150px" }} aria-label="任务状态筛选" value={status} onChange={(e) => onFiltersChange({ platform, status: e.target.value, taskType, dateFrom, dateTo })}>
+        <select aria-label="任务状态筛选" value={status} onChange={(e) => onFiltersChange({ platform, status: e.target.value, taskType, dateFrom, dateTo })}>
           <option value="">全部状态</option><option value="pending">待执行</option><option value="running">执行中</option><option value="interrupted">中断</option><option value="pending_verify">待核实</option><option value="success">成功</option><option value="failed">失败</option><option value="skipped">跳过</option>
         </select>
-        <select style={{ width: 150, maxWidth: "100%", flex: "0 1 150px" }} aria-label="任务类型筛选" value={taskType} onChange={(e) => onFiltersChange({ platform, status, taskType: e.target.value, dateFrom, dateTo })}>
+        <select aria-label="任务类型筛选" value={taskType} onChange={(e) => onFiltersChange({ platform, status, taskType: e.target.value, dateFrom, dateTo })}>
           <option value="">全部任务类型</option><option value="publish_polling">发布轮询</option><option value="data_fetch">数据采集</option><option value="daily_ops">每日运营</option><option value="comment_polling">评论轮询</option><option value="cb_recovery">熔断恢复</option><option value="kb_scan">题库扫描</option><option value="draft_save">存草稿</option><option value="round_pipeline">轮次主流程</option><option value="data_retention_cleanup">数据清理</option>
         </select>
-        <input style={{ width: 150, maxWidth: "100%", flex: "0 1 150px" }} aria-label="任务开始日期" type="date" value={dateFrom} onChange={(e) => onFiltersChange({ platform, status, taskType, dateFrom: e.target.value, dateTo })} />
-        <input style={{ width: 150, maxWidth: "100%", flex: "0 1 150px" }} aria-label="任务结束日期" type="date" value={dateTo} onChange={(e) => onFiltersChange({ platform, status, taskType, dateFrom, dateTo: e.target.value })} />
+        <input aria-label="任务开始日期" type="date" value={dateFrom} onChange={(e) => onFiltersChange({ platform, status, taskType, dateFrom: e.target.value, dateTo })} />
+        <input aria-label="任务结束日期" type="date" value={dateTo} onChange={(e) => onFiltersChange({ platform, status, taskType, dateFrom, dateTo: e.target.value })} />
         <button className="btn sm ghost" onClick={() => onFiltersChange({ platform: "", status: "", taskType: "", dateFrom: "", dateTo: "" })}>清空筛选</button>
       </div>
       <div className="table-wrap">
         <table>
-          <thead><tr><th>ID</th><th>类型</th><th>平台</th><th>状态</th><th>尝试</th><th>开始</th><th>结束</th><th>错误</th><th>操作</th></tr></thead>
+          <thead><tr><th>类型</th><th>平台</th><th>状态</th><th>尝试</th><th>开始</th><th>结束</th><th>错误</th><th>操作</th></tr></thead>
           <tbody>
             {tasks.length === 0 && (
-              <tr><td colSpan={9}>
+              <tr><td colSpan={8}>
                 <EmptyHint className="" next="运行一轮生产，或等待定时任务触发后会自动记录">暂无任务记录</EmptyHint>
               </td></tr>
             )}
             {tasks.map((t) => (
               <tr key={t.id} style={(targetType === "round" ? t.task_type === "round_pipeline" && t.biz_id === String(targetId) : targetId === t.id) ? { background: "var(--surface-2)", outline: "2px solid var(--primary)" } : undefined}>
-                <td style={{ fontSize: 12, fontFamily: "monospace" }}>#{t.id}</td>
+                
                 <td>{TYPE_LABEL[t.task_type] ?? displayTaskTypeLabel(t.task_type)}</td>
                 <td>{t.platform ? PLATFORM_NAME[t.platform] : "-"}</td>
                 <td><span className={`demo-status ${STATUS_CLS[t.status] ?? ""}`}>{STATUS_LABEL[t.status] ?? displayStatusLabel(t.status)}</span></td>
                 <td>{t.attempt}/{t.max_attempts}</td>
-                <td style={{ fontSize: 11, color: "var(--muted)" }}>{t.started_at ? new Date(t.started_at).toLocaleString("zh-CN") : "-"}</td>
-                <td style={{ fontSize: 11, color: "var(--muted)" }}>{t.finished_at ? new Date(t.finished_at).toLocaleString("zh-CN") : "-"}</td>
-                <td style={{ fontSize: 11, maxWidth: 200 }}>{t.error_msg ?? "-"}</td>
+                <td style={{ fontSize: 11, color: "var(--muted)" }}>{formatBusinessDateTime(t.started_at)}</td>
+                <td style={{ fontSize: 11, color: "var(--muted)" }}>{formatBusinessDateTime(t.finished_at)}</td>
+                <td style={{ fontSize: 11, maxWidth: 200 }}>{t.error_msg ? "任务执行未完成，请查看任务详情。" : "—"}</td>
                 <td>
                   {t.status === "pending_verify" ? (
                     <>
@@ -947,7 +947,7 @@ function SchedulerPane({ jobs, onTriggered }: {
       setMsg(`已触发「${j.name}」，可到「任务追踪」查看结果`);
       onTriggered?.();
     } catch (e: any) {
-      setMsg(`触发失败: ${e.message}`);
+      setMsg(`触发失败: 请稍后重试`);
     } finally {
       setBusyId(null);
     }
@@ -984,7 +984,7 @@ function SchedulerPane({ jobs, onTriggered }: {
       setEditing(null);
       onTriggered?.();
     } catch (e: any) {
-      setMsg(`保存失败: ${e.message}`);
+      setMsg(`保存失败: 请稍后重试`);
     } finally {
       setBusyId(null);
     }
@@ -1030,12 +1030,12 @@ function SchedulerPane({ jobs, onTriggered }: {
               <i className={`task-prio ${j.enabled ? "blue" : "gray"}`} />
               <div className="task-main">
                 <div className="task-title">
-                  {j.name} <code style={{ fontSize: 10, color: "var(--muted)" }}>{j.id}</code>
+                  {j.name}
                   {!j.enabled && <span className="tag gray" style={{ marginLeft: 6 }}>已关闭</span>}
                 </div>
                 <div className="task-desc">
                   {j.schedule}
-                  {j.enabled && j.next_run_time && <> · 下次 {new Date(j.next_run_time).toLocaleString("zh-CN")}</>}
+                  {j.enabled && j.next_run_time && <> · 下次 {formatBusinessDateTime(j.next_run_time)}</>}
                   {j.enabled && !j.next_run_time && <> · 未排定</>}
                 </div>
               </div>
@@ -1154,7 +1154,7 @@ function RhythmPane({ rhythm, onSaved }: { rhythm: RhythmConfig | null; onSaved?
       showToast(`✓ 已保存 ${Object.keys(updates).length} 项节奏配置`, "success");
       onSaved?.();
     } catch (e: any) {
-      showToast(`保存失败: ${e?.message ?? e}`, "error");
+      showToast("运营节奏配置保存失败，请检查配置后重试", "error");
     } finally {
       setBusy(false);
     }
@@ -1263,7 +1263,7 @@ function NotificationsPane({ items, rules, total, page, pages, onPageChange, onC
       showToast("✓ 通知规则已新增", "success");
       onChanged?.();
     } catch (e: any) {
-      showToast(`新增失败: ${e?.message ?? e}`, "error");
+      showToast("通知规则新增失败，请检查配置后重试", "error");
     } finally { setBusy(false); }
   };
 
@@ -1273,7 +1273,7 @@ function NotificationsPane({ items, rules, total, page, pages, onPageChange, onC
         scenario: r.scenario, channel: r.channel, level: r.level, enabled: !r.enabled,
       });
       onChanged?.();
-    } catch (e: any) { showToast(`更新失败: ${e?.message ?? e}`, "error"); }
+    } catch { showToast("通知规则更新失败，请刷新后重试", "error"); }
   };
 
   const changeLevel = async (r: NotifyRule, next: string) => {
@@ -1290,7 +1290,7 @@ function NotificationsPane({ items, rules, total, page, pages, onPageChange, onC
       await api.deleteNotifyRule(r.id);
       showToast("已删除规则", "success");
       onChanged?.();
-    } catch (e: any) { showToast(`删除失败: ${e?.message ?? e}`, "error"); }
+    } catch { showToast("通知规则删除失败，请刷新后重试", "error"); }
   };
 
   return (
@@ -1386,7 +1386,7 @@ function NotificationsPane({ items, rules, total, page, pages, onPageChange, onC
               )}
               {items.map((n) => (
                 <tr key={n.id}>
-                  <td style={{ fontSize: 11, color: "var(--muted)", whiteSpace: "nowrap" }}>{new Date(n.sent_at).toLocaleString("zh-CN")}</td>
+                  <td style={{ fontSize: 11, color: "var(--muted)", whiteSpace: "nowrap" }}>{formatBusinessDateTime(n.sent_at)}</td>
                   <td><span className={`tag ${LEVEL_CLS[n.level] ?? ""}`}>{displayLevelLabel(n.level)}</span></td>
                   <td>{TYPE_LABEL[n.type] ?? displayCodeLabel(n.type)}</td>
                   <td>{n.platform ? PLATFORM_NAME[n.platform] ?? displayPlatformLabel(n.platform) : "-"}</td>

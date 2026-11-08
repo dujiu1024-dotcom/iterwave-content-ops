@@ -11,6 +11,7 @@ import { useApp } from "../AppContext";
 import { PersonaEditor } from "../components/ConfigEditors";
 import { navigate, useUrlTab } from "../nav";
 import { displaySourceLabel, displayStatusLabel } from "../displayLabels";
+import { formatBusinessDateTime } from "../businessTime.mjs";
 import {
   api, AssetItem, AssetType, Draft, HotTopicItem, KbInspect, ScoredTopic, SystemConfigView,
 } from "../api";
@@ -128,7 +129,7 @@ export default function Assets() {
         setError(`部分数据加载失败：${failures.join("、")} — 已展示成功部分`);
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError("资产数据加载失败，请稍后重试。");
     } finally {
       setLoading(false);
     }
@@ -144,7 +145,7 @@ export default function Assets() {
       setAssetTotals((current) => ({ ...current, [type]: result.total }));
       setAssetPageCounts((current) => ({ ...current, [type]: result.pages }));
     } catch (e) {
-      showToast(`资产列表加载失败：${e instanceof Error ? e.message : String(e)}`, "error");
+      showToast("资产列表加载失败，请稍后重试", "error");
     }
   };
 
@@ -155,7 +156,7 @@ export default function Assets() {
       await load();
       return true;
     } catch (e: any) {
-      showToast(`保存失败: ${e?.message ?? e}`, "error");
+      showToast("资产保存失败，请检查填写内容后重试", "error");
       return false;
     }
   };
@@ -166,7 +167,7 @@ export default function Assets() {
       setTemplateVersions(result.items);
       setViewingTemplateId(id);
     } catch (e) {
-      showToast(`模板版本历史加载失败：${e instanceof Error ? e.message : String(e)}`, "error");
+      showToast("模板版本历史加载失败，请稍后重试", "error");
     }
   };
 
@@ -177,7 +178,7 @@ export default function Assets() {
       setViewingTemplateId(null);
       await load();
     } catch (e) {
-      showToast(`模板版本恢复失败：${e instanceof Error ? e.message : String(e)}`, "error");
+      showToast("模板版本恢复失败，请刷新后重试", "error");
     }
   };
 
@@ -315,7 +316,7 @@ export default function Assets() {
                         <td style={{ fontSize: 11 }}>
                           {a.source_url ?? <span style={{ color: "var(--subtle)" }}>—</span>}
                         </td>
-                        <td>{a.created_at ?? <span style={{ color: "var(--subtle)" }}>—</span>}</td>
+                        <td>{a.created_at ? formatBusinessDateTime(a.created_at) : <span style={{ color: "var(--subtle)" }}>—</span>}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -412,7 +413,7 @@ export default function Assets() {
                       <div className="task-title">{v.title}</div>
                       <div className="task-desc">{v.body || <span style={{ color: "var(--subtle)" }}>（无正文）</span>}</div>
                     </div>
-                    <span className="tag gray">{v.created_at?.slice(0, 10) ?? "—"}</span>
+                    <span className="tag gray">{formatBusinessDateTime(v.created_at)}</span>
                   </div>
                 ))}
               </div>
@@ -478,7 +479,7 @@ export default function Assets() {
                         <td>v{version.version}</td>
                         <td>{version.title}</td>
                         <td style={{ whiteSpace: "pre-line" }}>{version.body || "—"}</td>
-                        <td>{version.created_at?.slice(0, 16).replace("T", " ") ?? "—"}</td>
+                        <td>{formatBusinessDateTime(version.created_at)}</td>
                         <td><button className="btn xs" type="button" onClick={() => void restoreTemplateVersion(viewingTemplateId, version.version)}>恢复此版本</button></td>
                       </tr>
                     ))}
@@ -506,7 +507,7 @@ export default function Assets() {
                     <div className="skill-name">{t.title} {inactive && <span className="tag gray">已停用</span>}</div>
                     <div className="skill-desc" style={{ whiteSpace: "pre-line" }}>{t.body || "（无结构说明）"}</div>
                     <div className="skill-foot">
-                      <span>v{t.version ?? 1} · {t.updated_at?.slice(0, 10) ?? t.created_at?.slice(0, 10) ?? "—"}</span>
+                      <span>v{t.version ?? 1} · {formatBusinessDateTime(t.updated_at ?? t.created_at)}</span>
                       <button className="btn xs" type="button" onClick={() => setEditingTemplate(t)}>编辑模板</button>
                       <button className="btn xs" type="button" onClick={() => void openTemplateVersions(t.id)}>版本历史</button>
                       {inactive ? (
@@ -578,7 +579,7 @@ function AssetForm({
           <div className="panel-sub">保存后可在内容生产的生产线中直接选择</div>
         </div>
       </div>
-      <div className="grid asset-form-grid" style={{ gridTemplateColumns: needUrl ? "1fr 1fr 1.4fr auto" : "1fr 2fr auto", gap: 10 }}>
+      <div className="grid" style={{ gridTemplateColumns: needUrl ? "1fr 1fr 1.4fr auto" : "1fr 2fr auto", gap: 10 }}>
         <input className="field" placeholder={titleLabel} value={title} onChange={(e) => setTitle(e.target.value)} />
         {type === "template" ? (
           <textarea className="field" rows={3} placeholder={bodyPlaceholder ?? "按步骤写出内容结构，每行一个环节"} value={body} onChange={(e) => setBody(e.target.value)} />
@@ -617,7 +618,7 @@ function TemplateEditor({ item, onCancel, onSaved }: {
       showToast("内容模板已更新；后续生产将使用新结构", "success");
       await onSaved();
     } catch (e) {
-      showToast(`更新失败：${(e as Error).message}`, "error");
+      showToast("资产更新失败，请检查填写内容后重试", "error");
     } finally { setBusy(false); }
   };
   return (

@@ -78,3 +78,83 @@ def test_global_monitor_aggregates_tenant_dbs_read_only(tmp_path, test_auth):
     finally:
         api_main._g_ctx.clear()
         api_main._g_ctx.update(saved)
+
+
+def test_global_todos_sanitize_task_and_media_generation_errors(tmp_path, test_auth):
+    registry = TenantRegistry(tmp_path / "workspace")
+    registry.initialize()
+    paths = registry.paths("default", create=True)
+    conn = sqlite3.connect(paths.db_file)
+    conn.executescript("""
+        CREATE TABLE task_runs (
+            id INTEGER PRIMARY KEY, task_type TEXT, status TEXT, platform TEXT,
+            error_msg TEXT, finished_at TEXT, started_at TEXT, created_at TEXT
+        );
+        CREATE TABLE media_generation_jobs (
+            id INTEGER PRIMARY KEY, error_message TEXT, created_at TEXT, status TEXT
+        );
+        CREATE TABLE circuit_breaker_events (
+            id INTEGER PRIMARY KEY, platform TEXT, reason TEXT, detected_at TEXT,
+            cooldown_until TEXT, resolved_at TEXT
+        );
+        CREATE TABLE notifications (
+            id INTEGER PRIMARY KEY, level TEXT, title TEXT, body TEXT,
+            sent_at TEXT, read_at TEXT
+        );
+    """)
+    now = datetime.now().isoformat(sep=" ")
+    internal_error = "sqlite3.OperationalError: unable to open /home/ubuntu/iterwave/data/private.db\\nTraceback (most recent call last):"
+    conn.execute(
+        "INSERT INTO task_runs(task_type,status,platform,error_msg,created_at) VALUES (?,?,?,?,?)",
+        ("round_pipeline", "failed", "xhs", internal_error, now),
+    )
+    conn.execute(
+        "INSERT INTO media_generation_jobs(error_message,created_at,status) VALUES (?,?,?)",
+        (internal_error, now, "failed"),
+    )
+    conn.execute(
+        "INSERT INTO circuit_breaker_events(platform,reason,detected_at,cooldown_until) VALUES (?,?,?,?)",
+        ("xhs", internal_error, now, now),
+    )
+    conn.execute(
+        "INSERT INTO notifications(level,title,body,sent_at) VALUES (?,?,?,?)",
+        ("error", internal_error, internal_error, now),
+    )
+    conn.execute(
+        "INSERT INTO notifications(level,title,body,sent_at) VALUES (?,?,?,?)",
+        ("info", "账号组配置提醒", "请补充本周的内容目标。", now),
+    )
+    conn.commit()
+    conn.close()
+
+    saved = dict(api_main._g_ctx)
+    api_main._g_ctx.clear()
+    api_main._g_ctx.update({"tenant_registry": registry, "runtime_tenant_id": "default"})
+    try:
+        client = test_auth(TestClient(api_main._build_app(), base_url="http://127.0.0.1"))
+        task_response = client.get("/api/todos?source=task_run")
+        media_response = client.get("/api/todos?source=media_generation")
+        assert task_response.status_code == 200
+        assert media_response.status_code == 200
+        for response in (task_response, media_response):
+            assert "/home/ubuntu" not in response.text
+            assert "sqlite3.OperationalError" not in response.text
+            assert "Traceback" not in response.text
+        assert "任务执行失败，请进入任务追踪查看详情。" in task_response.text
+        assert "AI 配图生成失败，请检查图片生成配置后重试。" in media_response.text
+
+        breaker_response = client.get("/api/todos?source=circuit_breaker")
+        notification_response = client.get("/api/todos?source=notification")
+        assert breaker_response.status_code == 200
+        assert notification_response.status_code == 200
+        for response in (breaker_response, notification_response):
+            assert "/home/ubuntu" not in response.text
+            assert "sqlite3.OperationalError" not in response.text
+            assert "Traceback" not in response.text
+        assert "平台触发保护机制，暂不可继续执行" in breaker_response.text
+        assert "系统通知需要处理" in notification_response.text
+        # 普通业务通知正文必须保留，不能因系统异常脱敏而误伤用户内容。
+        assert "请补充本周的内容目标。" in notification_response.text
+    finally:
+        api_main._g_ctx.clear()
+        api_main._g_ctx.update(saved)

@@ -2767,7 +2767,7 @@ def test_global_task_retry_api_requires_platform_confirmation_and_preserves_snap
     assert response.status_code == 200
     result = response.json()
     assert result["created"] is True
-    assert result["retry_of_task_id"] == original.task_id
+    assert "retry_of_task_id" not in result
     retry = queue.get(result["task_id"])
     assert retry is not None
     assert retry.tenant_id == original.tenant_id
@@ -2822,12 +2822,13 @@ def test_global_task_resolution_api_records_actor_and_keeps_execution_status_imm
     assert task is not None
     assert task.status == "failed"
     assert task.resolution_action == "handled"
-    assert task.resolution_actor == body["actor"]
+    assert task.resolution_actor.startswith("session:")
+    assert body["actor"] == "operator"
     assert task.resolution_executing_actor == "service:api"
     assert task.resolution_tenant_id == "tenant-a"
     assert task.resolution_queue_task_id is None
     audit = queue.list_admin_audit(original.task_id)
-    assert audit[0]["actor"] == body["actor"]
+    assert audit[0]["actor"].startswith("session:")
     assert audit[0]["executing_actor"] == "service:api"
     assert audit[0]["tenant_id"] == "tenant-a"
     assert audit[0]["queue_task_id"] is None
@@ -5364,3 +5365,380 @@ def test_kpi_one_day_window_includes_midnight_through_0800_shanghai(client, monk
     assert summary.json()["contents_created"] == 3
     assert summary.json()["drafts_created"] == 3
     assert summary.json()["confirmed_published"] == 3
+
+
+def test_notifications_api_projects_public_fields_and_keeps_deep_links(client):
+    tc, conn, seed = client
+    round_id = seed.round(status="failed")
+    now = datetime.now().isoformat(sep=" ", timespec="seconds")
+    cur = conn.execute(
+        "INSERT INTO notifications "
+        "(level,type,platform,title,body,channel,sent_at,task_run_id,ops_log_id,round_id,draft_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        ("warning", "round_timeout", "xhs", "轮次阶段超时", "阶段执行超时，请检查任务。",
+         "wecom", now, None, None, round_id, None),
+    )
+    conn.commit()
+
+    response = tc.get("/api/notifications?page=1&page_size=20")
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    item = next(row for row in payload["items"] if row["id"] == cur.lastrowid)
+    assert item["target_type"] == "round"
+    assert item["target_id"] == round_id
+    assert item["target_page"] == "operations"
+    assert item["target_tab"] == "tasks"
+    for internal_key in ("task_run_id", "ops_log_id", "round_id", "draft_id"):
+        assert internal_key not in item
+    assert set(item) == {
+        "id", "level", "type", "platform", "title", "body", "channel",
+        "sent_at", "read_at", "target_page", "target_tab", "target_type", "target_id",
+    }
+
+    legacy = tc.get("/api/notifications?limit=20")
+    assert legacy.status_code == 200, legacy.text
+    legacy_item = next(row for row in legacy.json() if row["id"] == cur.lastrowid)
+    assert "round_id" not in legacy_item
+    assert legacy_item["target_id"] == round_id
+
+
+def test_task_runs_api_projects_public_fields_and_sanitizes_internal_errors(client):
+    tc, conn, _seed = client
+    now = datetime.now().isoformat(sep=" ", timespec="seconds")
+    internal_error = (
+        "sqlite3.OperationalError: unable to open /home/ubuntu/iterwave/data/private.db\\n"
+        "Traceback (most recent call last):"
+    )
+    cur = conn.execute(
+        "INSERT INTO task_runs "
+        "(task_type,biz_id,platform,status,attempt,max_attempts,error_msg,created_at,started_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        ("comment_polling", "business-123", "xhs", "failed", 2, 3, internal_error, now, now),
+    )
+    conn.commit()
+
+    response = tc.get("/api/task_runs?page=1&page_size=20")
+    assert response.status_code == 200, response.text
+    item = next(row for row in response.json()["items"] if row["id"] == cur.lastrowid)
+    assert item["error_msg"] == "任务执行失败，请进入任务详情核对。"
+    assert "/home/ubuntu" not in response.text
+    assert "sqlite3.OperationalError" not in response.text
+    assert "Traceback" not in response.text
+    assert set(item) == {
+        "id", "task_type", "biz_id", "platform", "status", "attempt",
+        "max_attempts", "started_at", "finished_at", "next_run_at",
+        "error_msg", "created_at", "resolved_at", "resolved_by", "resolution_action",
+    }
+
+    legacy = tc.get("/api/task_runs?limit=20")
+    assert legacy.status_code == 200, legacy.text
+    legacy_item = next(row for row in legacy.json() if row["id"] == cur.lastrowid)
+    assert legacy_item["error_msg"] == "任务执行失败，请进入任务详情核对。"
+    assert "worker_id" not in legacy_item
+
+
+def test_ops_logs_api_hides_task_run_fk_and_sanitizes_error_details(client):
+    tc, conn, _seed = client
+    now = datetime.now().isoformat(sep=" ", timespec="seconds")
+    internal_error = (
+        "sqlite3.OperationalError: unable to open /home/ubuntu/iterwave/data/private.db\\n"
+        "Traceback (most recent call last):"
+    )
+    task_run = conn.execute(
+        "INSERT INTO task_runs (task_type,biz_id,platform,status,attempt,max_attempts,created_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        ("comment_polling", "ops-log-fixture", "xhs", "failed", 1, 1, now),
+    )
+    cur = conn.execute(
+        "INSERT INTO ops_logs "
+        "(platform,action_type,content,executed_at,status,task_run_id,error_msg) "
+        "VALUES (?,?,?,?,?,?,?)",
+        ("xhs", "active_comment", "业务操作说明", now, "failed", task_run.lastrowid, internal_error),
+    )
+    conn.commit()
+
+    response = tc.get("/api/ops_logs?page=1&page_size=20")
+    assert response.status_code == 200, response.text
+    item = next(row for row in response.json()["items"] if row["id"] == cur.lastrowid)
+    assert item["content"] == "业务操作说明"
+    assert item["error_msg"] == "运营操作执行失败，请核对平台状态。"
+    assert "task_run_id" not in item
+    assert "987" not in item.get("error_msg", "")
+    assert "/home/ubuntu" not in response.text
+    assert "sqlite3.OperationalError" not in response.text
+    assert "Traceback" not in response.text
+    assert set(item) == {
+        "id", "round_id", "platform", "action_type", "target_url",
+        "target_author", "content", "schedule_time", "executed_at",
+        "status", "error_msg", "resolved_at", "resolved_by",
+        "resolution_action", "resolution_note", "rhythm_wait_seconds",
+    }
+
+
+def test_global_task_detail_sanitizes_step_and_task_errors(client, tmp_path, monkeypatch):
+    from src.core.task_queue import GlobalTaskQueue
+
+    tc, _conn, _seed = client
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    monkeypatch.setattr(api_main, "_task_queue", queue)
+    task, _ = queue.enqueue(
+        task_type="round_run", tenant_id="default", aggregate_id="detail-probe", payload={},
+    )
+    internal = (
+        "sqlite3.OperationalError: unable to open /home/ubuntu/iterwave/data/private.db\\n"
+        "Traceback (most recent call last):"
+    )
+    conn = queue._connect()
+    try:
+        conn.execute(
+            "UPDATE global_task_queue SET status='failed', error_code=?, error_message=?, "
+            "result_json=?, progress_json=? WHERE task_id=?",
+            ("sqlite3.OperationalError", internal,
+             json.dumps({"steps": [{"step": "写入数据库", "status": "failed", "detail": internal}]}, ensure_ascii=False),
+             json.dumps({
+                "steps": [{"id": "write", "label": "写入数据库", "status": "failed", "detail": internal}],
+                "current_step": "write", "current_label": "写入数据库",
+                "detail": internal, "percent": 50,
+            }),
+             task.task_id),
+        )
+    finally:
+        conn.close()
+
+    response = tc.get(f"/api/task-queue/{task.task_id}")
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["error_message"] == "任务执行失败，请核对平台状态后再决定是否恢复。"
+    assert payload["error_code"] == "任务异常"
+    assert payload["execution_log"][0]["detail"] == "步骤已记录；详细诊断请联系管理员。"
+    assert payload["progress"]["detail"] == "步骤已记录；详细诊断请联系管理员。"
+    assert payload["progress"]["steps"][0]["detail"] == "步骤已记录；详细诊断请联系管理员。"
+    assert payload["progress"]["percent"] == 50
+    assert "/home/ubuntu" not in response.text
+    assert "sqlite3.OperationalError" not in response.text
+    assert "Traceback" not in response.text
+
+
+def test_global_task_queue_list_sanitizes_task_errors_and_keeps_list_working(client, tmp_path, monkeypatch):
+    from src.core.task_queue import GlobalTaskQueue
+
+    tc, _conn, _seed = client
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    monkeypatch.setattr(api_main, "_task_queue", queue)
+    task, _ = queue.enqueue(
+        task_type="round_run", tenant_id="default", aggregate_id="list-probe", payload={},
+    )
+    internal = (
+        "sqlite3.OperationalError: unable to open /home/ubuntu/iterwave/data/private.db\\n"
+        "Traceback (most recent call last):"
+    )
+    conn = queue._connect()
+    try:
+        conn.execute(
+            "UPDATE global_task_queue SET status='failed', error_code=?, error_message=?, progress_json=? WHERE task_id=?",
+            ("sqlite3.OperationalError", internal,
+             json.dumps({"steps": [{"id": "poll", "label": "平台轮询", "status": "failed", "detail": internal}], "detail": internal, "percent": 30}),
+             task.task_id),
+        )
+    finally:
+        conn.close()
+
+    response = tc.get("/api/task-queue?scope=failed")
+    assert response.status_code == 200, response.text
+    item = next(row for row in response.json()["items"] if row["task_id"] == task.task_id)
+    assert item["error_code"] == "任务异常"
+    assert item["error_message"] == "任务执行失败，请进入任务详情核对。"
+    assert item["progress"]["detail"] == "步骤已记录；详细诊断请联系管理员。"
+    assert item["progress"]["steps"][0]["detail"] == "步骤已记录；详细诊断请联系管理员。"
+    assert "/home/ubuntu" not in response.text
+    assert "sqlite3.OperationalError" not in response.text
+    assert "Traceback" not in response.text
+
+
+def test_round_run_status_sanitizes_nested_report_and_progress(client, tmp_path, monkeypatch):
+    from src.core.task_queue import GlobalTaskQueue
+
+    tc, _conn, seed = client
+    round_id = seed.round(status="producing")
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    monkeypatch.setattr(api_main, "_task_queue", queue)
+    task, _ = queue.enqueue(
+        task_type="round_run", tenant_id="default", aggregate_id=str(round_id),
+        payload={"operation": "run", "round_id": round_id},
+    )
+    internal = (
+        "sqlite3.OperationalError: unable to open /home/ubuntu/iterwave/data/private.db\\n"
+        "Traceback (most recent call last):"
+    )
+    result = {
+        "round_id": round_id, "final_status": "failed",
+        "errors": [internal], "failure_message": internal,
+        "summary": "报告正文：日志位于 /home/ubuntu/iterwave/data/report.json，备份位于 C:\\Users\\operator\\report.json。",
+        "task_id": "internal-task-123", "tenant_id": "default",
+        "content": "第一段完整业务正文\\n第二段仍应完整保留，包含正常换行。",
+        "steps": [{"step": "save_drafts", "detail": internal, "draft_id": 987}],
+    }
+    progress = {"steps": [{"id": "save", "label": "存草稿", "status": "failed", "detail": internal}], "detail": internal, "percent": 80}
+    conn = queue._connect()
+    try:
+        conn.execute(
+            "UPDATE global_task_queue SET status='failed', error_message=?, error_code=?, "
+            "result_json=?, progress_json=? WHERE task_id=?",
+            (internal, "sqlite3.OperationalError", json.dumps(result, ensure_ascii=False),
+             json.dumps(progress, ensure_ascii=False), task.task_id),
+        )
+    finally:
+        conn.close()
+
+    response = tc.get(f"/api/rounds/{round_id}/run_status")
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["report"]["errors"] == ["详细诊断已隐藏，请联系管理员。"]
+    assert payload["report"]["content"] == "第一段完整业务正文\\n第二段仍应完整保留，包含正常换行。"
+    assert payload["report"]["steps"][0]["detail"] == "详细诊断已隐藏，请联系管理员。"
+    assert "task_id" not in payload
+    assert "task_type" not in payload
+    assert "task_id" not in payload["report"]
+    assert "tenant_id" not in payload["report"]
+    assert "draft_id" not in payload["report"]["steps"][0]
+    assert payload["progress"]["detail"] == "步骤已记录；详细诊断请联系管理员。"
+    assert payload["error"] == "本轮执行失败，请查看管理员诊断日志。"
+    assert "/home/ubuntu" not in response.text
+    assert "sqlite3.OperationalError" not in response.text
+    assert "Traceback" not in response.text
+    assert "服务器内部路径" in response.text
+    assert "本地内部路径" in response.text
+
+
+def test_round_run_status_memory_branch_uses_response_allowlist(client, monkeypatch):
+    tc, _conn, seed = client
+    round_id = seed.round(status="producing")
+    monkeypatch.setitem(api_main._round_job_status, round_id, {
+        "status": "running", "queued": False, "running": True,
+        "task_id": "internal-task-123", "task_type": "round_run",
+        "tenant_id": "tenant-private", "lease_owner": "worker-private",
+        "report": {"content": "完整的多行业务报告\\n第二行正文"},
+        "error": None, "error_code": None,
+        "progress": {"steps": [], "detail": "正在生成", "percent": 25},
+        "started_at": "2026-11-07T12:00:00+00:00", "elapsed_seconds": 15,
+        "private_debug": {"path": "/home/ubuntu/iterwave/data/private.db"},
+    })
+
+    response = tc.get(f"/api/rounds/{round_id}/run_status")
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert set(payload) == {
+        "round_id", "status", "queued", "running", "report", "error",
+        "error_code", "progress", "started_at", "elapsed_seconds",
+    }
+    assert payload["report"]["content"] == "完整的多行业务报告\\n第二行正文"
+    assert payload["progress"]["detail"] == "正在生成"
+    assert "internal-task-123" not in response.text
+    assert "tenant-private" not in response.text
+    assert "worker-private" not in response.text
+    assert "private_debug" not in response.text
+    assert "/home/ubuntu" not in response.text
+
+
+def test_global_task_queue_detail_and_audit_use_public_safe_contract(client, tmp_path, monkeypatch):
+    from src.core.task_queue import GlobalTaskQueue
+
+    tc, _conn, _seed = client
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    monkeypatch.setattr(api_main, "_task_queue", queue)
+    task, _ = queue.enqueue(
+        task_type="scheduler_job", tenant_id="private-tenant",
+        aggregate_id="_job_data_fetch:internal-object:2", payload={},
+    )
+    internal = (
+        "sqlite3.OperationalError: unable to open /home/ubuntu/iterwave/data/private.db\\n"
+        "Traceback (most recent call last):"
+    )
+    conn = queue._connect()
+    try:
+        conn.execute(
+            "UPDATE global_task_queue SET status='failed', error_code=?, error_message=?, "
+            "retry_confirmation_note=?, result_json=? WHERE task_id=?",
+            ("sqlite3.OperationalError", internal,
+             "已核验 /home/ubuntu/iterwave/private.db，不含凭据。",
+             json.dumps({"steps": []}), task.task_id),
+        )
+    finally:
+        conn.close()
+    queue.resolve_failed_task(
+        task.task_id, action="handled", actor="session:private-user",
+        note="已检查 /home/ubuntu/iterwave/private.db 并完成处理",
+    )
+
+    detail_response = tc.get(f"/api/task-queue/{task.task_id}")
+    assert detail_response.status_code == 200, detail_response.text
+    detail = detail_response.json()
+    assert "tenant_id" not in detail
+    assert "aggregate_id" not in detail
+    assert "retry_of_task_id" not in detail
+    assert detail["aggregate_label"] == "平台数据采集 · 第 2 次"
+    assert detail["error_code"] == "任务异常"
+    assert detail["error_message"] == "任务执行失败，请核对平台状态后再决定是否恢复。"
+    assert "服务器内部路径" in detail["retry_confirmation_note"]
+    assert "服务器内部路径" in detail["resolution_note"]
+    assert "private-tenant" not in detail_response.text
+    assert "/home/ubuntu" not in detail_response.text
+    assert "sqlite3.OperationalError" not in detail_response.text
+
+    audit_response = tc.get(f"/api/task-queue/{task.task_id}/audit")
+    assert audit_response.status_code == 200, audit_response.text
+    audit = audit_response.json()["items"][0]
+    assert set(audit) == {"action", "actor", "acted_at", "details"}
+    assert "tenant_id" not in audit
+    assert "queue_task_id" not in audit
+    assert "private-user" not in audit_response.text
+    assert "/home/ubuntu" not in audit_response.text
+    assert "服务器内部路径" in audit["details"]["note"]
+
+
+def test_global_task_queue_list_uses_business_label_without_internal_aggregate_key(client, tmp_path, monkeypatch):
+    from src.core.task_queue import GlobalTaskQueue
+
+    tc, _conn, _seed = client
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    monkeypatch.setattr(api_main, "_task_queue", queue)
+    task, _ = queue.enqueue(
+        task_type="scheduler_job", tenant_id="private-tenant",
+        aggregate_id="_job_data_fetch:internal-object:3", payload={},
+    )
+    response = tc.get("/api/task-queue?scope=active")
+    assert response.status_code == 200, response.text
+    item = next(row for row in response.json()["items"] if row["task_id"] == task.task_id)
+    assert item["aggregate_label"] == "平台数据采集 · 第 3 次"
+    assert item["tenant_name"] == "未登记账号组"
+    assert "aggregate_id" not in item
+    assert "tenant_id" not in item
+    assert "internal-object" not in response.text
+    assert "private-tenant" not in response.text
+
+
+def test_notifications_api_sanitizes_legacy_error_bodies(client):
+    tc, conn, _seed = client
+    now = datetime.now().isoformat(sep=" ", timespec="seconds")
+    internal = (
+        "小红书存草稿失败：示例标题 — sqlite3.OperationalError: unable to open "
+        "/home/ubuntu/iterwave/data/private.db\\nTraceback (most recent call last):"
+    )
+    cursor = conn.execute(
+        "INSERT INTO notifications (level,type,title,body,channel,sent_at) VALUES(?,?,?,?,?,?)",
+        ("error", "draft_failed", "存草稿失败", internal, "wecom", now),
+    )
+    conn.commit()
+
+    response = tc.get("/api/notifications?page=1&page_size=20")
+    assert response.status_code == 200, response.text
+    item = next(row for row in response.json()["items"] if row["id"] == cursor.lastrowid)
+    assert item["body"] == "任务执行失败，详细诊断已隐藏。"
+    assert "/home/ubuntu" not in response.text
+    assert "sqlite3.OperationalError" not in response.text
+    assert "Traceback" not in response.text

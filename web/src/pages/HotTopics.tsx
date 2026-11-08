@@ -81,7 +81,7 @@ export default function HotTopics() {
       });
       showToast(r.imported ? "✓ 已转入选题库" : r.message ?? "选题库已存在", r.imported ? "success" : "info");
     } catch (e: any) {
-      showToast(`入库失败: ${e?.message ?? e}`, "error");
+      showToast("热点入库失败，请稍后重试", "error");
     } finally {
       setImportingKey(null);
     }
@@ -99,7 +99,7 @@ export default function HotTopics() {
       setRefreshing(!!data.refresh_job?.running);
       setResearching(!!data.research_job?.running);
     } catch (e) {
-      setError(String(e));
+      setError("热点列表加载失败，请稍后刷新重试。");
     } finally {
       setLoading(false);
     }
@@ -111,7 +111,7 @@ export default function HotTopics() {
     try {
       await api.refreshHotTopics();
     } catch (e: any) {
-      showToast(`触发采集失败: ${e?.message ?? e}`, "error");
+      showToast("热点采集启动失败，请稍后重试", "error");
       setRefreshing(false);
     }
   }
@@ -130,7 +130,7 @@ export default function HotTopics() {
         showToast(res.reason ?? "已有研判任务在运行", "info");
       }
     } catch (e: any) {
-      showToast(`触发研判失败: ${e?.message ?? e}`, "error");
+      showToast("热点研判启动失败，请稍后重试", "error");
       setResearching(false);
     }
   }
@@ -146,14 +146,14 @@ export default function HotTopics() {
         setHot(data);
         if (refreshing && !data.refresh_job?.running) {
           setRefreshing(false);
-          if (data.refresh_job?.error) showToast(`采集失败: ${data.refresh_job.error}`, "error");
+          if (data.refresh_job?.error) showToast("热点采集未能完成，请查看采集状态并稍后重试", "error");
           else if (data.refresh_job?.progress?.stage === "matching_partial") {
             showToast(data.refresh_job.progress.message || "采集完成，但仍有热点待研判或研判失败", "info");
           }
         }
         if (researching && !data.research_job?.running) {
           setResearching(false);
-          if (data.research_job?.error) showToast(`研判失败: ${data.research_job.error}`, "error");
+          if (data.research_job?.error) showToast("热点研判未能完成，请检查模型配置或稍后重试", "error");
           else {
             const report = data.research_job?.report || {};
             const failed = Number(report.failed_batches || 0);
@@ -186,8 +186,7 @@ export default function HotTopics() {
         timeOn: v.editable.hot_topics.time_filter_enabled ?? true,
       });
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setCfgError(msg);  // N2 真实修复：可见错误态，不再静默 console.error
+      setCfgError("热点筛选配置加载失败，请稍后重试。");
     }
   }
 
@@ -219,7 +218,7 @@ export default function HotTopics() {
       await loadConfig();
       await loadHot();
     } catch (e: any) {
-      showToast(`保存失败: ${e?.message ?? e}`, "error");
+      showToast("热点筛选配置保存失败，请检查数值后重试", "error");
     }
   }
 
@@ -564,7 +563,7 @@ function HotSourceManager({ onSaved }: { onSaved: () => void }) {
   useEffect(() => {
     api.hotSources()
       .then((res) => setItems(res.items))
-      .catch((e) => showToast((e as Error).message, "error"))
+      .catch(() => showToast("热点来源读取失败，请稍后重试", "error"))
       .finally(() => setLoading(false));
   }, [showToast]);
 
@@ -577,7 +576,7 @@ function HotSourceManager({ onSaved }: { onSaved: () => void }) {
       onSaved();
       return true;
     } catch (e) {
-      showToast((e as Error).message, "error");
+      showToast("热点来源保存失败，请检查配置后重试", "error");
       return false;
     } finally {
       setBusy(false);
@@ -621,8 +620,7 @@ function HotSourceManager({ onSaved }: { onSaved: () => void }) {
       setItems(latest.items);
       showToast(result.message, result.ok ? "success" : "error");
     } catch (e) {
-      const message = (e as Error).message || "来源试抓取失败";
-      showToast(message, "error");
+      showToast("来源试抓取失败，请检查地址和访问权限后重试", "error");
     } finally {
       setTestingIndex(null);
     }

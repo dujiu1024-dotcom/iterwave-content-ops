@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, GlobalTaskQueueItem } from "../api";
 import { useApp } from "../AppContext";
-import { roundTaskLabel } from "../roundLabel";
+import { formatBusinessDateTime } from "../businessTime.mjs";
 import TaskDispatchMetrics from "../components/TaskDispatchMetrics";
 import TaskProgressPanel from "../components/TaskProgressPanel";
 import { displayCodeLabel, displayStatusLabel, displayStepLabel, displayTaskTypeLabel, displayErrorLabel } from "../displayLabels";
@@ -35,24 +35,24 @@ const SCHEDULER_JOB_LABEL: Record<string, string> = {
   _job_autogrow_next_round: "自动闭环检查",
 };
 
-function aggregateLabel(task: GlobalTaskQueueItem) {
-  if (!task.aggregate_id) return "—";
-  if (task.task_type === "round_run") return roundTaskLabel(task);
-  if (task.task_type !== "scheduler_job") {
-    return "关联业务任务";
-  }
-  const [method, objectId, attempt] = task.aggregate_id.split(":");
-  const label = SCHEDULER_JOB_LABEL[method] || "账号组后台任务";
-  if (method === "_job_data_fetch" && objectId) {
-    return `${label}${attempt ? ` · 第 ${attempt} 次` : ""}`;
-  }
-  return label;
+function aggregateLabel(task: { aggregate_label: string }) {
+  return task.aggregate_label || "—";
+}
+
+function auditActionLabel(value: string | null | undefined) {
+  const labels: Record<string, string> = { cancel: "取消任务", retry: "人工核验后重试", resolve_handled: "标记为已处理", resolve_ignored: "标记为已忽略" };
+  return value ? labels[value] ?? "其他管理操作" : "管理操作";
+}
+
+function auditActorLabel(value: string | null | undefined) {
+  if (!value) return "操作人未知";
+  if (value.startsWith("system:") || value.startsWith("service:")) return "系统";
+  return "操作人";
 }
 
 function timeLabel(value: string | null) {
   if (!value) return "—";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  return formatBusinessDateTime(value);
 }
 
 function TaskRow({
@@ -76,22 +76,22 @@ function TaskRow({
 }) {
   const active = task.status === "queued" || task.status === "running";
   return (
-    <div className="panel-row" style={{ display: "grid", gridTemplateColumns: "minmax(180px, 1.5fr) minmax(100px, .8fr) minmax(100px, .8fr) minmax(150px, 1fr) auto", gap: 14, alignItems: "center", padding: "14px 16px" }}>
-      <div style={{ minWidth: 0 }}>
+    <div className="panel-row task-queue-row">
+      <div className="task-queue-main" style={{ minWidth: 0 }}>
         <div style={{ fontWeight: 650 }}>{TASK_LABEL[task.task_type] || displayTaskTypeLabel(task.task_type)}</div>
         <div className="muted" style={{ fontSize: 12, marginTop: 4, overflowWrap: "anywhere" }}>
           {task.tenant_name} · {aggregateLabel(task)}
         </div>
         <button className="btn sm ghost" type="button" style={{ marginTop: 6 }} onClick={() => onDetails(task)}>查看详情</button>
       </div>
-      <div>
+      <div className="task-queue-status">
         <span className={`status-pill ${task.status === "failed" || task.status === "interrupted" ? "failed" : task.status === "running" ? "producing" : task.status === "succeeded" ? "completed" : task.status === "cancelled" ? "cancelled" : "creating"}`}>
           {STATUS_LABEL[task.status]}
         </span>
       </div>
-      <div className="muted" style={{ fontSize: 12 }}>{timeLabel(task.created_at)}</div>
-      <div className="muted" style={{ fontSize: 12 }}>
-        {task.error_message || (
+      <div className="task-queue-time muted" style={{ fontSize: 12 }}>{timeLabel(task.created_at)}</div>
+      <div className="task-queue-execution muted" style={{ fontSize: 12 }}>
+        {task.error_message ? "任务执行未完成，请查看详情中的诊断提示。" : (
           task.status === "queued" && new Date(task.available_at).getTime() > Date.now()
             ? `计划执行：${timeLabel(task.available_at)}`
             : task.started_at ? `开始：${timeLabel(task.started_at)}` : "尚未开始"
@@ -100,7 +100,7 @@ function TaskRow({
         {task.started_at && task.finished_at && <div>耗时：{Math.max(0, (new Date(task.finished_at).getTime() - new Date(task.started_at).getTime()) / 1000).toFixed(1)} 秒</div>}
         {task.status === "running" && task.started_at && <div>已运行：{Math.max(0, (Date.now() - new Date(task.started_at).getTime()) / 1000).toFixed(1)} 秒</div>}
       </div>
-      <div>
+      <div className="task-queue-actions">
         {task.status === "queued" && (
           <button className="btn sm soft" type="button" disabled={cancelling} onClick={() => onCancel(task)}>
             {cancelling ? "取消中…" : "取消"}
@@ -111,7 +111,7 @@ function TaskRow({
             <div className="muted" style={{ fontSize: 12, maxWidth: 260 }}>
               <div>
                 {task.resolution_action === "handled" ? "已处理" : "已忽略"}
-                {task.resolution_actor ? " · " + task.resolution_actor : ""}
+                {task.resolution_actor ? " · " + auditActorLabel(task.resolution_actor) : ""}
               </div>
               {task.resolution_at && <div style={{ marginTop: 3 }}>{timeLabel(task.resolution_at)}</div>}
               {task.resolution_note && <div style={{ marginTop: 3, overflowWrap: "anywhere" }}>{task.resolution_note}</div>}
@@ -207,7 +207,7 @@ export default function TaskQueue() {
       if (historyPage > nextHistoryPages) setHistoryPage(nextHistoryPages);
       setError("");
     } catch (err) {
-      setError((err as Error).message || "任务队列读取失败");
+      setError("任务队列读取失败，请稍后重试");
     } finally {
       setLoading(false);
     }
@@ -244,7 +244,7 @@ export default function TaskQueue() {
       setDetailTask(detail);
       setDetailAudit(audit.items ?? []);
     } catch (err) {
-      setDetailError((err as Error).message || "任务详情读取失败");
+      setDetailError("任务详情读取失败，请稍后重试");
     } finally {
       setDetailLoading(false);
     }
@@ -267,7 +267,7 @@ export default function TaskQueue() {
       showToast("排队任务已取消", "success");
       await refresh();
     } catch (err) {
-      showToast((err as Error).message || "取消失败", "error");
+      showToast("取消失败，请稍后重试", "error");
     } finally {
       setCancellingId(null);
     }
@@ -292,7 +292,7 @@ export default function TaskQueue() {
       setResolutionNote("");
       await refresh();
     } catch (err) {
-      showToast((err as Error).message || "任务处理失败", "error");
+      showToast("任务处理失败，请稍后重试", "error");
     } finally {
       setResolvingId(null);
     }
@@ -321,7 +321,7 @@ export default function TaskQueue() {
       setRetryConfirmed(false);
       await refresh();
     } catch (err) {
-      showToast((err as Error).message || "恢复任务创建失败", "error");
+      showToast("恢复任务创建失败，请稍后重试", "error");
     } finally {
       setRetryingId(null);
     }
@@ -366,9 +366,9 @@ export default function TaskQueue() {
       </section>
 
       <section className="panel">
-        <div className="panel-head">
-          <div><h2>最近任务</h2><div className="muted">支持按任务类型、失败状态、账号组 ID、失败原因和创建日期筛选；系统后台调度任务可单独查看。</div></div>
-          <div className="filter-row" style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <div className="panel-head task-queue-panel-head">
+          <div><h2>最近任务</h2><div className="muted">支持按任务类型、状态、账号组标识、失败原因和创建日期筛选；系统后台调度任务可单独查看。</div></div>
+          <div className="task-queue-filters">
             {drilldown && <button className="btn sm soft" type="button" onClick={() => { setDrilldown(null); setHistoryPage(1); }}>清除图表钻取</button>}
             <select aria-label="历史任务类型" value={historyType} onChange={(event) => { setHistoryType(event.target.value as "all" | "round_run" | "scheduler_job"); setHistoryPage(1); }}>
               <option value="round_run">内容生产</option><option value="scheduler_job">系统后台任务</option><option value="all">全部任务类型</option>
@@ -376,7 +376,7 @@ export default function TaskQueue() {
             <select aria-label="历史任务状态" value={historyStatus} onChange={(event) => { setHistoryStatus(event.target.value as "all" | "failed"); setHistoryPage(1); }}>
               <option value="all">全部状态</option><option value="failed">失败 / 中断待处理</option>
             </select>
-            <input aria-label="按账号组 ID 筛选" value={historyTenantId} onChange={(event) => { setHistoryTenantId(event.target.value); setHistoryPage(1); }} placeholder="账号组 ID" style={{ width: 130 }} />
+            <input aria-label="按账号组标识筛选" value={historyTenantId} onChange={(event) => { setHistoryTenantId(event.target.value); setHistoryPage(1); }} placeholder="账号组标识" style={{ width: 130 }} />
             <input aria-label="按失败原因筛选" value={historyErrorKeyword} onChange={(event) => { setHistoryErrorKeyword(event.target.value); setHistoryPage(1); }} placeholder="失败原因关键字" style={{ width: 150 }} />
             <input aria-label="历史任务开始日期" type="date" value={historyDateFrom} onChange={(event) => { setHistoryDateFrom(event.target.value); setHistoryPage(1); }} />
             <input aria-label="历史任务结束日期" type="date" value={historyDateTo} onChange={(event) => { setHistoryDateTo(event.target.value); setHistoryPage(1); }} />
@@ -411,7 +411,7 @@ export default function TaskQueue() {
           >
             <h2 id="task-retry-title">人工核验后恢复任务</h2>
             <p className="muted" style={{ marginTop: 8 }}>
-              原任务：{retryTask.task_id} · 账号组：{retryTask.tenant_name}
+              待恢复任务 · 账号组：{retryTask.tenant_name}
             </p>
             <div role="alert" style={{ margin: "14px 0", padding: 12, borderRadius: 10, border: "1px solid var(--red)", background: "var(--red-weak)", color: "var(--text)", fontSize: 13, lineHeight: 1.6 }}>
               仅当你已在对应平台核实“该操作没有执行、没有创建草稿或发布记录”时才能恢复。
@@ -464,9 +464,7 @@ export default function TaskQueue() {
             {detailLoading ? <div className="empty-state">正在读取任务详情…</div> : detailError ? <div className="notice danger" role="alert">{detailError}</div> : detailTask && (
               <>
                 <div className="grid two">
-                  <div><div className="muted">任务队列</div><strong>后台任务</strong></div>
                   <div><div className="muted">队列序号</div><strong>#{detailTask.queue_order}</strong></div>
-                  <div><div className="muted">账号组</div><strong>当前任务所属账号组</strong></div>
                   <div><div className="muted">任务类型 / 状态</div><strong>{displayTaskTypeLabel(detailTask.task_type)} · {STATUS_LABEL[detailTask.status] ?? displayStatusLabel(detailTask.status)}</strong></div>
                   <div><div className="muted">创建时间</div>{timeLabel(detailTask.created_at)}</div>
                   <div><div className="muted">开始时间</div>{timeLabel(detailTask.started_at)}</div>
@@ -480,12 +478,12 @@ export default function TaskQueue() {
                     queued={detailTask.status === "queued"}
                   />
                 )}
-                {detailTask.error_code && <div className="notice danger" style={{ marginTop: 14 }}>处理建议：{displayErrorLabel(detailTask.error_code)}</div>}
-                {detailTask.retry_of_task_id && <div className="muted" style={{ marginTop: 12 }}>该任务由一次恢复操作创建。</div>}
-                <details className="advanced-diagnostics" style={{ marginTop: 12 }}><summary>高级诊断信息</summary><div className="tiny">任务标识：{detailTask.task_id} · 账号组标识：{detailTask.tenant_id}</div>{detailTask.error_code && <div className="tiny">错误代码：{detailTask.error_code}</div>}{detailTask.error_message && <pre className="note" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{detailTask.error_message}</pre>}{detailTask.retry_of_task_id && <div className="tiny">来源任务标识：{detailTask.retry_of_task_id}</div>}</details>
+                {detailTask.error_code && <div className="notice danger" style={{ marginTop: 14 }}>错误说明：{displayErrorLabel(detailTask.error_code)} </div>}
+                {detailTask.error_message && <div className="note" style={{ marginTop: 10 }}>任务执行未完成。请核对平台状态后再决定是否恢复。</div>}
+                
                 {detailTask.retry_confirmation_note && <div className="muted" style={{ marginTop: 6 }}>恢复核验：{detailTask.retry_confirmation_note}</div>}
                 {detailTask.resolution_action && <div className="muted" style={{ marginTop: 12 }}>
-                  处理记录：{detailTask.resolution_action === "handled" ? "已处理" : "已忽略"} · {detailTask.resolution_actor || "操作人未知"} · {timeLabel(detailTask.resolution_at)}
+                  处理记录：{detailTask.resolution_action === "handled" ? "已处理" : "已忽略"} · {auditActorLabel(detailTask.resolution_actor)} · {timeLabel(detailTask.resolution_at)}
                   {detailTask.resolution_note && <div>{detailTask.resolution_note}</div>}
                 </div>}
                 <section style={{ marginTop: 16 }}>
@@ -495,7 +493,7 @@ export default function TaskQueue() {
                       <div className="task-main">
                         <strong>{displayStepLabel(entry.step)}</strong>
                         <div className="tiny">{displayStatusLabel(entry.status)}</div>
-                        {entry.detail && <div className="tiny" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{entry.detail}</div>}
+                        {entry.detail && <div className="tiny">步骤已记录；详细诊断请联系管理员。</div>}
                       </div>
                     </div>)}
                   </div> : <div className="empty-state">该任务没有步骤明细（历史任务或尚未开始执行）。</div>}
@@ -503,13 +501,13 @@ export default function TaskQueue() {
                 <section style={{ marginTop: 16 }}>
                   <h3>操作审计</h3>
                   {detailAudit.length ? <div className="list">
-                    {detailAudit.map((entry) => <div className="task-row" key={entry.id}>
+                    {detailAudit.map((entry, index) => <div className="task-row" key={index}>
                       <div className="task-main">
-                        <strong>{entry.action}</strong>
-                        <div className="tiny">{entry.actor} · {timeLabel(entry.acted_at)}</div>
+                        <strong>{auditActionLabel(entry.action)}</strong>
+                        <div className="tiny">{auditActorLabel(entry.actor)} · {timeLabel(entry.acted_at)}</div>
                         {typeof entry.details.note === "string" && <div className="tiny">{entry.details.note}</div>}
                         {typeof entry.details.confirmation_note === "string" && <div className="tiny">恢复核验：{entry.details.confirmation_note}</div>}
-                        {typeof entry.details.retry_task_id === "string" && <div className="tiny">已创建恢复任务</div>}
+                        
                       </div>
                     </div>)}
                   </div> : <div className="empty-state">暂无管理操作审计记录。</div>}
@@ -536,7 +534,7 @@ export default function TaskQueue() {
           >
             <h2 id="task-resolution-title">{resolutionAction === "handled" ? "标记任务已处理" : "忽略此任务"}</h2>
             <p className="muted" style={{ marginTop: 8 }}>
-              原任务：{resolutionTask.task_id} · 账号组：{resolutionTask.tenant_name}
+              待处理任务 · 账号组：{resolutionTask.tenant_name}
             </p>
             <div role="alert" className="notice" style={{ margin: "14px 0" }}>
               此操作只关闭待办，不会修改原始失败状态，也不会重新执行任务。处理记录会永久保留。

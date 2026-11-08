@@ -104,7 +104,7 @@ export default function Onboarding() {
       }
       setErr(null);
     } catch (e: any) {
-      setErr(e.message);
+      setErr("引导信息加载失败，请稍后重试。");
     }
   };
 
@@ -122,7 +122,7 @@ export default function Onboarding() {
     }).catch((e) => {
       if (!active) return;
       // 读取失败时不覆盖后端已有进度：保持从第一步开始，但不回写。
-      showToast(`向导进度读取失败：${e instanceof Error ? e.message : String(e)}`, "error");
+      showToast("向导进度读取失败，请稍后重试", "error");
     });
     return () => { active = false; };
   }, []);
@@ -131,7 +131,7 @@ export default function Onboarding() {
     if (!progressLoaded || lastSavedStep.current === stepIdx) return;
     lastSavedStep.current = stepIdx;
     api.saveOnboardingProgress(STEPS[stepIdx].key, stepIdx).catch((e) => {
-      showToast(`向导进度保存失败：${e instanceof Error ? e.message : String(e)}`, "error");
+      showToast("向导进度保存失败，请稍后重试", "error");
     });
   }, [progressLoaded, stepIdx]);
 
@@ -165,7 +165,7 @@ export default function Onboarding() {
       await reload();
       setGoalForm((f) => ({ ...f, goal_text: "" }));
     } catch (e: any) {
-      showToast(`创建失败: ${e?.message ?? e}`, "error");
+      showToast("创建失败，请检查填写内容后重试", "error");
     } finally {
       setGoalBusy(false);
     }
@@ -335,7 +335,7 @@ export default function Onboarding() {
               <FormRow label="目标描述 *" value={goalForm.goal_text}
                 onChange={(v) => setGoalForm({ ...goalForm, goal_text: v })}
                 placeholder="如：小红书 30 天新增 500 粉" />
-              <div className="grid three onboarding-goal-grid">
+              <div className="grid three">
                 <div>
                   <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 4 }}>平台</div>
                   <select className="field" style={{ width: "100%" }} value={goalForm.target_platform}

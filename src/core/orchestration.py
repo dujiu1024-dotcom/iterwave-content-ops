@@ -19,6 +19,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from .redact import safe_error_summary
+
 logger = logging.getLogger(__name__)
 
 STEP_DEFS: dict[str, dict] = {
@@ -218,7 +220,8 @@ def diagnose(cfg, conn, *, cb=None, live_llm: bool = False) -> dict:
     kb_check = read_all_for_check(cfg)
     kb_status = kb_check["status"]
     active_pool = list_topics(cfg, conn, status="active", limit=1)
-    kb_message = f"{kb_check['message']} · 当前可用选题 {active_pool['total']} 条"
+    kb_summary = safe_error_summary(kb_check["message"], "选题库读取失败，请检查来源配置。")
+    kb_message = f"{kb_summary} · 当前可用选题 {active_pool['total']} 条"
     items.append(_item(
         1, "选题库来源可读", kb_status, kb_message, "assets", "mapping"))
 
@@ -280,7 +283,7 @@ def diagnose(cfg, conn, *, cb=None, live_llm: bool = False) -> dict:
                 used = endpoint
                 break
             except Exception as exc:  # noqa: BLE001
-                failures.append(f"{endpoint.model}: {str(exc)[:80]}")
+                failures.append(f"{endpoint.model}: {safe_error_summary(exc, '模型服务连接或鉴权失败')}")
         if used is not None:
             extra = "（已自动切换到兜底模型）" if used.label == "fallback" else ""
             items.append(_item(4, "大模型服务检查", "pass", f"{used.model} 调用成功{extra}"))
@@ -329,7 +332,7 @@ def diagnose(cfg, conn, *, cb=None, live_llm: bool = False) -> dict:
         conn.execute("ROLLBACK")
         items.append(_item(7, "数据库可写", "pass", "可获取写锁"))
     except Exception as exc:  # noqa: BLE001
-        items.append(_item(7, "数据库可写", "block", f"写锁失败：{exc}"))
+        items.append(_item(7, "数据库可写", "block", f"写锁失败：{safe_error_summary(exc, '数据库暂时无法获取写锁')}"))
 
     # 8 Easel skills
     vendor = Path(__file__).resolve().parent.parent / "vendor" / "easel"

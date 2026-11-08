@@ -37,7 +37,7 @@ const LABELS: Record<string, string> = {
   goal_strategy: "目标策略", publish_decision: "发布决策",
   threshold: "阈值评分", weighted: "加权评分", hybrid: "混合评分",
   // 品牌视觉版本
-  draft: "草稿", current: "当前版本", superseded: "历史版本",
+  draft: "草稿", confirmed: "已确认", current: "当前版本", superseded: "历史版本",
   // 指标
   interaction_rate: "互动率", like_rate: "点赞率", collect_rate: "收藏率",
   follower_efficiency: "涨粉效率", views: "曝光量", impressions: "曝光量",
