@@ -2564,6 +2564,7 @@ def _register_routes(app: FastAPI) -> None:
             queued, created = _task_queue.enqueue(
                 task_type="round_run", tenant_id=tenant_id,
                 aggregate_id=f"activation-sample:{sample_content_id}",
+                dedupe_terminal=True,
                 payload={
                     **parameters,
                     "initiating_actor": "user:activation-promotion",
