@@ -466,7 +466,7 @@ export default function TaskQueue() {
                 <div className="grid two">
                   <div><div className="muted">任务队列</div><strong>后台任务</strong></div>
                   <div><div className="muted">队列序号</div><strong>#{detailTask.queue_order}</strong></div>
-                  <div><div className="muted">所属账号组</div><strong>{detailTask.tenant_name || "当前账号组"}</strong></div>
+                  <div><div className="muted">账号组</div><strong>当前任务所属账号组</strong></div>
                   <div><div className="muted">任务类型 / 状态</div><strong>{displayTaskTypeLabel(detailTask.task_type)} · {STATUS_LABEL[detailTask.status] ?? displayStatusLabel(detailTask.status)}</strong></div>
                   <div><div className="muted">创建时间</div>{timeLabel(detailTask.created_at)}</div>
                   <div><div className="muted">开始时间</div>{timeLabel(detailTask.started_at)}</div>
