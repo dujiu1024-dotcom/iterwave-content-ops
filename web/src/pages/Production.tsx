@@ -933,7 +933,7 @@ export default function Production() {
                   )}
                   <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                     {allocRows.map((row, i) => (
-                      <div key={i} style={{ display: "flex", gap: 6 }}>
+                      <div key={i} className="production-allocation-row">
                         <input
                           value={row.dim} placeholder="维度名" style={{ flex: 1 }}
                           onChange={(e) => setAllocRows((prev) => prev.map((r, j) => j === i ? { ...r, dim: e.target.value } : r))}
@@ -1740,7 +1740,7 @@ export default function Production() {
                 <div className="panel-sub">历史生产轮次 · 支持按执行状态筛选</div>
               </div>
             </div>
-            <div className="toolbar" style={{ marginBottom: 10, flexWrap: "wrap" }}>
+            <div className="toolbar filter-row" style={{ marginBottom: 10, flexWrap: "wrap" }}>
               <label className="tiny" htmlFor="round-status-filter">轮次状态</label>
               <select id="round-status-filter" className="field" value={roundStatusFilter} onChange={(e) => { setRoundStatusFilter(e.target.value); setRoundsPage(1); setCurrentRoundId(null); setRoundDetail(null); }} style={{ maxWidth: 180 }}>
                 <option value="">全部状态</option>
