@@ -73,14 +73,14 @@ export default function ContentProductionLinePanel() {
       <div className="toolbar" style={{ marginBottom: 12 }}>
         <label className="tiny" htmlFor="content-production-line-select">生产任务</label>
         <select id="content-production-line-select" className="field" value={selectedId} onChange={(event) => setSelectedId(event.target.value)} style={{ maxWidth: 420 }}>
-          {items.map((item) => <option key={item.id} value={item.id}>{LINE_STATUS[item.status] ?? displayStatusLabel(item.status)} · {displayPlatformLabel(item.platform)} · {item.production_task_id.slice(0, 14)}</option>)}
+          {items.map((item, index) => <option key={item.id} value={item.id}>{LINE_STATUS[item.status] ?? displayStatusLabel(item.status)} · {displayPlatformLabel(item.platform)} · 任务 {index + 1}</option>)}
         </select>
       </div>
       {selected && <>
         <div className="panel" style={{ padding: 12, marginBottom: 12 }}>
           <div className="panel-head">
             <div><div className="panel-title">{LINE_STATUS[selected.status] ?? displayStatusLabel(selected.status)}</div>
-              <div className="panel-sub">{displayPlatformLabel(selected.platform)} · 任务 {selected.production_task_id} · 轮次 #{selected.round_id}</div></div>
+              <div className="panel-sub">{displayPlatformLabel(selected.platform)} · 生产任务详情</div></div>
             <span className={"tag " + (selected.status === "failed" ? "red" : ACTIVE.has(selected.status) ? "orange" : "green")}>{LINE_STATUS[selected.status] ?? selected.status}</span>
           </div>
           <div className="grid four" style={{ gap: 8 }}>
@@ -90,18 +90,18 @@ export default function ContentProductionLinePanel() {
             <div className="kpi-card"><div className="metric-label">资源缺口</div><div className="metric-val">{context?.resource_gaps?.length ?? "—"}</div></div>
           </div>
           {selected.content_id && <div className="task-row" style={{ marginTop: 10 }}>
-            <div className="task-main"><div className="task-title">内容成品 {selected.content_id}</div></div>
+            <div className="task-main"><div className="task-title">内容成品</div><details className="tiny"><summary>技术引用</summary><code>{selected.content_id}</code></details></div>
             <button className="btn sm" onClick={() => navigate("production", "pipeline", { type: "content", id: selected.content_id! })}>查看成品</button>
           </div>}
           {selected.task_status === "failed" && <>
-            <div className="note" role="alert" style={{ marginTop: 10 }}>{displayErrorLabel(selected.error_code ?? undefined)}（{selected.error_code || "未知错误"}）：{selected.error_message || "未提供错误信息"}</div>
+            <div className="note" role="alert" style={{ marginTop: 10 }}>{displayErrorLabel(selected.error_code ?? undefined)}：{selected.error_message || "未提供错误信息"}{selected.error_code && <details className="tiny"><summary>错误代码</summary><code>{selected.error_code}</code></details>}</div>
             <button className="btn primary" style={{ marginTop: 8 }} disabled={busy} onClick={() => void recover()}>{busy ? "提交中…" : "确认无外部副作用并恢复任务"}</button>
           </>}
         </div>
         <div className="panel" style={{ padding: 12, marginBottom: 12 }}>
           <div className="panel-title">生产决策与经营上下文快照</div>
           {!selected.context_snapshot ? <div className="note">快照尚未生成。该任务不可领取执行，需检查生产上下文组装错误。</div> : <>
-            <div className="tiny" style={{ marginTop: 6 }}>快照 {selected.context_snapshot.id} · {dateLabel(selected.context_snapshot.captured_at)} · 状态 {selected.context_snapshot.context_status === "complete" ? "完整" : selected.context_snapshot.context_status === "waived" ? "人工豁免" : "历史不完整"}</div>
+            <div className="tiny" style={{ marginTop: 6 }}>{dateLabel(selected.context_snapshot.captured_at)} · 状态 {selected.context_snapshot.context_status === "complete" ? "完整" : selected.context_snapshot.context_status === "waived" ? "人工豁免" : "历史不完整"} <details><summary>快照技术引用</summary><code>{selected.context_snapshot.id}</code></details></div>
             {selected.context_snapshot.context_status === "legacy_incomplete" && <div className="note" role="alert">这是迁移前历史任务的输入快照，不代表已具备完整经营上下文；不会被当作新任务的生产依据。</div>}
             <div className="grid two" style={{ gap: 8, marginTop: 10 }}>
               <div className="kpi-card"><div className="metric-label">北极星目标</div><div className="metric-val" style={{ fontSize: 13 }}>{context?.north_star?.goal_text ?? "缺失/已豁免"}</div></div>
