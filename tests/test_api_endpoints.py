@@ -5550,7 +5550,7 @@ def test_global_task_queue_list_sanitizes_task_errors_and_keeps_list_working(cli
     item = next(row for row in response.json()["items"] if row["task_id"] == task.task_id)
     assert item["error_code"] == "任务异常"
     assert item["error_message"] == "任务执行失败，请进入任务详情核对。"
-    assert item["progress"]["detail"] == "任务正在执行。"
+    assert item["progress"]["detail"] == "步骤已记录；详细诊断请联系管理员。"
     assert item["progress"]["steps"][0]["detail"] == "步骤已记录；详细诊断请联系管理员。"
     assert "/home/ubuntu" not in response.text
     assert "sqlite3.OperationalError" not in response.text
