@@ -142,6 +142,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: responsive-viewport-screenshots
-          path: test-results/responsive/\n            test-results/structured-diagnostics/
+          path: |
+            test-results/responsive/
+            test-results/structured-diagnostics/
           if-no-files-found: warn
           retention-days: 7
