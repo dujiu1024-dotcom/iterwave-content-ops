@@ -1219,7 +1219,12 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 }
 
 
-/* Global task queue filters: align compact controls into a predictable responsive grid. */
+/* Global task queue filters: give the grid the full panel width before packing controls. */
+.panel-head:has(.task-queue-filters) {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+}
 .task-queue-filters {
   display: grid;
   grid-template-columns: minmax(120px, 1fr) minmax(120px, 1fr) minmax(110px, .8fr) minmax(150px, 1.2fr) minmax(140px, 1fr) minmax(140px, 1fr) auto auto;
