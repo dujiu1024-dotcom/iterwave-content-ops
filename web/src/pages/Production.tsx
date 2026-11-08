@@ -1754,7 +1754,7 @@ export default function Production() {
             <div className="panel-head">
               <div>
                 <div className="panel-title"><span className="icon">≡</span>轮次列表</div>
-                <div className="panel-sub">历史生产轮次 · 支持按执行状态筛选</div>
+                <div className="panel-sub">历史生产轮次 · 当前支持按执行状态筛选</div>
               </div>
             </div>
             <div className="toolbar" style={{ marginBottom: 10, flexWrap: "wrap" }}>
@@ -1763,7 +1763,7 @@ export default function Production() {
                 <option value="">全部状态</option>
                 {Object.entries(ROUND_STATUS_LABEL).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
-              <select className="field" aria-label="按平台筛选轮次" disabled title="等待轮次平台关联 API"><option>全部平台（待接 API）</option></select><select className="field" aria-label="按主计划筛选轮次" disabled title="等待主计划关联 API"><option>全部主计划（待接 API）</option></select><select className="field" aria-label="按阶段筛选轮次" disabled title="等待阶段关联 API"><option>全部阶段（待接 API）</option></select>
+
             </div>
             <div className="list">
               {rounds.length === 0 && (
