@@ -187,3 +187,38 @@
     box-sizing: border-box;
   }
 }
+
+/* PC density pass: keep sidebar labels and count badges on a single line. */
+@media (min-width: 761px) and (max-width: 1250px) {
+  .nav .label {
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .nav .count {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    padding-inline: 5px;
+    font-size: 9px;
+  }
+}
+
+/* Keep transient feedback away from the sticky topbar and page-level controls. */
+.toast-area {
+  top: auto;
+  bottom: 20px;
+}
+@media (max-width: 760px) {
+  .toast-area {
+    right: 12px;
+    bottom: 14px;
+    left: 12px;
+    max-width: none;
+  }
+  .toast {
+    width: 100%;
+    max-width: none;
+    box-sizing: border-box;
+  }
+}
