@@ -44,6 +44,23 @@ def test_activation_snapshot_rejects_identity_version_and_content_changes():
             verify_activation_sample_snapshot(changed, frozen)
 
 
+def test_activation_snapshot_accepts_sqlite_row_mapping():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE sample (id TEXT, tenant_id TEXT, platform TEXT, content_version INTEGER, "
+        "title TEXT, body TEXT, hashtags_json TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO sample VALUES ('sample-db','tenant-db','xhs',1,'标题','正文','[]')"
+    )
+    row = conn.execute("SELECT * FROM sample").fetchone()
+    frozen = build_activation_sample_snapshot(row)
+    assert frozen["sample_content_id"] == "sample-db"
+    assert frozen["content_version"] == 1
+    conn.close()
+
+
 def test_activation_snapshot_rejects_malformed_copy_fields():
     with pytest.raises(ActivationSampleSnapshotError):
         build_activation_sample_snapshot(sample(title="  "))
