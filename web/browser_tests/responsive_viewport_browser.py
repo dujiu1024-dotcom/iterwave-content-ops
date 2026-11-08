@@ -78,6 +78,12 @@ def _install_api_fixtures(page):
                 content_type="application/json",
                 body='{"runtime_tenant_id":"default","selected_tenant_id":"default","restart_required":false,"items":[{"id":"default","name":"Viewport test","created_at":null,"is_active":true}]}',
             )
+        if path.endswith("/api/drafts"):
+            return route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"items":[{"id":"viewport-draft-1","platform":"xhs","title":"发布确认控件布局测试","status":"draft_pending","guard_confirmation_allowed":false,"guard_outcome":"needs_review","guard_reason":"测试数据：需要人工复核","review_rejected":false,"platform_content_sync":"matched"}],"total":1,"page":1,"pages":1,"page_size":100}',
+            )
         # Fail closed for business APIs. Each page should render its normal
         # empty/error state rather than treating an invented success payload as real data.
         return route.fulfill(
@@ -240,6 +246,47 @@ def test_all_routable_pages_at_required_viewports():
                             full_page=True,
                             animations="disabled",
                         )
+
+                # Exercise the actual Operations > Publish confirmation pane.
+                # A deterministic pending draft makes the narrow verification inputs visible.
+                page_errors.clear()
+                page.goto(
+                    f"http://127.0.0.1:{port}/?page=operations",
+                    wait_until="domcontentloaded",
+                )
+                page.locator("#main-content").wait_for(state="visible", timeout=10000)
+                page.get_by_role("button", name="发布确认").click()
+                page.get_by_text("发布确认双通道").wait_for(state="visible", timeout=10000)
+                page.locator(".ops-task-verification-actions").wait_for(state="visible", timeout=10000)
+                verification_inputs = page.locator(".ops-task-verification-actions .ops-verification-input")
+                if verification_inputs.count() < 1:
+                    failures.append(f"operations-publish@{width}: verification inputs are missing")
+                publish_layout = page.evaluate(
+                    """() => ({
+                      documentWidth: document.documentElement.scrollWidth,
+                      bodyWidth: document.body.scrollWidth,
+                      controls: [...document.querySelectorAll('.ops-task-verification-actions input')]
+                        .map(element => {
+                          const rect = element.getBoundingClientRect();
+                          return {left: Math.round(rect.left), right: Math.round(rect.right),
+                            width: Math.round(rect.width)};
+                        })
+                    })"""
+                )
+                if publish_layout["documentWidth"] > width + 1 or publish_layout["bodyWidth"] > width + 1:
+                    failures.append(
+                        f"operations-publish@{width}: horizontal overflow "
+                        f"(document={publish_layout['documentWidth']}, body={publish_layout['bodyWidth']})"
+                    )
+                if any(item["left"] < -1 or item["right"] > width + 1 for item in publish_layout["controls"]):
+                    failures.append(f"operations-publish@{width}: verification input outside viewport: {publish_layout['controls']}")
+                if page_errors:
+                    failures.append(f"operations-publish@{width}: browser page errors: {page_errors[:3]}")
+                page.screenshot(
+                    path=str(ARTIFACTS / f"operations-publish-{width}.png"),
+                    full_page=True,
+                    animations="disabled",
+                )
 
                 page.close()
             browser.close()

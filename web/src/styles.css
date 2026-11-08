@@ -1529,3 +1529,37 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
   .calendar-toolbar select.field { width: 150px; max-width: 150px !important; }
   .calendar-toolbar .calendar-plan-check { white-space: nowrap; }
 }
+
+/* Operations publish verification: inputs yield to available card width and wrap predictably. */
+.ops-task-verification-actions { min-width: 0; max-width: 100%; }
+.ops-task-verification-actions .ops-verification-input {
+  box-sizing: border-box;
+  flex: 1 1 220px;
+  width: auto;
+  min-width: min(100%, 220px);
+  max-width: 280px;
+  min-height: 34px;
+  font-size: 12px;
+}
+.ops-task-verification-actions .ops-verification-url { flex-basis: 200px; }
+/* Keep verification copy readable when the task card becomes narrower than its actions. */
+@media (max-width: 950px) {
+  .ops-task-verification-row { flex-wrap: wrap; }
+  .ops-task-verification-row > .task-main { flex: 1 1 calc(100% - 17px); }
+  .ops-task-verification-row > .ops-task-verification-actions {
+    flex: 1 1 calc(100% - 17px);
+    width: calc(100% - 17px);
+    margin-left: 17px;
+    justify-content: flex-start !important;
+  }
+}
+@media (max-width: 760px) {
+  .ops-task-verification-actions { justify-content: stretch !important; }
+  .ops-task-verification-actions .ops-verification-input {
+    flex: 1 1 100%;
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+  }
+  .ops-task-verification-actions > .btn { flex: 0 0 auto; }
+}
