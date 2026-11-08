@@ -1946,7 +1946,7 @@ def _register_routes(app: FastAPI) -> None:
             "current_step": str(current_step)[:80] if current_step else None,
             "current_label": safe_error_summary(value.get("current_label"), "正在处理")[:120],
             "detail": safe_error_summary(
-                value.get("detail"), "任务正在执行。",
+                value.get("detail"), "步骤已记录；详细诊断请联系管理员。",
             )[:200] if value.get("detail") else "",
             "percent": percent,
             "updated_at": value.get("updated_at"),
