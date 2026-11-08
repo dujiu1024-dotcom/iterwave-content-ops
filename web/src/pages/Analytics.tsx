@@ -377,7 +377,7 @@ export default function Analytics() {
             {!!weeklyReport.data_conflicts?.length && <div className="note" style={{ marginTop: 12 }}>
               <strong>数据来源冲突（保留原始记录）</strong>
               {weeklyReport.data_conflicts.map((conflict) => <div className="panel-sub" key={conflict.content_id}>
-                {PLATFORM_NAME[conflict.platform]} · 内容 {conflict.content_id.slice(0, 8)} · 指标：{conflict.metrics.join("、")}
+                {PLATFORM_NAME[conflict.platform]} · 内容记录存在指标冲突 · 指标：{conflict.metrics.join("、")}
               </div>)}
             </div>}
             <h3 style={{ marginTop: 14 }}>可能原因</h3>
@@ -386,8 +386,7 @@ export default function Analytics() {
               <details>
                 <summary className="form-label" style={{ cursor: "pointer" }}>查看证据与适用范围</summary>
                 <div className="panel-sub">平台：{item.platform ? PLATFORM_NAME[item.platform] : "全部"} · 时间范围：{item.time_window ? item.time_window.start + " 至 " + item.time_window.end : "未指定"} · 数据来源：{weeklyReport.data_sources.join("、") || "暂无"}</div>
-                <div className="panel-sub">证据内容 ID：{item.evidence_content_ids?.join("、") || "无"}</div>
-                <div className="panel-sub">指标快照 ID：{item.metric_snapshot_ids?.join("、") || "无"}</div>
+                <details><summary className="form-label" style={{ cursor: "pointer" }}>技术引用标识</summary><div className="panel-sub">证据记录：{item.evidence_content_ids?.join("、") || "无"}</div><div className="panel-sub">指标快照：{item.metric_snapshot_ids?.join("、") || "无"}</div></details>
               </details>
             </div>)}
             <h3 style={{ marginTop: 14 }}>下一轮建议</h3>
@@ -396,8 +395,7 @@ export default function Analytics() {
               <div className="task-desc">依据：{zhSentence(item.basis)} · 验证：{zhSentence(item.verification)}</div>
               <details><summary className="form-label" style={{ cursor: "pointer" }}>查看建议证据</summary>
                 <div className="panel-sub">平台：{item.platform ? PLATFORM_NAME[item.platform] : "全部"} · 样本：{item.sample_size} · 时间范围：{item.time_window ? item.time_window.start + " 至 " + item.time_window.end : "未指定"}</div>
-                <div className="panel-sub">证据内容 ID：{item.evidence_content_ids?.join("、") || "无"}</div>
-                <div className="panel-sub">指标快照 ID：{item.metric_snapshot_ids?.join("、") || "无"}</div>
+                <details><summary className="form-label" style={{ cursor: "pointer" }}>技术引用标识</summary><div className="panel-sub">证据记录：{item.evidence_content_ids?.join("、") || "无"}</div><div className="panel-sub">指标快照：{item.metric_snapshot_ids?.join("、") || "无"}</div></details>
               </details>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10, alignItems: "center" }}>
                 <span className="tag">{item.decision === "adopted" ? "已采纳" : item.decision === "ignored" ? "已忽略" : "待处理"}</span>
