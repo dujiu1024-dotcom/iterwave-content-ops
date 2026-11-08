@@ -131,7 +131,7 @@ export default function PersonaMatrix({ onSaved }: { onSaved?: () => void }) {
   return (
     <div>
       <div className="form-label">目标模式</div>
-      <div className="grid three" style={{ gap: 10, marginBottom: 16 }}>
+      <div className="grid three persona-compact-grid" style={{ gap: 10, marginBottom: 16 }}>
         {(Object.keys(GOAL_MODE_META) as GoalMode[]).map((m) => (
           <button key={m} type="button" className={`mode-card ${draft.mode === m ? "active" : ""}`}
             onClick={() => setDraft({ ...draft, mode: m })}>
