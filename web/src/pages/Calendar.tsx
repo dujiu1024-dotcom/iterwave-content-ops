@@ -339,7 +339,7 @@ export default function Calendar() {
                     </button>
                     {loading && <div className="loading" style={{ marginTop: 6, fontSize: 11, color: "var(--muted)" }}><div className="spinner" />加载中...</div>}
                     {d.batches.slice(0, 2).map((batch) => (
-                      <button type="button" key={batch.round_id} className="calendar-plan-chip" title={`第 ${batch.round_number ?? batch.round_id} 轮 · ${batch.task_count} 个生产任务`} onClick={() => void openBatchDetails(batch.round_id)}>
+                      <button type="button" key={batch.round_id} className="calendar-plan-chip" title={batch.round_number != null ? `第 ${batch.round_number} 轮 · ${batch.task_count} 个生产任务` : `历史轮次 · ${batch.task_count} 个生产任务`} onClick={() => void openBatchDetails(batch.round_id)}>
                         <strong>生产批次</strong><span>{batch.sub_plan_title ?? "历史轮次"} · {batch.strategy_step_title ?? "策略步骤待核实"}</span>
                       </button>
                     ))}
@@ -389,7 +389,7 @@ export default function Calendar() {
                 {d.batches.map((batch) => (
                   <div className="calendar-agenda-plan" key={batch.round_id}>
                     <button className="calendar-plan-label" onClick={() => void openBatchDetails(batch.round_id)}>生产任务</button>
-                    <span className="calendar-agenda-copy"><strong>{batch.sub_plan_title ?? `第 ${batch.round_number ?? batch.round_id} 轮`}</strong><small>{batch.platform ? platformMeta(batch.platform).label : "平台待核实"} · {batch.strategy_step_title ?? "策略步骤待核实"} · {batch.task_count} 个任务 · {displayStatusLabel(batch.round_status)}</small></span>
+                    <span className="calendar-agenda-copy"><strong>{batch.sub_plan_title ?? (batch.round_number != null ? `第 ${batch.round_number} 轮` : "历史轮次")}</strong><small>{batch.platform ? platformMeta(batch.platform).label : "平台待核实"} · {batch.strategy_step_title ?? "策略步骤待核实"} · {batch.task_count} 个任务 · {displayStatusLabel(batch.round_status)}</small></span>
                   </div>
                 ))}
                 {d.plans.map((plan) => (
@@ -481,7 +481,7 @@ export default function Calendar() {
                 </div>) : <div className="note">尚未关联生产轮次</div>}
               </div>
               <div><strong>关联草稿（{planDetail.drafts.length}）</strong>
-                {planDetail.drafts.length ? planDetail.drafts.map((draft) => <div className="calendar-plan-detail-row" key={draft.draft_id}>{draft.title || draft.draft_id} · {platformMeta(draft.platform).label} · {draft.status}</div>) : <div className="note">生产完成后自动回写草稿</div>}
+                {planDetail.drafts.length ? planDetail.drafts.map((draft) => <div className="calendar-plan-detail-row" key={draft.draft_id}>{/* Internal draft IDs stay out of business-facing fallback text. */}{draft.title || "未命名草稿"} · {platformMeta(draft.platform).label} · {draft.status}</div>) : <div className="note">生产完成后自动回写草稿</div>}
               </div>
             </div>
             {planDetailLoading && <div className="loading"><div className="spinner" />刷新中…</div>}
@@ -496,14 +496,14 @@ export default function Calendar() {
           <section className="panel" onClick={(e) => e.stopPropagation()}>
             <div className="panel-head">
               <div>
-                <div className="panel-title">生产批次 · 第 {batchDetail.batch.round_number ?? batchDetail.batch.round_id} 轮</div>
+                <div className="panel-title">生产批次 · {batchDetail.batch.round_number != null ? `第 ${batchDetail.batch.round_number} 轮` : "历史轮次"}</div>
                 <div className="panel-sub">{batchDetail.batch.sub_plan_title ?? "历史轮次"} · {batchDetail.batch.platform ? platformMeta(batchDetail.batch.platform).label : "平台待核实"} · {displayStatusLabel(batchDetail.batch.round_status)}</div>
               </div>
               <button className="btn sm" onClick={() => setBatchDetail(null)}>关闭</button>
             </div>
             <div className="note">
-              母计划版本：{batchDetail.batch.master_plan_version_id ?? "待核实"} ·
-              子计划版本：{batchDetail.batch.sub_plan_version_id ?? "待核实"} ·
+              母计划版本：{batchDetail.batch.master_plan_version_id != null ? "已关联" : "待核实"} ·
+              子计划版本：{batchDetail.batch.sub_plan_version_id != null ? "已关联" : "待核实"} ·
               策略步骤：{batchDetail.batch.strategy_step_title ?? "待核实"} ·
               归属：{batchDetail.batch.attribution_status === "attributed" ? "完整" : "待核实"}
             </div>
