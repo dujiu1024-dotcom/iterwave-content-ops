@@ -170,6 +170,15 @@ def test_all_routable_pages_at_required_viewports():
                             f"{route}@{width}: horizontal document overflow "
                             f"(document={result['documentWidth']}, body={result['bodyWidth']})"
                         )
+                    if route == "plan-center" and width <= 760:
+                        hierarchy = page.locator(".plan-hierarchy")
+                        hint = page.locator(".plan-hierarchy-hint")
+                        if hierarchy.count() != 1 or hierarchy.get_attribute("aria-label") is None:
+                            failures.append(f"{route}@{width}: plan hierarchy is not exposed as an accessible scroll region")
+                        if hint.count() != 1 or not hint.is_visible():
+                            failures.append(f"{route}@{width}: mobile plan hierarchy scroll hint is not visible")
+                        elif "左右滑动" not in (hint.inner_text() or ""):
+                            failures.append(f"{route}@{width}: mobile plan hierarchy scroll hint is unclear")
                     if width <= 760 and result["topbarHeight"] and result["topbarHeight"] > 80:
                         failures.append(
                             f"{route}@{width}: mobile topbar is too tall "
