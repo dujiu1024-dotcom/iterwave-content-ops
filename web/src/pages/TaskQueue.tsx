@@ -138,7 +138,8 @@ function TaskRow({
 
 export default function TaskQueue() {
   const { showToast } = useApp();
-  const [activeItems, setActiveItems] = useState<GlobalTaskQueueItem[]>([]);\n  const [tenantOptions, setTenantOptions] = useState<TenantItem[]>([]);
+  const [activeItems, setActiveItems] = useState<GlobalTaskQueueItem[]>([]);
+  const [tenantOptions, setTenantOptions] = useState<TenantItem[]>([]);
   const [activeTotal, setActiveTotal] = useState(0);
   const [activePages, setActivePages] = useState(1);
   const [activePage, setActivePage] = useState(1);
@@ -153,7 +154,11 @@ export default function TaskQueue() {
   const [historyErrorKeyword, setHistoryErrorKeyword] = useState("");
   const [historyDateFrom, setHistoryDateFrom] = useState("");
   const [historyDateTo, setHistoryDateTo] = useState("");
-  useEffect(() => {\n    api.tenants().then((result) => setTenantOptions(result.items ?? [])).catch(() => {});\n  }, []);\n\n  const activePageSize = 20;
+  useEffect(() => {
+    api.tenants().then((result) => setTenantOptions(result.items ?? [])).catch(() => {});
+  }, []);
+
+  const activePageSize = 20;
   const historyPageSize = 20;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
