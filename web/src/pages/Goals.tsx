@@ -419,7 +419,7 @@ export default function Goals() {
           </div>
           <div className="head-actions"><button className="btn sm" onClick={() => setCreating(false)}>收起</button></div>
         </div>
-        <div className="grid four" style={{ gap: 10 }}>
+        <div className="grid four goal-form-grid" style={{ gap: 10 }}>
           <div>
             <label className="form-label">目标描述 *</label>
             <textarea className="field" rows={2} placeholder="如：小红书涨粉 500；可按回车分行补充目标说明"
