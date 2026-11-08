@@ -94,6 +94,45 @@ def _install_api_fixtures(page):
                     "unscheduled_page_size": 50,
                 }),
             )
+        if path.endswith("/api/production-batches/987654321"):
+            return route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({
+                    "batch": {
+                        "round_id": 987654321, "round_number": None,
+                        "round_status": "completed", "created_at": "2026-11-08T10:00:00+08:00",
+                        "master_plan_version_id": 99001, "sub_plan_id": "internal-sub-plan-id",
+                        "sub_plan_title": None, "platform": "xhs",
+                        "sub_plan_version_id": 99002,
+                        "strategy_step_id": "internal-strategy-step-id",
+                        "strategy_step_title": "内容策略阶段",
+                        "production_line_version_id": 99003,
+                        "attribution_status": "manual_review",
+                    },
+                    "tasks": [],
+                }),
+            )
+        if path.endswith("/api/production-batches"):
+            params = parse_qs(urlparse(route.request.url).query)
+            start_date = params.get("start_date", ["2026-11-08"])[0]
+            batch = {
+                "round_id": 987654321, "round_number": None,
+                "round_status": "completed", "created_at": f"{start_date}T10:00:00+08:00",
+                "master_plan_version_id": 99001, "sub_plan_id": "internal-sub-plan-id",
+                "sub_plan_title": None, "platform": "xhs",
+                "sub_plan_version_id": 99002,
+                "strategy_step_id": "internal-strategy-step-id",
+                "strategy_step_title": "内容策略阶段",
+                "production_line_version_id": 99003,
+                "attribution_status": "manual_review",
+                "task_count": 0, "pending_task_count": 0, "running_task_count": 0,
+                "succeeded_task_count": 0, "failed_task_count": 0, "cancelled_task_count": 0,
+            }
+            return route.fulfill(
+                status=200, content_type="application/json",
+                body=json.dumps({"items": [batch], "total": 1}),
+            )
         if path.endswith("/api/content-plans/viewport-plan-1"):
             return route.fulfill(
                 status=200,
@@ -112,7 +151,14 @@ def _install_api_fixtures(page):
                         "platform": "xhs", "status": "draft_pending",
                         "title": "", "round_id": None, "round_number": None,
                     }],
-                    "rounds": [],
+                    "rounds": [{
+                        "round_id": 987654321, "round_number": None,
+                        "task_id": "internal-task-id-should-not-show",
+                        "created_at": "2026-11-08T10:00:00+08:00",
+                        "strategy_step_id": "internal-strategy-step-id",
+                        "production_line_version_id": 99003,
+                        "attribution_status": "manual_review",
+                    }],
                 }),
             )
         if path.endswith("/api/content-plans"):
@@ -322,6 +368,8 @@ def test_all_routable_pages_at_required_viewports():
                                 failures.append(f"calendar@{width}: missing-title draft fallback is not business-readable")
                             if "internal-draft-id-should-not-show" in dialog_text:
                                 failures.append(f"calendar@{width}: internal draft ID leaked into visible plan details")
+                            if "987654321" in dialog_text or "internal-task-id-should-not-show" in dialog_text:
+                                failures.append(f"calendar@{width}: internal round/task ID leaked into plan details")
                             modal_layout = dialog.evaluate(
                                 """element => {
                                   const rect = element.getBoundingClientRect();
@@ -336,6 +384,38 @@ def test_all_routable_pages_at_required_viewports():
                                 failures.append(f"calendar@{width}: plan detail modal has unexpected horizontal overflow: {modal_layout}")
                             page.screenshot(
                                 path=str(ARTIFACTS / f"calendar-plan-detail-{width}.png"),
+                                full_page=False,
+                                animations="disabled",
+                            )
+                            dialog.get_by_role("button", name="关闭").click()
+                            batch_chip = page.locator(".calendar-plan-chip").filter(has_text="生产批次")
+                            batch_chip.wait_for(state="visible", timeout=10000)
+                            batch_chip.click()
+                            batch_dialog = page.get_by_role("dialog", name="生产批次详情")
+                            batch_dialog.wait_for(state="visible", timeout=10000)
+                            batch_text = batch_dialog.inner_text()
+                            internal_ids = (
+                                "987654321", "99001", "99002", "99003",
+                                "internal-sub-plan-id", "internal-strategy-step-id",
+                            )
+                            for internal_id in internal_ids:
+                                if internal_id in batch_text:
+                                    failures.append(f"calendar@{width}: internal batch/version ID leaked: {internal_id}")
+                            if batch_text.count("已关联") < 2:
+                                failures.append(f"calendar@{width}: batch detail does not show business-readable plan associations")
+                            batch_dialog_layout = batch_dialog.evaluate(
+                                """element => {
+                                  const rect = element.getBoundingClientRect();
+                                  return {left: Math.round(rect.left), right: Math.round(rect.right),
+                                    scrollWidth: element.scrollWidth, clientWidth: element.clientWidth};
+                                }"""
+                            )
+                            if batch_dialog_layout["left"] < -1 or batch_dialog_layout["right"] > width + 1:
+                                failures.append(f"calendar@{width}: batch detail modal exceeds viewport: {batch_dialog_layout}")
+                            if batch_dialog_layout["scrollWidth"] > batch_dialog_layout["clientWidth"] + 1:
+                                failures.append(f"calendar@{width}: batch detail modal has unexpected horizontal overflow: {batch_dialog_layout}")
+                            page.screenshot(
+                                path=str(ARTIFACTS / f"calendar-batch-detail-{width}.png"),
                                 full_page=False,
                                 animations="disabled",
                             )
