@@ -1169,3 +1169,41 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
     flex: 0 0 auto;
   }
 }
+
+
+/* Mobile topbar density: keep page identity and primary global actions on one row. */
+@media (max-width: 760px) {
+  .topbar {
+    flex-wrap: nowrap;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 10px;
+  }
+  .crumb {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .top-actions {
+    flex: 0 0 auto;
+    width: auto;
+    flex-wrap: nowrap;
+    gap: 6px;
+  }
+  /* The onboarding destination remains available in the workspace menu. */
+  .top-actions > .btn.soft {
+    display: none;
+  }
+  .account-menu-trigger {
+    width: 36px;
+    min-width: 36px;
+    justify-content: center;
+    padding: 3px;
+  }
+  .account-menu-name,
+  .account-menu-chevron {
+    display: none;
+  }
+}
