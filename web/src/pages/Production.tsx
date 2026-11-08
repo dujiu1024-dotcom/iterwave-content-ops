@@ -800,8 +800,9 @@ export default function Production() {
           {orphanDrafts.map((draft) => (
             <div key={draft.id} className="task-row" style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
               <div>
-                <div style={{ fontWeight: 600 }}>{displayPlatformLabel(draft.platform)} · {draft.id}</div>
-                <div className="tiny">来源内容：{draft.content_id} · 草稿状态：{displayStatusLabel(draft.status)} · 创建：{draft.created_at || "未知"}</div>
+                <div style={{ fontWeight: 600 }}>{displayPlatformLabel(draft.platform)} · 待人工核实草稿</div>
+                <div className="tiny">草稿状态：{displayStatusLabel(draft.status)} · 创建：{draft.created_at || "未知"}</div>
+                <details className="advanced-diagnostics"><summary>查看技术记录标识</summary><div className="tiny">草稿记录：{draft.id} · 来源内容记录：{draft.content_id}</div></details>
                 <div className="tiny">处置建议：{({
                   manual_verification_required: "先人工核实平台是否已保存",
                   platform_state_must_be_preserved: "保留平台状态，不得自动清理",
@@ -1839,7 +1840,7 @@ export default function Production() {
                   <div className="panel-title" style={{ fontSize: 13, marginBottom: 10 }}>✎ 单篇草稿（{roundDetail.drafts?.length || 0}）</div>
                   <div className="table-wrap">
                     <table>
-                      <thead><tr><th>草稿 ID</th><th>平台</th><th>状态</th><th>操作</th></tr></thead>
+                      <thead><tr><th>草稿记录</th><th>平台</th><th>状态</th><th>操作</th></tr></thead>
                       <tbody>
                         {roundDetail.drafts?.length === 0 && (
                           <tr><td colSpan={4}>
@@ -1848,7 +1849,7 @@ export default function Production() {
                         )}
                         {roundDetail.drafts?.map((d) => (
                           <tr key={d.id}>
-                            <td style={{ fontFamily: "monospace", fontSize: 11 }}>{d.id.slice(0, 16)}...</td>
+                            <td><details className="advanced-diagnostics"><summary>查看技术标识</summary><code>{d.id}</code></details></td>
                             <td>{PLATFORM_NAME[d.platform] ?? displayPlatformLabel(d.platform)}</td>
                             <td><span className={`tag ${STATUS_CLS[d.status] || "gray"}`}>{displayStatusLabel(d.status)}</span></td>
                             <td>

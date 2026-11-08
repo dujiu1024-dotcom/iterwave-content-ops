@@ -153,7 +153,7 @@ function PreviewPane({ orch, runs, onEdit }: {
         const st = run?.step_status?.[s.id];
         return (
           <div className="note" style={{ marginTop: 12, padding: 14, background: "var(--surface-2)", borderRadius: 10 }}>
-            <div style={{ fontWeight: 700, marginBottom: 6 }}>{s.label} <code style={{ fontSize: 11, color: "var(--muted)" }}>skill: {s.skill}</code></div>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>{s.label}</div>
             <div style={{ marginBottom: 6 }}>{s.desc}</div>
             <div className="kv-grid">
               <span>依赖</span><span>{s.requires.length ? s.requires.map(labelOf).join("、") : "无"}</span>
@@ -587,7 +587,7 @@ function SkillsPane() {
               <thead><tr><th>Skill</th><th>版本</th><th>分类</th><th>权限</th><th>安装</th><th>启用</th><th>可运行</th><th>操作</th></tr></thead>
               <tbody>{customSkills.map((skill) => (
                 <tr key={skill.skill_id}>
-                  <td><strong>{skill.name}</strong><div className="tiny">{skill.skill_id}</div><div className="tiny">{skill.description}</div><details className="skill-manifest-preview"><summary>预览 Manifest</summary><pre>{JSON.stringify(skill, null, 2)}</pre></details></td>
+                  <td><strong>{skill.name}</strong><div className="tiny">{skill.description}</div><details className="skill-manifest-preview"><summary>预览 Manifest</summary><pre>{JSON.stringify(skill, null, 2)}</pre></details></td>
                   <td>{skill.version}</td>
                   <td>{skill.category}</td>
                   <td>{skill.permissions.length ? skill.permissions.join("、") : "无"}</td>
