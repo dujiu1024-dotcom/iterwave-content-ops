@@ -132,6 +132,10 @@ class ProductionTaskStore:
                 or row.get("production_line_version_id") != production_line_version_id
             ):
                 raise ProductionTaskError("幂等键已被不同生产任务占用")
+            persisted_snapshot = json.loads(row.get("input_snapshot_json") or "{}")
+            requested_input = json.loads(json.dumps(input_snapshot or {}, ensure_ascii=False, sort_keys=True))
+            if persisted_snapshot.get("task_input", {}) != requested_input:
+                raise ProductionTaskError("幂等键已被不同生产输入快照占用")
             return self.get_task(str(row['id']))
 
         snapshot = {
@@ -204,6 +208,10 @@ class ProductionTaskStore:
                     or row.get("production_line_version_id") != production_line_version_id
                 ):
                     raise ProductionTaskError("幂等键已被不同生产任务占用") from exc
+                persisted_snapshot = json.loads(row.get("input_snapshot_json") or "{}")
+                requested_input = json.loads(json.dumps(input_snapshot or {}, ensure_ascii=False, sort_keys=True))
+                if persisted_snapshot.get("task_input", {}) != requested_input:
+                    raise ProductionTaskError("幂等键已被不同生产输入快照占用") from exc
                 return self.get_task(str(row['id']))
             if "idx_content_production_line_single_active" in str(exc):
                 raise ProductionTaskError("上一条内容生产线尚未完成闭环，暂不能创建新任务") from exc
