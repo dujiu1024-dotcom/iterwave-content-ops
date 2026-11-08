@@ -1340,12 +1340,6 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 }
 .review-stat > span { color: var(--muted); font-size: 12px; }
 .review-stat > strong { color: var(--text); font-size: 19px; font-variant-numeric: tabular-nums; }
-@media (min-width: 1200px) {
-  .review-filters { grid-template-columns: repeat(6, minmax(0, 1fr)); }
-}
-@media (min-width: 721px) and (max-width: 1199px) {
-  .review-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-}
 @media (max-width: 720px) {
   .review-stats { gap: 6px; }
   .review-stat { align-items: flex-start; flex-direction: column; gap: 3px; padding: 8px; }
