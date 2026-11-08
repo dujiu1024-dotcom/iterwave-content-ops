@@ -454,14 +454,14 @@ function LogsPane({ logs, total, page, pages, onPageChange, onResolved, targetId
       </div>
       {resolveError && <div className="panel-sub" style={{ padding: "0 16px 8px", color: "var(--red)" }}>{resolveError}</div>}
       <div className="filter-row" style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "0 16px 12px" }}>
-        <select aria-label="运营日志平台" value={platform} onChange={(e) => onFiltersChange({ platform: e.target.value as Platform | "", status, dateFrom, dateTo })}>
+        <select style={{ width: 150, maxWidth: "100%", flex: "0 1 150px" }} aria-label="运营日志平台" value={platform} onChange={(e) => onFiltersChange({ platform: e.target.value as Platform | "", status, dateFrom, dateTo })}>
           <option value="">全部平台</option><option value="xhs">小红书</option><option value="douyin">抖音</option><option value="kuaishou">快手</option><option value="wechat_channels">视频号</option>
         </select>
-        <select aria-label="运营日志状态" value={status} onChange={(e) => onFiltersChange({ platform, status: e.target.value, dateFrom, dateTo })}>
+        <select style={{ width: 150, maxWidth: "100%", flex: "0 1 150px" }} aria-label="运营日志状态" value={status} onChange={(e) => onFiltersChange({ platform, status: e.target.value, dateFrom, dateTo })}>
           <option value="">全部状态</option><option value="success">成功</option><option value="failed">失败</option><option value="pending_verify">待核实</option><option value="skipped">跳过</option><option value="circuit_broken">熔断拦截</option>
         </select>
-        <input aria-label="运营日志开始日期" type="date" value={dateFrom} onChange={(e) => onFiltersChange({ platform, status, dateFrom: e.target.value, dateTo })} />
-        <input aria-label="运营日志结束日期" type="date" value={dateTo} onChange={(e) => onFiltersChange({ platform, status, dateFrom, dateTo: e.target.value })} />
+        <input style={{ width: 150, maxWidth: "100%", flex: "0 1 150px" }} aria-label="运营日志开始日期" type="date" value={dateFrom} onChange={(e) => onFiltersChange({ platform, status, dateFrom: e.target.value, dateTo })} />
+        <input style={{ width: 150, maxWidth: "100%", flex: "0 1 150px" }} aria-label="运营日志结束日期" type="date" value={dateTo} onChange={(e) => onFiltersChange({ platform, status, dateFrom, dateTo: e.target.value })} />
         <button className="btn sm ghost" onClick={() => onFiltersChange({ platform: "", status: "", dateFrom: "", dateTo: "" })}>清空筛选</button>
       </div>
       <div className="table-wrap">
@@ -875,17 +875,17 @@ function TasksPane({ tasks, total, page, pages, onPageChange, onResolved, target
       </div>
       {err && <div className="panel-sub" style={{ padding: "0 16px 8px", color: "var(--red)" }}>{err}</div>}
       <div className="filter-row" style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "0 16px 12px" }}>
-        <select aria-label="任务平台筛选" value={platform} onChange={(e) => onFiltersChange({ platform: e.target.value as Platform | "", status, taskType, dateFrom, dateTo })}>
+        <select style={{ width: 150, maxWidth: "100%", flex: "0 1 150px" }} aria-label="任务平台筛选" value={platform} onChange={(e) => onFiltersChange({ platform: e.target.value as Platform | "", status, taskType, dateFrom, dateTo })}>
           <option value="">全部平台</option><option value="xhs">小红书</option><option value="douyin">抖音</option><option value="kuaishou">快手</option><option value="wechat_channels">视频号</option>
         </select>
-        <select aria-label="任务状态筛选" value={status} onChange={(e) => onFiltersChange({ platform, status: e.target.value, taskType, dateFrom, dateTo })}>
+        <select style={{ width: 150, maxWidth: "100%", flex: "0 1 150px" }} aria-label="任务状态筛选" value={status} onChange={(e) => onFiltersChange({ platform, status: e.target.value, taskType, dateFrom, dateTo })}>
           <option value="">全部状态</option><option value="pending">待执行</option><option value="running">执行中</option><option value="interrupted">中断</option><option value="pending_verify">待核实</option><option value="success">成功</option><option value="failed">失败</option><option value="skipped">跳过</option>
         </select>
-        <select aria-label="任务类型筛选" value={taskType} onChange={(e) => onFiltersChange({ platform, status, taskType: e.target.value, dateFrom, dateTo })}>
+        <select style={{ width: 150, maxWidth: "100%", flex: "0 1 150px" }} aria-label="任务类型筛选" value={taskType} onChange={(e) => onFiltersChange({ platform, status, taskType: e.target.value, dateFrom, dateTo })}>
           <option value="">全部任务类型</option><option value="publish_polling">发布轮询</option><option value="data_fetch">数据采集</option><option value="daily_ops">每日运营</option><option value="comment_polling">评论轮询</option><option value="cb_recovery">熔断恢复</option><option value="kb_scan">题库扫描</option><option value="draft_save">存草稿</option><option value="round_pipeline">轮次主流程</option><option value="data_retention_cleanup">数据清理</option>
         </select>
-        <input aria-label="任务开始日期" type="date" value={dateFrom} onChange={(e) => onFiltersChange({ platform, status, taskType, dateFrom: e.target.value, dateTo })} />
-        <input aria-label="任务结束日期" type="date" value={dateTo} onChange={(e) => onFiltersChange({ platform, status, taskType, dateFrom, dateTo: e.target.value })} />
+        <input style={{ width: 150, maxWidth: "100%", flex: "0 1 150px" }} aria-label="任务开始日期" type="date" value={dateFrom} onChange={(e) => onFiltersChange({ platform, status, taskType, dateFrom: e.target.value, dateTo })} />
+        <input style={{ width: 150, maxWidth: "100%", flex: "0 1 150px" }} aria-label="任务结束日期" type="date" value={dateTo} onChange={(e) => onFiltersChange({ platform, status, taskType, dateFrom, dateTo: e.target.value })} />
         <button className="btn sm ghost" onClick={() => onFiltersChange({ platform: "", status: "", taskType: "", dateFrom: "", dateTo: "" })}>清空筛选</button>
       </div>
       <div className="table-wrap">
