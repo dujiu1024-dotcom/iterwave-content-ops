@@ -1207,3 +1207,13 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
     display: none;
   }
 }
+
+/* Plan hierarchy: make the horizontal continuation explicit on narrow screens. */
+.plan-hierarchy-wrap { min-width: 0; }
+.plan-hierarchy-hint { display: none; color: var(--muted); font-size: 11px; text-align: right; margin: -5px 4px 6px; }
+.plan-hierarchy:focus-visible { outline: 3px solid #b7c8ff; outline-offset: 2px; }
+@media (max-width: 760px) {
+  .plan-hierarchy-hint { display: block; }
+  .plan-hierarchy { scroll-snap-type: x proximity; }
+  .plan-hierarchy-node { scroll-snap-align: start; }
+}
