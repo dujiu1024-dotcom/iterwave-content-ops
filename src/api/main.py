@@ -1982,11 +1982,11 @@ def _register_routes(app: FastAPI) -> None:
             # 普通业务文案、标题、正文和多行内容保持完整；只清理凭据与内部路径。
             safe_text = redact(value)
             safe_text = re.sub(
-                r"(?<![A-Za-z0-9:])/(?:home|root|tmp|var|opt|srv|app|Users|workspace|usr|etc|mnt)/[^\\s\"']+",
+                r"(?<![A-Za-z0-9:])/(?:home|root|tmp|var|opt|srv|app|Users|workspace|usr|etc|mnt)/[^\s\"']+",
                 "服务器内部路径",
                 safe_text,
             )
-            safe_text = re.sub(r"[A-Za-z]:\\\\[^\\s\"']+", "本地内部路径", safe_text)
+            safe_text = re.sub(r"[A-Za-z]:\\[^\s\"']+", "本地内部路径", safe_text)
             return safe_text[:20000]
         if isinstance(value, (int, float, bool)) or value is None:
             return value
