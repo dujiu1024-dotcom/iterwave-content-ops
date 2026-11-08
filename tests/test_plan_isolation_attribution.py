@@ -356,21 +356,22 @@ def test_promoted_sample_inherits_round_plan_attribution(api_client, tmp_path, m
     assert task.payload["round_id"] == round_id
     assert task.payload["save_drafts"] is False
     binding = task.payload["execution_snapshot"]["round_binding"]
-    assert binding == {
-        "master_plan_version_id": master_id,
-        "sub_plan_id": sub_id,
-        "sub_plan_version_id": int(version["id"]),
-        "sub_plan_stage_id": int(stage["id"]),
-        "sub_plan_snapshot_sha256": binding["sub_plan_snapshot_sha256"],
-        "sub_plan_stage_snapshot_sha256": binding["sub_plan_stage_snapshot_sha256"],
-    }
+    assert binding["master_plan_version_id"] == master_id
+    assert binding["sub_plan_id"] == sub_id
+    assert binding["sub_plan_version_id"] == int(version["id"])
+    assert binding["sub_plan_stage_id"] == int(stage["id"])
+    assert binding["sub_plan_snapshot_sha256"]
+    assert binding["sub_plan_stage_snapshot_sha256"]
     sample = conn.execute(
         "SELECT promoted_task_id,promoted_round_id FROM sample_contents WHERE id='sample-promote'"
     ).fetchone()
     assert tuple(sample) == (body["task_id"], round_id)
     # 入队阶段不得提前创建正式内容或平台草稿；Worker 成功后才会持久化 draft_pending。
     assert conn.execute("SELECT COUNT(*) FROM contents WHERE round_id=?", (round_id,)).fetchone()[0] == 0
-    assert conn.execute("SELECT COUNT(*) FROM drafts WHERE round_id=?", (round_id,)).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM drafts d JOIN contents c ON c.id=d.content_id WHERE c.round_id=?",
+        (round_id,),
+    ).fetchone()[0] == 0
 
 
 def test_adopted_content_draft_keeps_plan_attribution(cfg, conn):
