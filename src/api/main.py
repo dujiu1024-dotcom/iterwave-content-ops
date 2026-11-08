@@ -2477,9 +2477,9 @@ def _register_routes(app: FastAPI) -> None:
             "promoted_content_id": row["promoted_content_id"], "promoted_at": row["promoted_at"],
         } for row in rows]}
 
-    @app.post("/api/activation/saved/{sample_content_id}/promote", status_code=201)
+    @app.post("/api/activation/saved/{sample_content_id}/promote", status_code=202)
     def promote_activation_sample(sample_content_id: str, req: dict):
-        """将已保存体验样稿导入正式内容生产轮次；不自动生成图片、不自动存平台草稿或发布。"""
+        """将不可变 Activation 样稿排入正式视觉生产；不存平台草稿或发布。"""
         conn = _g()["conn"]
         tenant_id = _tenant_id()
         round_id = (req or {}).get("round_id")
@@ -2496,113 +2496,104 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(404, "已保存的体验样稿不存在")
         if sample["quality_status"] != "pass" or sample["run_status"] != "ready":
             raise HTTPException(409, "只有质量检查通过的已完成样稿才能导入")
-        if sample["promoted_content_id"]:
-            existing = conn.execute(
-                "SELECT round_id FROM contents WHERE id=?", (sample["promoted_content_id"],)
-            ).fetchone()
+        if sample["promoted_task_id"]:
             return {
                 "sample_content_id": sample_content_id,
-                "content_id": sample["promoted_content_id"],
-                "round_id": existing["round_id"] if existing else round_id,
-                "already_promoted": True,
-                "visual_status": "degraded",
-                "visual_production_required": True,
-                "image_generation_started": False,
+                "task_id": sample["promoted_task_id"], "round_id": round_id,
+                "already_promoted": True, "status": "queued_or_completed",
+                "draft_status": "draft_pending", "platform_draft_saved": False,
                 "publication_started": False,
-                "next_step": "需要进入正式视觉生产流程；导入本身不会生成图片或发布",
             }
         target_round = conn.execute(
-            "SELECT id, status, topic_ids FROM spiral_rounds WHERE id=?", (round_id,)
+            "SELECT id,status FROM spiral_rounds WHERE id=?", (round_id,),
         ).fetchone()
         if target_round is None:
             raise HTTPException(404, "正式生产轮次不存在")
         if target_round["status"] != "created":
             raise HTTPException(409, "只能导入尚未开始执行的正式生产轮次")
-        platform = sample["platform"]
-        tags = json.loads(sample["hashtags_json"] or "[]")
+        binding = _load_round_binding(conn, round_id)
+        required = (
+            "master_plan_version_id", "sub_plan_id", "sub_plan_version_id",
+            "sub_plan_stage_id", "production_line_version_id",
+        )
+        if not binding or any(binding.get(key) is None for key in required):
+            raise HTTPException(409, "正式轮次缺少完整母计划、子计划、阶段或生产线版本绑定")
+        from types import SimpleNamespace
         try:
-            outcome = _g()["guard"].check_content(
-                sample["title"], sample["body"], tags, platform=platform,
-            )
-        except Exception as exc:
-            logger.exception("体验样稿导入正式生产时质量检查异常 sample=%s", sample_content_id)
-            raise HTTPException(503, "正式生产质量检查暂不可用，样稿未导入") from exc
-        if not outcome.passes:
-            raise HTTPException(409, f"样稿未通过正式生产质量检查：{outcome.reason}")
-        topic_id = f"activation-{sample_content_id}"
-        content_id = f"content-{uuid.uuid4().hex[:12]}"
-        draft_id = f"draft-{uuid.uuid4().hex[:12]}"
-        now = _storage_now().isoformat(sep=" ", timespec="seconds")
-        try:
-            conn.execute(
-                "INSERT OR IGNORE INTO topic_index (id, dimension, source, title, date, total_uses) "
-                "VALUES (?, ?, 'activation_sample', ?, ?, 0)",
-                (topic_id, sample["angle"], sample["title"], now[:10]),
-            )
-            content_columns = {row[1] for row in conn.execute("PRAGMA table_info(contents)").fetchall()}
-            draft_columns = {row[1] for row in conn.execute("PRAGMA table_info(drafts)").fetchall()}
-            binding_row = _load_round_binding(conn, round_id) or {}
-            content_attr = [c for c in _ROUND_PLAN_COLUMNS if c in content_columns]
-            draft_attr = [c for c in _ROUND_PLAN_COLUMNS
-                          if c in draft_columns and c != "production_line_version_id"]
-            content_sql = (
-                "INSERT INTO contents (id, round_id, topic_id, platform, title, body, tags, image_paths, "
-                "word_count, card_style, guard_outcome, guard_reason, visual_status, visual_reason"
-                + "".join(f", {c}" for c in content_attr)
-                + ") VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, 'knowledge', 'pass', ?, 'degraded', ?"
-                + ", ?" * len(content_attr) + ")"
-            )
-            conn.execute(
-                content_sql,
-                (
-                    content_id, round_id, topic_id, platform, sample["title"], sample["body"],
-                    json.dumps(tags, ensure_ascii=False), len(sample["body"] or ""),
-                    outcome.reason, "体验样稿导入；图片卡片需在正式生产流程中生成",
-                    *[binding_row.get(column) for column in content_attr],
+            _assert_round_plan_binding(
+                conn, int(binding["master_plan_version_id"]),
+                SimpleNamespace(
+                    sub_plan_id=binding["sub_plan_id"],
+                    sub_plan_version_id=int(binding["sub_plan_version_id"]),
+                    sub_plan_stage_id=int(binding["sub_plan_stage_id"]),
+                    production_line_version_id=int(binding["production_line_version_id"]),
                 ),
             )
-            draft_sql = (
-                "INSERT INTO drafts (id, content_id, platform, status"
-                + "".join(f", {c}" for c in draft_attr)
-                + ") VALUES (?, ?, ?, 'draft_pending'" + ", ?" * len(draft_attr) + ")"
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.exception("Activation 样稿正式计划绑定校验异常 sample=%s", sample_content_id)
+            raise HTTPException(409, "正式生产计划绑定校验失败，样稿未入队") from exc
+        plan_platform = conn.execute(
+            "SELECT platform FROM sub_plans WHERE id=?", (binding["sub_plan_id"],),
+        ).fetchone()
+        if plan_platform is None or str(plan_platform["platform"]) != str(sample["platform"]):
+            raise HTTPException(409, "样稿平台与正式子计划平台不一致")
+        from src.core.activation_sample_snapshot import build_activation_sample_snapshot
+        try:
+            snapshot = build_activation_sample_snapshot(dict(sample))
+        except Exception as exc:
+            raise HTTPException(409, f"Activation 样稿无法冻结：{exc}") from exc
+        if _task_queue is None:
+            raise HTTPException(503, "正式生产任务队列尚未就绪")
+        parameters = {
+            "round_id": round_id,
+            "operation": "activation_promote",
+            "sample_content_id": sample_content_id,
+            "activation_sample_snapshot": snapshot,
+            "save_drafts": False,
+        }
+        try:
+            execution_snapshot = _build_task_execution_snapshot(
+                tenant_id, round_id, parameters,
             )
-            conn.execute(
-                draft_sql,
-                (draft_id, content_id, platform,
-                 *[binding_row.get(column) for column in draft_attr]),
+            queued, created = _task_queue.enqueue(
+                task_type="round_run", tenant_id=tenant_id,
+                aggregate_id=f"activation-sample:{sample_content_id}",
+                payload={
+                    **parameters,
+                    "initiating_actor": "user:activation-promotion",
+                    "execution_snapshot": execution_snapshot,
+                },
             )
-            try:
-                topic_ids = json.loads(target_round["topic_ids"] or "[]")
-            except (TypeError, ValueError):
-                topic_ids = []
-            if topic_id not in topic_ids:
-                topic_ids.append(topic_id)
-            conn.execute(
-                "UPDATE spiral_rounds SET topic_ids=? WHERE id=?",
-                (json.dumps(topic_ids, ensure_ascii=False), round_id),
-            )
-            conn.execute(
-                "UPDATE sample_contents SET promoted_content_id=?, promoted_at=?, updated_at=? "
-                "WHERE id=? AND tenant_id=? AND promoted_content_id IS NULL",
-                (content_id, now, now, sample_content_id, tenant_id),
-            )
-            _record_content_event(
-                "content_adopted", sample_content_id=sample_content_id,
-                metadata={"content_id": content_id, "round_id": round_id, "source": "formal_production_import"},
-                idempotency_key=f"sample-promoted:{sample_content_id}",
-            )
-            conn.commit()
-        except sqlite3.IntegrityError as exc:
-            conn.rollback()
-            raise HTTPException(409, "样稿已导入或该轮次存在重复平台选题，请刷新后检查") from exc
+            now = _storage_now().isoformat(sep=" ", timespec="seconds")
+            with conn:
+                conn.execute(
+                    "UPDATE sample_contents SET promoted_task_id=?,promoted_at=?,updated_at=? "
+                    "WHERE id=? AND tenant_id=? AND promoted_task_id IS NULL",
+                    (queued.task_id, now, now, sample_content_id, tenant_id),
+                )
+                _record_content_event(
+                    "content_adopted", sample_content_id=sample_content_id,
+                    metadata={
+                        "task_id": queued.task_id, "round_id": round_id,
+                        "source": "activation_formal_production_queue",
+                        "content_version": snapshot["content_version"],
+                        "content_hash": snapshot["content_hash"],
+                    },
+                    idempotency_key=f"sample-promoted:{sample_content_id}",
+                )
+        except Exception as exc:
+            logger.exception("Activation 样稿正式生产入队失败 sample=%s", sample_content_id)
+            raise HTTPException(503, "正式生产任务入队失败；样稿未确认导入") from exc
         return {
-            "sample_content_id": sample_content_id, "content_id": content_id,
-            "draft_id": draft_id, "round_id": round_id, "already_promoted": False,
-            "visual_status": "degraded",
-            "visual_production_required": True,
-            "image_generation_started": False,
-            "publication_started": False,
-            "next_step": "需要进入正式视觉生产流程；导入本身不会生成图片或发布",
+            "sample_content_id": sample_content_id,
+            "task_id": queued.task_id, "round_id": round_id,
+            "already_promoted": not created, "status": queued.status,
+            "content_version": snapshot["content_version"],
+            "content_hash": snapshot["content_hash"],
+            "draft_status": "draft_pending_after_success",
+            "platform_draft_saved": False, "publication_started": False,
         }
 
     @app.get("/api/activation/samples/{sample_run_id}")
