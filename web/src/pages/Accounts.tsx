@@ -369,7 +369,7 @@ export default function Accounts() {
         }}>
           <div
             style={{
-              background: "#fff", borderRadius: 14, padding: 28, minWidth: 380, maxWidth: 440,
+              background: "#fff", borderRadius: 14, padding: 24, width: "min(440px, calc(100vw - 24px))", minWidth: 0, maxWidth: 440,
               boxShadow: "0 20px 60px rgba(0,0,0,0.3)", textAlign: "center",
             }}
             onClick={(e) => e.stopPropagation()}

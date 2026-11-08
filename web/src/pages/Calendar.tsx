@@ -271,7 +271,7 @@ export default function Calendar() {
             </span>}
           </div>
         </div>
-        <div className="head-actions calendar-toolbar">
+        <div className="head-actions calendar-toolbar filter-bar">
           <div className="segmented-control" role="group" aria-label="日历视图">
             {(["month", "week", "day"] as const).map((mode) => (
               <button key={mode} className={`btn sm ${viewMode === mode ? "primary" : ""}`} aria-pressed={viewMode === mode} onClick={() => setViewMode(mode)}>

@@ -578,7 +578,7 @@ function AssetForm({
           <div className="panel-sub">保存后可在内容生产的生产线中直接选择</div>
         </div>
       </div>
-      <div className="grid" style={{ gridTemplateColumns: needUrl ? "1fr 1fr 1.4fr auto" : "1fr 2fr auto", gap: 10 }}>
+      <div className="grid asset-form-grid" style={{ gridTemplateColumns: needUrl ? "1fr 1fr 1.4fr auto" : "1fr 2fr auto", gap: 10 }}>
         <input className="field" placeholder={titleLabel} value={title} onChange={(e) => setTitle(e.target.value)} />
         {type === "template" ? (
           <textarea className="field" rows={3} placeholder={bodyPlaceholder ?? "按步骤写出内容结构，每行一个环节"} value={body} onChange={(e) => setBody(e.target.value)} />

@@ -93,7 +93,7 @@ export default function TopicPoolPane() {
       </div>
 
       {adding && (
-        <form className="toolbar" style={{ marginBottom: 12 }} onSubmit={(e) => { e.preventDefault(); add(); }}>
+        <form className="toolbar topic-pool-add-form" style={{ marginBottom: 12 }} onSubmit={(e) => { e.preventDefault(); add(); }}>
           <input className="field" style={{ flex: 2, minWidth: 200 }} placeholder="选题标题（≥4 字）" required
             value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} />
           <input className="field" style={{ width: 130 }} placeholder="内容方向" required list="dim-list"
@@ -107,14 +107,14 @@ export default function TopicPoolPane() {
       )}
       <datalist id="dim-list">{(data?.dimensions ?? []).map((d) => <option key={d} value={d} />)}</datalist>
 
-      <div className="toolbar" style={{ marginBottom: 10 }}>
+      <div className="toolbar topic-pool-toolbar" style={{ marginBottom: 10 }}>
         <div className="tabs" role="tablist">
           {(["active", "excluded"] as const).map((s) => (
             <button key={s} role="tab" aria-selected={status === s} className={`tab ${status === s ? "active" : ""}`}
               onClick={() => { setStatus(s); setPage(0); }}>{s === "active" ? "可用" : "已删除"}</button>
           ))}
         </div>
-        <form className="flex" style={{ gap: 6 }} onSubmit={(e) => { e.preventDefault(); setPage(0); load(); }}>
+        <form className="flex filter-row" style={{ gap: 6 }} onSubmit={(e) => { e.preventDefault(); setPage(0); load(); }}>
           <input className="field" style={{ width: 180 }} placeholder="搜索标题 / 摘要" value={q} onChange={(e) => setQ(e.target.value)} />
           <button type="submit" className="btn sm">搜索</button>
         </form>

@@ -453,7 +453,7 @@ function LogsPane({ logs, total, page, pages, onPageChange, onResolved, targetId
         </div>
       </div>
       {resolveError && <div className="panel-sub" style={{ padding: "0 16px 8px", color: "var(--red)" }}>{resolveError}</div>}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "0 16px 12px" }}>
+      <div className="filter-row" style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "0 16px 12px" }}>
         <select aria-label="运营日志平台" value={platform} onChange={(e) => onFiltersChange({ platform: e.target.value as Platform | "", status, dateFrom, dateTo })}>
           <option value="">全部平台</option><option value="xhs">小红书</option><option value="douyin">抖音</option><option value="kuaishou">快手</option><option value="wechat_channels">视频号</option>
         </select>
@@ -874,7 +874,7 @@ function TasksPane({ tasks, total, page, pages, onPageChange, onResolved, target
         </div>
       </div>
       {err && <div className="panel-sub" style={{ padding: "0 16px 8px", color: "var(--red)" }}>{err}</div>}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "0 16px 12px" }}>
+      <div className="filter-row" style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "0 16px 12px" }}>
         <select aria-label="任务平台筛选" value={platform} onChange={(e) => onFiltersChange({ platform: e.target.value as Platform | "", status, taskType, dateFrom, dateTo })}>
           <option value="">全部平台</option><option value="xhs">小红书</option><option value="douyin">抖音</option><option value="kuaishou">快手</option><option value="wechat_channels">视频号</option>
         </select>

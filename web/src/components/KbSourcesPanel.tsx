@@ -358,7 +358,7 @@ export default function KbSourcesPanel() {
         </div>
 
         {addMode === "upload" && (
-          <div className="flex wrap" style={{ gap: 8, alignItems: "center" }}>
+          <div className="flex wrap kb-source-fields" style={{ gap: 8, alignItems: "center" }}>
             <input ref={fileRef} type="file" accept=".csv,.json,.jsonl,.ndjson,.xlsx,.db,.sqlite,.sqlite3" />
             <input className="field" style={{ width: 200 }} placeholder="来源名称（可选）"
               value={uploadName} onChange={(e) => setUploadName(e.target.value)} />
@@ -378,7 +378,7 @@ export default function KbSourcesPanel() {
 
         {addMode === "remote" && (
           <div style={{ display: "grid", gap: 8 }}>
-            <div className="flex wrap" style={{ gap: 8 }}>
+            <div className="flex wrap kb-source-fields" style={{ gap: 8 }}>
               <input className="field" style={{ flex: 1, minWidth: 240 }} placeholder="https://example.com/topics.csv 或 /feed.xml"
                 value={remoteUrl} onChange={(e) => setRemoteUrl(e.target.value)} />
               <input className="field" style={{ width: 160 }} placeholder="来源名称（可选）"

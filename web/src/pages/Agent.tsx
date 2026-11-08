@@ -129,7 +129,7 @@ function PreviewPane({ orch, runs, onEdit }: {
         </div>
       </div>
 
-      <div className="agent-flow" style={{ gridTemplateColumns: `repeat(${orch.steps.length}, minmax(0, 1fr))` }}>
+      <div className="agent-flow agent-flow-responsive" style={{ gridTemplateColumns: `repeat(${orch.steps.length}, minmax(0, 1fr))` }}>
         {orch.steps.map((s, i) => {
           const st = s.enabled ? (run?.step_status?.[s.id]?.status ?? null) : "off";
           const cls = st === "success" ? "done" : st === "failed" ? "pause" : openId === s.id ? "active" : "";
