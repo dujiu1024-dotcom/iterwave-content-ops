@@ -1420,3 +1420,29 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
   .task-queue-history-filters > button:last-of-type,
   .task-queue-history-filters > span { grid-column: auto; }
 }
+
+/* Business profile and diagnosis: keep long technical evidence inside bounded panels. */
+.business-profile-page .advanced-diagnostics,
+.business-diagnosis-page .advanced-diagnostics {
+  min-width: 0;
+  max-width: 100%;
+}
+.business-profile-page .advanced-diagnostics pre {
+  box-sizing: border-box;
+  max-width: 100%;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.business-diagnosis-source-table {
+  max-height: 280px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.business-diagnosis-page .advanced-diagnostics code {
+  display: block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}

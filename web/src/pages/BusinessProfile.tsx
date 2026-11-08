@@ -85,7 +85,7 @@ export default function BusinessProfilePage() {
   };
 
   const visibleItems = items.filter(item => item.entity_type === tab);
-  if (loading) return <div className="page"><div className="page-head"><div><h1 className="page-title">经营资料</h1></div></div><p>正在加载业务档案…</p></div>;
+  if (loading) return <div className="page business-profile-page"><div className="page-head"><div><h1 className="page-title">经营资料</h1></div></div><p>正在加载业务档案…</p></div>;
   return (
     <div className="page">
       <div className="page-head">
