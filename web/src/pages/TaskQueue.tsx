@@ -355,7 +355,7 @@ export default function TaskQueue() {
       <section className="panel" style={{ marginBottom: 20 }}>
         <div className="panel-head">
           <div><h2>待执行任务</h2><div className="muted">已到执行时间的任务按入队顺序执行；延迟任务到期后参与排序，同一时刻只执行一个队列任务。</div></div>
-          <span className="muted">共 {activeTotal} 项 · 第 {activePage}/{activePages} 页</span>
+          <span className="muted task-queue-pagination-summary">共 {activeTotal} 项 · 第 {activePage}/{activePages} 页</span>
         </div>
         {loading ? <div className="empty-state">正在读取队列…</div> : active.length ? (
           <div>{active.map((task) => <TaskRow key={task.task_id} task={task} onCancel={cancel} cancelling={cancellingId === task.task_id} onRetry={requestRetry} retrying={retryingId === task.task_id} onResolve={requestResolve} resolving={resolvingId === task.task_id} onDetails={openDetails} />)}</div>
@@ -386,7 +386,7 @@ export default function TaskQueue() {
             <input aria-label="历史任务开始日期" type="date" value={historyDateFrom} onChange={(event) => { setHistoryDateFrom(event.target.value); setHistoryPage(1); }} />
             <input aria-label="历史任务结束日期" type="date" value={historyDateTo} onChange={(event) => { setHistoryDateTo(event.target.value); setHistoryPage(1); }} />
             <button className="btn sm ghost" onClick={() => { setHistoryType("all"); setHistoryStatus("all"); setHistoryTenantId(""); setHistoryErrorKeyword(""); setHistoryDateFrom(""); setHistoryDateTo(""); setHistoryPage(1); }}>清空筛选</button>
-            <span className="muted">共 {historyTotal} 项 · 第 {historyPage}/{historyPages} 页</span>
+            <span className="muted task-queue-pagination-summary">共 {historyTotal} 项 · 第 {historyPage}/{historyPages} 页</span>
           </div>
         </div>
         {drilldown && <div className="notice" style={{ margin: "0 16px 10px" }}>图表钻取：{drilldown.status ? STATUS_LABEL[drilldown.status] : "全部状态"} · {drilldown.dateFrom || "不限日期"} 至 {drilldown.dateTo || "不限日期"} · 共 {historyTotal} 项</div>}

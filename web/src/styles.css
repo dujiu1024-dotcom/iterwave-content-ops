@@ -1481,3 +1481,8 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 @media (max-width: 1100px) { .ops-data-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 720px) { .ops-data-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); } .ops-data-filters > button { justify-self: start; } }
 @media (max-width: 420px) { .ops-data-filters { grid-template-columns: minmax(0, 1fr); } }
+
+
+/* Keep task queue pagination metadata intact at desktop widths. */
+.task-queue-pagination-summary { white-space: nowrap; flex-shrink: 0; }
+@media (max-width: 720px) { .task-queue-pagination-summary { white-space: normal; } }
