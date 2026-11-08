@@ -1158,3 +1158,6 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
   .form-row > .field:first-child,
   .form-row > .field:not(:first-child) { flex: 1 1 100%; min-width: 0; }
 }
+
+.filter-row select { min-width: 120px; }
+.filter-row input[type="date"] { min-width: 132px; max-width: 150px; }
