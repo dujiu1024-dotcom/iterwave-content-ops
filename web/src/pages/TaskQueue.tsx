@@ -366,7 +366,7 @@ export default function TaskQueue() {
       </section>
 
       <section className="panel">
-        <div className="panel-head">
+        <div className="panel-head task-queue-panel-head">
           <div><h2>最近任务</h2><div className="muted">支持按任务类型、状态、账号组标识、失败原因和创建日期筛选；系统后台调度任务可单独查看。</div></div>
           <div className="task-queue-filters">
             {drilldown && <button className="btn sm soft" type="button" onClick={() => { setDrilldown(null); setHistoryPage(1); }}>清除图表钻取</button>}
