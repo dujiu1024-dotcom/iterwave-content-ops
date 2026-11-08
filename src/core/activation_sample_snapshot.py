@@ -10,8 +10,16 @@ class ActivationSampleSnapshotError(ValueError):
     """Raised when an Activation sample cannot be frozen or verified safely."""
 
 
+def _as_mapping(sample: Mapping[str, Any]) -> dict[str, Any]:
+    # sqlite3.Row supports keys/index access but is not a dict and has no .get().
+    if hasattr(sample, "keys"):
+        return {key: sample[key] for key in sample.keys()}
+    return dict(sample)
+
+
 def canonical_activation_sample(sample: Mapping[str, Any]) -> dict[str, Any]:
     """Return the exact copy fields that are allowed to enter formal production."""
+    sample = _as_mapping(sample)
     title = sample.get("title")
     body = sample.get("body")
     if not isinstance(title, str) or not title.strip():
@@ -41,6 +49,7 @@ def activation_sample_content_hash(sample: Mapping[str, Any]) -> str:
 
 def build_activation_sample_snapshot(sample: Mapping[str, Any]) -> dict[str, Any]:
     """Freeze sample identity, tenant, content version, and exact copy bytes."""
+    sample = _as_mapping(sample)
     sample_id = str(sample.get("id") or "").strip()
     tenant_id = str(sample.get("tenant_id") or "").strip()
     platform = str(sample.get("platform") or "").strip()
