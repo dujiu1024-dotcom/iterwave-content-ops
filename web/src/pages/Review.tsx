@@ -366,8 +366,12 @@ export default function Review() {
         .review-stat { border: 1px solid var(--line); background: var(--surface); border-radius: 10px; padding: 12px 14px; display: grid; gap: 5px; }
         .review-stat span { color: var(--muted); font-size: 11px; } .review-stat strong { font-size: 20px; }
         .review-panel-head { padding: 14px 16px; border-bottom: 1px solid var(--line); font-weight: 700; }
-        .review-filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; padding: 14px 16px; }
-        .review-filters label { display: grid; gap: 5px; color: var(--muted); font-size: 11px; min-width: 140px; flex: 1 1 140px; }
+        .review-filters { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; align-items: end; padding: 12px 14px; }
+        .review-filters label { display: grid; gap: 5px; color: var(--muted); font-size: 11px; min-width: 0; }
+        .review-filters input, .review-filters select { height: 34px; padding-inline: 8px; font-size: 12px; }
+        @media (max-width: 1199px) and (min-width: 901px) { .review-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+        @media (max-width: 900px) and (min-width: 561px) { .review-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+        @media (max-width: 560px) { .review-filters { grid-template-columns: 1fr; } }
         .review-filters input, .review-filters select { width: 100%; min-width: 0; }
         .review-notice { padding: 10px 13px; border-radius: 8px; font-size: 12px; }
         .review-notice.success { background: var(--green-weak); color: var(--green); }
