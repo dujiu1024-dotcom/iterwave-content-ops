@@ -597,9 +597,12 @@ export default function Analytics() {
               </div>
             )}
             {analysis.evidence && Object.keys(analysis.evidence).length > 0 && (
-              <details style={{ marginTop: 18 }}>
-                <summary className="form-label" style={{ cursor: "pointer" }}>查看触发数据</summary>
-                <StructuredDataView data={analysis.evidence} title="触发依据" />
+              <details className="advanced-diagnostics" style={{ marginTop: 14 }}>
+                <summary>高级诊断信息（触发依据）</summary>
+                <div className="tiny" style={{ marginTop: 8 }}>以下结构化信息用于核验系统分析依据；日常查看请以策略调整建议为准。</div>
+                <div style={{ maxHeight: 240, overflow: "auto", overflowWrap: "anywhere" }}>
+                  <StructuredDataView data={analysis.evidence} title="触发依据" />
+                </div>
               </details>
             )}
           </>

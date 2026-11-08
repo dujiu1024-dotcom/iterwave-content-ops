@@ -734,10 +734,10 @@ export default function PlanCenter() {
           <div className="tiny">资源基线：{String((aiGeneration.resource_baseline.summary as Record<string, number> | undefined)?.confirmed ?? 0)} 项已确认 / {String((aiGeneration.resource_baseline.summary as Record<string, number> | undefined)?.total ?? 0)} 项</div>
           <div style={{ marginTop: 10 }}><b>制定摘要</b><p>{aiGeneration.summary}</p></div>
           <div className="grid two">
-            <div><b>业务资料与素材依据</b><StructuredDataView data={aiGeneration.resource_basis} /></div>
-            <div><b>风险提示</b><StructuredDataView data={aiGeneration.risks} /></div>
-            <div><b>前提与假设</b><StructuredDataView data={aiGeneration.assumptions} /></div>
-            <div><b>待用户确认</b><StructuredDataView data={aiGeneration.pending_confirmations} /></div>
+            <details className="advanced-diagnostics"><summary>业务资料与素材依据</summary><div className="tiny">系统原始依据，仅供核验；请优先阅读制定摘要。</div><div style={{ maxHeight: 220, overflow: "auto", overflowWrap: "anywhere" }}><StructuredDataView data={aiGeneration.resource_basis} /></div></details>
+            <details className="advanced-diagnostics"><summary>风险提示</summary><div className="tiny">系统识别的风险记录，仅供核验。</div><div style={{ maxHeight: 220, overflow: "auto", overflowWrap: "anywhere" }}><StructuredDataView data={aiGeneration.risks} /></div></details>
+            <details className="advanced-diagnostics"><summary>前提与假设</summary><div className="tiny">模型生成时采用的前提记录，仅供核验。</div><div style={{ maxHeight: 220, overflow: "auto", overflowWrap: "anywhere" }}><StructuredDataView data={aiGeneration.assumptions} /></div></details>
+            <details className="advanced-diagnostics"><summary>待用户确认</summary><div className="tiny">需要业务人员确认的原始条目。</div><div style={{ maxHeight: 220, overflow: "auto", overflowWrap: "anywhere" }}><StructuredDataView data={aiGeneration.pending_confirmations} /></div></details>
           </div>
         </div>}
       </div>
