@@ -1217,3 +1217,28 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
   .plan-hierarchy { scroll-snap-type: x proximity; }
   .plan-hierarchy-node { scroll-snap-align: start; }
 }
+
+
+/* Global task queue filters: align compact controls into a predictable responsive grid. */
+.task-queue-filters {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(120px, 1fr) minmax(110px, .8fr) minmax(150px, 1.2fr) minmax(140px, 1fr) minmax(140px, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 100%;
+  width: 100%;
+  min-width: 0;
+}
+.task-queue-filters > * { min-width: 0; max-width: 100%; }
+.task-queue-filters > select,
+.task-queue-filters > input { width: 100%; }
+.task-queue-filters > span { white-space: nowrap; }
+@media (max-width: 1100px) {
+  .task-queue-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .task-queue-filters > span { grid-column: 1 / -1; }
+}
+@media (max-width: 680px) {
+  .task-queue-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .task-queue-filters > span { grid-column: 1 / -1; }
+  .task-queue-filters > button { justify-self: start; }
+}
