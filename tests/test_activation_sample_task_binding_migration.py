@@ -4,6 +4,7 @@ from __future__ import annotations
 def test_activation_sample_task_binding_migration_adds_nullable_unique_task_id(conn):
     columns = {row[1] for row in conn.execute("PRAGMA table_info(sample_contents)")}
     assert "promoted_task_id" in columns
+    assert "promoted_round_id" in columns
     conn.execute(
         "INSERT INTO sample_runs (id,tenant_id,platform,account_description,status,idempotency_key,created_at) "
         "VALUES ('task-bind-run','default','xhs','分享产品经理实践方法','ready','task-bind-key',CURRENT_TIMESTAMP)"
