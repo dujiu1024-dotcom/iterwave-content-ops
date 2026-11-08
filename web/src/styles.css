@@ -1011,3 +1011,128 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 @media (max-width: 560px) {
   .calendar-load-more { align-items: stretch; flex-direction: column; }
 }
+
+
+/* ===== Compact control & filter density pass (2026-11) =====
+   Keep long-form editors full width; constrain only short controls and filter rows. */
+.filter-bar,
+.filter-row,
+.toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+.filter-bar,
+.filter-row { margin-bottom: 12px; }
+.filter-bar > label,
+.filter-row > label,
+.toolbar > label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.filter-bar .field,
+.filter-bar select,
+.filter-row .field,
+.filter-row select,
+.filter-row input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+.toolbar .field,
+.toolbar select,
+.toolbar input:not([type="checkbox"]):not([type="radio"]):not([type="file"]) {
+  width: auto;
+  min-width: 132px;
+  max-width: min(220px, 100%);
+  min-height: 34px;
+  padding: 6px 9px;
+  flex: 0 1 auto;
+}
+.filter-bar input[type="date"],
+.filter-row input[type="date"],
+.toolbar input[type="date"] {
+  min-width: 142px;
+  max-width: 160px;
+}
+.filter-bar input[type="search"],
+.filter-row input[type="search"],
+.toolbar input[type="search"],
+.filter-bar .grow,
+.filter-row .grow,
+.toolbar .grow {
+  flex: 1 1 220px;
+  min-width: min(180px, 100%);
+  max-width: 360px;
+}
+.filter-row > .tiny,
+.filter-bar > .tiny {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+.filter-bar .btn,
+.filter-row .btn,
+.toolbar .btn { flex: 0 0 auto; }
+
+/* Review has six short criteria: keep them together on desktop rather than
+   forcing every input into its own full-width row. */
+.review-filters {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  align-items: end;
+  gap: 8px;
+}
+.review-filters > label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 650;
+}
+.review-filters input,
+.review-filters select {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 34px;
+  padding: 6px 8px;
+}
+.review-filters > label:last-child { grid-column: span 1; }
+
+/* Short profile/config fields form compact grids; textareas and editors remain full width. */
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: 12px;
+  align-items: start;
+  min-width: 0;
+}
+.form-grid > label { display: block; min-width: 0; }
+.form-grid > label .field,
+.form-grid > label input,
+.form-grid > label select { width: 100%; min-width: 0; }
+
+@media (max-width: 1100px) {
+  .review-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 760px) {
+  .review-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .review-filters > label:last-child { grid-column: 1 / -1; }
+  .filter-bar > label,
+  .filter-row > label,
+  .toolbar > label { flex: 1 1 145px; }
+}
+@media (max-width: 420px) {
+  .filter-bar, .filter-row, .toolbar { gap: 6px; }
+  .filter-bar .field,
+  .filter-bar select,
+  .filter-row .field,
+  .filter-row select,
+  .filter-row input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+  .toolbar .field,
+  .toolbar select { min-width: 0; max-width: 100%; }
+  .filter-bar > label,
+  .filter-row > label,
+  .toolbar > label { flex: 1 1 calc(50% - 6px); }
+}
