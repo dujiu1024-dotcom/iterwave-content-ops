@@ -129,6 +129,38 @@ def _install_dashboard_data_fixtures(page):
              "achievement_rate": 62.5, "status": "active", "created_at": "2026-10-01T00:00:00+08:00",
              "goal_level": "platform", "parent_goal_id": "goal-north-star", "weight": 1, "contribution_note": "阶段目标"},
         ],
+        "/api/goals/summary": {
+            "percent": 56.7, "method": "equal_weight_mean", "active_goals": 2,
+            "counted_goals": 2, "pending_goals": 0, "period_start": "2026-11-01",
+            "period_end": "2026-11-30", "days_left": 22,
+            "mode": "hybrid",
+            "north_star": {"id": "goal-north-star", "goal_text": "季度品牌认知提升与高质量线索增长目标（长文本布局验证）", "rate": 56.7},
+            "by_platform": {"xhs": {"percent": 62.5, "goals": 1, "counted": 1}},
+        },
+        "/api/config": {
+            "editable": {
+                "business_timezone": "Asia/Shanghai", "daily_quotas": {},
+                "ops_window": {"start_hour": 9, "end_hour": 21}, "cooldown_minutes": 30,
+                "hot_topics": {"heat_threshold": 1000, "heat_filter_enabled": True,
+                               "time_window_hours": 24, "time_filter_enabled": True},
+            },
+            "locked": {"dimension_match_required": True, "publishability_required": True},
+            "readonly": {
+                "persona_configured": True, "persona_keywords": ["品牌运营", "用户体验"],
+                "forbidden_directions": ["未经证实的功效承诺"], "redline_keywords_count": 1,
+                "kb_path": "", "kb_type": "none", "kb_table": "", "kb_field_mapping": {},
+                "llm_provider": "fixture", "llm_model": "fixture", "llm_fallback_provider": "",
+                "llm_fallback_model": "", "llm_base_url": "", "llm_fallback_base_url": "",
+                "llm_thinking": "", "llm_channel": "plan", "llm_temperature": 0.2,
+                "llm_timeout_seconds": 30, "llm_enabled": True, "llm_has_api_key": False,
+                "llm_fallback_has_api_key": False, "platforms": {}, "timeouts": {},
+                "scoring": {"cold_start": {}, "sample_accumulating": {}, "stable_operation": {},
+                            "timeliness_half_life_days": {}, "active_dimension_min_uses": 1,
+                            "active_dimension_window_days": 30, "shrinkage_m": 1},
+                "rhythm_intervals": {}, "redline_keywords": [], "notification_channels": {},
+            },
+            "overrides_file": "", "overrides": {}, "audit": [],
+        },
         "/api/hot_topics": {"items": [
             {"id": "hot-fixture-1", "title": "平台内容治理新规发布：品牌账号运营需要关注的五个变化",
              "source": "xhs", "discovered_at": "2026-11-08T08:00:00+08:00", "url": None,
@@ -217,6 +249,7 @@ def test_dashboard_structured_data_state_at_required_viewports():
                 page.locator("#main-content").wait_for(state="visible", timeout=10000)
                 page.get_by_text("请确认本周品牌运营策略调整建议", exact=True).wait_for(state="visible", timeout=15000)
                 page.get_by_text("平台内容治理新规发布：品牌账号运营需要关注的五个变化", exact=True).wait_for(state="visible", timeout=10000)
+                assert page.locator(".dashboard-partial-warning").count() == 0, "Dashboard fixture should resolve all eight data sources"
                 page.screenshot(path=str(ARTIFACTS / f"dashboard-data-state-{width}.png"),
                                 full_page=True, animations="disabled")
                 metrics = page.evaluate("""() => ({
