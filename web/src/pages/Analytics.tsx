@@ -295,7 +295,7 @@ export default function Analytics() {
             <div className="panel-sub">按近 {metrics?.z_window_days ?? 90} 天有效互动率排序；仅展示有有效指标的内容</div>
           </div>
         </div>
-        {rateRows.length === 0 ? <EmptyHint next="先在详细数据中为已发布内容补填数据，或等待平台采集完成">暂无可比较的互动率样本</EmptyHint> : (() => {
+        {rateRows.length === 0 ? <EmptyHint className="analytics-empty-hint" next="先在详细数据中为已发布内容补填数据，或等待平台采集完成">暂无可比较的互动率样本</EmptyHint> : (() => {
           const topRows = [...rateRows].sort((x, y) => (y.interaction_rate ?? 0) - (x.interaction_rate ?? 0)).slice(0, 8);
           const maxRate = Math.max(...topRows.map((r) => r.interaction_rate ?? 0), 0.0001);
           return <div style={{ padding: "4px 16px 16px" }}>
@@ -321,7 +321,7 @@ export default function Analytics() {
       <div className="panel" style={{ marginBottom: 15 }}>
         <div className="panel-head"><div><div className="panel-title">发布后数据回填</div><div className="panel-sub">可补充发布链接和人工指标。每次提交保留独立快照，未填写字段保持未知。</div></div></div>
         {reportError && <div className="note" role="alert" style={{ color: "var(--red)", padding: 12 }}>{reportError}</div>}
-        {publishedDrafts.length === 0 ? <EmptyHint next="在内容生产页确认一篇内容已发布后，可在这里补填链接与数据">暂无已确认发布的内容</EmptyHint> : (
+        {publishedDrafts.length === 0 ? <EmptyHint className="analytics-empty-hint" next="在内容生产页确认一篇内容已发布后，可在这里补填链接与数据">暂无已确认发布的内容</EmptyHint> : (
           <div className="list" style={{ padding: "0 16px 16px" }}>
             {publishedDrafts.map((draft) => {
               const value = backfillValues[draft.id];
@@ -452,7 +452,7 @@ export default function Analytics() {
         {!metrics && !metricsError && <div className="loading"><div className="spinner" />加载中...</div>}
 
         {metrics && rows.length === 0 && (
-          <EmptyHint next="运行一轮 → 手动发布 → 24h 后自动采集">暂无已采集数据</EmptyHint>
+          <EmptyHint className="analytics-empty-hint" next="运行一轮 → 手动发布 → 24h 后自动采集">暂无已采集数据</EmptyHint>
         )}
 
         {metrics && rows.length > 0 && (
@@ -582,7 +582,7 @@ export default function Analytics() {
         {!analysis && !reportError ? <div className="loading"><div className="spinner" />加载中...</div> : analysis && (
           <>
             {adjustments.length === 0 ? (
-              <EmptyHint next="跑满一轮并完成数据采集后，再回到这里查看调整建议">暂无策略调整建议</EmptyHint>
+              <EmptyHint className="analytics-empty-hint" next="跑满一轮并完成数据采集后，再回到这里查看调整建议">暂无策略调整建议</EmptyHint>
             ) : (
               <div className="list">
                 {adjustments.map((s, i) => (
