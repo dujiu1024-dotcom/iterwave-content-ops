@@ -143,6 +143,7 @@ class RoundExecutor:
         save_drafts: Optional[bool] = None,
         feedback=None,
         template_data: Optional[dict] = None,
+        activation_sample: Optional[dict] = None,
     ) -> dict:
         """Execute the complete round while recording image API usage."""
         from .image_generation_budget import image_generation_run
@@ -152,6 +153,7 @@ class RoundExecutor:
         ) as usage:
             report = await self._run_with_image_budget(
                 round_id, topic_count, platform_values, save_drafts, feedback, template_data,
+                activation_sample=activation_sample,
             )
             if isinstance(report, dict):
                 report["image_generation_usage"] = usage.snapshot()
@@ -173,6 +175,7 @@ class RoundExecutor:
         save_drafts: Optional[bool] = None,
         feedback=None,
         template_data: Optional[dict] = None,
+        activation_sample: Optional[dict] = None,
     ) -> dict:
         """执行一轮。返回结构化执行报告（不抛业务异常，失败写进 report）。
 
@@ -242,10 +245,23 @@ class RoundExecutor:
             )
 
         # 执行前预检：选题池为空时不进入 producing，不制造一次必然失败的轮次。
-        available_topics, pool_report = load_pool(self.cfg, self.conn)
-        if not available_topics:
-            detail = pool_report.get("kb_error") or "选题库当前没有可用选题"
-            raise RoundPreconditionError(f"运行前检查未通过：{detail}。请先补充或恢复选题，再运行本轮")
+        if activation_sample is None:
+            available_topics, pool_report = load_pool(self.cfg, self.conn)
+            if not available_topics:
+                detail = pool_report.get("kb_error") or "选题库当前没有可用选题"
+                raise RoundPreconditionError(f"运行前检查未通过：{detail}。请先补充或恢复选题，再运行本轮")
+        else:
+            from .activation_sample_snapshot import build_activation_sample_snapshot, verify_activation_sample_snapshot
+            try:
+                frozen = activation_sample.get("snapshot")
+                current = activation_sample.get("current")
+                if not isinstance(frozen, dict) or not isinstance(current, dict):
+                    raise ValueError("样稿快照或当前记录缺失")
+                verify_activation_sample_snapshot(current, frozen)
+                if frozen != activation_sample.get("snapshot"):
+                    raise ValueError("样稿快照不一致")
+            except Exception as exc:
+                raise RoundPreconditionError(f"Activation 样稿不可验证，拒绝生产：{exc}") from exc
 
         # 计划来源：子计划轮次严格读取创建时绑定的主计划/子计划/阶段快照。
         self._pvm = PlanVersionManager(self.cfg, self.conn)
@@ -491,7 +507,29 @@ class RoundExecutor:
 
             # ① + ② 选题读取与评分（G 节点）
             update_step("topic_eval", status="running", detail="正在读取选题库并评分")
-            scored = self._select_topics(topic_count, report)
+            if activation_sample is not None:
+                from types import SimpleNamespace
+                from .activation_sample_snapshot import verify_activation_sample_snapshot
+                verify_activation_sample_snapshot(
+                    activation_sample["current"], activation_sample["snapshot"],
+                )
+                frozen = activation_sample["snapshot"]
+                topic = SimpleNamespace(
+                    id=f"activation-{frozen['sample_content_id']}",
+                    title=frozen["title"], summary=frozen["body"],
+                    dimension=str(activation_sample["current"].get("angle") or "Activation 样稿"),
+                )
+                scored = [SimpleNamespace(
+                    topic=topic, mode="activation_sample", total_score=0.0,
+                    score_breakdown={}, is_exploration=False,
+                )]
+                report["steps"].append({
+                    "step": "activation_sample_input", "sample_content_id": frozen["sample_content_id"],
+                    "content_version": frozen["content_version"], "content_hash": frozen["content_hash"],
+                    "copy_mutable": False,
+                })
+            else:
+                scored = self._select_topics(topic_count, report)
             if not scored:
                 report["errors"].append("选题库无可用选题")
                 update_step("topic_eval", status="failed", detail="选题库无可用选题")
@@ -514,7 +552,7 @@ class RoundExecutor:
 
             # P0：只有确认本轮确实有内容需要生成后，才检查模型配置。
             # 放在统一失败收尾内，确保失败报告和 task_run 状态可追踪。
-            if not _llm_available(self.cfg):
+            if activation_sample is None and not _llm_available(self.cfg):
                 raise ContentGenerationError(
                     "model_not_configured",
                     "尚未配置可用模型，请先配置模型服务和 API Key 后再运行",
@@ -527,6 +565,7 @@ class RoundExecutor:
             # ③④⑤⑥ 每选题 × 每平台产出内容
             content_rows = await self._produce_contents(
                 round_id, scored, platforms, report, template_data=template_data,
+                activation_sample=activation_sample,
             )
 
             # ⑦ 存草稿
@@ -1070,7 +1109,7 @@ class RoundExecutor:
 
     async def _produce_contents(
         self, round_id: int, scored: list, platforms: list[Platform], report: dict,
-        template_data: Optional[dict] = None,
+        template_data: Optional[dict] = None, activation_sample: Optional[dict] = None,
     ) -> list[dict]:
         output_dir = self.cfg.resolve_path(self.cfg.paths.output_dir)
         rows: list[dict] = []
@@ -1282,6 +1321,9 @@ class RoundExecutor:
                             f"topic:{topic.id}:platform:{platform.value}"
                         ),
                         input_snapshot={
+                            "activation_sample": (
+                                activation_sample["snapshot"] if activation_sample is not None else None
+                            ),
                             "topic": {
                                 "id": topic.id, "title": topic.title,
                                 "summary": topic.summary, "dimension": topic.dimension,
@@ -1432,35 +1474,44 @@ class RoundExecutor:
                 visual_plan_data: Optional[dict] = None
                 reject_reason: Optional[str] = None
                 visual_generation_attempts: list[dict] = []
-                for attempt in range(self.cfg.copy_generation.max_guard_retries + 1):
-                    # LLM 为阻塞调用，放到线程池避免卡住事件循环。
-                    # 仅对明确可重试的网络/超时/限流/临时服务错误执行有限指数退避。
-                    for model_attempt in range(self.cfg.llm.retry_attempts + 1):
-                        try:
-                            title, body, tags = await asyncio.to_thread(
-                                generate_copy_content,
-                                topic.title, topic.summary, topic.dimension, platform, self.cfg,
-                                self.conn, topic.id, round_id,
-                                reject_reason,
-                                self._hints_for(platform),
-                                template_data,
-                            )
-                            break
-                        except ContentGenerationError as exc:
-                            if not exc.retryable or model_attempt >= self.cfg.llm.retry_attempts:
-                                raise
-                            delay = exc.retry_after_seconds or (
-                                self.cfg.llm.retry_backoff_seconds * (2 ** model_attempt)
-                            )
-                            report["steps"].append({
-                                "step": "model_retry",
-                                "platform": platform.value,
-                                "topic_id": topic.id,
-                                "error_code": exc.code,
-                                "attempt": model_attempt + 1,
-                                "delay_seconds": delay,
-                            })
-                            await asyncio.sleep(delay)
+                guard_attempts = 1 if activation_sample is not None else self.cfg.copy_generation.max_guard_retries + 1
+                for attempt in range(guard_attempts):
+                    if activation_sample is not None:
+                        from .activation_sample_snapshot import verify_activation_sample_snapshot
+                        verify_activation_sample_snapshot(
+                            activation_sample["current"], activation_sample["snapshot"],
+                        )
+                        frozen_copy = activation_sample["snapshot"]
+                        title, body, tags = frozen_copy["title"], frozen_copy["body"], frozen_copy["tags"]
+                    else:
+                        # LLM 为阻塞调用，放到线程池避免卡住事件循环。
+                        # 仅对明确可重试的网络/超时/限流/临时服务错误执行有限指数退避。
+                        for model_attempt in range(self.cfg.llm.retry_attempts + 1):
+                            try:
+                                title, body, tags = await asyncio.to_thread(
+                                    generate_copy_content,
+                                    topic.title, topic.summary, topic.dimension, platform, self.cfg,
+                                    self.conn, topic.id, round_id,
+                                    reject_reason,
+                                    self._hints_for(platform),
+                                    template_data,
+                                )
+                                break
+                            except ContentGenerationError as exc:
+                                if not exc.retryable or model_attempt >= self.cfg.llm.retry_attempts:
+                                    raise
+                                delay = exc.retry_after_seconds or (
+                                    self.cfg.llm.retry_backoff_seconds * (2 ** model_attempt)
+                                )
+                                report["steps"].append({
+                                    "step": "model_retry",
+                                    "platform": platform.value,
+                                    "topic_id": topic.id,
+                                    "error_code": exc.code,
+                                    "attempt": model_attempt + 1,
+                                    "delay_seconds": delay,
+                                })
+                                await asyncio.sleep(delay)
                     if card_first:
                         # 编排把出图排在质量门之前；候选版本也必须由图片 API 生成完整卡片。
                         from .ai_card_generation import generate_ai_card_set, _paginate_body
@@ -2257,10 +2308,11 @@ class RoundExecutor:
 _original_produce_contents = RoundExecutor._produce_contents
 
 
-async def _produce_contents_with_task_recovery(self, round_id, scored, platforms, report, template_data=None):
+async def _produce_contents_with_task_recovery(self, round_id, scored, platforms, report, template_data=None, activation_sample=None):
     try:
         return await _original_produce_contents(
             self, round_id, scored, platforms, report, template_data=template_data,
+            activation_sample=activation_sample,
         )
     except Exception as exc:
         if getattr(self, "_subplan_context", None):
