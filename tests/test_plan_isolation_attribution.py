@@ -343,7 +343,7 @@ def test_promoted_sample_inherits_round_plan_attribution(api_client, tmp_path, m
     conn.commit()
 
     response = client.post("/api/activation/saved/sample-promote/promote", json={"round_id": round_id})
-    assert response.status_code == 201, response.text
+    assert response.status_code == 202, response.text
     body = response.json()
     assert body["sample_content_id"] == "sample-promote"
     assert body["draft_status"] == "draft_pending_after_success"
