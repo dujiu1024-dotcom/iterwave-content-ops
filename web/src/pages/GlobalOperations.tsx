@@ -252,7 +252,7 @@ export default function GlobalOperations() {
             <option value="notification">通知</option>
             <option value="media_generation">AI 配图</option>
           </select>
-          <input aria-label="待办账号组筛选" value={todoTenantId} onChange={(event) => { setTodoTenantId(event.target.value); setTodoPage(1); }} placeholder="按账号组筛选" style={{ width: 160 }} />
+          <input aria-label="待办账号组 ID 筛选" value={todoTenantId} onChange={(event) => { setTodoTenantId(event.target.value); setTodoPage(1); }} placeholder="输入账号组 ID 筛选" style={{ width: 180 }} />
           <span className="tiny">队列 {todoCounts.global_queue ?? 0} · 任务 {todoCounts.task_run ?? 0} · 日志 {todoCounts.ops_log ?? 0} · 熔断 {todoCounts.circuit_breaker ?? 0} · 热点 {todoCounts.hot_topic_source ?? 0} · 素材 {todoCounts.media_review ?? 0} · 通知 {todoCounts.notification ?? 0} · 配图 {todoCounts.media_generation ?? 0}</span>
         </div>
         {todos.length ? <div className="list">
