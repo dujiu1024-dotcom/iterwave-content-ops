@@ -64,7 +64,7 @@ export default function BusinessDiagnosis() {
     finally { setBusy(false); }
   }
 
-  return <div className="page">
+  return <div className="page business-diagnosis-page">
     <div className="page-head"><div><div className="eyebrow">内容生产 · 决策准备</div><h1 className="page-title">AI 经营分析</h1><div className="page-desc">基于经营目标、业务档案、原始素材盘点、内容资产和历史内容形成可追溯报告。确认后才允许创建母计划草稿。</div></div>
       <div className="head-actions"><button className="btn" onClick={() => void load()} disabled={busy}>刷新</button><button className="btn primary" onClick={() => void analyze()} disabled={busy}>{busy ? "处理中…" : "重新分析"}</button></div>
     </div>
@@ -75,7 +75,7 @@ export default function BusinessDiagnosis() {
         <p>来源：经营目标 {report.source_snapshot.inventory_summary.business_goal_count} 项，业务档案 {report.source_snapshot.inventory_summary.registered_business_profile ? "已登记" : "未登记"}，产品/服务目录 {report.source_snapshot.inventory_summary.business_catalog_count ?? 0} 项，原始素材 {report.source_snapshot.inventory_summary.original_asset_count ?? 0} 项（可用 {report.source_snapshot.inventory_summary.original_asset_usable_count ?? 0} 项、待补缺口 {report.source_snapshot.inventory_summary.original_asset_open_gap_count ?? 0} 项），图片素材 {report.source_snapshot.inventory_summary.media_asset_count} 项，历史内容 {report.source_snapshot.inventory_summary.historical_content_count} 条。</p>
         <p>{report.status === "confirmed" ? (report.strategy_is_current ? (report.source_is_current ? "战略来源未变化" : "战略依据有效，生产期数据有更新") : "战略依据已变化，需重新分析") : report.source_is_current ? "来源未变化" : "来源已变化，需重新分析"}</p>
         <div className="panel-sub">分析依据（{report.source_snapshot.source_references.length} 条）</div>
-        <div className="table-wrap"><table><thead><tr><th>来源类型</th><th>记录</th></tr></thead><tbody>
+        <div className="table-wrap business-diagnosis-source-table"><table><thead><tr><th>来源类型</th><th>记录</th></tr></thead><tbody>
           {report.source_snapshot.source_references.slice(0, 100).map((ref, index) => <tr key={ref.source_type + ref.source_id + index}><td>{displaySourceLabel(ref.source_type)}</td><td>{ref.label}</td></tr>)}
           {!report.source_snapshot.source_references.length && <tr><td colSpan={2}>没有可引用的业务资料</td></tr>}
         </tbody></table></div>
