@@ -494,6 +494,38 @@ details[open] > summary::before { content: "▾ "; }
 }
 
 
+/* Hot topics list: prioritize search/source width without inheriting the global 160px minimum. */
+.hot-topics-filter-bar {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1.2fr) minmax(126px, .8fr) minmax(190px, 1.35fr) minmax(118px, .75fr);
+  align-items: center;
+  gap: 8px;
+}
+.hot-topics-filter-bar > .grow { display: none; }
+.hot-topics-filter-bar .tabs { min-width: 0; flex-wrap: nowrap; }
+.hot-topics-filter-bar .field,
+.hot-topics-filter-bar select.field,
+.hot-topics-filter-bar input.field {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+@media (max-width: 1100px) {
+  .hot-topics-filter-bar { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .hot-topics-filter-bar .tabs { grid-column: 1 / -1; }
+}
+@media (max-width: 720px) {
+  .hot-topics-filter-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .hot-topics-filter-bar .tabs { grid-column: 1 / -1; }
+  .hot-topics-filter-bar input.field { grid-column: 1 / -1; }
+}
+@media (max-width: 420px) {
+  .hot-topics-filter-bar { grid-template-columns: minmax(0, 1fr); }
+  .hot-topics-filter-bar .tabs,
+  .hot-topics-filter-bar input.field { grid-column: auto; }
+}
+
 /* ===== 内容审核工作台筛选区 ===== */
 .review-filters {
   display: grid;
