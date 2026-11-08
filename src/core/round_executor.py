@@ -1318,7 +1318,13 @@ class RoundExecutor:
                         task_ordinal=rank + 1,
                         idempotency_key=(
                             f"round:{round_id}:step:{strategy_step_id}:"
-                            f"topic:{topic.id}:platform:{platform.value}"
+                            + (
+                                f"activation:{activation_sample['snapshot']['sample_content_id']}:"
+                                f"v{activation_sample['snapshot']['content_version']}:"
+                                f"{activation_sample['snapshot']['content_hash']}:"
+                                if activation_sample is not None else f"topic:{topic.id}:"
+                            )
+                            + f"platform:{platform.value}"
                         ),
                         input_snapshot={
                             "activation_sample": (
