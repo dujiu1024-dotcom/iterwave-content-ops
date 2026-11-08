@@ -1248,3 +1248,31 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
   .task-queue-filters > span { grid-column: 1 / -1; }
   .task-queue-filters > button { justify-self: start; }
 }
+
+
+/* Tablet topbar: keep breadcrumb on one line and move global actions below it. */
+@media (min-width: 761px) and (max-width: 1100px) {
+  .topbar {
+    height: auto;
+    min-height: 58px;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 12px;
+    padding: 10px 16px;
+  }
+  .crumb {
+    flex: 1 1 100%;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .top-actions {
+    flex: 1 1 100%;
+    width: 100%;
+    min-width: 0;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+}
