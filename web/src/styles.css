@@ -1518,3 +1518,14 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
     grid-column: auto;
   }
 }
+
+
+/* Desktop calendar toolbar: keep filters content-sized instead of stretching into orphan rows. */
+@media (min-width: 1101px) {
+  .calendar-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .calendar-toolbar > * { flex: 0 0 auto; min-width: 0; }
+  .calendar-toolbar .calendar-date-picker { width: 148px; }
+  .calendar-toolbar .calendar-search { width: 200px; min-width: 160px; }
+  .calendar-toolbar select.field { width: 150px; max-width: 150px !important; }
+  .calendar-toolbar .calendar-plan-check { white-space: nowrap; }
+}
