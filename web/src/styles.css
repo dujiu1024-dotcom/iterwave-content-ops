@@ -1220,30 +1220,31 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 
 
 /* Global task queue filters: give the grid the full panel width before packing controls. */
-.panel-head:has(.task-queue-filters) {
+.panel-head.task-queue-panel-head {
   flex-direction: column;
   align-items: stretch;
   gap: 12px;
 }
 .task-queue-filters {
-  display: grid;
-  grid-template-columns: minmax(120px, 1fr) minmax(120px, 1fr) minmax(110px, .8fr) minmax(150px, 1.2fr) minmax(140px, 1fr) minmax(140px, 1fr) auto auto;
+  display: grid !important;
+  grid-template-columns: repeat(8, minmax(0, 1fr)) !important;
   align-items: center;
   gap: 8px;
   flex: 1 1 100%;
-  width: 100%;
+  width: 100% !important;
   min-width: 0;
+  flex: none;
 }
 .task-queue-filters > * { min-width: 0; max-width: 100%; }
 .task-queue-filters > select,
 .task-queue-filters > input { width: 100%; }
 .task-queue-filters > span { white-space: nowrap; }
 @media (max-width: 1100px) {
-  .task-queue-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .task-queue-filters { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
   .task-queue-filters > span { grid-column: 1 / -1; }
 }
 @media (max-width: 680px) {
-  .task-queue-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .task-queue-filters { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 8px; }
   .task-queue-filters > span { grid-column: 1 / -1; }
   .task-queue-filters > button { justify-self: start; }
 }
