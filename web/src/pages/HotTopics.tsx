@@ -412,7 +412,7 @@ export default function HotTopics() {
 
       {pageTab === "list" && (
       <>
-      <div className="filter-bar">
+      <div className="filter-bar hot-topics-filter-bar">
         <div className="tabs">
           {[
             { k: "all", l: `全部 ${items.length}` },
