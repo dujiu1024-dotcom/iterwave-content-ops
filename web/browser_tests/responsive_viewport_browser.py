@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 import signal
 import socket
 import subprocess
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen
 
 from playwright.sync_api import sync_playwright
@@ -77,6 +79,107 @@ def _install_api_fixtures(page):
                 status=200,
                 content_type="application/json",
                 body='{"runtime_tenant_id":"default","selected_tenant_id":"default","restart_required":false,"items":[{"id":"default","name":"Viewport test","created_at":null,"is_active":true}]}',
+            )
+        if path.endswith("/api/schedule") and route.request.method == "GET":
+            params = parse_qs(urlparse(route.request.url).query)
+            start_date = params.get("start_date", ["2026-11-08"])[0]
+            end_date = params.get("end_date", [start_date])[0]
+            return route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({
+                    "start_date": start_date, "end_date": end_date,
+                    "items": [], "total": 0, "unscheduled": [],
+                    "unscheduled_total": 0, "unscheduled_page": 1,
+                    "unscheduled_page_size": 50,
+                }),
+            )
+        if path.endswith("/api/production-batches/987654321"):
+            return route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({
+                    "batch": {
+                        "round_id": 987654321, "round_number": None,
+                        "round_status": "completed", "created_at": "2026-11-08T10:00:00+08:00",
+                        "master_plan_version_id": 99001, "sub_plan_id": "internal-sub-plan-id",
+                        "sub_plan_title": None, "platform": "xhs",
+                        "sub_plan_version_id": 99002,
+                        "strategy_step_id": "internal-strategy-step-id",
+                        "strategy_step_title": "内容策略阶段",
+                        "production_line_version_id": 99003,
+                        "attribution_status": "manual_review",
+                    },
+                    "tasks": [],
+                }),
+            )
+        if path.endswith("/api/production-batches"):
+            params = parse_qs(urlparse(route.request.url).query)
+            start_date = params.get("start_date", ["2026-11-08"])[0]
+            batch = {
+                "round_id": 987654321, "round_number": None,
+                "round_status": "completed", "created_at": f"{start_date}T10:00:00+08:00",
+                "master_plan_version_id": 99001, "sub_plan_id": "internal-sub-plan-id",
+                "sub_plan_title": None, "platform": "xhs",
+                "sub_plan_version_id": 99002,
+                "strategy_step_id": "internal-strategy-step-id",
+                "strategy_step_title": "内容策略阶段",
+                "production_line_version_id": 99003,
+                "attribution_status": "manual_review",
+                "task_count": 0, "pending_task_count": 0, "running_task_count": 0,
+                "succeeded_task_count": 0, "failed_task_count": 0, "cancelled_task_count": 0,
+            }
+            return route.fulfill(
+                status=200, content_type="application/json",
+                body=json.dumps({"items": [batch], "total": 1}),
+            )
+        if path.endswith("/api/content-plans/viewport-plan-1"):
+            return route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({
+                    "id": "viewport-plan-1",
+                    "title": "视觉验收计划：用于验证长标题与详情弹窗的窄屏换行",
+                    "topic": "测试主题：" + "长文本主题片段。" * 18,
+                    "platforms": ["xhs"], "planned_count": 3,
+                    "scheduled_date": "2026-11-08", "status": "planned",
+                    "notes": "测试备注：" + "长文本备注片段。" * 24,
+                    "version": 1, "created_at": "2026-11-08T10:00:00+08:00",
+                    "updated_at": "2026-11-08T10:00:00+08:00",
+                    "drafts": [{
+                        "draft_id": "internal-draft-id-should-not-show",
+                        "platform": "xhs", "status": "draft_pending",
+                        "title": "", "round_id": None, "round_number": None,
+                    }],
+                    "rounds": [{
+                        "round_id": 987654321, "round_number": None,
+                        "task_id": "internal-task-id-should-not-show",
+                        "created_at": "2026-11-08T10:00:00+08:00",
+                        "strategy_step_id": "internal-strategy-step-id",
+                        "production_line_version_id": 99003,
+                        "attribution_status": "manual_review",
+                    }],
+                }),
+            )
+        if path.endswith("/api/content-plans"):
+            params = parse_qs(urlparse(route.request.url).query)
+            start_date = params.get("start_date", ["2026-11-08"])[0]
+            return route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({
+                    "items": [{
+                        "id": "viewport-plan-1",
+                        "title": "视觉验收计划：用于验证长标题与详情弹窗的窄屏换行",
+                        "topic": "测试主题",
+                        "platforms": ["xhs"], "planned_count": 3,
+                        "scheduled_date": start_date, "status": "planned",
+                        "notes": "测试备注", "version": 1,
+                        "created_at": "2026-11-08T10:00:00+08:00",
+                        "updated_at": "2026-11-08T10:00:00+08:00",
+                    }],
+                    "total": 1,
+                }),
             )
         if path.endswith("/api/drafts"):
             return route.fulfill(
@@ -216,6 +319,56 @@ def test_all_routable_pages_at_required_viewports():
                                     f"(expected {expected_rows}; layout={filter_layout})"
                                 )
 
+                        # Render a deterministic task-row fixture so responsive row CSS is
+                        # exercised even when business APIs intentionally fail closed.
+                        row_layout = page.evaluate(
+                            """() => {
+                              const host = document.querySelector('#main-content');
+                              const row = document.createElement('div');
+                              row.className = 'panel task-queue-row';
+                              row.innerHTML = `
+                                <div class="task-queue-main"><strong>内容生产任务</strong><div>测试账号组 · 运营内容汇总</div></div>
+                                <div class="task-queue-status"><span class="status-pill producing">执行中</span></div>
+                                <div class="task-queue-time">2026-11-08 13:00</div>
+                                <div class="task-queue-execution">开始：2026-11-08 13:01<div>耗时：12.3 秒</div></div>
+                                <div class="task-queue-actions"><button class="btn sm">查看详情</button><button class="btn sm ghost">取消任务</button></div>
+                              `;
+                              host.appendChild(row);
+                              const style = getComputedStyle(row);
+                              const children = [...row.children].map(element => {
+                                const rect = element.getBoundingClientRect();
+                                return {className: element.className, left: Math.round(rect.left),
+                                  right: Math.round(rect.right), top: Math.round(rect.top),
+                                  width: Math.round(rect.width), height: Math.round(rect.height)};
+                              });
+                              return {columns: style.gridTemplateColumns.split(' ').length,
+                                documentWidth: document.documentElement.scrollWidth,
+                                bodyWidth: document.body.scrollWidth,
+                                rowRight: Math.round(row.getBoundingClientRect().right), children};
+                            }
+                            """
+                        )
+                        expected_columns = 5 if width > 1100 else 2 if width > 680 else 1
+                        if row_layout['columns'] != expected_columns:
+                            failures.append(f"{route}@{width}: task row has {row_layout['columns']} columns (expected {expected_columns}; layout={row_layout})")
+                        if row_layout['documentWidth'] > width + 1 or row_layout['bodyWidth'] > width + 1:
+                            failures.append(f"{route}@{width}: task row fixture causes horizontal overflow: {row_layout}")
+                        if row_layout['rowRight'] > width + 1:
+                            failures.append(f"{route}@{width}: task row exceeds viewport: {row_layout}")
+                        if any(item['width'] < 1 or item['left'] < -1 or item['right'] > width + 1 for item in row_layout['children']):
+                            failures.append(f"{route}@{width}: task row child is clipped or outside viewport: {row_layout}")
+
+                        # Capture the row itself, not only the page's empty/error-state screenshot.
+                        # The fixture is appended below the rendered content and must be scrolled
+                        # into view so reviewers can inspect the actual responsive arrangement.
+                        row_locator = page.locator("#main-content .task-queue-row")
+                        row_locator.scroll_into_view_if_needed()
+                        page.screenshot(
+                            path=str(ARTIFACTS / f"task-queue-row-{width}.png"),
+                            full_page=False,
+                            animations="disabled",
+                        )
+
                     if route == "plan-center" and width <= 760:
                         hierarchy = page.locator(".plan-hierarchy")
                         hint = page.locator(".plan-hierarchy-hint")
@@ -246,6 +399,76 @@ def test_all_routable_pages_at_required_viewports():
                             full_page=True,
                             animations="disabled",
                         )
+
+                    if route == "calendar":
+                        plan_chip = page.locator(".calendar-plan-chip").filter(has_text="视觉验收计划")
+                        try:
+                            plan_chip.wait_for(state="visible", timeout=10000)
+                        except Exception:
+                            failures.append(f"calendar@{width}: deterministic content-plan fixture is missing")
+                        else:
+                            if plan_chip.count() != 1:
+                                failures.append(f"calendar@{width}: expected one content-plan fixture, found {plan_chip.count()}")
+                            plan_chip.click()
+                            dialog = page.get_by_role("dialog", name="内容计划详情")
+                            dialog.wait_for(state="visible", timeout=10000)
+                            dialog.locator(".calendar-plan-detail-grid").wait_for(state="visible", timeout=10000)
+                            dialog_text = dialog.inner_text()
+                            if "未命名草稿" not in dialog_text:
+                                failures.append(f"calendar@{width}: missing-title draft fallback is not business-readable")
+                            if "internal-draft-id-should-not-show" in dialog_text:
+                                failures.append(f"calendar@{width}: internal draft ID leaked into visible plan details")
+                            if "987654321" in dialog_text or "internal-task-id-should-not-show" in dialog_text:
+                                failures.append(f"calendar@{width}: internal round/task ID leaked into plan details")
+                            modal_layout = dialog.evaluate(
+                                """element => {
+                                  const rect = element.getBoundingClientRect();
+                                  return {left: Math.round(rect.left), right: Math.round(rect.right),
+                                    width: Math.round(rect.width), scrollWidth: element.scrollWidth,
+                                    clientWidth: element.clientWidth};
+                                }"""
+                            )
+                            if modal_layout["left"] < -1 or modal_layout["right"] > width + 1:
+                                failures.append(f"calendar@{width}: plan detail modal exceeds viewport: {modal_layout}")
+                            if modal_layout["scrollWidth"] > modal_layout["clientWidth"] + 1:
+                                failures.append(f"calendar@{width}: plan detail modal has unexpected horizontal overflow: {modal_layout}")
+                            page.screenshot(
+                                path=str(ARTIFACTS / f"calendar-plan-detail-{width}.png"),
+                                full_page=False,
+                                animations="disabled",
+                            )
+                            dialog.get_by_role("button", name="关闭").click()
+                            batch_chip = page.locator(".calendar-plan-chip").filter(has_text="生产批次")
+                            batch_chip.wait_for(state="visible", timeout=10000)
+                            batch_chip.click()
+                            batch_dialog = page.get_by_role("dialog", name="生产批次详情")
+                            batch_dialog.wait_for(state="visible", timeout=10000)
+                            batch_text = batch_dialog.inner_text()
+                            internal_ids = (
+                                "987654321", "99001", "99002", "99003",
+                                "internal-sub-plan-id", "internal-strategy-step-id",
+                            )
+                            for internal_id in internal_ids:
+                                if internal_id in batch_text:
+                                    failures.append(f"calendar@{width}: internal batch/version ID leaked: {internal_id}")
+                            if batch_text.count("已关联") < 2:
+                                failures.append(f"calendar@{width}: batch detail does not show business-readable plan associations")
+                            batch_dialog_layout = batch_dialog.evaluate(
+                                """element => {
+                                  const rect = element.getBoundingClientRect();
+                                  return {left: Math.round(rect.left), right: Math.round(rect.right),
+                                    scrollWidth: element.scrollWidth, clientWidth: element.clientWidth};
+                                }"""
+                            )
+                            if batch_dialog_layout["left"] < -1 or batch_dialog_layout["right"] > width + 1:
+                                failures.append(f"calendar@{width}: batch detail modal exceeds viewport: {batch_dialog_layout}")
+                            if batch_dialog_layout["scrollWidth"] > batch_dialog_layout["clientWidth"] + 1:
+                                failures.append(f"calendar@{width}: batch detail modal has unexpected horizontal overflow: {batch_dialog_layout}")
+                            page.screenshot(
+                                path=str(ARTIFACTS / f"calendar-batch-detail-{width}.png"),
+                                full_page=False,
+                                animations="disabled",
+                            )
 
                 # Exercise the actual Operations > Publish confirmation pane.
                 # A deterministic pending draft makes the narrow verification inputs visible.
