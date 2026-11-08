@@ -133,3 +133,5 @@ jobs:
           python -m playwright install --with-deps chromium
       - name: Run real-browser task recovery scenarios
         run: python -m pytest -vv --override-ini python_files=visual_generation_browser.py web/browser_tests/visual_generation_browser.py
+      - name: Run compact UI layout viewport acceptance
+        run: python -m pytest -vv --override-ini python_files=ui_layout_browser.py web/browser_tests/ui_layout_browser.py
