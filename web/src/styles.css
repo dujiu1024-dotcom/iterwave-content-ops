@@ -1219,42 +1219,6 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 }
 
 
-/* Global task history filters: keep the toolbar compact and responsive. */
-.task-queue-history-head {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 10px;
-}
-.task-queue-history-filters {
-  display: grid;
-  grid-template-columns: minmax(112px, 1fr) minmax(132px, 1.2fr) minmax(150px, 1.3fr) minmax(138px, 1.1fr) minmax(138px, 1.1fr) minmax(138px, 1.1fr) auto auto;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-width: 0;
-}
-.task-queue-history-filters > * { min-width: 0; max-width: 100%; }
-.task-queue-history-filters select,
-.task-queue-history-filters input { width: 100%; box-sizing: border-box; }
-.task-queue-history-filters > button { white-space: nowrap; }
-.task-queue-history-filters > span { white-space: nowrap; }
-@media (max-width: 1100px) {
-  .task-queue-history-filters { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  .task-queue-history-filters > button:last-of-type,
-  .task-queue-history-filters > span { justify-self: start; }
-}
-@media (max-width: 760px) {
-  .task-queue-history-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .task-queue-history-filters > button:last-of-type,
-  .task-queue-history-filters > span { grid-column: 1 / -1; }
-}
-@media (max-width: 420px) {
-  .task-queue-history-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .task-queue-history-filters > button:last-of-type,
-  .task-queue-history-filters > span { grid-column: auto; }
-}
-
 /* Global task queue filters: give the grid the full panel width before packing controls. */
 .panel-head.task-queue-panel-head {
   flex-direction: column;
@@ -1391,3 +1355,34 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 }
 .analytics-empty-hint > div:first-child { font-size: 12px !important; }
 .analytics-empty-hint > div + div { margin-top: 4px !important; font-size: 11px !important; }
+
+
+/* History filter density overrides the shared task queue toolbar grid. */
+.task-queue-history-head {
+  align-items: stretch;
+  gap: 10px;
+}
+.task-queue-history-filters {
+  grid-template-columns: minmax(112px, 1fr) minmax(132px, 1.2fr) minmax(150px, 1.3fr) minmax(138px, 1.1fr) minmax(138px, 1.1fr) minmax(138px, 1.1fr) auto auto !important;
+  gap: 8px;
+}
+.task-queue-history-filters > * { min-width: 0; max-width: 100%; }
+.task-queue-history-filters select,
+.task-queue-history-filters input { width: 100%; box-sizing: border-box; }
+.task-queue-history-filters > button,
+.task-queue-history-filters > span { white-space: nowrap; }
+@media (max-width: 1100px) {
+  .task-queue-history-filters { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }
+  .task-queue-history-filters > button:last-of-type,
+  .task-queue-history-filters > span { justify-self: start; }
+}
+@media (max-width: 760px) {
+  .task-queue-history-filters { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+  .task-queue-history-filters > button:last-of-type,
+  .task-queue-history-filters > span { grid-column: 1 / -1; }
+}
+@media (max-width: 420px) {
+  .task-queue-history-filters { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+  .task-queue-history-filters > button:last-of-type,
+  .task-queue-history-filters > span { grid-column: auto; }
+}
