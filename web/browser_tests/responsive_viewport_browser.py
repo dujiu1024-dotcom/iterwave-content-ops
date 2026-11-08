@@ -209,7 +209,8 @@ def test_dashboard_structured_data_state_at_required_viewports():
                     viewport={"width": width, "height": 900 if width > 390 else 844},
                     device_scale_factor=1,
                 )
-                page.on("pageerror", lambda error: (_ for _ in ()).throw(AssertionError(str(error))))
+                page_errors = []
+                page.on("pageerror", lambda error: page_errors.append(str(error)))
                 _install_api_fixtures(page)
                 _install_dashboard_data_fixtures(page)
                 page.goto(f"http://127.0.0.1:{port}/?page=dashboard", wait_until="domcontentloaded")
@@ -228,6 +229,8 @@ def test_dashboard_structured_data_state_at_required_viewports():
                     raise AssertionError(f"dashboard@{width}: horizontal overflow: {metrics}")
                 if metrics["visibleRows"] < 2:
                     raise AssertionError(f"dashboard@{width}: expected structured business rows: {metrics}")
+                if page_errors:
+                    raise AssertionError(f"dashboard@{width}: browser errors: {page_errors}")
                 page.close()
             browser.close()
     finally:
