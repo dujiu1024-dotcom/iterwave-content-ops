@@ -181,10 +181,17 @@ def test_all_routable_pages_at_required_viewports():
                                     control.matches('select, input')
                                   );
                                   const style = getComputedStyle(element);
+                                  const tops = controls.map(control =>
+                                    control.getBoundingClientRect().top
+                                  ).sort((a, b) => a - b);
+                                  let rows = 0;
+                                  let previousTop = null;
+                                  for (const top of tops) {
+                                    if (previousTop === null || top - previousTop > 6) rows += 1;
+                                    previousTop = top;
+                                  }
                                   return {
-                                    rows: new Set(controls.map(control =>
-                                      Math.round(control.getBoundingClientRect().top)
-                                    )).size,
+                                    rows,
                                     display: style.display,
                                     columns: style.gridTemplateColumns,
                                     width: Math.round(element.getBoundingClientRect().width),
