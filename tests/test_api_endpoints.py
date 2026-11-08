@@ -5576,6 +5576,7 @@ def test_round_run_status_sanitizes_nested_report_and_progress(client, tmp_path,
     result = {
         "round_id": round_id, "final_status": "failed",
         "errors": [internal], "failure_message": internal,
+        "summary": "报告正文：日志位于 /home/ubuntu/iterwave/data/report.json，备份位于 C:\\Users\\operator\\report.json。",
         "task_id": "internal-task-123", "tenant_id": "default",
         "content": "第一段完整业务正文\\n第二段仍应完整保留，包含正常换行。",
         "steps": [{"step": "save_drafts", "detail": internal, "draft_id": 987}],
@@ -5608,6 +5609,8 @@ def test_round_run_status_sanitizes_nested_report_and_progress(client, tmp_path,
     assert "/home/ubuntu" not in response.text
     assert "sqlite3.OperationalError" not in response.text
     assert "Traceback" not in response.text
+    assert "服务器内部路径" in response.text
+    assert "本地内部路径" in response.text
 
 
 def test_round_run_status_memory_branch_uses_response_allowlist(client, monkeypatch):
