@@ -193,7 +193,7 @@ def _install_dashboard_data_fixtures(page):
                     "detail": "测试长备注：基于近期内容表现、平台差异和样本不足情况，需要人工确认是否调整下一轮生产方向。",
                     "severity": "high", "source_label": "策略建议", "created_at": "2026-11-08T08:00:00+08:00",
                     "target_page": "goals", "target_tab": None}], "total": 1, "counts": {"global_queue": 1}, "page": 1, "page_size": 100, "pages": 1, "capped": False}, ensure_ascii=False))
-        return route.continue_()
+        return route.fallback()
 
     page.route("**/api/**", handle)
 
