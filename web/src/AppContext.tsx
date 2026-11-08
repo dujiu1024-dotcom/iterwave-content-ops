@@ -76,6 +76,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const showToast = useCallback((text: string, type: Toast["type"] = "info") => {
     const id = Date.now() + Math.random();
     setToasts((prev) => [...prev, { id, text, type }]);
+    // Toast 是短暂反馈，避免接口连续失败时永久堆叠并遮挡页面内容。
+    window.setTimeout(() => {
+      setToasts((prev) => prev.filter((toast) => toast.id !== id));
+    }, 6000);
   }, []);
 
   const dismissToast = useCallback((id: number) => {
