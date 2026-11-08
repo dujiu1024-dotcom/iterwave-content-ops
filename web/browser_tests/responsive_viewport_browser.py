@@ -216,6 +216,45 @@ def test_all_routable_pages_at_required_viewports():
                                     f"(expected {expected_rows}; layout={filter_layout})"
                                 )
 
+                        # Render a deterministic task-row fixture so responsive row CSS is
+                        # exercised even when business APIs intentionally fail closed.
+                        row_layout = page.evaluate(
+                            """() => {
+                              const host = document.querySelector('#main-content');
+                              const row = document.createElement('div');
+                              row.className = 'panel task-queue-row';
+                              row.innerHTML = `
+                                <div class="task-queue-main"><strong>内容生产任务</strong><div>测试账号组 · 运营内容汇总</div></div>
+                                <div class="task-queue-status"><span class="status-pill producing">执行中</span></div>
+                                <div class="task-queue-time">2026-11-08 13:00</div>
+                                <div class="task-queue-execution">开始：2026-11-08 13:01<div>耗时：12.3 秒</div></div>
+                                <div class="task-queue-actions"><button class="btn sm">查看详情</button><button class="btn sm ghost">取消任务</button></div>
+                              `;
+                              host.appendChild(row);
+                              const style = getComputedStyle(row);
+                              const children = [...row.children].map(element => {
+                                const rect = element.getBoundingClientRect();
+                                return {className: element.className, left: Math.round(rect.left),
+                                  right: Math.round(rect.right), top: Math.round(rect.top),
+                                  width: Math.round(rect.width), height: Math.round(rect.height)};
+                              });
+                              return {columns: style.gridTemplateColumns.split(' ').length,
+                                documentWidth: document.documentElement.scrollWidth,
+                                bodyWidth: document.body.scrollWidth,
+                                rowRight: Math.round(row.getBoundingClientRect().right), children};
+                            }
+                            """
+                        )
+                        expected_columns = 5 if width > 1100 else 2 if width > 680 else 1
+                        if row_layout['columns'] != expected_columns:
+                            failures.append(f"{route}@{width}: task row has {row_layout['columns']} columns (expected {expected_columns}; layout={row_layout})")
+                        if row_layout['documentWidth'] > width + 1 or row_layout['bodyWidth'] > width + 1:
+                            failures.append(f"{route}@{width}: task row fixture causes horizontal overflow: {row_layout}")
+                        if row_layout['rowRight'] > width + 1:
+                            failures.append(f"{route}@{width}: task row exceeds viewport: {row_layout}")
+                        if any(item['width'] < 1 or item['left'] < -1 or item['right'] > width + 1 for item in row_layout['children']):
+                            failures.append(f"{route}@{width}: task row child is clipped or outside viewport: {row_layout}")
+
                     if route == "plan-center" and width <= 760:
                         hierarchy = page.locator(".plan-hierarchy")
                         hint = page.locator(".plan-hierarchy-hint")

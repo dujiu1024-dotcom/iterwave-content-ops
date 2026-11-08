@@ -713,8 +713,6 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 }
 
 /* ===== 全局运营中心与日历控件 ===== */
-.global-operations-page .table-wrap { overflow-x: auto; }
-.global-operations-page table { min-width: 820px; }
 .global-operations-page .tiny { color: var(--subtle); font-size: 11px; margin-top: 4px; }
 .calendar-month-grid { min-width: 0; }
 .calendar-month-grid > div { min-width: 0; }

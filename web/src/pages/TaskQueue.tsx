@@ -76,8 +76,8 @@ function TaskRow({
 }) {
   const active = task.status === "queued" || task.status === "running";
   return (
-    <div className="panel-row" style={{ display: "grid", gridTemplateColumns: "minmax(180px, 1.5fr) minmax(100px, .8fr) minmax(100px, .8fr) minmax(150px, 1fr) auto", gap: 14, alignItems: "center", padding: "10px 12px" }}>
-      <div style={{ minWidth: 0 }}>
+    <div className="task-queue-row">
+      <div className="task-queue-main" style={{ minWidth: 0 }}>
         <div style={{ fontWeight: 650 }}>{TASK_LABEL[task.task_type] || displayTaskTypeLabel(task.task_type)}</div>
         <div className="muted" style={{ fontSize: 12, marginTop: 4, overflowWrap: "anywhere" }}>
           {task.tenant_name} · {aggregateLabel(task)}
