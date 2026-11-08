@@ -393,13 +393,9 @@ def test_weekly_action_feedback_persists_decisions_and_outcomes(activation_clien
     assert final_action["outcome"] == "success"
 
 
-def test_saved_sample_promotes_into_created_formal_round_idempotently(activation_client, conn, seed):
+def test_saved_sample_rejects_formal_round_without_complete_plan_binding(activation_client, conn, seed):
     from datetime import datetime
-    from types import SimpleNamespace
 
-    main._g_ctx["guard"] = SimpleNamespace(
-        check_content=lambda *args, **kwargs: SimpleNamespace(passes=True, reason="通过正式质量门")
-    )
     now = datetime.now().isoformat(sep=" ")
     round_id = seed.round(status="created")
     conn.execute(
@@ -422,36 +418,10 @@ def test_saved_sample_promotes_into_created_formal_round_idempotently(activation
         "/api/activation/saved/sample-content-promote/promote",
         json={"round_id": round_id},
     )
-    assert response.status_code == 201, response.text
-    payload = response.json()
-    assert payload["round_id"] == round_id
-    assert payload["already_promoted"] is False
-    assert payload["visual_status"] == "degraded"
-    assert payload["visual_production_required"] is True
-    assert payload["image_generation_started"] is False
-    assert payload["publication_started"] is False
-    assert payload["next_step"]
-    assert conn.execute(
-        "SELECT COUNT(*) FROM contents WHERE id=? AND round_id=?",
-        (payload["content_id"], round_id),
-    ).fetchone()[0] == 1
-    assert conn.execute(
-        "SELECT status FROM drafts WHERE id=?", (payload["draft_id"],)
-    ).fetchone()[0] == "draft_pending"
-
-    repeated = activation_client.post(
-        "/api/activation/saved/sample-content-promote/promote",
-        json={"round_id": round_id},
-    )
-    assert repeated.status_code == 201, repeated.text
-    assert repeated.json()["already_promoted"] is True
-    assert repeated.json()["content_id"] == payload["content_id"]
-    assert repeated.json()["visual_production_required"] is True
-    assert repeated.json()["image_generation_started"] is False
-    assert repeated.json()["publication_started"] is False
-    assert conn.execute(
-        "SELECT COUNT(*) FROM contents WHERE round_id=?", (round_id,)
-    ).fetchone()[0] == 1
+    assert response.status_code == 409, response.text
+    assert "完整母计划" in response.text
+    assert conn.execute("SELECT COUNT(*) FROM contents WHERE round_id=?", (round_id,)).fetchone()[0] == 0
+    assert conn.execute("SELECT promoted_task_id FROM sample_contents WHERE id='sample-content-promote'").fetchone()[0] is None
 
 
 def test_chinese_body_passes_character_level_quality_check(activation_client, conn, monkeypatch):
@@ -761,56 +731,20 @@ def test_first_value_activation_to_saved_edited_and_reviewed_formal_content(
     library = activation_client.get("/api/activation/saved")
     assert any(item["id"] == sample["id"] for item in library.json()["items"])
 
-    # 将样稿导入正式生产轮次，保持幂等。
+    # 正式导入必须经过完整的母计划/子计划/阶段/生产线版本绑定校验。
     round_id = seed.round(status="created")
     promoted = activation_client.post(
         f"/api/activation/saved/{sample['id']}/promote",
         json={"round_id": round_id},
     )
-    assert promoted.status_code == 201, promoted.text
-    formal = promoted.json()
-    assert formal["already_promoted"] is False
+    assert promoted.status_code == 409, promoted.text
+    assert "完整母计划" in promoted.text
     assert conn.execute(
-        "SELECT status FROM drafts WHERE id=?", (formal["draft_id"],)
-    ).fetchone()["status"] == "draft_pending"
-
-    repeated = activation_client.post(
-        f"/api/activation/saved/{sample['id']}/promote",
-        json={"round_id": round_id},
-    )
-    assert repeated.status_code == 201
-    assert repeated.json()["already_promoted"] is True
-    assert repeated.json()["content_id"] == formal["content_id"]
-
-    # 正式内容允许编辑；编辑后必须重新执行质量检查。
-    edited = activation_client.patch(
-        f"/api/contents/{formal['content_id']}",
-        json={
-            "title": "经过人工编辑的产品经理实践方法",
-            "body": sample["body"] + " 人工补充了真实项目中的执行细节和复盘依据。",
-            "tags": ["产品经理", "项目复盘"],
-            "reason": "首次体验内容人工完善",
-        },
-    )
-    assert edited.status_code == 200, edited.text
-    assert edited.json()["changed"] is True
-    stale_guard = conn.execute(
-        "SELECT guard_outcome FROM contents WHERE id=?", (formal["content_id"],)
-    ).fetchone()["guard_outcome"]
-    assert stale_guard is None
-
-    reviewed = activation_client.post(f"/api/contents/{formal['content_id']}/recheck")
-    assert reviewed.status_code == 200, reviewed.text
-    assert reviewed.json()["passes"] is True
+        "SELECT COUNT(*) FROM contents WHERE round_id=?", (round_id,)
+    ).fetchone()[0] == 0
     assert conn.execute(
-        "SELECT guard_outcome FROM contents WHERE id=?", (formal["content_id"],)
-    ).fetchone()["guard_outcome"] == "pass"
-
-    # 关键数据必须落在正式内容库，而不是继续停留在体验样稿状态。
-    assert conn.execute(
-        "SELECT COUNT(*) FROM contents WHERE id=? AND round_id=?",
-        (formal["content_id"], round_id),
-    ).fetchone()[0] == 1
+        "SELECT promoted_task_id FROM sample_contents WHERE id=?", (sample["id"],)
+    ).fetchone()[0] is None
     assert conn.execute(
         "SELECT COUNT(*) FROM content_events WHERE sample_content_id=? AND event_type='content_saved'",
         (sample["id"],),
