@@ -2555,7 +2555,7 @@ def _register_routes(app: FastAPI) -> None:
         }
         try:
             execution_snapshot = _build_task_execution_snapshot(
-                tenant_id, round_id, parameters,
+                tenant_id, round_id, parameters, runtime_context=_g(),
             )
             queued, created = _task_queue.enqueue(
                 task_type="round_run", tenant_id=tenant_id,
