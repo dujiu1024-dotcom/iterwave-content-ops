@@ -4381,6 +4381,18 @@ def _register_routes(app: FastAPI) -> None:
                      severity: str, target_page: str, target_tab: str):
             if source and source != source_key:
                 return
+            # Detail is a presentation contract, not a raw diagnostic channel.
+            # Preserve user-authored business context, but never forward free-form
+            # circuit-breaker reasons or error-level notification bodies verbatim.
+            safe_title = str(title or "待处理事项")
+            safe_detail = str(detail or "")
+            if source_key == "circuit_breaker" and status != "login_expired":
+                safe_detail = "平台触发保护机制，暂不可继续执行；请查看平台熔断详情并在恢复条件满足后重试。"
+            elif source_key == "notification" and severity == "high":
+                safe_title = safe_error_summary(safe_title, "系统通知需要处理")
+                safe_detail = safe_error_summary(
+                    safe_detail, "有一条需要处理的系统通知，请进入通知详情查看。",
+                )
             items.append({
                 "id": f"{tenant['id']}:{source_key}:{item_id}",
                 "record_id": item_id,
@@ -4394,8 +4406,8 @@ def _register_routes(app: FastAPI) -> None:
                 }[source_key],
                 "tenant_id": tenant["id"],
                 "tenant_name": tenant.get("name") or tenant["id"],
-                "title": redact(str(title or "待处理事项"))[:160],
-                "detail": redact(str(detail or ""))[:240],
+                "title": redact(safe_title)[:160],
+                "detail": redact(safe_detail)[:240],
                 "status": status,
                 "created_at": created_at,
                 "severity": severity,
