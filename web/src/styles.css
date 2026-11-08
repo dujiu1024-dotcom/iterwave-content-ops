@@ -1298,3 +1298,21 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 @media (max-width: 600px) {
   .grid.three.onboarding-goal-grid { grid-template-columns: minmax(0, 1fr) !important; }
 }
+
+/* Force responsive page grids to use the intended layout despite shared utility presets. */
+.grid.three.onboarding-goal-grid {
+  display: grid !important;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+}
+.agent-flow.agent-flow-responsive {
+  display: grid !important;
+  grid-template-columns: repeat(7, minmax(0, 1fr)) !important;
+}
+@media (max-width: 900px) {
+  .grid.three.onboarding-goal-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+  .agent-flow.agent-flow-responsive { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }
+}
+@media (max-width: 600px) {
+  .grid.three.onboarding-goal-grid { grid-template-columns: minmax(0, 1fr) !important; }
+  .agent-flow.agent-flow-responsive { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+}
