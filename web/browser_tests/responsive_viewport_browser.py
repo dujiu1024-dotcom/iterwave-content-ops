@@ -175,19 +175,33 @@ def test_all_routable_pages_at_required_viewports():
                         if filters.count() != 1 or not filters.is_visible():
                             failures.append(f"{route}@{width}: compact history filters are missing")
                         else:
-                            filter_rows = filters.evaluate(
+                            filter_layout = filters.evaluate(
                                 """element => {
-                                  const controls = [...element.children].slice(0, 6);
-                                  return new Set(controls.map(control =>
-                                    Math.round(control.getBoundingClientRect().top)
-                                  )).size;
+                                  const controls = [...element.children].filter(control =>
+                                    control.matches('select, input')
+                                  );
+                                  const style = getComputedStyle(element);
+                                  return {
+                                    rows: new Set(controls.map(control =>
+                                      Math.round(control.getBoundingClientRect().top)
+                                    )).size,
+                                    display: style.display,
+                                    columns: style.gridTemplateColumns,
+                                    width: Math.round(element.getBoundingClientRect().width),
+                                    controls: controls.map(control => ({
+                                      tag: control.tagName,
+                                      top: Math.round(control.getBoundingClientRect().top),
+                                      width: Math.round(control.getBoundingClientRect().width)
+                                    }))
+                                  };
                                 }"""
                             )
+                            filter_rows = filter_layout["rows"]
                             expected_rows = 1 if width > 1100 else 2 if width > 680 else 3
                             if filter_rows != expected_rows:
                                 failures.append(
                                     f"{route}@{width}: history filters use {filter_rows} rows "
-                                    f"(expected {expected_rows})"
+                                    f"(expected {expected_rows}; layout={filter_layout})"
                                 )
 
                     if route == "plan-center" and width <= 760:
