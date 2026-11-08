@@ -531,26 +531,42 @@ details[open] > summary::before { content: "▾ "; }
 /* ===== 内容审核工作台筛选区 ===== */
 .review-filters {
   display: grid;
-  grid-template-columns: minmax(120px, 1fr) minmax(100px, .65fr) minmax(110px, .7fr);
-  gap: 7px;
-  padding: 10px 0;
+  grid-template-columns: minmax(118px, 1fr) minmax(104px, .8fr) minmax(132px, 1.1fr) minmax(132px, .9fr) minmax(132px, .9fr) minmax(190px, 1.5fr);
+  gap: 8px;
+  align-items: end;
+  padding: 8px 0;
   border-bottom: 1px solid var(--line);
   margin-bottom: 4px;
+}
+.review-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--muted);
 }
 .review-filters input,
 .review-filters select {
   width: 100%;
   min-width: 0;
+  max-width: 100%;
   box-sizing: border-box;
 }
 .review-content-list { max-height: min(66vh, 760px); overflow: auto; }
 .review-content-list .task-row { padding: 10px; border-radius: 9px; transition: background .15s ease, border-color .15s ease; }
 .review-content-list .task-row:hover { background: var(--surface-2); }
-@media (max-width: 720px) {
-  .review-filters { grid-template-columns: 1fr 1fr; }
-  .review-filters input { grid-column: 1 / -1; }
+@media (max-width: 1100px) {
+  .review-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
-
+@media (max-width: 720px) {
+  .review-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .review-filters label:last-child { grid-column: 1 / -1; }
+}
+@media (max-width: 420px) {
+  .review-filters { grid-template-columns: minmax(0, 1fr); }
+  .review-filters label:last-child { grid-column: auto; }
+}
 
 /* ===== 跨账号组全局监控 ===== */
 .global-monitor-kpis {
