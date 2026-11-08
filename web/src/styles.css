@@ -1077,6 +1077,7 @@ html, body, #root { width: 100%; max-width: 100%; overflow-x: clip; }
 /* Review has six short criteria: keep them together on desktop rather than
    forcing every input into its own full-width row. */
 .review-filters {
+  display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
   align-items: end;
   gap: 8px;
