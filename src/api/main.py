@@ -5236,7 +5236,6 @@ def _register_routes(app: FastAPI) -> None:
                 if details.get(key) is not None
             }
             items.append({
-                "id": entry.get("id"),
                 "action": entry.get("action"),
                 "actor": _safe_operator_actor(entry.get("actor")),
                 "acted_at": entry.get("acted_at"),
