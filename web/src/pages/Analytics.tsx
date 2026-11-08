@@ -483,9 +483,9 @@ export default function Analytics() {
                         "gray"  // pending / 其他：中性色
                       }`}>{({ success: "已采集", partial: "部分采集", failed: "失败", parse_error: "解析失败", pending: "待采集" } as Record<string, string>)[m.fetch_status] ?? displayStatusLabel(m.fetch_status)}</span>
                     </td>
-                    {/* P1-8 修复：失败态显示 error_msg（来自 metrics.error_msg 字段） */}
+                    {/* 失败态仅提示可执行的下一步，不向普通界面暴露后端异常详情。 */}
                     <td style={{ maxWidth: 180, fontSize: 11, color: (m.fetch_status === "failed" || m.fetch_status === "parse_error") ? "var(--red)" : "var(--subtle)" }}>
-                      {(m.fetch_status === "failed" || m.fetch_status === "parse_error") ? (m.error_msg ? <details className="advanced-report-editor"><summary>查看采集诊断</summary><pre className="diagnostic-text">{m.error_msg}</pre></details> : "—") : <span style={{ color: "transparent" }}>·</span>}
+                      {(m.fetch_status === "failed" || m.fetch_status === "parse_error") ? "采集未完成；请稍后重试，持续失败请联系管理员。" : <span style={{ color: "transparent" }}>·</span>}
                     </td>
                     <td>
                       <Num value={m.views} />
