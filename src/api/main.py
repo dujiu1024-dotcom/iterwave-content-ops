@@ -2497,9 +2497,13 @@ def _register_routes(app: FastAPI) -> None:
         if sample["quality_status"] != "pass" or sample["run_status"] != "ready":
             raise HTTPException(409, "只有质量检查通过的已完成样稿才能导入")
         if sample["promoted_task_id"]:
+            promoted_round_id = sample["promoted_round_id"]
+            if promoted_round_id is not None and int(promoted_round_id) != round_id:
+                raise HTTPException(409, "该样稿已绑定其他正式生产轮次，不能更换轮次重复提交")
             return {
                 "sample_content_id": sample_content_id,
-                "task_id": sample["promoted_task_id"], "round_id": round_id,
+                "task_id": sample["promoted_task_id"],
+                "round_id": int(promoted_round_id) if promoted_round_id is not None else round_id,
                 "already_promoted": True, "status": "queued_or_completed",
                 "draft_status": "draft_pending", "platform_draft_saved": False,
                 "publication_started": False,
@@ -2569,9 +2573,9 @@ def _register_routes(app: FastAPI) -> None:
             now = _storage_now().isoformat(sep=" ", timespec="seconds")
             with conn:
                 conn.execute(
-                    "UPDATE sample_contents SET promoted_task_id=?,promoted_at=?,updated_at=? "
+                    "UPDATE sample_contents SET promoted_task_id=?,promoted_round_id=?,promoted_at=?,updated_at=? "
                     "WHERE id=? AND tenant_id=? AND promoted_task_id IS NULL",
-                    (queued.task_id, now, now, sample_content_id, tenant_id),
+                    (queued.task_id, round_id, now, now, sample_content_id, tenant_id),
                 )
                 _record_content_event(
                     "content_adopted", sample_content_id=sample_content_id,
