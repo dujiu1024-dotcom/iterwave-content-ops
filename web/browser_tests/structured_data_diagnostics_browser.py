@@ -54,7 +54,7 @@ def test_structured_diagnostics_disclosure_and_sensitive_filtering():
                 details = page.locator("details.structured-data-diagnostics")
                 details.wait_for(state="attached", timeout=10000)
                 assert details.evaluate("(element) => !element.open"), "diagnostics must start collapsed"
-                assert not details.locator("code").is_visible(), "diagnostic values must not be visible before expansion"
+                assert not details.locator("code").first.is_visible(), "diagnostic values must not be visible before expansion"
                 page.screenshot(path=str(ARTIFACTS / f"diagnostics-collapsed-{width}.png"), full_page=True)
 
                 details.locator("summary").click()
