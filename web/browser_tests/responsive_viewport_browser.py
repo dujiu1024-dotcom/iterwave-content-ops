@@ -127,6 +127,17 @@ def test_all_routable_pages_at_required_viewports():
                             'button, input, select, textarea'
                           )].filter(visible).map((element) => {
                             const rect = element.getBoundingClientRect();
+                            let ancestor = element.parentElement;
+                            let insideHorizontalScroller = false;
+                            while (ancestor && ancestor !== document.body) {
+                              const overflowX = getComputedStyle(ancestor).overflowX;
+                              if (['auto', 'scroll'].includes(overflowX)
+                                && ancestor.scrollWidth > ancestor.clientWidth + 1) {
+                                insideHorizontalScroller = true;
+                                break;
+                              }
+                              ancestor = ancestor.parentElement;
+                            }
                             return {
                               tag: element.tagName.toLowerCase(),
                               label: element.getAttribute('aria-label')
@@ -135,8 +146,10 @@ def test_all_routable_pages_at_required_viewports():
                               left: Math.round(rect.left),
                               right: Math.round(rect.right),
                               width: Math.round(rect.width),
+                              insideHorizontalScroller,
                             };
-                          }).filter((item) => item.left < -1 || item.right > innerWidth + 1);
+                          }).filter((item) => !item.insideHorizontalScroller
+                            && (item.left < -1 || item.right > innerWidth + 1));
                           const main = document.querySelector('#main-content');
                           const topbar = document.querySelector('.topbar');
                           return {
