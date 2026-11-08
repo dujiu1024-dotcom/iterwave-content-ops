@@ -161,7 +161,7 @@ function PreviewPane({ orch, runs, onEdit }: {
               <span>依赖</span><span>{s.requires.length ? s.requires.map(labelOf).join("、") : "无"}</span>
               <span>输入</span><span>{s.inputs.join("、")}</span>
               <span>状态</span><span>{s.enabled ? (s.locked ? "开启（锁定，不可关闭）" : "开启") : "已关闭"}</span>
-              <span>最近执行</span><span>{st ? `${STATE_META[st.status].text}${st.detail ? ` · ${st.detail}` : ""}` : run ? "该轮无此步骤记录" : "还没有执行记录"}</span>
+              <span>最近执行</span><span>{st ? STATE_META[st.status].text : run ? "该轮无此步骤记录" : "还没有执行记录"}</span>
               {run?.duration_seconds != null && (<><span>整轮耗时</span><span>{run.duration_seconds} 秒</span></>)}
             </div>
           </div>
@@ -173,7 +173,7 @@ function PreviewPane({ orch, runs, onEdit }: {
       )}
       {run && run.errors.length > 0 && (
         <div className="note" style={{ marginTop: 10, color: "var(--orange)" }}>
-          本轮提示：{run.errors.join("；")}
+          本轮存在执行异常，请查看对应步骤状态并重试。
         </div>
       )}
     </div>
