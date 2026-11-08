@@ -99,7 +99,9 @@ test("critical layouts retain narrow-screen reflow and horizontal-scroll contrac
 
   assert.match(source, /\.task-queue-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);/s,
     "task queue rows must collapse to one column on narrow screens");
-  assert.match(source, /@media\s*\(max-width:\s*760px\)\s*\{[^}]*\.plan-stage-list[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s,
+  const planMobile = source.match(/@media\s*\(max-width:\s*760px\)\s*\{([\s\S]*?)\n\s*\}/);
+  assert.ok(planMobile, "plan center must define a mobile breakpoint");
+  assert.match(planMobile[1], /\.plan-stage-list\s*,\s*\.plan-version-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s,
     "plan stage cards must become a single column on mobile");
   assert.match(source, /@media\s*\(max-width:\s*700px\)\s*\{[^}]*\.structured-data-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s,
     "structured business data must become a single column on narrow screens");
