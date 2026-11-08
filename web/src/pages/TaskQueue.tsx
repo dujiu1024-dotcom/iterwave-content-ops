@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, GlobalTaskQueueItem } from "../api";
+import { api, GlobalTaskQueueItem, TenantItem } from "../api";
 import { useApp } from "../AppContext";
 import { roundTaskLabel } from "../roundLabel";
 import TaskDispatchMetrics from "../components/TaskDispatchMetrics";
@@ -76,13 +76,13 @@ function TaskRow({
 }) {
   const active = task.status === "queued" || task.status === "running";
   return (
-    <div className="panel-row" style={{ display: "grid", gridTemplateColumns: "minmax(180px, 1.5fr) minmax(100px, .8fr) minmax(100px, .8fr) minmax(150px, 1fr) auto", gap: 14, alignItems: "center", padding: "14px 16px" }}>
+    <div className="panel-row" style={{ display: "grid", gridTemplateColumns: "minmax(180px, 1.5fr) minmax(100px, .8fr) minmax(100px, .8fr) minmax(150px, 1fr) auto", gap: 14, alignItems: "center", padding: "10px 12px" }}>
       <div style={{ minWidth: 0 }}>
         <div style={{ fontWeight: 650 }}>{TASK_LABEL[task.task_type] || displayTaskTypeLabel(task.task_type)}</div>
         <div className="muted" style={{ fontSize: 12, marginTop: 4, overflowWrap: "anywhere" }}>
           {task.tenant_name} · {aggregateLabel(task)}
         </div>
-        <button className="btn sm ghost" type="button" style={{ marginTop: 6 }} onClick={() => onDetails(task)}>查看详情</button>
+        <button className="btn sm ghost" type="button" style={{ marginLeft: 8 }} onClick={() => onDetails(task)}>详情</button>
       </div>
       <div>
         <span className={`status-pill ${task.status === "failed" || task.status === "interrupted" ? "failed" : task.status === "running" ? "producing" : task.status === "succeeded" ? "completed" : task.status === "cancelled" ? "cancelled" : "creating"}`}>
@@ -139,6 +139,7 @@ function TaskRow({
 export default function TaskQueue() {
   const { showToast } = useApp();
   const [activeItems, setActiveItems] = useState<GlobalTaskQueueItem[]>([]);
+  const [tenantOptions, setTenantOptions] = useState<TenantItem[]>([]);
   const [activeTotal, setActiveTotal] = useState(0);
   const [activePages, setActivePages] = useState(1);
   const [activePage, setActivePage] = useState(1);
@@ -153,6 +154,10 @@ export default function TaskQueue() {
   const [historyErrorKeyword, setHistoryErrorKeyword] = useState("");
   const [historyDateFrom, setHistoryDateFrom] = useState("");
   const [historyDateTo, setHistoryDateTo] = useState("");
+  useEffect(() => {
+    api.tenants().then((result) => setTenantOptions(result.items ?? [])).catch(() => {});
+  }, []);
+
   const activePageSize = 20;
   const historyPageSize = 20;
   const [loading, setLoading] = useState(true);
@@ -367,7 +372,7 @@ export default function TaskQueue() {
 
       <section className="panel">
         <div className="panel-head">
-          <div><h2>最近任务</h2><div className="muted">支持按任务类型、失败状态、账号组 ID、失败原因和创建日期筛选；系统后台调度任务可单独查看。</div></div>
+          <div><h2>最近任务</h2><div className="muted">支持按任务类型、状态、账号组名称、失败原因和日期筛选；系统后台调度任务可单独查看。</div></div>
           <div className="filter-row" style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             {drilldown && <button className="btn sm soft" type="button" onClick={() => { setDrilldown(null); setHistoryPage(1); }}>清除图表钻取</button>}
             <select aria-label="历史任务类型" value={historyType} onChange={(event) => { setHistoryType(event.target.value as "all" | "round_run" | "scheduler_job"); setHistoryPage(1); }}>
@@ -376,7 +381,7 @@ export default function TaskQueue() {
             <select aria-label="历史任务状态" value={historyStatus} onChange={(event) => { setHistoryStatus(event.target.value as "all" | "failed"); setHistoryPage(1); }}>
               <option value="all">全部状态</option><option value="failed">失败 / 中断待处理</option>
             </select>
-            <input aria-label="按账号组 ID 筛选" value={historyTenantId} onChange={(event) => { setHistoryTenantId(event.target.value); setHistoryPage(1); }} placeholder="账号组 ID" style={{ width: 130 }} />
+            <select aria-label="按账号组筛选" value={historyTenantId} onChange={(event) => { setHistoryTenantId(event.target.value); setHistoryPage(1); }}><option value="">全部账号组</option>{tenantOptions.map((tenant) => <option key={tenant.id} value={tenant.id}>{tenant.name}{tenant.is_active ? "" : "（已停用）"}</option>)}</select>
             <input aria-label="按失败原因筛选" value={historyErrorKeyword} onChange={(event) => { setHistoryErrorKeyword(event.target.value); setHistoryPage(1); }} placeholder="失败原因关键字" style={{ width: 150 }} />
             <input aria-label="历史任务开始日期" type="date" value={historyDateFrom} onChange={(event) => { setHistoryDateFrom(event.target.value); setHistoryPage(1); }} />
             <input aria-label="历史任务结束日期" type="date" value={historyDateTo} onChange={(event) => { setHistoryDateTo(event.target.value); setHistoryPage(1); }} />
