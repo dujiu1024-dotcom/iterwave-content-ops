@@ -172,3 +172,18 @@
 .acct-log{max-height:220px;overflow:auto}
 .setup-login-row{display:flex;align-items:center;justify-content:space-between;gap:6px;margin-top:8px}
 @media(max-width:950px){.acct-grid{grid-template-columns:1fr}.acct-summary{grid-template-columns:1fr 1fr}.login-body{grid-template-columns:1fr}.qr-box{margin:0 auto}}
+
+@media (max-width: 760px) {
+  .toast-area {
+    top: auto;
+    right: 12px;
+    bottom: 14px;
+    left: 12px;
+    max-width: none;
+  }
+  .toast {
+    width: 100%;
+    max-width: none;
+    box-sizing: border-box;
+  }
+}
