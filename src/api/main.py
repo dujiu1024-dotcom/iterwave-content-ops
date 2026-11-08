@@ -2575,7 +2575,8 @@ def _register_routes(app: FastAPI) -> None:
                 prior_payload = queued.payload if isinstance(queued.payload, dict) else {}
                 if (
                     prior_payload.get("operation") != "activation_promote"
-                    or int(prior_payload.get("round_id") or 0) != round_id
+                    or isinstance(prior_payload.get("round_id"), bool)
+                    or prior_payload.get("round_id") != round_id
                     or prior_payload.get("sample_content_id") != sample_content_id
                     or prior_payload.get("activation_sample_snapshot") != snapshot
                 ):
