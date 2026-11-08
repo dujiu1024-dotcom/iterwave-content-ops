@@ -306,9 +306,13 @@ def test_all_routable_pages_at_required_viewports():
 
                     if route == "calendar":
                         plan_chip = page.locator(".calendar-plan-chip").filter(has_text="视觉验收计划")
-                        if plan_chip.count() != 1:
+                        try:
+                            plan_chip.wait_for(state="visible", timeout=10000)
+                        except Exception:
                             failures.append(f"calendar@{width}: deterministic content-plan fixture is missing")
                         else:
+                            if plan_chip.count() != 1:
+                                failures.append(f"calendar@{width}: expected one content-plan fixture, found {plan_chip.count()}")
                             plan_chip.click()
                             dialog = page.get_by_role("dialog", name="内容计划详情")
                             dialog.wait_for(state="visible", timeout=10000)
