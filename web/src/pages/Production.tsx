@@ -11,7 +11,7 @@ import DemoBadge from "../components/DemoBadge";
 import EmptyHint from "../components/EmptyHint";
 import TaskProgressPanel from "../components/TaskProgressPanel";
 import ContentProductionLinePanel from "../components/ContentProductionLinePanel";
-import { displayCodeLabel, displayStatusLabel, displayStepLabel, displayPlatformLabel, displaySourceLabel } from "../displayLabels";
+import { displayCodeLabel, displayStatusLabel, displayStepLabel, displayPlatformLabel, displaySourceLabel, displayStatusLabel } from "../displayLabels";
 
 const ROUND_STATUSES = ["created", "producing", "awaiting_publish", "collecting_metrics", "analyzing", "completed", "partial_completed", "failed", "cancelled"];
 const ROUND_TARGETABLE: Record<string, string[]> = {
@@ -1131,10 +1131,10 @@ export default function Production() {
                             <div className="task-title">{c.title}</div>
                             <div className="task-desc">
                               {c.topic_id ?? "—"} · {c.word_count ?? "—"} 字 · 卡片 {c.image_count} 张
-                              {c.draft_status && <> · 草稿 <span className={`tag ${STATUS_CLS[c.draft_status] ?? "gray"}`}>{c.draft_status}</span></>}
+                              {c.draft_status && <> · 草稿 <span className={`tag ${STATUS_CLS[c.draft_status] ?? "gray"}`}>{displayStatusLabel(c.draft_status)}</span></>}
                             </div>
                           </div>
-                          <span className={`tag ${GUARD_CLS[c.guard_outcome ?? ""] ?? "gray"}`}>{c.guard_outcome ?? "—"}</span>
+                          <span className={`tag ${GUARD_CLS[c.guard_outcome ?? ""] ?? "gray"}`}>{displayStatusLabel(c.guard_outcome) ?? "—"}</span>
                         </div>
                       ))}
                     </div>
@@ -1351,7 +1351,7 @@ export default function Production() {
                   草稿状态：
                   {Object.keys(pipeline.drafts_by_status).length === 0
                     ? " 无"
-                    : ` ${Object.entries(pipeline.drafts_by_status).map(([k, v]) => `${k}=${v}`).join(" · ")}`}
+                    : ` ${Object.entries(pipeline.drafts_by_status).map(([k, v]) => `${displayStatusLabel(k)}=${v}`).join(" · ")}`}
                 </div>
                 <div className="table-wrap">
                   <table>
@@ -1438,7 +1438,7 @@ export default function Production() {
                   <div className="task-main">
                     <div className="task-title">{c.title}</div>
                     <div className="task-desc">
-                      {PLATFORM_NAME[c.platform]} · 检查 {c.guard_outcome ?? "—"} · 卡片 {c.image_count} 张
+                      {PLATFORM_NAME[c.platform]} · 检查 {displayStatusLabel(c.guard_outcome)} · 卡片 {c.image_count} 张
                       {c.draft_status && <> · <span className={`tag ${STATUS_CLS[c.draft_status] ?? "gray"}`}>{c.draft_status}</span></>}
                     </div>
                   </div>
@@ -1578,9 +1578,9 @@ export default function Production() {
                 </div>
 
                 <div className="note" style={{ marginTop: 12 }}>
-                  当前记录：终极目标检查 = <b>{selectedContent.guard_outcome ?? "—"}</b>
+                  当前记录：终极目标检查 = <b>{displayStatusLabel(selectedContent.guard_outcome)}</b>
                   {selectedContent.guard_reason && <>（{selectedContent.guard_reason}）</>}
-                  {" · "}正文 {selectedContent.word_count ?? "—"} 字 · 草稿 {selectedContent.draft_status ?? "—"}
+                  {" · "}正文 {selectedContent.word_count ?? "—"} 字 · 草稿 {displayStatusLabel(selectedContent.draft_status)}
                 </div>
               </>
             )}
