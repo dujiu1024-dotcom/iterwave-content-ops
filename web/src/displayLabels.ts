@@ -16,8 +16,8 @@ const LABELS: Record<string, string> = {
   producing: "生产中", awaiting_publish: "待发布", collecting_metrics: "数据采集中",
   analyzing: "复盘中", paused: "已暂停",
   draft_pending: "待保存", draft_saved: "草稿已保存", data_fetching: "数据采集中",
-  , inactive: "已停用", archived: "已归档",
-  deleted: "已删除", , generating: "生成中",
+  inactive: "已停用", archived: "已归档",
+  deleted: "已删除", generating: "生成中",
   quality_check: "质量检查中", reviewed: "已审核", planned: "待执行", generated_status: "已生成",
   // 生产步骤与后台任务
   publish_polling: "发布状态轮询", data_fetch: "平台数据采集", daily_ops: "每日运营",
@@ -38,7 +38,7 @@ const LABELS: Record<string, string> = {
   goal_strategy: "目标策略", publish_decision: "发布决策",
   threshold: "阈值评分", weighted: "加权评分", hybrid: "混合评分",
   // 品牌视觉版本
-  , current: "当前版本",
+  current: "当前版本",
   // 指标
   interaction_rate: "互动率", like_rate: "点赞率", collect_rate: "收藏率",
   follower_efficiency: "涨粉效率", views: "曝光量", impressions: "曝光量",
