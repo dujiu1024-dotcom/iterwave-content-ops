@@ -368,7 +368,7 @@ def test_repeated_hot_source_failures_preserve_first_failure_timestamp(cfg, conn
 
     collector._record_failure("60s/xhs", "xhs", "HTTP 429")
     initial = conn.execute(
-        "SELECT discovered_at,last_seen_at FROM hot_topics WHERE id='hot-failed-xhs'"
+        "SELECT discovered_at,last_seen_at,title FROM hot_topics WHERE id='hot-failed-xhs'"
     ).fetchone()
     collector._record_failure("60s/xhs", "xhs", "HTTP 429 again")
     repeated = conn.execute(
@@ -377,5 +377,6 @@ def test_repeated_hot_source_failures_preserve_first_failure_timestamp(cfg, conn
 
     assert repeated["discovered_at"] == initial["discovered_at"]
     assert repeated["last_seen_at"] > initial["last_seen_at"]
+    assert "again" in repeated["title"]
 
 
