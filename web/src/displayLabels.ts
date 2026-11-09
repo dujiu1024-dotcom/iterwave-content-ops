@@ -34,7 +34,7 @@ const LABELS: Record<string, string> = {
   wechat_channels: "视频号", rss: "RSS 订阅", website: "网站", upload: "手动上传",
   generated_image: "AI 生成图片", ai_generated: "AI 生成", library: "素材库",
   // 告警级别
-  debug: "调试", info: "提示", notice: "注意", warning: "警告", warn: "警告",
+  debug: "调试", info: "提示", notice: "注意", warning: "警告",
   error: "错误", critical: "严重", fatal: "致命",
   // 目标与评分
   goal_strategy: "目标策略", publish_decision: "发布决策",
@@ -62,7 +62,7 @@ export function displayCodeLabel(value: string | null | undefined, fallback = "�
 export function displayStatusLabel(value: string | null | undefined): string {
   return displayCodeLabel(value, "其他状态（需确认）");
 }
-export function displayTaskTypeLabel(value: string | null | undefined): string {
+/** 将状态汇总文本逐项翻译，兼容 status=count 等统计格式。 */\nexport function displayStatusSummary(value: string | null | undefined): string {\n  if (!value) return "—";\n  return value.replace(/\\b[a-z][a-z0-9_]*\\b/gi, (code) => LABELS[code] ?? "其他状态");\n}\nexport function displayTaskTypeLabel(value: string | null | undefined): string {
   return displayCodeLabel(value, "其他任务（需确认）");
 }
 export function displayStepLabel(value: string | null | undefined): string {
