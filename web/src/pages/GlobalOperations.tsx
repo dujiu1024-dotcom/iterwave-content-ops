@@ -259,7 +259,7 @@ export default function GlobalOperations() {
           <span className="tag">{todoCount} 项待处理</span>
         </div>
         <div className="filter-row" style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
-          <select aria-label="待办来源筛选" value={todoSource} onChange={(event) => { setTodoSource(event.target.value as GlobalTodoItem["source"] | "all"); setTodoPage(1); }}>
+          <select aria-label="待办来源筛选" value={todoSource} onChange={(event) => { setTodoSource(event.target.value as GlobalTodoItem["source"] | "all"); setTodoPage(1); setSelectedTaskRuns({}); }}>
             <option value="all">全部来源</option>
             <option value="global_queue">全局任务队列</option>
             <option value="task_run">任务追踪</option>
@@ -270,7 +270,7 @@ export default function GlobalOperations() {
             <option value="notification">通知</option>
             <option value="media_generation">AI 配图</option>
           </select>
-          <input aria-label="待办账号组 ID 筛选" value={todoTenantId} onChange={(event) => { setTodoTenantId(event.target.value); setTodoPage(1); }} placeholder="输入账号组 ID 筛选" style={{ width: 180 }} />
+          <input aria-label="待办账号组 ID 筛选" value={todoTenantId} onChange={(event) => { setTodoTenantId(event.target.value); setTodoPage(1); setSelectedTaskRuns({}); }} placeholder="输入账号组 ID 筛选" style={{ width: 180 }} />
           <span className="tiny">队列 {todoCounts.global_queue ?? 0} · 任务 {todoCounts.task_run ?? 0} · 日志 {todoCounts.ops_log ?? 0} · 熔断 {todoCounts.circuit_breaker ?? 0} · 热点 {todoCounts.hot_topic_source ?? 0} · 素材 {todoCounts.media_review ?? 0} · 通知 {todoCounts.notification ?? 0} · 配图 {todoCounts.media_generation ?? 0}</span>
           <button
             className="btn sm"
