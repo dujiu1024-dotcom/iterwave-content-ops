@@ -256,13 +256,13 @@ def test_multiple_active_content_lines_can_coexist_in_one_tenant_database(conn):
         round_id=round_id, master_plan_version_id=ids["master_id"],
         sub_plan_id=ids["sub_id"], sub_plan_version_id=ids["sub_version_id"],
         strategy_step_id=ids["stage_key"], platform="xhs", task_ordinal=1,
-        idempotency_key="task-active-a", input_snapshot={"topic": {"title": "选题 A"}},
+        idempotency_key="task-active-a", input_snapshot={"topic": {"id": "topic-active-a", "title": "选题 A"}},
     )
     second = task_store.create_task(
         round_id=round_id, master_plan_version_id=ids["master_id"],
         sub_plan_id=ids["sub_id"], sub_plan_version_id=ids["sub_version_id"],
         strategy_step_id=ids["stage_key"], platform="xhs", task_ordinal=2,
-        idempotency_key="task-active-b", input_snapshot={"topic": {"title": "选题 B"}},
+        idempotency_key="task-active-b", input_snapshot={"topic": {"id": "topic-active-b", "title": "选题 B"}},
     )
     assert first["id"] != second["id"]
     assert conn.execute(
@@ -324,7 +324,7 @@ def test_missing_confirmed_diagnosis_blocks_task_unless_explicitly_waived(conn):
         sub_plan_id=ids["sub_id"], sub_plan_version_id=ids["sub_version_id"],
         strategy_step_id=ids["stage_key"], platform="xhs", task_ordinal=2,
         idempotency_key="task-with-diagnosis-waiver-2",
-        input_snapshot={"topic": {"title": "second waived topic"}},
+        input_snapshot={"topic": {"id": "topic-waived-second", "title": "second waived topic"}},
     )
     second_line = ContentProductionLineStore(conn).get_for_task(second["id"])
     assert second_line["context_snapshot"]["context_status"] == "waived"
