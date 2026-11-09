@@ -342,7 +342,7 @@ export default function OperatingFeedbackPane() {
             <button className="btn sm" style={{ marginTop: 6 }} onClick={() => void loadRunHistory(task.task_id)}>查看采集批次（{runHistory[task.task_id]?.length ?? "加载"}）</button>
             {runHistory[task.task_id] && <div style={{ marginTop: 6 }}>
               {runHistory[task.task_id].map((run, index) => <div key={String(run.run_id || index)} className="panel-sub">
-                {statusText(String(run.status || ""))} · {String(run.source || "")} · {String(run.window_start || "—")} 至 {String(run.window_end || "—")}
+                {statusText(String(run.status || ""))} · {displayCodeLabel(String(run.source || ""), "未知来源")} · {String(run.window_start || "—")} 至 {String(run.window_end || "—")}
                 {run.error_message ? ` · ${String(run.error_message)}` : ""}
                 {Boolean(run.metrics) && <StructuredDataView data={run.metrics} title="本批采集指标"/>}
               </div>)}
