@@ -663,3 +663,41 @@ def test_interrupted_draft_save_is_marked_before_external_side_effect(cfg, conn,
     assert verification["status"] == "pending_verify"
     assert "尝试已启动" in verification["error_msg"]
     assert conn.execute("SELECT status FROM drafts WHERE id=?", (draft_id,)).fetchone()[0] == "draft_pending"
+
+
+def test_restart_preserves_pending_drafts_when_production_tasks_already_succeeded(cfg, conn, seed):
+    round_id = seed.round(status="producing")
+    draft_id = seed.draft(
+        round_id, platform="xhs", draft_status="draft_pending", fetch_status=None,
+    )
+    content_id = conn.execute(
+        "SELECT content_id FROM drafts WHERE id = ?", (draft_id,),
+    ).fetchone()[0]
+    # This fixture tests recovery/timeout decisions, not task creation provenance.
+    # Disable table-local guards only in this isolated fixture; production migrations
+    # and their trigger behavior remain covered by the migration/task-store tests.
+    for trigger in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='trigger' "
+        "AND tbl_name IN ('production_tasks', 'content_production_line')"
+    ).fetchall():
+        trigger_name = str(trigger["name"]).replace('"', '""')
+        conn.execute(f'DROP TRIGGER IF EXISTS "{trigger_name}"')
+    conn.execute(
+        """INSERT INTO production_tasks(
+            id,idempotency_key,round_id,master_plan_version_id,sub_plan_id,
+            sub_plan_version_id,strategy_step_id,platform,task_ordinal,status,
+            attempt_count,max_attempts,content_id,input_snapshot_json
+        ) VALUES('pt-succeeded','round:step:xhs:1',?,1,'sub-a',1,'step-a',
+                 'xhs',1,'succeeded',1,3,?,'{}')""",
+        (round_id, content_id),
+    )
+    conn.commit()
+
+    RecoveryManager(cfg, conn)._stale_producing_rounds()
+
+    assert conn.execute(
+        "SELECT status FROM spiral_rounds WHERE id = ?", (round_id,),
+    ).fetchone()[0] == "producing"
+    assert conn.execute(
+        "SELECT status FROM drafts WHERE id = ?", (draft_id,),
+    ).fetchone()[0] == "draft_pending"

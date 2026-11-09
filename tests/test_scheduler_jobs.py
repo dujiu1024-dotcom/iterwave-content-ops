@@ -649,6 +649,57 @@ def test_round_timeout_sweeper_reports_rounds_without_phase_start(cfg, conn, see
     assert report["errors"] == [f"轮次 {round_id} 在 producing 缺少阶段起点"]
 
 
+def test_round_timeout_sweeper_preserves_succeeded_tasks_with_pending_drafts(cfg, conn, seed):
+    round_id = seed.round(status="producing")
+    draft_id = seed.draft(
+        round_id, platform="xhs", draft_status="draft_pending", fetch_status=None,
+    )
+    content_id = conn.execute(
+        "SELECT content_id FROM drafts WHERE id=?", (draft_id,),
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE spiral_rounds SET producing_started_at='2000-01-01T00:00:00+00:00' WHERE id=?",
+        (round_id,),
+    )
+    # This fixture tests recovery/timeout decisions, not task creation provenance.
+    # Disable table-local guards only in this isolated fixture; production migrations
+    # and their trigger behavior remain covered by the migration/task-store tests.
+    for trigger in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='trigger' "
+        "AND tbl_name IN ('production_tasks', 'content_production_line')"
+    ).fetchall():
+        trigger_name = str(trigger["name"]).replace('"', '""')
+        conn.execute(f'DROP TRIGGER IF EXISTS "{trigger_name}"')
+    conn.execute(
+        """INSERT INTO production_tasks(
+            id,idempotency_key,round_id,master_plan_version_id,sub_plan_id,
+            sub_plan_version_id,strategy_step_id,platform,task_ordinal,status,
+            attempt_count,max_attempts,content_id,input_snapshot_json
+        ) VALUES('pt-timeout-succeeded','round-timeout:step:xhs:1',?,1,'sub-a',1,
+                 'step-a','xhs',1,'succeeded',1,3,?,'{}')""",
+        (round_id, content_id),
+    )
+    conn.commit()
+
+    class DraftMachine:
+        def check_expired_drafts(self, **_kwargs):
+            return []
+
+    class RoundMachine:
+        def transition(self, *_args, **_kwargs):
+            raise AssertionError("recoverable pending drafts must not time out to failed")
+
+    eng = SchedulerEngine(cfg, Path(cfg.paths.db_file))
+    eng.wire(conn=conn, adapters={}, sm_round=RoundMachine(), sm_draft=DraftMachine())
+    report = asyncio.run(eng._job_round_timeout_sweeper())
+
+    assert report["final_status"] == "success"
+    assert report["rounds_transitioned"] == 0
+    assert conn.execute(
+        "SELECT status FROM spiral_rounds WHERE id=?", (round_id,),
+    ).fetchone()[0] == "producing"
+
+
 def test_publish_polling_treats_unmatched_work_as_expected_pending(cfg, conn, seed, monkeypatch):
     from src.adapters.base import FetchStatus, MetricsSnapshot
 

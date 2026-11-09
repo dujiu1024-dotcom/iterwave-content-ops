@@ -205,8 +205,8 @@ def build_production_context_snapshot(
 
     waiver = conn.execute(
         """SELECT * FROM production_context_waivers
-           WHERE round_id=? AND platform=? AND consumed_task_id IS NULL
-           ORDER BY created_at DESC LIMIT 1""",
+           WHERE round_id=? AND platform=?
+           ORDER BY created_at DESC,id DESC LIMIT 1""",
         (round_id, platform),
     ).fetchone() if "production_context_waivers" in tables else None
     waiver_data = dict(waiver) if waiver is not None else None

@@ -1680,7 +1680,7 @@ class SchedulerEngine:
 
         rows = self.conn.execute(
             "SELECT id, status, producing_started_at, collecting_metrics_started_at, "
-            "transition_log FROM spiral_rounds "
+            "transition_log, run_report FROM spiral_rounds "
             "WHERE status IN ('producing','awaiting_publish','collecting_metrics')"
         ).fetchall()
         if not rows:
@@ -1715,6 +1715,40 @@ class SchedulerEngine:
             elapsed = now - start
             if elapsed <= timedelta(hours=limit_hours):
                 continue
+
+            if status == "producing":
+                pending_drafts = self.conn.execute(
+                    "SELECT COUNT(*) FROM drafts d JOIN contents c ON d.content_id=c.id "
+                    "WHERE c.round_id=? AND d.status='draft_pending'",
+                    (row["id"],),
+                ).fetchone()[0]
+                task_progress = self.conn.execute(
+                    "SELECT COUNT(*) AS total, "
+                    "SUM(CASE WHEN status IN ('pending','running') THEN 1 ELSE 0 END) AS active, "
+                    "SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END) AS succeeded "
+                    "FROM production_tasks WHERE round_id=?",
+                    (row["id"],),
+                ).fetchone()
+                active_tasks = int(task_progress["active"] or 0)
+                succeeded_tasks = int(task_progress["succeeded"] or 0)
+                try:
+                    run_report = json.loads(row["run_report"] or "{}")
+                except (TypeError, ValueError):
+                    run_report = {}
+                steps = run_report.get("steps", []) if isinstance(run_report, dict) else []
+                explicitly_recoverable = any(
+                    isinstance(step, dict) and step.get("step") in
+                    ("dry_run", "save_drafts_skipped_login")
+                    for step in (steps or [])
+                )
+                if pending_drafts and (
+                    active_tasks > 0 or succeeded_tasks > 0 or explicitly_recoverable
+                ):
+                    logger.info(
+                        "[APS] 轮次 %s producing 超时暂缓：%d 篇草稿待存，%d 个任务运行中、%d 个任务已成功",
+                        row["id"], pending_drafts, active_tasks, succeeded_tasks,
+                    )
+                    continue
 
             reason = f"{status} 超时 {limit_hours}h（已 {elapsed.total_seconds() / 3600:.1f}h）"
             if status == "awaiting_publish":

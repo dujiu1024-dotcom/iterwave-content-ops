@@ -181,6 +181,31 @@ class RecoveryManager:
                 "WHERE c.round_id = ? AND d.status = 'draft_pending'",
                 (round_id,),
             ).fetchone()[0]
+            # Persistent production tasks are the source of truth for the generation
+            # phase. A process can exit after every task and content succeeded but
+            # before run_report records the skipped-login/dry-run marker. Do not turn
+            # those recoverable draft_pending rows into a failed round merely because
+            # the older task_runs row is no longer running.
+            task_progress = self.conn.execute(
+                "SELECT COUNT(*) AS total, "
+                "SUM(CASE WHEN status IN ('pending','running') THEN 1 ELSE 0 END) AS active, "
+                "SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END) AS succeeded "
+                "FROM production_tasks WHERE round_id=?",
+                (round_id,),
+            ).fetchone()
+            task_total = int(task_progress["total"] or 0)
+            active_tasks = int(task_progress["active"] or 0)
+            succeeded_tasks = int(task_progress["succeeded"] or 0)
+            if pending and active_tasks:
+                # A durable task may still be queued or owned by a worker even when
+                # the legacy round_pipeline task_run has already been finalized.
+                continue
+            if pending and task_total and succeeded_tasks:
+                logger.warning(
+                    "♻️ 轮次 %s 已有 %d 个生产任务成功、%d 篇草稿待存；保留 producing 供恢复",
+                    round_id, succeeded_tasks, pending,
+                )
+                continue
             # 干跑或因未登录而跳过存草稿：这是明确可恢复的待存状态，不是崩溃失败。
             # 保持 producing，让用户登录后调用 save_pending；绝不把内容转成 failed。
             try:
