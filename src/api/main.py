@@ -10266,6 +10266,8 @@ def _register_routes(app: FastAPI) -> None:
                 item["error_msg"] = safe_error_summary(
                     item["error_msg"], "任务执行失败，请进入任务详情核对。",
                 )
+            if item.get("todo_dismissal_note"):
+                item["todo_dismissal_note"] = redact(item["todo_dismissal_note"])[:500]
             items.append(item)
         if page is None:
             return items
