@@ -8,6 +8,9 @@ const LABELS: Record<string, string> = {
   imported: "导入", hot_topic: "热点采集", user: "用户操作", auto: "自动触发",
   // 通用状态
   pending: "待执行", queued: "排队中", running: "执行中", success: "成功",
+  pass: "通过", warn: "警告", fail: "未通过", not_saved: "未保存", review_pending: "待审核",
+  awaiting_save: "待保存", verification_pending: "待核验", in_progress: "进行中", retrying: "重试中",
+  not_found: "未找到", recovering: "恢复中", aborted: "已中止", legacy_mapped: "历史任务映射",
   succeeded: "已完成", failed: "失败", interrupted: "已中断", skipped: "已跳过",
   cancelled: "已取消", done: "已完成", completed: "已完成", created: "已创建",
   producing: "生产中", awaiting_publish: "待发布", collecting_metrics: "数据采集中",
