@@ -14,11 +14,11 @@ const LABELS: Record<string, string> = {
   succeeded: "已完成", failed: "失败", interrupted: "已中断", skipped: "已跳过",
   cancelled: "已取消", done: "已完成", completed: "已完成", created: "已创建",
   producing: "生产中", awaiting_publish: "待发布", collecting_metrics: "数据采集中",
-  analyzing: "复盘中", partial_completed: "部分完成", paused: "已暂停",
-  draft_pending: "待保存", pending_verify: "待核实平台保存", draft_saved: "草稿已保存",
-  user_published: "用户已发布", data_fetching: "数据采集中", published: "已发布",
-  expired: "已过期", active: "已启用", inactive: "已停用", archived: "已归档",
-  deleted: "已删除", rejected: "已拒绝", ready: "就绪", generating: "生成中",
+  analyzing: "复盘中", , paused: "已暂停",
+  draft_pending: "待保存", , draft_saved: "草稿已保存",
+  , data_fetching: "数据采集中", ,
+  , , inactive: "已停用", archived: "已归档",
+  deleted: "已删除", , , generating: "生成中",
   quality_check: "质量检查中", reviewed: "已审核", planned: "待执行", generated_status: "已生成",
   // 生产步骤与后台任务
   publish_polling: "发布状态轮询", data_fetch: "平台数据采集", daily_ops: "每日运营",
@@ -35,12 +35,12 @@ const LABELS: Record<string, string> = {
   generated_image: "AI 生成图片", ai_generated: "AI 生成", library: "素材库",
   // 告警级别
   debug: "调试", info: "提示", notice: "注意", warning: "警告",
-  error: "错误", critical: "严重", fatal: "致命",
+  , critical: "严重", fatal: "致命",
   // 目标与评分
   goal_strategy: "目标策略", publish_decision: "发布决策",
   threshold: "阈值评分", weighted: "加权评分", hybrid: "混合评分",
   // 品牌视觉版本
-  draft: "草稿", confirmed: "已确认", current: "当前版本", superseded: "历史版本",
+  , , current: "当前版本", ,
   // 指标
   interaction_rate: "互动率", like_rate: "点赞率", collect_rate: "收藏率",
   follower_efficiency: "涨粉效率", views: "曝光量", impressions: "曝光量",
