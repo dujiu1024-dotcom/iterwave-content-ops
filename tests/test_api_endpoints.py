@@ -2769,7 +2769,7 @@ def test_hot_topics_database_pagination_preserves_latest_batch_and_failure_suppr
     )
     conn.execute(
         "INSERT INTO hot_topics (id, source, evidence_status, title, discovered_at) "
-        "VALUES ('failed-source', 'broken/douyin', 'failed', '采集失败', '2026-11-01 10:01:00')"
+        "VALUES ('failed-source', 'broken/douyin', 'failed', '采集失败', '2026-11-09 10:01:00')"
     )
     conn.execute(
         "INSERT INTO hot_topics (id, source, evidence_status, title, heat_score, last_seen_at) "
