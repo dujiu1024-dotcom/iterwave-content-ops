@@ -89,13 +89,33 @@ class ContentProductionLineStore:
             ),
         )
         if waiver_id:
+            # A round/platform waiver authorizes every content task in that batch.
+            # Keep an append-only per-task ledger; consumed_task_id remains the
+            # legacy first-consumer pointer for backward compatibility.
+            self.conn.execute(
+                """INSERT OR IGNORE INTO production_context_waiver_consumptions(
+                       waiver_id,production_task_id,round_id,platform,consumed_at
+                   )
+                   SELECT ?,?,?,?,? WHERE EXISTS (
+                       SELECT 1 FROM production_context_waivers
+                       WHERE id=? AND round_id=? AND platform=?
+                   )""",
+                (waiver_id, task_id, int(line["round_id"]), str(context.get("platform") or ""),
+                 snapshot["captured_at"], waiver_id, int(line["round_id"]),
+                 str(context.get("platform") or "")),
+            )
+            consumed = self.conn.execute(
+                """SELECT 1 FROM production_context_waiver_consumptions
+                   WHERE waiver_id=? AND production_task_id=?""",
+                (waiver_id, task_id),
+            ).fetchone()
+            if consumed is None:
+                raise ContentProductionLineError("人工豁免与当前任务的轮次/平台不匹配")
             self.conn.execute(
                 """UPDATE production_context_waivers SET consumed_task_id=?
                    WHERE id=? AND consumed_task_id IS NULL""",
                 (task_id, waiver_id),
             )
-            if self.conn.execute("SELECT changes()").fetchone()[0] != 1:
-                raise ContentProductionLineError("人工豁免已被其他任务消费，请重新确认")
         self.conn.execute(
             """INSERT INTO content_production_line_events(
                 content_production_line_id,event_type,from_status,to_status,actor,reason,
