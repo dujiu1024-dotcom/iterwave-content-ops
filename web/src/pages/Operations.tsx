@@ -482,7 +482,7 @@ function LogsPane({ logs, total, page, pages, onPageChange, onResolved, targetId
                   {l.executed_at ? formatBusinessDateTime(l.executed_at) : l.schedule_time ? "待执行" : "-"}
                 </td>
                 <td>{PLATFORM_NAME[l.platform]}</td>
-                <td><span className="tag gray">{ACTION_LABEL[l.action_type] ?? l.action_type}</span></td>
+                <td><span className="tag gray">{ACTION_LABEL[l.action_type] ?? displayCodeLabel(l.action_type, "其他操作")}</span></td>
                 <td style={{ maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12 }}>
                   {l.content ?? l.target_author ?? "-"}
                 </td>
