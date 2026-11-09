@@ -2576,6 +2576,10 @@ def test_global_todos_aggregate_tenant_sources_and_paginate(client, cfg, monkeyp
         "INSERT INTO task_runs (task_type, status, platform, error_msg, started_at) "
         "VALUES ('comment_polling', 'pending_verify', 'xhs', '需要核实发布结果', '2026-11-01 12:00:00')"
     )
+    failed_run_id = conn.execute(
+        "INSERT INTO task_runs (task_type,status,platform,error_msg,started_at) "
+        "VALUES ('daily_ops','failed','xhs','历史任务失败','2026-11-01 11:00:00')"
+    ).lastrowid
     conn.execute(
         "INSERT INTO ops_logs (platform, action_type, content, executed_at, status) "
         "VALUES ('xhs', 'active_comment', '评论操作待核实', '2026-11-01 12:01:00', 'pending_verify')"
@@ -2601,7 +2605,15 @@ def test_global_todos_aggregate_tenant_sources_and_paginate(client, cfg, monkeyp
         "INSERT INTO hot_topics (id, source, discovered_at, evidence_status, title) "
         "VALUES ('hot-failed-test', '60s/xhs', '2026-11-09T00:00:00+00:00', 'failed', '热点源抓取超时')"
     )
+    conn.execute(
+        "INSERT INTO hot_topics (id, source, discovered_at, evidence_status, title) "
+        "VALUES ('hot-failed-expired', '60s/douyin', '2026-11-01T12:03:00+00:00', 'failed', '过期热点失败')"
+    )
     conn.commit()
+    dismissed = tc.post(
+        "/api/task_runs/bulk-dismiss", json={"ids": [failed_run_id], "note": "已核对历史任务"},
+    )
+    assert dismissed.status_code == 200
 
     response = tc.get("/api/todos?page=1&page_size=2")
     assert response.status_code == 200
