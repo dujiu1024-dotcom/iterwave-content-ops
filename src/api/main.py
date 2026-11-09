@@ -10334,6 +10334,27 @@ def _register_routes(app: FastAPI) -> None:
     def dismiss_failed_task_runs(body: dict, request: Request):
         """批量从全局待办中收起失败任务；保留原始执行状态和错误审计。"""
         conn = _g()["conn"]
+        owned_conn = False
+        target_tenant_id = str((body or {}).get("tenant_id") or "").strip()
+        if target_tenant_id:
+            registry = _g().get("tenant_registry")
+            tenant = next(
+                (item for item in (registry.list() if registry is not None else [])
+                 if str(item.get("id")) == target_tenant_id),
+                None,
+            )
+            if tenant is None:
+                raise HTTPException(404, "账号组不存在或不可访问")
+            paths = registry.paths(target_tenant_id, name=str(tenant.get("name") or target_tenant_id))
+            if not paths.db_file.exists():
+                raise HTTPException(404, "账号组数据库尚未初始化")
+            conn = sqlite3.connect(paths.db_file, timeout=2)
+            conn.row_factory = sqlite3.Row
+            owned_conn = True
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(task_runs)")}
+            if not {"todo_dismissed_at", "todo_dismissed_by", "todo_dismissal_note"}.issubset(columns):
+                conn.close()
+                raise HTTPException(409, "该账号组数据库尚未完成待办治理迁移")
         raw_ids = (body or {}).get("ids")
         if not isinstance(raw_ids, list) or not raw_ids or len(raw_ids) > 100:
             raise HTTPException(400, "ids 必须是 1-100 条任务记录 ID")
@@ -10378,11 +10399,18 @@ def _register_routes(app: FastAPI) -> None:
                     raise HTTPException(409, "部分任务状态已变化，请刷新待办后重试")
             conn.commit()
         except HTTPException:
+            if owned_conn:
+                conn.close()
             raise
         except Exception:
             conn.rollback()
+            if owned_conn:
+                conn.close()
             raise
+        if owned_conn:
+            conn.close()
         return {
+            "tenant_id": target_tenant_id or None,
             "dismissed_count": len(pending_ids),
             "already_dismissed_count": len(ids) - len(pending_ids),
             "ids": ids,
