@@ -58,8 +58,8 @@ function visualPageMessage(value: string | null | undefined): string {
 
 
 const TABS = [
-  { key: "plan", label: "总计划" },
-  { key: "platforms", label: "平台分项计划" },
+  { key: "plan", label: "旧版总计划参数" },
+  { key: "platforms", label: "旧版平台分项参数" },
   { key: "pipeline", label: "生产线" },
   { key: "content-line", label: "单内容任务" },
   { key: "review", label: "内容编辑与审核" },
@@ -892,9 +892,13 @@ export default function Production() {
         </div>
       )}
 
-      {/* ============ ① 总计划 ============ */}
+      {/* ============ ① 旧版总计划参数（兼容入口） ============ */}
       {tab === "plan" && (
         <div className="panel">
+          <div className="note" role="note" style={{ marginBottom: 12 }}>
+            这是旧版计划参数兼容入口。新建与审核主计划、平台子计划、阶段和生产线，请使用
+            <a href="?page=plan-center">计划管理</a>；本入口暂保留历史参数维护能力。
+          </div>
           <div className="panel-head">
             <div>
               <div className="panel-title"><span className="icon">⌘</span>总计划（母计划）</div>
@@ -1082,9 +1086,13 @@ export default function Production() {
         </div>
       )}
 
-      {/* ============ ② 平台分项计划 ============ */}
+      {/* ============ ② 旧版平台分项参数（兼容入口） ============ */}
       {tab === "platforms" && (
         <div className="panel">
+          <div className="note" role="note" style={{ marginBottom: 12 }}>
+            旧版平台分项参数仅用于兼容既有配置。平台子计划与阶段目标请在
+            <a href="?page=plan-center">计划管理</a>中维护。
+          </div>
           <div className="panel-head">
             <div>
               <div className="panel-title"><span className="icon">⌗</span>平台分项计划</div>
