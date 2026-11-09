@@ -395,7 +395,7 @@ export default function Calendar() {
                 {d.plans.map((plan) => (
                   <div className="calendar-agenda-plan" key={plan.id}>
                     <button className="calendar-plan-label" onClick={() => void openPlanDetails(plan.id)}>批次详情</button>
-                    <span className="calendar-agenda-copy"><strong>{plan.title}</strong><small>{plan.planned_count} 篇/平台 · {plan.platforms.length ? plan.platforms.map((p) => platformMeta(p).label).join("、") : "使用启用平台"} · {PLAN_STATUS_LABEL[plan.status]}</small></span>
+                    <span className="calendar-agenda-copy"><strong>{plan.title}</strong><small>{plan.planned_count} 篇/平台 · {plan.platforms.length ? plan.platforms.map((p) => platformMeta(p).label).join("、") : "使用启用平台"} · {PLAN_STATUS_LABEL[plan.status] ?? displayStatusLabel(plan.status)}</small></span>
                   </div>
                 ))}
                 {loading ? <div className="loading"><div className="spinner" />加载中...</div> : d.events.length === 0 && d.plans.length === 0 && d.batches.length === 0 ? (
@@ -466,7 +466,7 @@ export default function Calendar() {
         <div className="calendar-plan-modal" role="dialog" aria-modal="true" aria-label="内容计划详情" onClick={() => setPlanDetail(null)}>
           <section className="panel" onClick={(e) => e.stopPropagation()}>
             <div className="panel-head">
-              <div><div className="panel-title">{planDetail.title}</div><div className="panel-sub">{planDetail.scheduled_date} · {planDetail.planned_count} 篇/平台 · {PLAN_STATUS_LABEL[planDetail.status]}</div></div>
+              <div><div className="panel-title">{planDetail.title}</div><div className="panel-sub">{planDetail.scheduled_date} · {planDetail.planned_count} 篇/平台 · {PLAN_STATUS_LABEL[planDetail.status] ?? displayStatusLabel(planDetail.status)}</div></div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button className="btn sm" onClick={() => setPlanDetail(null)}>关闭</button>
               </div>
