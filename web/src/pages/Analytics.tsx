@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import EmptyHint from "../components/EmptyHint";
 import OperatingFeedbackPane from "../components/OperatingFeedbackPane";
 import { api, MetricsResponse, MetricRow, Platform, SpiralAnalysis, Draft, WeeklyReport, ActivationStatus, GoalSummary, BusinessAnalyticsSummary } from "../api";
-import { displayMetricLabel, displaySourceLabel, displayPlatformLabel, displayStatusLabel } from "../displayLabels";
+import { displayMetricLabel, displaySourceLabel, displayPlatformLabel, displayStatusLabel, displayCodeLabel } from "../displayLabels";
 
 const PLATFORM_NAME: Record<Platform, string> = {
   xhs: "小红书", douyin: "抖音",
@@ -589,7 +589,7 @@ export default function Analytics() {
                   <div key={i} className="task-row">
                     <i className="task-prio blue" />
                     <div className="task-main">
-                      <div className="task-title">{s.type}</div>
+                      <div className="task-title">{displayCodeLabel(s.type, "其他建议类型")}</div>
                       <div className="task-desc">{s.description}</div>
                     </div>
                   </div>
