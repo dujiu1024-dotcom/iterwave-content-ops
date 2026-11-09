@@ -661,9 +661,15 @@ def test_round_timeout_sweeper_preserves_succeeded_tasks_with_pending_drafts(cfg
         "UPDATE spiral_rounds SET producing_started_at='2000-01-01T00:00:00+00:00' WHERE id=?",
         (round_id,),
     )
-    # This fixture isolates recovery/timeout behavior from task-provenance creation guards.
-    conn.execute("DROP TRIGGER IF EXISTS trg_production_tasks_validate_insert")
-    conn.execute("DROP TRIGGER IF EXISTS trg_content_production_line_after_task_insert")
+    # This fixture tests recovery/timeout decisions, not task creation provenance.
+    # Disable table-local guards only in this isolated fixture; production migrations
+    # and their trigger behavior remain covered by the migration/task-store tests.
+    for trigger in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='trigger' "
+        "AND tbl_name IN ('production_tasks', 'content_production_line')"
+    ).fetchall():
+        trigger_name = str(trigger["name"]).replace('"', '""')
+        conn.execute(f'DROP TRIGGER IF EXISTS "{trigger_name}"')
     conn.execute(
         """INSERT INTO production_tasks(
             id,idempotency_key,round_id,master_plan_version_id,sub_plan_id,
