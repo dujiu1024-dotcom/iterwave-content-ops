@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, Platform, AccountInfo, LoginStatus, RegisteredPlatformAccount, AccountIdentity } from "../api";
+import { displayStatusLabel } from "../displayLabels";
 
 const PLATFORM_EMOJI: Record<Platform, string> = {
   xhs: "小", douyin: "抖", kuaishou: "快", wechat_channels: "视",
@@ -419,7 +420,7 @@ export default function Accounts() {
             {loginStatus && (
               <div style={{ marginBottom: 14 }}>
                 <span className={`tag ${LOGIN_STATE_LABEL[loginStatus.state]?.color || "gray"}`}>
-                  {LOGIN_STATE_LABEL[loginStatus.state]?.label || loginStatus.state}
+                  {LOGIN_STATE_LABEL[loginStatus.state]?.label || displayStatusLabel(loginStatus.state)}
                 </span>
                 {loginStatus.state === "qr_ready" && (
                   <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6 }}>
