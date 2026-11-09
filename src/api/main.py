@@ -10333,6 +10333,13 @@ def _register_routes(app: FastAPI) -> None:
     @app.post("/api/task_runs/bulk-dismiss")
     def dismiss_failed_task_runs(body: dict, request: Request):
         """批量从全局待办中收起失败任务；保留原始执行状态和错误审计。"""
+        raw_ids = (body or {}).get("ids")
+        if not isinstance(raw_ids, list) or not raw_ids or len(raw_ids) > 100:
+            raise HTTPException(400, "ids 必须是 1-100 条任务记录 ID")
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 1 for value in raw_ids):
+            raise HTTPException(400, "任务记录 ID 必须是正整数")
+        ids = list(dict.fromkeys(raw_ids))
+        placeholders = ",".join("?" for _ in ids)
         conn = _g()["conn"]
         owned_conn = False
         target_tenant_id = str((body or {}).get("tenant_id") or "").strip()
@@ -10355,13 +10362,6 @@ def _register_routes(app: FastAPI) -> None:
             if not {"todo_dismissed_at", "todo_dismissed_by", "todo_dismissal_note"}.issubset(columns):
                 conn.close()
                 raise HTTPException(409, "该账号组数据库尚未完成待办治理迁移")
-        raw_ids = (body or {}).get("ids")
-        if not isinstance(raw_ids, list) or not raw_ids or len(raw_ids) > 100:
-            raise HTTPException(400, "ids 必须是 1-100 条任务记录 ID")
-        if any(isinstance(value, bool) or not isinstance(value, int) or value < 1 for value in raw_ids):
-            raise HTTPException(400, "任务记录 ID 必须是正整数")
-        ids = list(dict.fromkeys(raw_ids))
-        placeholders = ",".join("?" for _ in ids)
         note = str((body or {}).get("note") or "操作员已确认，无需继续显示在待办").strip()[:500]
         actor = auth.audit_actor(request)
         dismissed_at = _storage_now().isoformat(timespec="seconds")
