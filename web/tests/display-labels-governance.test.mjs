@@ -11,9 +11,9 @@ const enumProperties = [
   "event_type", "guard_outcome", "draft_status", "round_status", "task_type",
 ];
 const enumPropertyPattern = enumProperties.join("|");
-const memberPath = "[A-Za-z_$][\\\\w$]*(?:(?:\\\\.|\\\\?\\\\.)[A-Za-z_$][\\\\w$]*)*";
-const directEnumInterpolation = new RegExp("\\\\{\\\\s*" + memberPath + "\\\\.(?:" + enumPropertyPattern + ")\\\\s*\\\\}", "g");
-const templateEnumInterpolation = new RegExp("\\\\$\\\\{\\\\s*" + memberPath + "\\\\.(?:" + enumPropertyPattern + ")\\\\s*\\\\}", "g");
+const memberPath = "[A-Za-z_$][\\w$]*(?:(?:\\.|\\?\\.)[A-Za-z_$][\\w$]*)*";
+const directEnumInterpolation = new RegExp("\\{\\s*" + memberPath + "\\.(?:" + enumPropertyPattern + ")\\s*\\}", "g");
+const templateEnumInterpolation = new RegExp("\\$\\{\\s*" + memberPath + "\\.(?:" + enumPropertyPattern + ")\\s*\\}", "g");
 
 async function collectTsxFiles(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -22,7 +22,7 @@ async function collectTsxFiles(directory) {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) {
       files.push(...await collectTsxFiles(path));
-    } else if (/\\.(?:tsx|jsx)$/.test(entry.name)) {
+    } else if (/\.(?:tsx|jsx)$/.test(entry.name)) {
       files.push(path);
     }
   }
@@ -42,19 +42,19 @@ test("shared display-label map covers core business enums with Chinese labels", 
   ];
 
   for (const key of required) {
-    const escaped = key.replace(/[.*+?^$()|[\\]\\\\]/g, "\\\\$&");
-    const entry = new RegExp("(?:^|[,\\\\n])\\\\s*(?:" + escaped + "|\\\"" + escaped + "\\\")\\\\s*:\\\\s*\\\"[^\\\"]*[\\\\u3400-\\\\u9fff][^\\\"]*\\\"", "m");
+    const escaped = key.replace(/[.*+?^$()|[\]\\]/g, "\\$&");
+    const entry = new RegExp("(?:^|[,\\n])\\s*(?:" + escaped + "|\\\"" + escaped + "\\\")\\s*:\\s*\\\"[^\\\"]*[\\u3400-\\u9fff][^\\\"]*\\\"", "m");
     assert.match(source, entry, "displayLabels.ts must define a Chinese label for " + key);
   }
 });
 
 test("display helpers use Chinese fallbacks instead of exposing unknown enum codes", async () => {
   const source = await readFile(labelsUrl, "utf8");
-  assert.match(source, /return LABELS\\[value\\] \\?\\? fallback/);
-  assert.match(source, /return displayCodeLabel\\(value, "其他状态（需确认）"\\)/);
-  assert.match(source, /LABELS\\[code\\] \\?\\? "其他状态"/);
-  assert.match(source, /return displayCodeLabel\\(value, "其他来源（需确认）"\\)/);
-  assert.match(source, /return displayCodeLabel\\(value, "其他平台（需确认）"\\)/);
+  assert.match(source, /return LABELS\[value\] \?\? fallback/);
+  assert.match(source, /return displayCodeLabel\(value, "其他状态（需确认）"\)/);
+  assert.match(source, /LABELS\[code\] \?\? "其他状态"/);
+  assert.match(source, /return displayCodeLabel\(value, "其他来源（需确认）"\)/);
+  assert.match(source, /return displayCodeLabel\(value, "其他平台（需确认）"\)/);
 });
 
 test("TSX views do not interpolate backend enum properties directly into user-visible JSX", async () => {
@@ -66,7 +66,7 @@ test("TSX views do not interpolate backend enum properties directly into user-vi
     for (const pattern of [directEnumInterpolation, templateEnumInterpolation]) {
       pattern.lastIndex = 0;
       for (const match of source.matchAll(pattern)) {
-        const line = source.slice(0, match.index).split("\\n").length;
+        const line = source.slice(0, match.index).split("\n").length;
         violations.push(relative(new URL(".", import.meta.url).pathname, file) + ":" + line + ": " + match[0]);
       }
     }
@@ -75,6 +75,6 @@ test("TSX views do not interpolate backend enum properties directly into user-vi
   assert.deepEqual(
     violations,
     [],
-    "Use displayStatusLabel/displayCodeLabel or a domain-specific Chinese label before rendering enum fields:\\n" + violations.join("\\n"),
+    "Use displayStatusLabel/displayCodeLabel or a domain-specific Chinese label before rendering enum fields:\n" + violations.join("\n"),
   );
 });
