@@ -1564,6 +1564,36 @@ def test_bulk_dismiss_failed_task_runs_preserves_status_and_audits(client):
     assert invalid.status_code == 409
 
 
+def test_bulk_dismiss_task_runs_can_target_a_tenant_database(client, cfg, monkeypatch):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    tc, conn, _ = client
+    class Registry:
+        def list(self):
+            return [{"id": "tenant-a", "name": "账号组 A"}]
+
+        def paths(self, tenant_id, name=None):
+            assert tenant_id == "tenant-a"
+            return SimpleNamespace(db_file=Path(cfg.resolve_path(cfg.paths.db_file)))
+
+    monkeypatch.setitem(api_main._g_ctx, "tenant_registry", Registry())
+    run_id = conn.execute(
+        "INSERT INTO task_runs (task_type,status) VALUES ('daily_ops','failed')"
+    ).lastrowid
+    conn.commit()
+
+    response = tc.post(
+        "/api/task_runs/bulk-dismiss",
+        json={"tenant_id": "tenant-a", "ids": [run_id], "note": "账号组级待办收起"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["tenant_id"] == "tenant-a"
+    assert conn.execute(
+        "SELECT todo_dismissed_by FROM task_runs WHERE id=?", (run_id,),
+    ).fetchone()[0]
+
+
 def test_resolve_pending_verify_branching(client):
     tc, conn, _ = client
     conn.execute(
