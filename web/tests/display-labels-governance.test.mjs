@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-const sourceRoot = new URL("../src/", import.meta.url);
+const sourceRoot = fileURLToPath(new URL("../src/", import.meta.url));
 const labelsUrl = new URL("../src/displayLabels.ts", import.meta.url);
 const enumProperties = [
   "status", "state", "source", "platform", "verdict", "decision",
@@ -67,7 +68,7 @@ test("TSX views do not interpolate backend enum properties directly into user-vi
       pattern.lastIndex = 0;
       for (const match of source.matchAll(pattern)) {
         const line = source.slice(0, match.index).split("\n").length;
-        violations.push(relative(new URL(".", import.meta.url).pathname, file) + ":" + line + ": " + match[0]);
+        violations.push(relative(fileURLToPath(new URL(".", import.meta.url)), file) + ":" + line + ": " + match[0]);
       }
     }
   }
