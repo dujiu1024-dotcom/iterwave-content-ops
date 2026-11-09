@@ -3,7 +3,7 @@ import StructuredDataView from "./StructuredDataView";
 import {
   api, BusinessGapItem, Draft, MetricFactItem, PublishVerificationItem, ReviewTaskItem,
 } from "../api";
-import { displayPlatformLabel } from "../displayLabels";
+import { displayPlatformLabel, displayStatusLabel, displayCodeLabel } from "../displayLabels";
 
 type VerificationForm = { platform_content_id: string; content_url: string; published_at: string; evidence_note: string };
 type CollectionForm = {
@@ -42,7 +42,7 @@ function statusText(value: string): string {
     partial: "部分成功", failed: "失败", completed: "已完成", cancelled: "已取消",
     delivered: "已关闭", active: "待解决", resolved: "已解决", not_required: "无需关闭",
   };
-  return labels[value] ?? value;
+  return labels[value] ?? displayStatusLabel(value);
 }
 function displayMetric(value: number, unit: string): string {
   return unit === "ratio" ? `${(value * 100).toFixed(2)}%` : value.toLocaleString();
@@ -411,9 +411,9 @@ export default function OperatingFeedbackPane() {
 
         <h3 style={{ marginTop: 18 }}>当前经营缺口</h3>
         {gaps.length === 0 ? <div className="note">当前没有待解决经营缺口。</div> : gaps.map((gap) => <div key={gap.gap_id} className="toolbar" style={{ justifyContent: "space-between", borderBottom: "1px solid var(--line)", padding: "8px 0" }}>
-          <div><strong>{gap.title}</strong><div className="panel-sub">{gap.description} · {gap.severity}</div></div>
+          <div><strong>{gap.title}</strong><div className="panel-sub">{gap.description} · {{low: "低", medium: "中", high: "高", critical: "严重"}[gap.severity] ?? "未标注"}</div></div>
           <button className="btn sm" onClick={() => void showGapHistory(gap.gap_id)}>变更历史（{history[gap.gap_id]?.length ?? "查看"}）</button>
-          {history[gap.gap_id] && <div style={{ flexBasis: "100%" }}>{history[gap.gap_id].map((event, index) => <div key={index} className="panel-sub">{String(event.event_type)} · {String(event.reason || "")} · {String(event.created_at)}</div>)}</div>}
+          {history[gap.gap_id] && <div style={{ flexBasis: "100%" }}>{history[gap.gap_id].map((event, index) => <div key={index} className="panel-sub">{displayCodeLabel(String(event.event_type), "状态变更")} · {String(event.reason || "")} · {String(event.created_at)}</div>)}</div>}
         </div>)}
 
         <h3 style={{ marginTop: 18 }}>统一指标事实（最近 30 条）</h3>
