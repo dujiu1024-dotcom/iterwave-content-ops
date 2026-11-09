@@ -690,12 +690,25 @@ def test_dashboard_structured_data_state_at_required_viewports():
                 assert page.locator(".dashboard-partial-warning").count() == 0, "Dashboard fixture should resolve all eight data sources"
                 page.screenshot(path=str(ARTIFACTS / f"dashboard-data-state-{width}.png"),
                                 full_page=True, animations="disabled")
-                metrics = page.evaluate("""() => ({
-                    documentWidth: document.documentElement.scrollWidth,
-                    bodyWidth: document.body.scrollWidth,
-                    mainWidth: document.querySelector('#main-content')?.clientWidth ?? 0,
-                    visibleRows: document.querySelectorAll('.task-row').length
-                })""")
+                metrics = page.evaluate("""() => {
+                    const intro = document.querySelector('.page-head > div:first-child')?.getBoundingClientRect();
+                    const actions = document.querySelector('.page-head .head-actions')?.getBoundingClientRect();
+                    const goalStats = Array.from(document.querySelectorAll('.goal-right .goal-stat'))
+                        .map((node) => Math.round(node.getBoundingClientRect().width));
+                    return {
+                        documentWidth: document.documentElement.scrollWidth,
+                        bodyWidth: document.body.scrollWidth,
+                        mainWidth: document.querySelector('#main-content')?.clientWidth ?? 0,
+                        visibleRows: document.querySelectorAll('.task-row').length,
+                        headingBottom: intro ? Math.round(intro.bottom) : 0,
+                        actionsTop: actions ? Math.round(actions.top) : 0,
+                        goalStatWidths: goalStats
+                    };
+                }""")
+                if width <= 900 and metrics["actionsTop"] < metrics["headingBottom"] - 1:
+                    raise AssertionError(f"dashboard@{width}: page actions overlap the heading: {metrics}")
+                if width <= 620 and metrics["goalStatWidths"] and min(metrics["goalStatWidths"]) < 110:
+                    raise AssertionError(f"dashboard@{width}: goal result cards are too narrow: {metrics}")
                 if metrics["documentWidth"] > width + 1 or metrics["bodyWidth"] > width + 1:
                     raise AssertionError(f"dashboard@{width}: horizontal overflow: {metrics}")
                 if metrics["visibleRows"] < 2:
