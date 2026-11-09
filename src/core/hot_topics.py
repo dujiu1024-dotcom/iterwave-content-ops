@@ -26,6 +26,8 @@ import statistics
 import logging
 import re
 import uuid
+import time
+from email.utils import parsedate_to_datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
@@ -430,9 +432,12 @@ class HotTopicCollector:
             for row in source_rows
         }
 
+        failed_cutoff = (_utc_now() - timedelta(hours=72)).isoformat(timespec="seconds")
         failed_rows = self.conn.execute(
-            "SELECT source, title, discovered_at FROM hot_topics "
-            "WHERE evidence_status = 'failed' ORDER BY discovered_at DESC, id DESC"
+            "SELECT source, title, discovered_at, last_seen_at FROM hot_topics "
+            "WHERE evidence_status = 'failed' AND COALESCE(last_seen_at,discovered_at) >= ? "
+            "ORDER BY discovered_at DESC, id DESC",
+            (failed_cutoff,),
         ).fetchall()
         failed: dict[str, dict] = {}
         for row in failed_rows:
@@ -710,10 +715,37 @@ class HotTopicCollector:
     def _fetch_platform(self, platform: str, base_url: str, source_name: str) -> list[dict]:
         path = _PLATFORM_PATH.get(platform, platform)
         url = f"{base_url}/v2/{path}"
-        body, _content_type = _fetch_public_text(
-            url, timeout=self.hcfg.fetch_timeout_seconds,
-            headers={"User-Agent": "iterwave/0.1 (+local)"},
-        )
+        from .safe_http import SafeHTTPStatusError
+
+        body = None
+        for attempt in range(2):
+            try:
+                body, _content_type = _fetch_public_text(
+                    url, timeout=self.hcfg.fetch_timeout_seconds,
+                    headers={"User-Agent": "iterwave/0.1 (+local)"},
+                )
+                break
+            except SafeHTTPStatusError as exc:
+                if exc.status_code != 429 or attempt >= 1:
+                    raise
+                delay = 30.0
+                if exc.retry_after:
+                    try:
+                        delay = float(exc.retry_after)
+                    except (TypeError, ValueError):
+                        try:
+                            retry_at = parsedate_to_datetime(str(exc.retry_after))
+                            if retry_at.tzinfo is None:
+                                retry_at = retry_at.replace(tzinfo=timezone.utc)
+                            delay = max(0.0, (retry_at - _utc_now()).total_seconds())
+                        except (TypeError, ValueError, OverflowError):
+                            delay = 30.0
+                if delay > 60.0:
+                    # Do not retry earlier than a long server-specified Retry-After.
+                    raise
+                time.sleep(max(0.0, delay))
+        if body is None:
+            raise RuntimeError("热点数据源限流后重试仍未获得响应")
         payload = json.loads(body)
         if payload.get("code") not in (200, None):
             raise RuntimeError(f"接口返回 code={payload.get('code')} {payload.get('message', '')}")
@@ -871,7 +903,7 @@ class HotTopicCollector:
                 "title, heat_score, heat_unit, time_sensitive, dimension) "
                 "VALUES (?, ?, NULL, ?, ?, 'failed', ?, NULL, NULL, NULL, NULL) "
                 "ON CONFLICT(id) DO UPDATE SET "
-                "discovered_at=excluded.discovered_at, last_seen_at=excluded.last_seen_at, evidence_status='failed', "
+                "discovered_at=hot_topics.discovered_at, last_seen_at=excluded.last_seen_at, title=excluded.title, evidence_status='failed', "
                 "heat_score=NULL, raw_url=NULL",
                 (
                     f"hot-failed-{platform}", source,
@@ -942,9 +974,11 @@ class HotTopicCollector:
         sources: dict[str, dict] = {}
         failed: dict[str, dict] = {}
 
+        # 失败占位保留审计，但 72 小时后不再遮蔽旧热点或进入待办。
+        failed_cutoff = (_utc_now() - timedelta(hours=72)).isoformat(timespec="seconds")
         # 第一遍：找出「最近一次采集失败」的平台，其旧数据一并隐藏（避免失败还显示数字）
         for row in rows:
-            if row["evidence_status"] != "failed":
+            if row["evidence_status"] != "failed" or str(row["last_seen_at"] or row["discovered_at"] or "") < failed_cutoff:
                 continue
             source = row["source"] or ""
             platform = source.rsplit("/", 1)[-1] if "/" in source else source

@@ -36,6 +36,7 @@ export default function GlobalOperations() {
   const [unreadNotifications, setUnreadNotifications] = useState<NotificationItem[]>([]);
   const [unreadNotificationCount, setUnreadNotificationCount] = useState<number | null>(null);
   const [todos, setTodos] = useState<GlobalTodoItem[]>([]);
+  const [selectedTaskRuns, setSelectedTaskRuns] = useState<Record<string, { tenantId: string; id: number }>>({});
   const [todoCount, setTodoCount] = useState(0);
   const [todoCounts, setTodoCounts] = useState<Record<string, number>>({});
   const [todoPage, setTodoPage] = useState(1);
@@ -121,6 +122,23 @@ export default function GlobalOperations() {
 
   const active = tasks;
   const failed = failedTasks;
+  const selectedEntries = Object.values(selectedTaskRuns);
+  const selectedTenantIds = Array.from(new Set(selectedEntries.map((item) => item.tenantId)));
+  const dismissSelectedTaskRuns = async () => {
+    if (selectedEntries.length === 0 || selectedTenantIds.length !== 1) return;
+    if (!window.confirm(`确认从待办中收起所选 ${selectedEntries.length} 条失败/中断任务？原始执行记录会保留。`)) return;
+    try {
+      await api.dismissTaskRuns(
+        selectedTenantIds[0],
+        selectedEntries.map((item) => item.id),
+        "全局待办批量收起；保留原始任务执行记录",
+      );
+      setSelectedTaskRuns({});
+      await refresh();
+    } catch {
+      setError("批量收起失败，请刷新待办并确认所选账号组迁移状态。");
+    }
+  };
   return (
     <div className="page global-operations-page">
       <div className="page-head">
@@ -241,7 +259,7 @@ export default function GlobalOperations() {
           <span className="tag">{todoCount} 项待处理</span>
         </div>
         <div className="filter-row" style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
-          <select aria-label="待办来源筛选" value={todoSource} onChange={(event) => { setTodoSource(event.target.value as GlobalTodoItem["source"] | "all"); setTodoPage(1); }}>
+          <select aria-label="待办来源筛选" value={todoSource} onChange={(event) => { setTodoSource(event.target.value as GlobalTodoItem["source"] | "all"); setTodoPage(1); setSelectedTaskRuns({}); }}>
             <option value="all">全部来源</option>
             <option value="global_queue">全局任务队列</option>
             <option value="task_run">任务追踪</option>
@@ -252,12 +270,34 @@ export default function GlobalOperations() {
             <option value="notification">通知</option>
             <option value="media_generation">AI 配图</option>
           </select>
-          <input aria-label="待办账号组 ID 筛选" value={todoTenantId} onChange={(event) => { setTodoTenantId(event.target.value); setTodoPage(1); }} placeholder="输入账号组 ID 筛选" style={{ width: 180 }} />
+          <input aria-label="待办账号组 ID 筛选" value={todoTenantId} onChange={(event) => { setTodoTenantId(event.target.value); setTodoPage(1); setSelectedTaskRuns({}); }} placeholder="输入账号组 ID 筛选" style={{ width: 180 }} />
           <span className="tiny">队列 {todoCounts.global_queue ?? 0} · 任务 {todoCounts.task_run ?? 0} · 日志 {todoCounts.ops_log ?? 0} · 熔断 {todoCounts.circuit_breaker ?? 0} · 热点 {todoCounts.hot_topic_source ?? 0} · 素材 {todoCounts.media_review ?? 0} · 通知 {todoCounts.notification ?? 0} · 配图 {todoCounts.media_generation ?? 0}</span>
+          <button
+            className="btn sm"
+            disabled={loading || selectedEntries.length === 0 || selectedTenantIds.length !== 1}
+            onClick={() => void dismissSelectedTaskRuns()}
+          >批量收起已选失败任务（{selectedEntries.length}）</button>
+          {selectedTenantIds.length > 1 && <span className="tiny">所选任务跨账号组，请分组批量收起。</span>}
         </div>
         {todos.length ? <div className="list">
           {todos.map((todo) => <div className="task-row" key={todo.id}>
             <i className={`task-prio ${todo.severity === "high" ? "red" : "blue"}`} />
+            {todo.source === "task_run" && ["failed", "interrupted"].includes(todo.status) && (
+              <input
+                type="checkbox"
+                aria-label={`选择 ${todo.tenant_name} 的任务记录 ${todo.record_id}`}
+                checked={Boolean(selectedTaskRuns[todo.id])}
+                onChange={(event) => setSelectedTaskRuns((current) => {
+                  const next = { ...current };
+                  if (event.target.checked) {
+                    next[todo.id] = { tenantId: todo.tenant_id, id: Number(todo.record_id) };
+                  } else {
+                    delete next[todo.id];
+                  }
+                  return next;
+                })}
+              />
+            )}
             <div className="task-main">
               <div className="task-title">{todo.title}</div>
               <div className="task-desc">{todo.tenant_name} · {todo.source_label} · {todo.detail} · {todo.created_at ? formatBusinessDateTime(todo.created_at) : "时间未知"}</div>

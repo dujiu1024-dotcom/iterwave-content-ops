@@ -1517,6 +1517,83 @@ def test_operations_history_filters_by_platform_status_type_and_date(client):
 
 
 # ---------------------------------------------------------------- R-17 pending_verify
+def test_bulk_dismiss_failed_task_runs_preserves_status_and_audits(client):
+    tc, conn, _ = client
+    now = datetime.now().isoformat(timespec="seconds")
+    failed = conn.execute(
+        "INSERT INTO task_runs (task_type,status,started_at) VALUES ('comment_polling','failed',?)",
+        (now,),
+    ).lastrowid
+    interrupted = conn.execute(
+        "INSERT INTO task_runs (task_type,status,started_at) VALUES ('round_pipeline','interrupted',?)",
+        (now,),
+    ).lastrowid
+    pending_verify = conn.execute(
+        "INSERT INTO task_runs (task_type,status,started_at) VALUES ('comment_polling','pending_verify',?)",
+        (now,),
+    ).lastrowid
+    conn.commit()
+
+    assert tc.post("/api/task_runs/bulk-dismiss", json={"ids": []}).status_code == 400
+    response = tc.post(
+        "/api/task_runs/bulk-dismiss",
+        json={"ids": [failed, interrupted], "note": "已核对历史失败，无需继续显示"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["dismissed_count"] == 2
+    rows = conn.execute(
+        "SELECT id,status,todo_dismissed_at,todo_dismissed_by,todo_dismissal_note "
+        "FROM task_runs WHERE id IN (?,?) ORDER BY id",
+        (failed, interrupted),
+    ).fetchall()
+    assert [row["status"] for row in rows] == ["failed", "interrupted"]
+    assert all(row["todo_dismissed_at"] and row["todo_dismissed_by"] for row in rows)
+    assert all(row["todo_dismissal_note"] == "已核对历史失败，无需继续显示" for row in rows)
+
+    repeated = tc.post(
+        "/api/task_runs/bulk-dismiss",
+        json={"ids": [failed, interrupted]},
+    )
+    assert repeated.status_code == 200
+    assert repeated.json()["dismissed_count"] == 0
+    assert repeated.json()["already_dismissed_count"] == 2
+    invalid = tc.post(
+        "/api/task_runs/bulk-dismiss",
+        json={"ids": [pending_verify]},
+    )
+    assert invalid.status_code == 409
+
+
+def test_bulk_dismiss_task_runs_can_target_a_tenant_database(client, cfg, monkeypatch):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    tc, conn, _ = client
+    class Registry:
+        def list(self):
+            return [{"id": "tenant-a", "name": "账号组 A"}]
+
+        def paths(self, tenant_id, name=None):
+            assert tenant_id == "tenant-a"
+            return SimpleNamespace(db_file=Path(cfg.resolve_path(cfg.paths.db_file)))
+
+    monkeypatch.setitem(api_main._g_ctx, "tenant_registry", Registry())
+    run_id = conn.execute(
+        "INSERT INTO task_runs (task_type,status) VALUES ('daily_ops','failed')"
+    ).lastrowid
+    conn.commit()
+
+    response = tc.post(
+        "/api/task_runs/bulk-dismiss",
+        json={"tenant_id": "tenant-a", "ids": [run_id], "note": "账号组级待办收起"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["tenant_id"] == "tenant-a"
+    assert conn.execute(
+        "SELECT todo_dismissed_by FROM task_runs WHERE id=?", (run_id,),
+    ).fetchone()[0]
+
+
 def test_resolve_pending_verify_branching(client):
     tc, conn, _ = client
     conn.execute(
@@ -2529,6 +2606,10 @@ def test_global_todos_aggregate_tenant_sources_and_paginate(client, cfg, monkeyp
         "INSERT INTO task_runs (task_type, status, platform, error_msg, started_at) "
         "VALUES ('comment_polling', 'pending_verify', 'xhs', '需要核实发布结果', '2026-11-01 12:00:00')"
     )
+    failed_run_id = conn.execute(
+        "INSERT INTO task_runs (task_type,status,platform,error_msg,started_at) "
+        "VALUES ('daily_ops','failed','xhs','历史任务失败','2026-11-01 11:00:00')"
+    ).lastrowid
     conn.execute(
         "INSERT INTO ops_logs (platform, action_type, content, executed_at, status) "
         "VALUES ('xhs', 'active_comment', '评论操作待核实', '2026-11-01 12:01:00', 'pending_verify')"
@@ -2552,9 +2633,17 @@ def test_global_todos_aggregate_tenant_sources_and_paginate(client, cfg, monkeyp
     )
     conn.execute(
         "INSERT INTO hot_topics (id, source, discovered_at, evidence_status, title) "
-        "VALUES ('hot-failed-test', '60s/xhs', '2026-11-01 12:03:00', 'failed', '热点源抓取超时')"
+        "VALUES ('hot-failed-test', '60s/xhs', '2026-11-09T00:00:00+00:00', 'failed', '热点源抓取超时')"
+    )
+    conn.execute(
+        "INSERT INTO hot_topics (id, source, discovered_at, evidence_status, title) "
+        "VALUES ('hot-failed-expired', '60s/douyin', '2026-11-01T12:03:00+00:00', 'failed', '过期热点失败')"
     )
     conn.commit()
+    dismissed = tc.post(
+        "/api/task_runs/bulk-dismiss", json={"ids": [failed_run_id], "note": "已核对历史任务"},
+    )
+    assert dismissed.status_code == 200
 
     response = tc.get("/api/todos?page=1&page_size=2")
     assert response.status_code == 200
@@ -2680,7 +2769,7 @@ def test_hot_topics_database_pagination_preserves_latest_batch_and_failure_suppr
     )
     conn.execute(
         "INSERT INTO hot_topics (id, source, evidence_status, title, discovered_at) "
-        "VALUES ('failed-source', 'broken/douyin', 'failed', '采集失败', '2026-11-01 10:01:00')"
+        "VALUES ('failed-source', 'broken/douyin', 'failed', '采集失败', '2026-11-09 10:01:00')"
     )
     conn.execute(
         "INSERT INTO hot_topics (id, source, evidence_status, title, heat_score, last_seen_at) "
@@ -5428,6 +5517,7 @@ def test_task_runs_api_projects_public_fields_and_sanitizes_internal_errors(clie
         "id", "task_type", "biz_id", "platform", "status", "attempt",
         "max_attempts", "started_at", "finished_at", "next_run_at",
         "error_msg", "created_at", "resolved_at", "resolved_by", "resolution_action",
+        "todo_dismissed_at", "todo_dismissed_by", "todo_dismissal_note",
     }
 
     legacy = tc.get("/api/task_runs?limit=20")

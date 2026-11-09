@@ -4561,15 +4561,18 @@ def _register_routes(app: FastAPI) -> None:
                                      "operations", "breaker")
 
                 if "hot_topics" in tables and (not source or source == "hot_topic_source"):
+                    hot_failure_cutoff = (_storage_now() - timedelta(hours=72)).isoformat(timespec="seconds")
                     total = int(conn.execute(
-                        "SELECT COUNT(*) FROM hot_topics WHERE evidence_status = 'failed'"
+                        "SELECT COUNT(*) FROM hot_topics "
+                        "WHERE evidence_status = 'failed' AND COALESCE(last_seen_at,discovered_at) >= ?",
+                        (hot_failure_cutoff,),
                     ).fetchone()[0])
                     counts["hot_topic_source"] += total
                     rows = conn.execute(
                         "SELECT id, source, title, discovered_at FROM hot_topics "
-                        "WHERE evidence_status = 'failed' "
+                        "WHERE evidence_status = 'failed' AND discovered_at >= ? "
                         "ORDER BY discovered_at DESC, id DESC LIMIT ?",
-                        (fetch_limit,),
+                        (hot_failure_cutoff, fetch_limit),
                     ).fetchall()
                     capped = capped or total > fetch_limit
                     for row in rows:
@@ -4579,15 +4582,24 @@ def _register_routes(app: FastAPI) -> None:
                                  "failed", row["discovered_at"], "high", "hot", "sources")
 
                 if "task_runs" in tables and (not source or source == "task_run"):
+                    task_run_columns = {
+                        column["name"] for column in conn.execute("PRAGMA table_info(task_runs)")
+                    }
+                    todo_conditions = ["status IN ('pending_verify','failed','interrupted')"]
+                    if "resolved_at" in task_run_columns:
+                        todo_conditions.append("resolved_at IS NULL")
+                    if "todo_dismissed_at" in task_run_columns:
+                        todo_conditions.append("todo_dismissed_at IS NULL")
+                    todo_where = " AND ".join(todo_conditions)
                     total = int(conn.execute(
-                        "SELECT COUNT(*) FROM task_runs WHERE status IN ('pending_verify','failed','interrupted')"
+                        "SELECT COUNT(*) FROM task_runs WHERE " + todo_where
                     ).fetchone()[0])
                     counts["task_run"] += total
                     rows = conn.execute(
                         "SELECT id, task_type, status, platform, error_msg, "
                         "COALESCE(finished_at, started_at, created_at) AS todo_at "
-                        "FROM task_runs WHERE status IN ('pending_verify','failed','interrupted') "
-                        "ORDER BY COALESCE(finished_at, started_at, created_at) DESC, id DESC LIMIT ?",
+                        "FROM task_runs WHERE " + todo_where +
+                        " ORDER BY COALESCE(finished_at, started_at, created_at) DESC, id DESC LIMIT ?",
                         (fetch_limit,),
                     ).fetchall()
                     capped = capped or total > fetch_limit
@@ -10244,6 +10256,7 @@ def _register_routes(app: FastAPI) -> None:
             "id", "task_type", "biz_id", "platform", "status", "attempt",
             "max_attempts", "started_at", "finished_at", "next_run_at",
             "error_msg", "created_at", "resolved_at", "resolved_by", "resolution_action",
+            "todo_dismissed_at", "todo_dismissed_by", "todo_dismissal_note",
         )
         items = []
         for row in rows:
@@ -10253,6 +10266,8 @@ def _register_routes(app: FastAPI) -> None:
                 item["error_msg"] = safe_error_summary(
                     item["error_msg"], "任务执行失败，请进入任务详情核对。",
                 )
+            if item.get("todo_dismissal_note"):
+                item["todo_dismissal_note"] = redact(item["todo_dismissal_note"])[:500]
             items.append(item)
         if page is None:
             return items
@@ -10313,6 +10328,94 @@ def _register_routes(app: FastAPI) -> None:
             "ops_logs_sync": "linked_records_updated" if linked.rowcount else "no_linked_pending_logs",
             "ops_logs_pending_verify": 0,
             "ops_logs_updated": linked.rowcount,
+        }
+
+    @app.post("/api/task_runs/bulk-dismiss")
+    def dismiss_failed_task_runs(body: dict, request: Request):
+        """批量从全局待办中收起失败任务；保留原始执行状态和错误审计。"""
+        raw_ids = (body or {}).get("ids")
+        if not isinstance(raw_ids, list) or not raw_ids or len(raw_ids) > 100:
+            raise HTTPException(400, "ids 必须是 1-100 条任务记录 ID")
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 1 for value in raw_ids):
+            raise HTTPException(400, "任务记录 ID 必须是正整数")
+        ids = list(dict.fromkeys(raw_ids))
+        placeholders = ",".join("?" for _ in ids)
+        conn = _g()["conn"]
+        owned_conn = False
+        target_tenant_id = str((body or {}).get("tenant_id") or "").strip()
+        if target_tenant_id:
+            registry = _g().get("tenant_registry")
+            tenant = next(
+                (item for item in (registry.list() if registry is not None else [])
+                 if str(item.get("id")) == target_tenant_id),
+                None,
+            )
+            if tenant is None:
+                raise HTTPException(404, "账号组不存在或不可访问")
+            paths = registry.paths(target_tenant_id, name=str(tenant.get("name") or target_tenant_id))
+            if not paths.db_file.exists():
+                raise HTTPException(404, "账号组数据库尚未初始化")
+            conn = sqlite3.connect(paths.db_file, timeout=2)
+            conn.row_factory = sqlite3.Row
+            owned_conn = True
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(task_runs)")}
+            if not {"todo_dismissed_at", "todo_dismissed_by", "todo_dismissal_note"}.issubset(columns):
+                conn.close()
+                raise HTTPException(409, "该账号组数据库尚未完成待办治理迁移")
+        note = str((body or {}).get("note") or "操作员已确认，无需继续显示在待办").strip()[:500]
+        actor = auth.audit_actor(request)
+        dismissed_at = _storage_now().isoformat(timespec="seconds")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                f"SELECT id,status,todo_dismissed_at FROM task_runs WHERE id IN ({placeholders})",
+                ids,
+            ).fetchall()
+            by_id = {int(row["id"]): row for row in rows}
+            missing = [run_id for run_id in ids if run_id not in by_id]
+            if missing:
+                conn.rollback()
+                raise HTTPException(404, f"任务记录不存在：{missing[:10]}")
+            invalid = [
+                run_id for run_id, row in by_id.items()
+                if row["status"] not in ("failed", "interrupted")
+            ]
+            if invalid:
+                conn.rollback()
+                raise HTTPException(409, f"仅 failed/interrupted 任务可从待办收起：{invalid[:10]}")
+            pending_ids = [
+                run_id for run_id in ids if not by_id[run_id]["todo_dismissed_at"]
+            ]
+            if pending_ids:
+                pending_marks = ",".join("?" for _ in pending_ids)
+                updated = conn.execute(
+                    f"UPDATE task_runs SET todo_dismissed_at=?,todo_dismissed_by=?,"
+                    f"todo_dismissal_note=? WHERE id IN ({pending_marks}) "
+                    "AND status IN ('failed','interrupted') AND todo_dismissed_at IS NULL",
+                    [dismissed_at, actor, note, *pending_ids],
+                )
+                if updated.rowcount != len(pending_ids):
+                    conn.rollback()
+                    raise HTTPException(409, "部分任务状态已变化，请刷新待办后重试")
+            conn.commit()
+        except HTTPException:
+            if owned_conn:
+                conn.close()
+            raise
+        except Exception:
+            conn.rollback()
+            if owned_conn:
+                conn.close()
+            raise
+        if owned_conn:
+            conn.close()
+        return {
+            "tenant_id": target_tenant_id or None,
+            "dismissed_count": len(pending_ids),
+            "already_dismissed_count": len(ids) - len(pending_ids),
+            "ids": ids,
+            "dismissed_at": dismissed_at if pending_ids else None,
+            "dismissed_by": actor if pending_ids else None,
         }
 
     # --- 通知中心（notifications）---

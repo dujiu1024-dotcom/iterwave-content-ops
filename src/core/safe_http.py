@@ -26,6 +26,15 @@ class SafeFetchError(ValueError):
     """可直接展示给操作者的安全请求错误，不含原始 URL。"""
 
 
+class SafeHTTPStatusError(SafeFetchError):
+    """HTTP status failure with safe retry metadata for explicitly retryable callers."""
+
+    def __init__(self, status_code: int, retry_after: str | None = None):
+        self.status_code = int(status_code)
+        self.retry_after = str(retry_after).strip() if retry_after else None
+        super().__init__(f"远程地址返回错误（HTTP {self.status_code}）")
+
+
 def _normalise_host(host: str) -> str:
     return host.strip("[]").rstrip(".").encode("idna").decode("ascii").lower()
 
@@ -250,6 +259,10 @@ def fetch_public_bytes(
 
                     if response.status_code in (401, 403):
                         raise SafeFetchError("远程地址拒绝访问，请检查鉴权设置")
+                    if response.status_code == 429:
+                        raise SafeHTTPStatusError(
+                            429, response.headers.get("retry-after"),
+                        )
                     if response.status_code < 200 or response.status_code >= 300:
                         raise SafeFetchError(
                             f"远程地址返回错误（HTTP {response.status_code}）"

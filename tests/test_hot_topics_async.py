@@ -331,3 +331,52 @@ def test_manual_research_reports_failed_batch_items_as_remaining_pending(cfg, co
     assert recovered["report"]["remaining_pending"] == 0
     hot_topic_service.reset_for_tests()
 
+
+
+def test_60s_source_retries_once_after_429_and_honors_retry_after(cfg, conn, monkeypatch):
+    from src.core.safe_http import SafeHTTPStatusError
+
+    collector = HotTopicCollector(cfg, conn)
+    calls = []
+    delays = []
+
+    def fake_fetch(*_args, **_kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise SafeHTTPStatusError(429, "7")
+        return json.dumps({"code": 200, "data": [{"title": "恢复后的热点"}]}), "application/json"
+
+    monkeypatch.setattr("src.core.hot_topics._fetch_public_text", fake_fetch)
+    monkeypatch.setattr("src.core.hot_topics.time.sleep", lambda seconds: delays.append(seconds))
+
+    rows = collector._fetch_platform("weibo", "https://60s.viki.moe", "60s.viki.moe")
+
+    assert len(calls) == 2
+    assert delays == [7.0]
+    assert rows[0]["title"] == "恢复后的热点"
+
+
+def test_repeated_hot_source_failures_preserve_first_failure_timestamp(cfg, conn, monkeypatch):
+    from datetime import timedelta
+    import src.core.hot_topics as hot_topics
+
+    collector = HotTopicCollector(cfg, conn)
+    first = datetime(2026, 11, 1, 10, 0, tzinfo=timezone.utc)
+    later = first + timedelta(hours=2)
+    moments = iter([first, first, later, later])
+    monkeypatch.setattr(hot_topics, "_utc_now", lambda: next(moments))
+
+    collector._record_failure("60s/xhs", "xhs", "HTTP 429")
+    initial = conn.execute(
+        "SELECT discovered_at,last_seen_at,title FROM hot_topics WHERE id='hot-failed-xhs'"
+    ).fetchone()
+    collector._record_failure("60s/xhs", "xhs", "HTTP 429 again")
+    repeated = conn.execute(
+        "SELECT discovered_at,last_seen_at,title FROM hot_topics WHERE id='hot-failed-xhs'"
+    ).fetchone()
+
+    assert repeated["discovered_at"] == initial["discovered_at"]
+    assert repeated["last_seen_at"] > initial["last_seen_at"]
+    assert "again" in repeated["title"]
+
+
