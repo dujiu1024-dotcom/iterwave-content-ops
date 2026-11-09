@@ -434,8 +434,8 @@ class HotTopicCollector:
 
         failed_cutoff = (_utc_now() - timedelta(hours=72)).isoformat(timespec="seconds")
         failed_rows = self.conn.execute(
-            "SELECT source, title, discovered_at FROM hot_topics "
-            "WHERE evidence_status = 'failed' AND discovered_at >= ? "
+            "SELECT source, title, discovered_at, last_seen_at FROM hot_topics "
+            "WHERE evidence_status = 'failed' AND COALESCE(last_seen_at,discovered_at) >= ? "
             "ORDER BY discovered_at DESC, id DESC",
             (failed_cutoff,),
         ).fetchall()
@@ -975,7 +975,7 @@ class HotTopicCollector:
         failed_cutoff = (_utc_now() - timedelta(hours=72)).isoformat(timespec="seconds")
         # 第一遍：找出「最近一次采集失败」的平台，其旧数据一并隐藏（避免失败还显示数字）
         for row in rows:
-            if row["evidence_status"] != "failed" or str(row["discovered_at"] or "") < failed_cutoff:
+            if row["evidence_status"] != "failed" or str(row["last_seen_at"] or row["discovered_at"] or "") < failed_cutoff:
                 continue
             source = row["source"] or ""
             platform = source.rsplit("/", 1)[-1] if "/" in source else source
