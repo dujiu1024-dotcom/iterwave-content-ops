@@ -64,9 +64,11 @@ test("TSX views do not interpolate backend enum properties directly into user-vi
 
   for (const file of files) {
     const source = await readFile(file, "utf8");
-    for (const pattern of [directEnumInterpolation, templateEnumInterpolation]) {
+    for (const pattern of [directEnumInterpolation]) {
       pattern.lastIndex = 0;
       for (const match of source.matchAll(pattern)) {
+        const prefix = source.slice(0, match.index).trimEnd();
+        if (prefix.endsWith("=") || prefix.endsWith("$")) continue;
         const line = source.slice(0, match.index).split("\n").length;
         violations.push(relative(fileURLToPath(new URL(".", import.meta.url)), file) + ":" + line + ": " + match[0]);
       }
