@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, ReviewQueueItem } from "../api";
 import { formatBusinessDateTime } from "../businessTime.mjs";
-import { ALL_PLATFORMS, platformMeta, Platform } from "../platforms";\nimport { displayStatusLabel } from "../displayLabels";
+import { ALL_PLATFORMS, platformMeta, Platform } from "../platforms";
+import { displayStatusLabel } from "../displayLabels";
 
 const PAGE_SIZE = 30;
 
@@ -259,7 +260,7 @@ export default function Review() {
                 <span>生产轮次：{selected.round_number ?? "—"}</span>
                 <span>轮次状态：{displayStatusLabel(selected.round_status)}</span>
                 <span>草稿状态：{displayStatusLabel(selected.draft_status)}</span>
-                <span>质量检查：{displayStatusLabel(selected.guard_outcome ?? "未检查")}</span>
+                <span>质量检查：{selected.guard_outcome ? displayStatusLabel(selected.guard_outcome) : "未检查"}</span>
                 <span>审核：{statusLabel(selected.review_status)}</span>
                 <span>发布：{selected.publish_status === "published" ? "已发布" : selected.publish_status === "failed" ? "发布失败" : "未发布"}</span>
                 {selected.published_at && <span>发布时间：{selected.published_at}（{selected.publish_time_source === "user_supplied" ? "人工填写" : "确认时间"}）</span>}
