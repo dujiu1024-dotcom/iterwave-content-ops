@@ -903,7 +903,7 @@ class HotTopicCollector:
                 "title, heat_score, heat_unit, time_sensitive, dimension) "
                 "VALUES (?, ?, NULL, ?, ?, 'failed', ?, NULL, NULL, NULL, NULL) "
                 "ON CONFLICT(id) DO UPDATE SET "
-                "discovered_at=hot_topics.discovered_at, last_seen_at=excluded.last_seen_at, evidence_status='failed', "
+                "discovered_at=hot_topics.discovered_at, last_seen_at=excluded.last_seen_at, title=excluded.title, evidence_status='failed', "
                 "heat_score=NULL, raw_url=NULL",
                 (
                     f"hot-failed-{platform}", source,
