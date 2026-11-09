@@ -4561,15 +4561,18 @@ def _register_routes(app: FastAPI) -> None:
                                      "operations", "breaker")
 
                 if "hot_topics" in tables and (not source or source == "hot_topic_source"):
+                    hot_failure_cutoff = (_storage_now() - timedelta(hours=72)).isoformat(timespec="seconds")
                     total = int(conn.execute(
-                        "SELECT COUNT(*) FROM hot_topics WHERE evidence_status = 'failed'"
+                        "SELECT COUNT(*) FROM hot_topics "
+                        "WHERE evidence_status = 'failed' AND discovered_at >= ?",
+                        (hot_failure_cutoff,),
                     ).fetchone()[0])
                     counts["hot_topic_source"] += total
                     rows = conn.execute(
                         "SELECT id, source, title, discovered_at FROM hot_topics "
-                        "WHERE evidence_status = 'failed' "
+                        "WHERE evidence_status = 'failed' AND discovered_at >= ? "
                         "ORDER BY discovered_at DESC, id DESC LIMIT ?",
-                        (fetch_limit,),
+                        (hot_failure_cutoff, fetch_limit),
                     ).fetchall()
                     capped = capped or total > fetch_limit
                     for row in rows:
