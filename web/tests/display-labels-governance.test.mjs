@@ -8,13 +8,12 @@ const sourceRoot = fileURLToPath(new URL("../src/", import.meta.url));
 const labelsUrl = new URL("../src/displayLabels.ts", import.meta.url);
 const enumProperties = [
   "status", "state", "source", "platform", "verdict", "decision",
-  "outcome", "severity", "stage", "phase", "action", "type",
+  "outcome", "severity", "stage", "phase", "type",
   "event_type", "guard_outcome", "draft_status", "round_status", "task_type",
 ];
 const enumPropertyPattern = enumProperties.join("|");
 const memberPath = "[A-Za-z_$][\\w$]*(?:(?:\\.|\\?\\.)[A-Za-z_$][\\w$]*)*";
 const directEnumInterpolation = new RegExp("\\{\\s*" + memberPath + "\\.(?:" + enumPropertyPattern + ")\\s*\\}", "g");
-const templateEnumInterpolation = new RegExp("\\$\\{\\s*" + memberPath + "\\.(?:" + enumPropertyPattern + ")\\s*\\}", "g");
 
 async function collectTsxFiles(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
