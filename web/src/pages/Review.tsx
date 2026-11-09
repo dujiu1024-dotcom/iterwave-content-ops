@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, ReviewQueueItem } from "../api";
 import { formatBusinessDateTime } from "../businessTime.mjs";
-import { ALL_PLATFORMS, platformMeta, Platform } from "../platforms";
+import { ALL_PLATFORMS, platformMeta, Platform } from "../platforms";\nimport { displayStatusLabel } from "../displayLabels";
 
 const PAGE_SIZE = 30;
 
@@ -237,7 +237,7 @@ export default function Review() {
                     <strong>{item.title || "未命名内容"}</strong>
                     <span className={`status-pill status-${item.review_status}`}>{statusLabel(item.review_status)}</span>
                   </span>
-                  <span className="muted">{platformMeta(item.platform).label} · 第 {item.round_number ?? "—"} 轮 · {item.draft_status}</span>
+                  <span className="muted">{platformMeta(item.platform).label} · 第 {item.round_number ?? "—"} 轮 · {displayStatusLabel(item.draft_status)}</span>
                   <span className="muted">{item.created_at || "时间未知"}</span>
                 </button>
               ))}
@@ -257,9 +257,9 @@ export default function Review() {
               <div className="review-detail-meta">
                 <span>{platformMeta(selected.platform).label}</span>
                 <span>生产轮次：{selected.round_number ?? "—"}</span>
-                <span>轮次状态：{selected.round_status ?? "—"}</span>
-                <span>草稿状态：{selected.draft_status}</span>
-                <span>G2：{selected.guard_outcome ?? "未检查"}</span>
+                <span>轮次状态：{displayStatusLabel(selected.round_status)}</span>
+                <span>草稿状态：{displayStatusLabel(selected.draft_status)}</span>
+                <span>质量检查：{displayStatusLabel(selected.guard_outcome ?? "未检查")}</span>
                 <span>审核：{statusLabel(selected.review_status)}</span>
                 <span>发布：{selected.publish_status === "published" ? "已发布" : selected.publish_status === "failed" ? "发布失败" : "未发布"}</span>
                 {selected.published_at && <span>发布时间：{selected.published_at}（{selected.publish_time_source === "user_supplied" ? "人工填写" : "确认时间"}）</span>}
