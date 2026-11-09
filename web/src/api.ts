@@ -2835,6 +2835,15 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action }),
     }),
+  dismissTaskRuns: (tenantId: string, ids: number[], note?: string) =>
+    fetchJson<{ tenant_id: string; dismissed_count: number; already_dismissed_count: number }>(
+      "/api/task_runs/bulk-dismiss",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tenant_id: tenantId, ids, note }),
+      },
+    ),
   /** 立即触发一次定时任务（§8.3 手动触发验证） */
   runSchedulerJob: (jobId: string) =>
     fetchJson<{ job_id: string; triggered_at: string }>(`/api/scheduler/jobs/${jobId}/run`, {
