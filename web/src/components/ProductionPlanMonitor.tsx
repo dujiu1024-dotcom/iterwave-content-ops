@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, ProductionMonitorResponse, ProductionMonitorStage, ProductionTaskItem, ProductionTaskDetail } from "../api";
 import { navigate } from "../nav";
 import { formatBusinessDateTime } from "../businessTime.mjs";
-import { displayCodeLabel, displayStatusLabel, displayPlatformLabel, displayStepLabel, displayErrorLabel } from "../displayLabels";
+import { displayCodeLabel, displayStatusLabel, displayPlatformLabel, displayStepLabel, displayErrorLabel, displayStatusSummary } from "../displayLabels";
 
 const PLATFORM_LABEL: Record<string, string> = {
   xhs: "小红书", douyin: "抖音", kuaishou: "快手", wechat_channels: "视频号",
@@ -50,7 +50,7 @@ function Stage({ stage }: { stage: ProductionMonitorStage }) {
         {stage.contents.map((content) => <div className="task-row" key={content.id}>
           <div className="task-main">
             <div className="task-title">{content.title || "未命名内容"}</div>
-            <div className="task-desc">{PLATFORM_LABEL[content.platform] ?? displayPlatformLabel(content.platform)} · {content.draft_count} 个草稿 · {content.review_rejected ? "已驳回" : content.draft_statuses || "无草稿状态"}</div>
+            <div className="task-desc">{PLATFORM_LABEL[content.platform] ?? displayPlatformLabel(content.platform)} · {content.draft_count} 个草稿 · {content.review_rejected ? "已驳回" : displayStatusSummary(content.draft_statuses) || "无草稿状态"}</div>
           </div>
           <button className="btn sm" onClick={() => navigate("production", "pipeline", { type: "content", id: content.id })}>查看内容</button>
         </div>)}
@@ -67,7 +67,7 @@ function Stage({ stage }: { stage: ProductionMonitorStage }) {
       </div>)}
     </div>}
     {stage.round_count > stage.rounds.length && <div className="tiny" style={{ marginTop: 6 }}>仅展示最近 {stage.rounds.length} 轮；共 {stage.round_count} 轮。</div>}
-    <div className="tiny" style={{ marginTop: 6 }}>轮次状态：{Object.entries(stage.round_status_counts ?? {}).filter(([, count]) => count > 0).map(([status, count]) => `${STATUS_LABEL[status] ?? status} ${count}`).join(" · ") || "暂无轮次"}</div>
+    <div className="tiny" style={{ marginTop: 6 }}>轮次状态：{Object.entries(stage.round_status_counts ?? {}).filter(([, count]) => count > 0).map(([status, count]) => `${STATUS_LABEL[status] ?? displayStatusLabel(status)} ${count}`).join(" · ") || "暂无轮次"}</div>
   </div>;
 }
 
