@@ -11,7 +11,7 @@ import DemoBadge from "../components/DemoBadge";
 import EmptyHint from "../components/EmptyHint";
 import TaskProgressPanel from "../components/TaskProgressPanel";
 import ContentProductionLinePanel from "../components/ContentProductionLinePanel";
-import { displayCodeLabel, displayStatusLabel, displayStepLabel, displayPlatformLabel, displaySourceLabel, displayStatusLabel } from "../displayLabels";
+import { displayCodeLabel, displayStatusLabel, displayStepLabel, displayPlatformLabel, displaySourceLabel } from "../displayLabels";
 
 const ROUND_STATUSES = ["created", "producing", "awaiting_publish", "collecting_metrics", "analyzing", "completed", "partial_completed", "failed", "cancelled"];
 const ROUND_TARGETABLE: Record<string, string[]> = {
