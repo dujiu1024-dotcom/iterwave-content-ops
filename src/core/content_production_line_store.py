@@ -89,6 +89,12 @@ class ContentProductionLineStore:
             ),
         )
         if waiver_id:
+            task = self.conn.execute(
+                "SELECT platform FROM production_tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            if task is None:
+                raise ContentProductionLineError("生产任务不存在，无法记录人工豁免消费")
+            platform = str(task["platform"])
             # A round/platform waiver authorizes every content task in that batch.
             # Keep an append-only per-task ledger; consumed_task_id remains the
             # legacy first-consumer pointer for backward compatibility.
@@ -100,9 +106,8 @@ class ContentProductionLineStore:
                        SELECT 1 FROM production_context_waivers
                        WHERE id=? AND round_id=? AND platform=?
                    )""",
-                (waiver_id, task_id, int(line["round_id"]), str(context.get("platform") or ""),
-                 snapshot["captured_at"], waiver_id, int(line["round_id"]),
-                 str(context.get("platform") or "")),
+                (waiver_id, task_id, int(line["round_id"]), platform,
+                 snapshot["captured_at"], waiver_id, int(line["round_id"]), platform),
             )
             consumed = self.conn.execute(
                 """SELECT 1 FROM production_context_waiver_consumptions
