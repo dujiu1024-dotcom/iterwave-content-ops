@@ -512,7 +512,7 @@ export default function Calendar() {
                 {batchDetail.tasks.length ? batchDetail.tasks.map((task) => (
                   <div className="calendar-plan-detail-row" key={task.id}>
                     <strong>{task.content_title || "未命名内容"}</strong>
-                    <div>{platformMeta(task.platform).label} · {TASK_STATUS_LABEL[task.status] ?? task.status} · 尝试 {task.attempt_count}/{task.max_attempts}</div>
+                    <div>{platformMeta(task.platform).label} · {TASK_STATUS_LABEL[task.status] ?? displayStatusLabel(task.status)} · 尝试 {task.attempt_count}/{task.max_attempts}</div>
                     {task.status === "failed" && <div className="note">任务执行失败，请查看生产监控中的诊断信息。</div>}
                   </div>
                 )) : <div className="note">该批次尚未生成独立生产任务</div>}
