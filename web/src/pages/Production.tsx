@@ -1439,7 +1439,7 @@ export default function Production() {
                     <div className="task-title">{c.title}</div>
                     <div className="task-desc">
                       {PLATFORM_NAME[c.platform]} · 检查 {displayStatusLabel(c.guard_outcome)} · 卡片 {c.image_count} 张
-                      {c.draft_status && <> · <span className={`tag ${STATUS_CLS[c.draft_status] ?? "gray"}`}>{c.draft_status}</span></>}
+                      {c.draft_status && <> · <span className={`tag ${STATUS_CLS[c.draft_status] ?? "gray"}`}>{displayStatusLabel(c.draft_status)}</span></>}
                     </div>
                   </div>
                 </div>
