@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { useApp } from "../AppContext";
 import { navigate } from "../nav";
 import { api, AutogrowStatus } from "../api";
+import { displayCodeLabel } from "../displayLabels";
 
 const ACTION_LABEL: Record<string, { text: string; cls: string }> = {
   start: { text: "可以开轮", cls: "green" },
@@ -62,7 +63,7 @@ export default function AutogrowPanel() {
   if (err) return <div className="panel"><div className="note" style={{ color: "var(--red)" }}>自动闭环状态加载失败：{err}</div></div>;
   if (!st) return <div className="panel"><div className="note">加载自动闭环状态…</div></div>;
 
-  const v = ACTION_LABEL[st.verdict.action] ?? { text: st.verdict.action, cls: "gray" };
+  const v = ACTION_LABEL[st.verdict.action] ?? { text: displayCodeLabel(st.verdict.action, "其他执行结果"), cls: "gray" };
   const bias = Object.entries(st.feedback.dimension_bias);
   const hints = Object.values(st.feedback.copy_hints).reduce((a, b) => a + b.length, 0);
 
@@ -150,7 +151,7 @@ export default function AutogrowPanel() {
                 {st.recent_runs.map((r) => (
                   <tr key={r.id}>
                     <td style={{ fontSize: 11, color: "var(--muted)" }}>{r.ran_at}</td>
-                    <td><span className={`tag ${(ACTION_LABEL[r.action] ?? { cls: "gray" }).cls}`}>{(ACTION_LABEL[r.action] ?? { text: r.action }).text}</span></td>
+                    <td><span className={`tag ${(ACTION_LABEL[r.action] ?? { cls: "gray" }).cls}`}>{(ACTION_LABEL[r.action] ?? { text: displayCodeLabel(r.action, "其他执行结果") }).text}</span></td>
                     <td style={{ fontSize: 12 }}>{r.reason}</td>
                   </tr>
                 ))}
