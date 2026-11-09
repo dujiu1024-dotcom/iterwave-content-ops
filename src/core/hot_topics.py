@@ -740,7 +740,10 @@ class HotTopicCollector:
                             delay = max(0.0, (retry_at - _utc_now()).total_seconds())
                         except (TypeError, ValueError, OverflowError):
                             delay = 30.0
-                time.sleep(min(60.0, max(0.0, delay)))
+                if delay > 60.0:
+                    # Do not retry earlier than a long server-specified Retry-After.
+                    raise
+                time.sleep(max(0.0, delay))
         if body is None:
             raise RuntimeError("热点数据源限流后重试仍未获得响应")
         payload = json.loads(body)
