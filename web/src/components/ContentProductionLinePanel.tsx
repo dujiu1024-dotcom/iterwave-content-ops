@@ -81,7 +81,7 @@ export default function ContentProductionLinePanel() {
           <div className="panel-head">
             <div><div className="panel-title">{LINE_STATUS[selected.status] ?? displayStatusLabel(selected.status)}</div>
               <div className="panel-sub">{displayPlatformLabel(selected.platform)} · 生产任务已关联</div></div>
-            <span className={"tag " + (selected.status === "failed" ? "red" : ACTIVE.has(selected.status) ? "orange" : "green")}>{LINE_STATUS[selected.status] ?? selected.status}</span>
+            <span className={"tag " + (selected.status === "failed" ? "red" : ACTIVE.has(selected.status) ? "orange" : "green")}>{LINE_STATUS[selected.status] ?? displayStatusLabel(selected.status)}</span>
           </div>
           <div className="grid four" style={{ gap: 8 }}>
             <div className="kpi-card"><div className="metric-label">执行尝试</div><div className="metric-val">{selected.attempt_count}/{selected.max_attempts}</div></div>
