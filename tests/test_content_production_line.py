@@ -244,14 +244,30 @@ def test_disabled_formal_subgoal_production_plan_blocks_task_creation(conn):
     assert conn.execute("SELECT COUNT(*) FROM production_tasks").fetchone()[0] == 0
 
 
-def test_only_one_active_content_line_per_tenant_database(conn):
+def test_multiple_active_content_lines_can_coexist_in_one_tenant_database(conn):
     ids = _setup(conn)
-    _round_id, first = _create_task(conn, ids, "task-active-a")
-    with pytest.raises(ProductionTaskError, match="上一条内容生产线尚未"):
-        _create_task(conn, ids, "task-active-b")
-    assert conn.execute("SELECT COUNT(*) FROM production_tasks").fetchone()[0] == 1
-    line = ContentProductionLineStore(conn).get_for_task(first["id"])
-    assert line["status"] == "pending"
+    round_id = _create_round(
+        conn, key="round-multiple-active", master_id=ids["master_id"],
+        sub_id=ids["sub_id"], sub_version_id=ids["sub_version_id"],
+        stage_id=ids["stage_id"], line_version_id=ids["line_version_id"],
+    )
+    task_store = ProductionTaskStore(conn)
+    first = task_store.create_task(
+        round_id=round_id, master_plan_version_id=ids["master_id"],
+        sub_plan_id=ids["sub_id"], sub_plan_version_id=ids["sub_version_id"],
+        strategy_step_id=ids["stage_key"], platform="xhs", task_ordinal=1,
+        idempotency_key="task-active-a", input_snapshot={"topic": {"title": "选题 A"}},
+    )
+    second = task_store.create_task(
+        round_id=round_id, master_plan_version_id=ids["master_id"],
+        sub_plan_id=ids["sub_id"], sub_plan_version_id=ids["sub_version_id"],
+        strategy_step_id=ids["stage_key"], platform="xhs", task_ordinal=2,
+        idempotency_key="task-active-b", input_snapshot={"topic": {"title": "选题 B"}},
+    )
+    assert first["id"] != second["id"]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM content_production_lines WHERE status='pending'"
+    ).fetchone()[0] == 2
 
 
 def test_missing_confirmed_diagnosis_blocks_task_unless_explicitly_waived(conn):
@@ -301,6 +317,22 @@ def test_missing_confirmed_diagnosis_blocks_task_unless_explicitly_waived(conn):
     assert conn.execute(
         "SELECT consumed_task_id FROM production_context_waivers WHERE id=?", (waiver["id"],)
     ).fetchone()[0] == task["id"]
+
+    # The same round/platform waiver remains valid for the next content task.
+    second = task_store.create_task(
+        round_id=round_id, master_plan_version_id=ids["master_id"],
+        sub_plan_id=ids["sub_id"], sub_plan_version_id=ids["sub_version_id"],
+        strategy_step_id=ids["stage_key"], platform="xhs", task_ordinal=2,
+        idempotency_key="task-with-diagnosis-waiver-2",
+        input_snapshot={"topic": {"title": "second waived topic"}},
+    )
+    second_line = ContentProductionLineStore(conn).get_for_task(second["id"])
+    assert second_line["context_snapshot"]["context_status"] == "waived"
+    assert second_line["context_snapshot"]["context"]["manual_waiver"]["id"] == waiver["id"]
+    assert conn.execute(
+        """SELECT COUNT(*) FROM production_context_waiver_consumptions
+           WHERE waiver_id=?""", (waiver["id"],)
+    ).fetchone()[0] == 2
 
 
 def test_migration_maps_legacy_tasks_without_rewriting_them(conn):
