@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import StructuredDataView from "./StructuredDataView";
 import { api, SubGoalRecord, SubPlanVersionRecord } from "../api";
-import EmptyHint from "./EmptyHint";\nimport { displayStatusLabel } from "../displayLabels";
+import EmptyHint from "./EmptyHint";
+import { displayStatusLabel } from "../displayLabels";
 
 const TYPES = [
   ["quantity","数量目标"],["business","业务目标"],["effect","效果目标"],
