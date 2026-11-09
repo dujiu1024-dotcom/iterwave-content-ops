@@ -4564,7 +4564,7 @@ def _register_routes(app: FastAPI) -> None:
                     hot_failure_cutoff = (_storage_now() - timedelta(hours=72)).isoformat(timespec="seconds")
                     total = int(conn.execute(
                         "SELECT COUNT(*) FROM hot_topics "
-                        "WHERE evidence_status = 'failed' AND discovered_at >= ?",
+                        "WHERE evidence_status = 'failed' AND COALESCE(last_seen_at,discovered_at) >= ?",
                         (hot_failure_cutoff,),
                     ).fetchone()[0])
                     counts["hot_topic_source"] += total
