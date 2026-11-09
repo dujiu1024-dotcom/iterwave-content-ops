@@ -663,6 +663,7 @@ def test_round_timeout_sweeper_preserves_succeeded_tasks_with_pending_drafts(cfg
     )
     # This fixture isolates recovery/timeout behavior from task-provenance creation guards.
     conn.execute("DROP TRIGGER IF EXISTS trg_production_tasks_validate_insert")
+    conn.execute("DROP TRIGGER IF EXISTS trg_content_production_line_after_task_insert")
     conn.execute(
         """INSERT INTO production_tasks(
             id,idempotency_key,round_id,master_plan_version_id,sub_plan_id,
