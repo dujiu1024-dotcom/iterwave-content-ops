@@ -365,12 +365,15 @@ def test_migration_maps_legacy_tasks_without_rewriting_them(conn):
             "trg_content_production_line_events_no_delete",
             "trg_production_context_waivers_consume_once",
             "trg_production_context_waivers_no_delete",
+            "trg_context_waiver_consumptions_no_update",
+            "trg_context_waiver_consumptions_no_delete",
         ]
         for name in new_triggers:
             legacy.execute(f'DROP TRIGGER IF EXISTS "{name}"')
         for name in (
             "content_production_line_events", "production_context_snapshots",
-            "production_context_waivers", "content_production_lines",
+            "production_context_waiver_consumptions", "production_context_waivers",
+            "content_production_lines",
         ):
             legacy.execute(f'DROP TABLE IF EXISTS "{name}"')
         now = "2026-11-04T12:00:00+08:00"
