@@ -482,7 +482,7 @@ function LogsPane({ logs, total, page, pages, onPageChange, onResolved, targetId
                   {l.executed_at ? formatBusinessDateTime(l.executed_at) : l.schedule_time ? "待执行" : "-"}
                 </td>
                 <td>{PLATFORM_NAME[l.platform]}</td>
-                <td><span className="tag gray">{ACTION_LABEL[l.action_type] ?? l.action_type}</span></td>
+                <td><span className="tag gray">{ACTION_LABEL[l.action_type] ?? displayCodeLabel(l.action_type, "其他操作")}</span></td>
                 <td style={{ maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12 }}>
                   {l.content ?? l.target_author ?? "-"}
                 </td>
@@ -650,7 +650,7 @@ function PublishPane() {
                 {(d.status === "draft_pending" || d.status === "draft_saved") &&
                   d.guard_confirmation_allowed !== true && !d.review_rejected && (
                   <div className="note" style={{ marginTop: 6, color: "var(--orange)" }}>
-                    当前质检状态：{d.guard_outcome ?? "未检查"}{d.guard_reason ? ` · ${d.guard_reason}` : ""}。
+                    当前质检状态：{d.guard_outcome ? displayStatusLabel(d.guard_outcome) : "未检查"}{d.guard_reason ? ` · ${d.guard_reason}` : ""}。
                     尚未发布时请先回到内容审核页复检；若已在平台真实发布，需填写例外原因才能登记采集。
                   </div>
                 )}

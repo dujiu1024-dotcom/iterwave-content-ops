@@ -4,7 +4,7 @@ import { navigate } from "../nav";
 import { formatBusinessDateTime } from "../businessTime.mjs";
 import { roundTaskLabel } from "../roundLabel";
 import ProductionPlanMonitor from "../components/ProductionPlanMonitor";
-import { displayStatusLabel } from "../displayLabels";
+import { displayStatusLabel, displayPlatformLabel, displayCodeLabel } from "../displayLabels";
 
 const STATUS: Record<string, string> = {
   queued: "排队中", running: "运行中", succeeded: "已完成",
@@ -204,7 +204,7 @@ export default function GlobalOperations() {
           <div className="panel-head"><div><div className="panel-title">全局 FIFO 任务</div><div className="panel-sub">运行任务不会因账号组切换而中断。</div></div><button className="btn sm" onClick={() => navigate("task-queue")}>完整队列</button></div>
           {active.length ? <div className="list">{active.map((task) => <div className="task-row" key={task.task_id}>
             <i className={`task-prio ${task.status === "running" ? "green" : "blue"}`} />
-            <div className="task-main"><div className="task-title">{task.tenant_name} · {task.task_type === "round_run" ? roundTaskLabel(task) : (TASK_TYPE_LABEL[task.task_type] ?? "账号组后台任务")}</div><div className="task-desc">队列 #{task.queue_order} · {STATUS[task.status]}</div></div>
+            <div className="task-main"><div className="task-title">{task.tenant_name} · {task.task_type === "round_run" ? roundTaskLabel(task) : (TASK_TYPE_LABEL[task.task_type] ?? "账号组后台任务")}</div><div className="task-desc">队列 #{task.queue_order} · {STATUS[task.status] ?? displayStatusLabel(task.status)}</div></div>
           </div>)}</div> : <div className="empty-state">当前没有排队或执行中的任务。</div>}
           {activePages > 1 && <div className="pagination-row" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, paddingTop: 12 }}>
             <button className="btn sm" disabled={activePage <= 1 || loading} onClick={() => setActivePage((p) => Math.max(1, p - 1))}>上一页</button>
@@ -290,7 +290,7 @@ export default function GlobalOperations() {
             <i className={`task-prio ${notification.level === "critical" || notification.level === "error" ? "red" : notification.level === "warning" ? "blue" : "green"}`} />
             <div className="task-main">
               <div className="task-title">{notification.title}</div>
-              <div className="task-desc">{notification.body || notification.type} · {notification.platform ? (PLATFORMS[notification.platform] ?? notification.platform) : "系统"} · {formatBusinessDateTime(notification.sent_at)}</div>
+              <div className="task-desc">{notification.body || displayCodeLabel(notification.type, "系统通知")} · {notification.platform ? (PLATFORMS[notification.platform] ?? notification.platform) : "系统"} · {formatBusinessDateTime(notification.sent_at)}</div>
             </div>
             <button className="btn sm primary" disabled={loading} onClick={() => {
               void api.markNotificationRead(notification.id)

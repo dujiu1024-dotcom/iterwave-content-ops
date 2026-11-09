@@ -121,7 +121,7 @@ export default function ProductionLinePanel({ subPlanId, platform, subplanTitle 
         <div className="panel-sub">{subplanTitle} · 子计划级策略模板；实际执行线按单条内容任务独立创建</div>
       </div>
       <span className={"tag " + (line?.is_stale ? "orange" : line?.status === "active" ? "green" : line?.status === "paused" ? "orange" : "gray")}>
-        {line?.is_stale ? "绑定版本已过期" : line?.status === "active" ? "已确认生效" : line?.status === "paused" ? "已暂停" : line ? line.status : "尚未建立"}
+        {line?.is_stale ? "绑定版本已过期" : line?.status === "active" ? "已确认生效" : line?.status === "paused" ? "已暂停" : line ? displayStatusLabel(line.status) : "尚未建立"}
       </span>
     </div>
     {error && <div className="note" role="alert">{error}</div>}

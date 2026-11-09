@@ -8,14 +8,16 @@ const LABELS: Record<string, string> = {
   imported: "导入", hot_topic: "热点采集", user: "用户操作", auto: "自动触发",
   // 通用状态
   pending: "待执行", queued: "排队中", running: "执行中", success: "成功",
+  pass: "通过", warn: "警告", fail: "未通过", error: "异常", partial: "部分完成", ready: "就绪", blocked: "依赖阻塞", stale: "已过期", effective: "当前生效", approved: "已通过", rejected: "已驳回", confirmed: "已确认", superseded: "已被替代", draft: "草稿", active: "进行中", resolved: "已解决", scheduled: "待执行", processing: "处理中", delivered: "已关闭", not_required: "无需关闭", review_required: "待人工审核", pending_verify: "待核实", draft_failed: "存稿失败", collected: "已采集", expired: "已过期", published: "已发布", user_published: "人工确认已发布", partial_completed: "部分完成", not_saved: "未保存", review_pending: "待审核",
+  awaiting_save: "待保存", verification_pending: "待核验", in_progress: "进行中", retrying: "重试中",
+  not_found: "未找到", recovering: "恢复中", aborted: "已中止", legacy_mapped: "历史任务映射",
   succeeded: "已完成", failed: "失败", interrupted: "已中断", skipped: "已跳过",
   cancelled: "已取消", done: "已完成", completed: "已完成", created: "已创建",
   producing: "生产中", awaiting_publish: "待发布", collecting_metrics: "数据采集中",
-  analyzing: "复盘中", partial_completed: "部分完成", paused: "已暂停",
-  draft_pending: "待保存", pending_verify: "待核实平台保存", draft_saved: "草稿已保存",
-  user_published: "用户已发布", data_fetching: "数据采集中", published: "已发布",
-  expired: "已过期", active: "已启用", inactive: "已停用", archived: "已归档",
-  deleted: "已删除", rejected: "已拒绝", ready: "就绪", generating: "生成中",
+  analyzing: "复盘中", paused: "已暂停",
+  draft_pending: "待保存", draft_saved: "草稿已保存", data_fetching: "数据采集中",
+  inactive: "已停用", archived: "已归档",
+  deleted: "已删除", generating: "生成中",
   quality_check: "质量检查中", reviewed: "已审核", planned: "待执行", generated_status: "已生成",
   // 生产步骤与后台任务
   publish_polling: "发布状态轮询", data_fetch: "平台数据采集", daily_ops: "每日运营",
@@ -31,13 +33,12 @@ const LABELS: Record<string, string> = {
   wechat_channels: "视频号", rss: "RSS 订阅", website: "网站", upload: "手动上传",
   generated_image: "AI 生成图片", ai_generated: "AI 生成", library: "素材库",
   // 告警级别
-  debug: "调试", info: "提示", notice: "注意", warning: "警告", warn: "警告",
-  error: "错误", critical: "严重", fatal: "致命",
+  debug: "调试", info: "提示", notice: "注意", warning: "警告", critical: "严重", fatal: "致命",
   // 目标与评分
   goal_strategy: "目标策略", publish_decision: "发布决策",
   threshold: "阈值评分", weighted: "加权评分", hybrid: "混合评分",
   // 品牌视觉版本
-  draft: "草稿", confirmed: "已确认", current: "当前版本", superseded: "历史版本",
+  current: "当前版本",
   // 指标
   interaction_rate: "互动率", like_rate: "点赞率", collect_rate: "收藏率",
   follower_efficiency: "涨粉效率", views: "曝光量", impressions: "曝光量",
@@ -58,6 +59,11 @@ export function displayCodeLabel(value: string | null | undefined, fallback = "�
 }
 export function displayStatusLabel(value: string | null | undefined): string {
   return displayCodeLabel(value, "其他状态（需确认）");
+}
+/** 将状态汇总文本逐项翻译，兼容 status=count 等统计格式。 */
+export function displayStatusSummary(value: string | null | undefined): string {
+  if (!value) return "—";
+  return value.replace(/\b[a-z][a-z0-9_]*\b/gi, (code) => LABELS[code] ?? "其他状态");
 }
 export function displayTaskTypeLabel(value: string | null | undefined): string {
   return displayCodeLabel(value, "其他任务（需确认）");

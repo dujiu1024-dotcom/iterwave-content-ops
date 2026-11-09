@@ -881,8 +881,8 @@ function AuditPane() {
                         <td>{PLATFORM_LABEL[r.platform] ?? displayPlatformLabel(r.platform)}</td>
                         <td style={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title}</td>
                         <td>
-                          {r.guard_outcome === "fail" ? <span className="tag red">✕ FAIL</span>
-                           : r.guard_outcome === "warn" ? <span className="tag orange">! WARN</span>
+                          {r.guard_outcome === "fail" ? <span className="tag red">✕ 未通过</span>
+                           : r.guard_outcome === "warn" ? <span className="tag orange">! 警告</span>
                            : <span className="tag gray">{r.guard_outcome === "error" ? "检查异常" : "其他结果（需确认）"}</span>}
                         </td>
                         <td style={{ maxWidth: 240, fontSize: 12 }}>{r.guard_reason ?? "—"}</td>
