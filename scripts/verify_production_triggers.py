@@ -32,7 +32,7 @@ def _trigger_statements(migration_sql: str) -> dict[str, str]:
             continue
         statement, buffer = buffer.strip(), ""
         match = re.search(
-            r"CREATE\\s+TRIGGER\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?"
+            r"CREATE +TRIGGER +(?:IF +NOT +EXISTS +)?"
             r"([A-Za-z_][A-Za-z0-9_]*)",
             statement,
             flags=re.IGNORECASE,
