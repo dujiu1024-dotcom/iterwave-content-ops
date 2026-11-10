@@ -773,3 +773,17 @@ def test_dry_run_finalized_round_can_still_resume_pending_drafts(cfg, conn, seed
         "SELECT run_report FROM spiral_rounds WHERE id=?", (round_id,)
     ).fetchone()[0])
     assert stored["dry_run_mode"] is False
+
+
+
+def test_dry_run_recovery_fails_round_when_all_draft_saves_fail(cfg, conn, seed):
+    round_id = seed.round(status="awaiting_publish")
+    seed.draft(round_id, platform="xhs", draft_status="failed", fetch_status=None)
+    report = {"errors": [], "steps": []}
+
+    _executor(cfg, conn)._finalize_round(round_id, report, save_drafts=True)
+
+    assert report["final_status"] == "failed"
+    assert conn.execute(
+        "SELECT status FROM spiral_rounds WHERE id=?", (round_id,)
+    ).fetchone()[0] == "failed"
