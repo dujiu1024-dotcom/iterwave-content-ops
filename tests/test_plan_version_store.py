@@ -1551,3 +1551,58 @@ def test_ai_metadata_edits_cannot_rewrite_provenance_or_mutate_history():
             "UPDATE master_plan_metadata_revisions SET change_reason='tampered' WHERE master_plan_version_id=?",
             (draft["id"],),
         )
+
+
+
+def test_bound_round_record_uses_immutable_master_plan_signature():
+    from src.core.plan_version import PlanVersionManager
+
+    conn = _db()
+    store = PlanVersionStore(conn)
+    master = _active_master(store)
+    # Runtime execution config is deliberately different; it must not change the
+    # signature/history snapshot of the immutable strategic master version.
+    conn.execute(
+        "UPDATE spiral_rounds SET master_plan_version_id=? WHERE id=1",
+        (master["id"],),
+    )
+    conn.commit()
+    manager = PlanVersionManager(None, conn)
+    runtime_plan = {
+        **json.loads(master["plan_snapshot"]),
+        "per_platform": {"xhs": {"topic_count": 2}},
+        "cadence": {"rounds_planned": 9},
+    }
+
+    signature = manager.record(1, runtime_plan, author="round_create")
+
+    assert signature == master["plan_signature"]
+    round_signature = conn.execute(
+        "SELECT plan_signature FROM spiral_rounds WHERE id=1"
+    ).fetchone()[0]
+    history = conn.execute(
+        "SELECT plan_signature,plan_snapshot FROM signature_history WHERE round_id=1"
+    ).fetchone()
+    assert round_signature == master["plan_signature"]
+    assert history["plan_signature"] == master["plan_signature"]
+    assert json.loads(history["plan_snapshot"]) == json.loads(master["plan_snapshot"])
+
+
+def test_bound_round_rejects_corrupt_master_plan_signature():
+    from src.core.plan_version import PlanVersionManager
+
+    conn = _db()
+    store = PlanVersionStore(conn)
+    master = _active_master(store)
+    conn.execute(
+        "UPDATE spiral_rounds SET master_plan_version_id=? WHERE id=1",
+        (master["id"],),
+    )
+    conn.execute(
+        "UPDATE master_plan_versions SET plan_signature='corrupt' WHERE id=?",
+        (master["id"],),
+    )
+    conn.commit()
+
+    with pytest.raises(ValueError, match="母计划快照与其签名不一致"):
+        PlanVersionManager(None, conn).record(1, _plan(), author="round_create")
