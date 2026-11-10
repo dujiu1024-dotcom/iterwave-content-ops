@@ -4561,18 +4561,23 @@ def _register_routes(app: FastAPI) -> None:
                                      "operations", "breaker")
 
                 if "hot_topics" in tables and (not source or source == "hot_topic_source"):
-                    hot_failure_cutoff = (_storage_now() - timedelta(hours=72)).isoformat(timespec="seconds")
+                    # Newly failed sources are treated as transient: suppress their
+                    # todo for one hour, then surface them for operator attention.
+                    hot_failure_cutoff = (_storage_now() - timedelta(hours=1)).isoformat(timespec="seconds")
                     total = int(conn.execute(
                         "SELECT COUNT(*) FROM hot_topics "
-                        "WHERE evidence_status = 'failed' AND COALESCE(last_seen_at,discovered_at) >= ?",
-                        (hot_failure_cutoff,),
+                        "WHERE evidence_status = 'failed' AND COALESCE(last_seen_at,discovered_at) < ? "
+                        "AND COALESCE(last_seen_at,discovered_at) >= ?",
+                        (hot_failure_cutoff, (_storage_now() - timedelta(hours=72)).isoformat(timespec="seconds")),
                     ).fetchone()[0])
                     counts["hot_topic_source"] += total
                     rows = conn.execute(
                         "SELECT id, source, title, discovered_at FROM hot_topics "
-                        "WHERE evidence_status = 'failed' AND discovered_at >= ? "
-                        "ORDER BY discovered_at DESC, id DESC LIMIT ?",
-                        (hot_failure_cutoff, fetch_limit),
+                        "WHERE evidence_status = 'failed' "
+                        "AND COALESCE(last_seen_at,discovered_at) < ? "
+                        "AND COALESCE(last_seen_at,discovered_at) >= ? "
+                        "ORDER BY COALESCE(last_seen_at,discovered_at) DESC, id DESC LIMIT ?",
+                        (hot_failure_cutoff, (_storage_now() - timedelta(hours=72)).isoformat(timespec="seconds"), fetch_limit),
                     ).fetchall()
                     capped = capped or total > fetch_limit
                     for row in rows:
