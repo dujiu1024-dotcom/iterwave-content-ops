@@ -718,7 +718,7 @@ class HotTopicCollector:
         from .safe_http import SafeHTTPStatusError
 
         body = None
-        for attempt in range(2):
+        for attempt in range(3):
             try:
                 body, _content_type = _fetch_public_text(
                     url, timeout=self.hcfg.fetch_timeout_seconds,
@@ -726,9 +726,11 @@ class HotTopicCollector:
                 )
                 break
             except SafeHTTPStatusError as exc:
-                if exc.status_code != 429 or attempt >= 1:
+                if exc.status_code != 429 or attempt >= 2:
                     raise
-                delay = 30.0
+                # Two bounded retries: exponential fallback (30s, 60s) when the
+                # provider omits Retry-After; an explicit header takes precedence.
+                delay = 30.0 * (2 ** attempt)
                 if exc.retry_after:
                     try:
                         delay = float(exc.retry_after)
@@ -739,7 +741,7 @@ class HotTopicCollector:
                                 retry_at = retry_at.replace(tzinfo=timezone.utc)
                             delay = max(0.0, (retry_at - _utc_now()).total_seconds())
                         except (TypeError, ValueError, OverflowError):
-                            delay = 30.0
+                            delay = 30.0 * (2 ** attempt)
                 if delay > 60.0:
                     # Do not retry earlier than a long server-specified Retry-After.
                     raise
