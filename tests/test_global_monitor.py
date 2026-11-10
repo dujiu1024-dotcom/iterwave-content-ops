@@ -158,3 +158,49 @@ def test_global_todos_sanitize_task_and_media_generation_errors(tmp_path, test_a
     finally:
         api_main._g_ctx.clear()
         api_main._g_ctx.update(saved)
+
+
+
+def test_global_todos_suppress_recent_hot_topic_failures_for_one_hour(tmp_path, test_auth, monkeypatch):
+    from datetime import timedelta
+
+    registry = TenantRegistry(tmp_path / "workspace")
+    registry.initialize()
+    paths = registry.paths("default", create=True)
+    conn = sqlite3.connect(paths.db_file)
+    conn.execute("""
+        CREATE TABLE hot_topics (
+            id INTEGER PRIMARY KEY, source TEXT, title TEXT,
+            discovered_at TEXT, last_seen_at TEXT, evidence_status TEXT
+        )
+    """)
+    now = datetime(2026, 11, 10, 10, 0, 0)
+    monkeypatch.setattr(api_main, "_storage_now", lambda: now)
+    rows = [
+        ("recent-retry", "60s/xhs", "刚刚重试失败", now - timedelta(hours=2), now - timedelta(minutes=30)),
+        ("visible-failure", "60s/douyin", "持续失败超过一小时", now - timedelta(hours=2), now - timedelta(hours=2)),
+        ("expired-failure", "60s/kuaishou", "超过72小时", now - timedelta(hours=73), now - timedelta(hours=73)),
+    ]
+    conn.executemany(
+        "INSERT INTO hot_topics(id,source,title,discovered_at,last_seen_at,evidence_status) "
+        "VALUES(?,?,?,?,?,'failed')",
+        [(i + 1, source, title, discovered.isoformat(sep=" "), seen.isoformat(sep=" "))
+         for i, (source, title, discovered, seen) in enumerate(rows)],
+    )
+    conn.commit()
+    conn.close()
+
+    saved = dict(api_main._g_ctx)
+    api_main._g_ctx.clear()
+    api_main._g_ctx.update({"tenant_registry": registry, "runtime_tenant_id": "default"})
+    try:
+        client = test_auth(TestClient(api_main._build_app(), base_url="http://127.0.0.1"))
+        response = client.get("/api/todos?source=hot_topic_source")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["total"] == 1
+        assert [item["record_id"] for item in body["items"]] == [2]
+        assert body["items"][0]["title"] == "热点来源采集失败 · 60s/douyin"
+    finally:
+        api_main._g_ctx.clear()
+        api_main._g_ctx.update(saved)
