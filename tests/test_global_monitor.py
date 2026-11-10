@@ -177,9 +177,9 @@ def test_global_todos_suppress_recent_hot_topic_failures_for_one_hour(tmp_path, 
     now = datetime(2026, 11, 10, 10, 0, 0)
     monkeypatch.setattr(api_main, "_storage_now", lambda: now)
     rows = [
-        ("recent-retry", "60s/xhs", "刚刚重试失败", now - timedelta(hours=2), now - timedelta(minutes=30)),
-        ("visible-failure", "60s/douyin", "持续失败超过一小时", now - timedelta(hours=2), now - timedelta(hours=2)),
-        ("expired-failure", "60s/kuaishou", "超过72小时", now - timedelta(hours=73), now - timedelta(hours=73)),
+        ("60s/xhs", "刚刚重试失败", now - timedelta(hours=2), now - timedelta(minutes=30)),
+        ("60s/douyin", "持续失败超过一小时", now - timedelta(hours=2), now - timedelta(hours=2)),
+        ("60s/kuaishou", "超过72小时", now - timedelta(hours=73), now - timedelta(hours=73)),
     ]
     conn.executemany(
         "INSERT INTO hot_topics(id,source,title,discovered_at,last_seen_at,evidence_status) "
