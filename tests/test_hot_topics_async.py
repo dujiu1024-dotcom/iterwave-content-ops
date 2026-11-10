@@ -380,3 +380,49 @@ def test_repeated_hot_source_failures_preserve_first_failure_timestamp(cfg, conn
     assert "again" in repeated["title"]
 
 
+
+
+
+def test_60s_source_uses_two_exponential_429_retries(cfg, conn, monkeypatch):
+    from src.core.safe_http import SafeHTTPStatusError
+
+    collector = HotTopicCollector(cfg, conn)
+    calls = []
+    delays = []
+
+    def fake_fetch(*_args, **_kwargs):
+        calls.append(1)
+        if len(calls) <= 2:
+            raise SafeHTTPStatusError(429)
+        return json.dumps({"code": 200, "data": [{"title": "退避后恢复的热点"}]}), "application/json"
+
+    monkeypatch.setattr("src.core.hot_topics._fetch_public_text", fake_fetch)
+    monkeypatch.setattr("src.core.hot_topics.time.sleep", lambda seconds: delays.append(seconds))
+
+    rows = collector._fetch_platform("weibo", "https://60s.viki.moe", "60s.viki.moe")
+
+    assert len(calls) == 3
+    assert delays == [30.0, 60.0]
+    assert rows[0]["title"] == "退避后恢复的热点"
+
+
+def test_60s_source_stops_after_two_429_retries(cfg, conn, monkeypatch):
+    import pytest
+    from src.core.safe_http import SafeHTTPStatusError
+
+    collector = HotTopicCollector(cfg, conn)
+    calls = []
+    delays = []
+
+    def fake_fetch(*_args, **_kwargs):
+        calls.append(1)
+        raise SafeHTTPStatusError(429)
+
+    monkeypatch.setattr("src.core.hot_topics._fetch_public_text", fake_fetch)
+    monkeypatch.setattr("src.core.hot_topics.time.sleep", lambda seconds: delays.append(seconds))
+
+    with pytest.raises(SafeHTTPStatusError):
+        collector._fetch_platform("weibo", "https://60s.viki.moe", "60s.viki.moe")
+
+    assert len(calls) == 3
+    assert delays == [30.0, 60.0]
