@@ -2213,19 +2213,23 @@ class RoundExecutor:
             report["final_status"] = "failed"
             return
 
-        if pending > 0:
-            # 内容已产出但草稿还没存 → 留在 producing
+        if pending > 0 and save_drafts:
+            # 正常存草稿模式：仍有待提交平台的草稿，保持 producing 以便恢复。
             logger.info("轮次 %s 仍有 %d 篇待存草稿，保持 producing", round_id, pending)
             report["final_status"] = "producing"
-            if save_drafts:
-                report["errors"].append(f"{pending} 篇草稿仍处于 draft_pending（存草稿未落定）")
-            else:
-                # 干跑（save_drafts=false）不是错误，只是本轮没走存草稿
-                report["steps"].append({
-                    "step": "dry_run",
-                    "note": f"{pending} 篇草稿停在 draft_pending（本次未执行存草稿）",
-                })
+            report["errors"].append(f"{pending} 篇草稿仍处于 draft_pending（存草稿未落定）")
             return
+
+        if pending > 0 and not save_drafts:
+            # 干跑模式已完成内容生产；draft_pending 是预期的交付状态，
+            # 不应阻止 Round 收口。将其计入本轮已产出内容，后续进入
+            # awaiting_publish（用户可在之后显式恢复存草稿流程）。
+            report["steps"].append({
+                "step": "dry_run",
+                "note": f"{pending} 篇内容已产出；干跑模式未执行平台存草稿，保留 draft_pending",
+            })
+            saved += pending
+            pending = 0
 
         # 仅有 draft_saved 才代表还有内容等待用户发布。
         if saved > 0:
