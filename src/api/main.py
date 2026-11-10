@@ -4561,25 +4561,31 @@ def _register_routes(app: FastAPI) -> None:
                                      "operations", "breaker")
 
                 if "hot_topics" in tables and (not source or source == "hot_topic_source"):
-                    hot_failure_cutoff = (_storage_now() - timedelta(hours=72)).isoformat(timespec="seconds")
+                    now = _storage_now()
+                    hot_failure_cutoff = (now - timedelta(hours=72)).isoformat(timespec="seconds")
+                    hot_failure_quiet_cutoff = (now - timedelta(hours=1)).isoformat(timespec="seconds")
+                    failure_time = "COALESCE(last_seen_at,discovered_at)"
+                    failure_window = (
+                        "evidence_status = 'failed' AND " + failure_time + " >= ? AND "
+                        + failure_time + " < ?"
+                    )
                     total = int(conn.execute(
-                        "SELECT COUNT(*) FROM hot_topics "
-                        "WHERE evidence_status = 'failed' AND COALESCE(last_seen_at,discovered_at) >= ?",
-                        (hot_failure_cutoff,),
+                        "SELECT COUNT(*) FROM hot_topics WHERE " + failure_window,
+                        (hot_failure_cutoff, hot_failure_quiet_cutoff),
                     ).fetchone()[0])
                     counts["hot_topic_source"] += total
                     rows = conn.execute(
-                        "SELECT id, source, title, discovered_at FROM hot_topics "
-                        "WHERE evidence_status = 'failed' AND discovered_at >= ? "
-                        "ORDER BY discovered_at DESC, id DESC LIMIT ?",
-                        (hot_failure_cutoff, fetch_limit),
+                        "SELECT id, source, title, " + failure_time + " AS failed_at "
+                        "FROM hot_topics WHERE " + failure_window +
+                        " ORDER BY failed_at DESC, id DESC LIMIT ?",
+                        (hot_failure_cutoff, hot_failure_quiet_cutoff, fetch_limit),
                     ).fetchall()
                     capped = capped or total > fetch_limit
                     for row in rows:
                         add_item(tenant, "hot_topic_source", row["id"],
                                  f"热点来源采集失败 · {row['source']}",
                                  row["title"] or "请检查数据源配置和抓取诊断",
-                                 "failed", row["discovered_at"], "high", "hot", "sources")
+                                 "failed", row["failed_at"], "high", "hot", "sources")
 
                 if "task_runs" in tables and (not source or source == "task_run"):
                     task_run_columns = {
