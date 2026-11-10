@@ -186,8 +186,40 @@ class PlanVersionManager:
     # ------------------------------------------------------------------
 
     def record(self, round_id: int, plan: dict, author: str = "system") -> str:
-        """写入轮次签名 + signature_history（同一签名重复记录也保留审计轨迹）。"""
+        """写入轮次签名；已绑定母计划版本时，以不可变版本快照/签名为唯一权威源。"""
+        round_row = self.conn.execute(
+            "SELECT master_plan_version_id FROM spiral_rounds WHERE id = ?",
+            (round_id,),
+        ).fetchone()
+        history_plan = plan
         signature = self.compute_signature(plan)
+        master_version_id = (
+            round_row["master_plan_version_id"]
+            if round_row is not None and "master_plan_version_id" in round_row.keys()
+            else None
+        )
+        if master_version_id is not None:
+            master_row = self.conn.execute(
+                "SELECT plan_signature, plan_snapshot FROM master_plan_versions WHERE id = ?",
+                (master_version_id,),
+            ).fetchone()
+            if master_row is None:
+                raise ValueError("轮次绑定的母计划版本不存在，拒绝记录轮次签名")
+            try:
+                master_snapshot = json.loads(master_row["plan_snapshot"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("轮次绑定的母计划快照损坏，拒绝记录轮次签名") from exc
+            if not isinstance(master_snapshot, dict):
+                raise ValueError("轮次绑定的母计划快照格式无效，拒绝记录轮次签名")
+            authoritative_signature = self.compute_signature(master_snapshot)
+            stored_signature = str(master_row["plan_signature"] or "")
+            if authoritative_signature != stored_signature:
+                # 兼容历史版本：旧签名可能包含平台分项篇数。
+                if legacy_signature_with_platform_counts(master_snapshot) != stored_signature:
+                    raise ValueError("母计划快照与其签名不一致，拒绝创建轮次")
+            signature = stored_signature
+            history_plan = master_snapshot
+
         self.conn.execute(
             "UPDATE spiral_rounds SET plan_signature = ? WHERE id = ?",
             (signature, round_id),
@@ -197,7 +229,7 @@ class PlanVersionManager:
             "VALUES (?, ?, ?, ?, ?)",
             (
                 signature,
-                json.dumps(plan, ensure_ascii=False),
+                json.dumps(history_plan, ensure_ascii=False, sort_keys=True),
                 round_id,
                 business_now(self.cfg).strftime("%Y-%m-%d %H:%M:%S"),
                 author,
