@@ -380,3 +380,51 @@ def test_repeated_hot_source_failures_preserve_first_failure_timestamp(cfg, conn
     assert "again" in repeated["title"]
 
 
+
+
+def test_60s_source_uses_two_exponential_retries_when_retry_after_missing(cfg, conn, monkeypatch):
+    from src.core.safe_http import SafeHTTPStatusError
+
+    collector = HotTopicCollector(cfg, conn)
+    calls = []
+    delays = []
+
+    def fake_fetch(*_args, **_kwargs):
+        calls.append(1)
+        if len(calls) <= 2:
+            raise SafeHTTPStatusError(429, None)
+        return json.dumps({"code": 200, "data": [{"title": "第二次重试后恢复"}]}), "application/json"
+
+    monkeypatch.setattr("src.core.hot_topics._fetch_public_text", fake_fetch)
+    monkeypatch.setattr("src.core.hot_topics.time.sleep", lambda seconds: delays.append(seconds))
+
+    rows = collector._fetch_platform("weibo", "https://60s.viki.moe", "60s.viki.moe")
+
+    assert len(calls) == 3
+    assert delays == [30.0, 60.0]
+    assert rows[0]["title"] == "第二次重试后恢复"
+
+
+def test_60s_source_stops_after_two_failed_retries(cfg, conn, monkeypatch):
+    from src.core.safe_http import SafeHTTPStatusError
+
+    collector = HotTopicCollector(cfg, conn)
+    calls = []
+    delays = []
+
+    def always_limited(*_args, **_kwargs):
+        calls.append(1)
+        raise SafeHTTPStatusError(429, None)
+
+    monkeypatch.setattr("src.core.hot_topics._fetch_public_text", always_limited)
+    monkeypatch.setattr("src.core.hot_topics.time.sleep", lambda seconds: delays.append(seconds))
+
+    try:
+        collector._fetch_platform("weibo", "https://60s.viki.moe", "60s.viki.moe")
+    except SafeHTTPStatusError as exc:
+        assert exc.status_code == 429
+    else:
+        raise AssertionError("rate limit must remain a failure after two retries")
+
+    assert len(calls) == 3
+    assert delays == [30.0, 60.0]
