@@ -174,8 +174,8 @@ def test_global_todos_suppress_recent_hot_topic_failures_for_one_hour(tmp_path, 
             discovered_at TEXT, last_seen_at TEXT, evidence_status TEXT
         )
     """)
-    now = datetime(2026, 11, 10, 10, 0, 0)
-    monkeypatch.setattr(api_main, "_storage_now", lambda: now)
+    now = datetime(2026, 11, 10, 10, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(api_main, "storage_now", lambda: now)
     rows = [
         ("60s/xhs", "刚刚重试失败", now - timedelta(hours=2), now - timedelta(minutes=30)),
         ("60s/douyin", "持续失败超过一小时", now - timedelta(hours=2), now - timedelta(hours=2)),
@@ -184,7 +184,7 @@ def test_global_todos_suppress_recent_hot_topic_failures_for_one_hour(tmp_path, 
     conn.executemany(
         "INSERT INTO hot_topics(id,source,title,discovered_at,last_seen_at,evidence_status) "
         "VALUES(?,?,?,?,?,'failed')",
-        [(i + 1, source, title, discovered.isoformat(sep=" "), seen.isoformat(sep=" "))
+        [(i + 1, source, title, discovered.isoformat(timespec="seconds"), seen.isoformat(timespec="seconds"))
          for i, (source, title, discovered, seen) in enumerate(rows)],
     )
     conn.commit()
