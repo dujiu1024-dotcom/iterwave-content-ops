@@ -55,7 +55,7 @@ platforms:
     base_url: "https://creator.douyin.com"
     account_key: "douyin_main"
   kuaishou:
-    enabled: false
+    enabled: true
     name: "快手"
     base_url: "https://creator.kuaishou.com"
     account_key: "kuaishou_main"
