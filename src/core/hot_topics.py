@@ -730,6 +730,7 @@ class HotTopicCollector:
                     raise
                 # Two bounded retries: exponential fallback (30s, 60s) when the
                 # provider omits Retry-After; an explicit header takes precedence.
+                delay = 30.0 * (2 ** attempt)
                 if exc.retry_after:
                     try:
                         delay = float(exc.retry_after)
@@ -740,7 +741,7 @@ class HotTopicCollector:
                                 retry_at = retry_at.replace(tzinfo=timezone.utc)
                             delay = max(0.0, (retry_at - _utc_now()).total_seconds())
                         except (TypeError, ValueError, OverflowError):
-                            delay = 30.0
+                            delay = 30.0 * (2 ** attempt)
                 if delay > 60.0:
                     # Do not retry earlier than a long server-specified Retry-After.
                     raise
