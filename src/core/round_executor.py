@@ -615,9 +615,19 @@ class RoundExecutor:
         ).fetchone()
         if not round_row:
             raise ValueError(f"轮次 {round_id} 不存在")
-        if round_row["status"] != "producing":
+        try:
+            prior_report = json.loads(round_row["run_report"] or "{}")
+        except (TypeError, ValueError):
+            prior_report = {}
+        dry_run_recovery = (
+            round_row["status"] == "awaiting_publish"
+            and isinstance(prior_report, dict)
+            and bool(prior_report.get("dry_run_mode"))
+        )
+        if round_row["status"] != "producing" and not dry_run_recovery:
             raise ValueError(
-                f"轮次 {round_id} 当前状态为 {round_row['status']}，只有 producing 状态可恢复存草稿"
+                f"轮次 {round_id} 当前状态为 {round_row['status']}，"
+                "仅 producing 轮次或已完成干跑的 awaiting_publish 轮次可恢复存草稿"
             )
 
         self._orch = Orchestration.load(self.conn)
@@ -763,6 +773,8 @@ class RoundExecutor:
             step for step in previous.get("steps", [])
             if isinstance(step, dict) and step.get("step") != "dry_run"
         ]
+        # 保留干跑来源标记，直到所有 draft_pending 都已处理完毕，支持分批恢复。
+        previous["dry_run_mode"] = bool(previous.get("dry_run_mode")) and report["pending_drafts"] > 0
         # 汇总步骤名沿用编排诊断使用的 save_drafts，保证恢复后不再显示为 skipped。
         previous["steps"].append({
             "step": "save_drafts",
@@ -2213,19 +2225,37 @@ class RoundExecutor:
             report["final_status"] = "failed"
             return
 
-        if pending > 0:
-            # 内容已产出但草稿还没存 → 留在 producing
-            logger.info("轮次 %s 仍有 %d 篇待存草稿，保持 producing", round_id, pending)
-            report["final_status"] = "producing"
-            if save_drafts:
-                report["errors"].append(f"{pending} 篇草稿仍处于 draft_pending（存草稿未落定）")
+        if pending > 0 and save_drafts:
+            # 正常生产中的存草稿尚未完成时保留 producing。干跑轮次已进入
+            # awaiting_publish 后允许恢复存草稿，但不回退 Round 状态。
+            round_state = self.conn.execute(
+                "SELECT status, run_report FROM spiral_rounds WHERE id = ?", (round_id,)
+            ).fetchone()
+            try:
+                prior_report = json.loads(round_state["run_report"] or "{}") if round_state else {}
+            except (TypeError, ValueError):
+                prior_report = {}
+            is_dry_run_round = bool(prior_report.get("dry_run_mode"))
+            if round_state and round_state["status"] == "awaiting_publish" and is_dry_run_round:
+                logger.info("轮次 %s 干跑后的草稿恢复仍有 %d 篇待存，保持 awaiting_publish", round_id, pending)
+                report["final_status"] = "awaiting_publish"
             else:
-                # 干跑（save_drafts=false）不是错误，只是本轮没走存草稿
-                report["steps"].append({
-                    "step": "dry_run",
-                    "note": f"{pending} 篇草稿停在 draft_pending（本次未执行存草稿）",
-                })
+                logger.info("轮次 %s 仍有 %d 篇待存草稿，保持 producing", round_id, pending)
+                report["final_status"] = "producing"
+            report["errors"].append(f"{pending} 篇草稿仍处于 draft_pending（存草稿未落定）")
             return
+
+        if pending > 0 and not save_drafts:
+            # 干跑模式已完成内容生产；draft_pending 是预期的交付状态，
+            # 不应阻止 Round 收口。将其计入本轮已产出内容，后续进入
+            # awaiting_publish（用户可在之后显式恢复存草稿流程）。
+            report["steps"].append({
+                "step": "dry_run",
+                "note": f"{pending} 篇内容已产出；干跑模式未执行平台存草稿，保留 draft_pending",
+            })
+            report["dry_run_mode"] = True
+            saved += pending
+            pending = 0
 
         # 仅有 draft_saved 才代表还有内容等待用户发布。
         if saved > 0:

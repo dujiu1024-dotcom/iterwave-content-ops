@@ -77,6 +77,16 @@ def test_round_transition_happy_path_and_illegal_jump(conn: sqlite3.Connection, 
         == "awaiting_publish"
 
 
+def test_awaiting_publish_can_fail_when_no_publishable_drafts_remain(conn: sqlite3.Connection, seed) -> None:
+    round_id = seed.round(status="awaiting_publish")
+    sm = RoundStateMachine(conn)
+
+    assert sm.transition(round_id, "failed", "所有草稿保存均失败") is True
+    assert conn.execute(
+        "SELECT status FROM spiral_rounds WHERE id = ?", (round_id,)
+    ).fetchone()[0] == "failed"
+
+
 def test_round_transition_persists_utc_time_log(conn: sqlite3.Connection, seed, cfg) -> None:
     """状态迁移日志和阶段起点使用统一 UTC 时间，业务时区仅用于日历计算。"""
     r = seed.round()

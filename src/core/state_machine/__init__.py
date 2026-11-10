@@ -39,7 +39,9 @@ ROUND_STATUSES = (
 ROUND_TRANSITIONS: dict[str, set[str]] = {
     "created":           {"producing", "cancelled"},
     "producing":         {"awaiting_publish", "failed", "cancelled"},
-    "awaiting_publish":  {"collecting_metrics", "cancelled"},
+    # If a dry-run Round later attempts to save drafts and every save fails,
+    # it has no publishable output and must be allowed to fail closed.
+    "awaiting_publish":  {"collecting_metrics", "cancelled", "failed"},
     "collecting_metrics": {"analyzing", "cancelled"},
     "analyzing":         {"completed", "partial_completed", "failed"},
     "completed":         set(),         # 终态

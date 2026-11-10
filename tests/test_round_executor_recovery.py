@@ -701,3 +701,89 @@ def test_restart_preserves_pending_drafts_when_production_tasks_already_succeede
     assert conn.execute(
         "SELECT status FROM drafts WHERE id = ?", (draft_id,),
     ).fetchone()[0] == "draft_pending"
+
+
+def test_finalize_dry_run_advances_round_with_pending_drafts(cfg, conn, seed):
+    round_id = seed.round(status="producing")
+    seed.draft(round_id, platform="xhs", draft_status="draft_pending", fetch_status=None)
+    executor = _executor(cfg, conn)
+
+    report = {"steps": [], "errors": []}
+    executor._finalize_round(round_id, report, save_drafts=False)
+
+    assert report["final_status"] == "awaiting_publish"
+    assert any(step.get("step") == "dry_run" for step in report["steps"])
+    assert conn.execute(
+        "SELECT status FROM spiral_rounds WHERE id = ?", (round_id,)
+    ).fetchone()[0] == "awaiting_publish"
+    assert conn.execute(
+        "SELECT status FROM drafts WHERE content_id IN "
+        "(SELECT id FROM contents WHERE round_id = ?)", (round_id,)
+    ).fetchone()[0] == "draft_pending"
+
+
+def test_finalize_save_drafts_mode_keeps_pending_round_producing(cfg, conn, seed):
+    round_id = seed.round(status="producing")
+    seed.draft(round_id, platform="xhs", draft_status="draft_pending", fetch_status=None)
+    executor = _executor(cfg, conn)
+
+    report = {"steps": [], "errors": []}
+    executor._finalize_round(round_id, report, save_drafts=True)
+
+    assert report["final_status"] == "producing"
+    assert report["errors"]
+    assert conn.execute(
+        "SELECT status FROM spiral_rounds WHERE id = ?", (round_id,)
+    ).fetchone()[0] == "producing"
+
+
+
+def test_dry_run_finalized_round_can_still_resume_pending_drafts(cfg, conn, seed, monkeypatch):
+    monkeypatch.setattr("src.core.login_manager.has_login_state", lambda _platform: True)
+    round_id = seed.round(status="awaiting_publish")
+    draft_id = seed.draft(round_id, platform="xhs", draft_status="draft_pending", fetch_status=None)
+    conn.execute(
+        "UPDATE contents SET title=?,body=?,tags=?,image_paths=? "
+        "WHERE id=(SELECT content_id FROM drafts WHERE id=?)",
+        ("干跑恢复标题", "干跑恢复正文", json.dumps(["测试"]), json.dumps(["/tmp/dry-run.png"]), draft_id),
+    )
+    conn.execute(
+        "UPDATE spiral_rounds SET run_report=? WHERE id=?",
+        (json.dumps({
+            "dry_run_mode": True,
+            "steps": [{"step": "produce"}, {"step": "dry_run"}],
+            "drafts_saved": 0,
+            "drafts_failed": 0,
+            "errors": [],
+        }), round_id),
+    )
+    conn.commit()
+
+    adapter = _SuccessfulDraftAdapter()
+    result = asyncio.run(
+        _executor(cfg, conn, {Platform.XHS: adapter}).save_pending_drafts(round_id)
+    )
+
+    assert result["final_status"] == "awaiting_publish"
+    assert result["pending_drafts"] == 0
+    assert conn.execute(
+        "SELECT status FROM drafts WHERE id=?", (draft_id,)
+    ).fetchone()[0] == "draft_saved"
+    stored = json.loads(conn.execute(
+        "SELECT run_report FROM spiral_rounds WHERE id=?", (round_id,)
+    ).fetchone()[0])
+    assert stored["dry_run_mode"] is False
+
+
+
+def test_dry_run_recovery_fails_round_when_all_draft_saves_fail(cfg, conn, seed):
+    round_id = seed.round(status="awaiting_publish")
+    seed.draft(round_id, platform="xhs", draft_status="failed", fetch_status=None)
+    report = {"errors": [], "steps": []}
+
+    _executor(cfg, conn)._finalize_round(round_id, report, save_drafts=True)
+
+    assert report["final_status"] == "failed"
+    assert conn.execute(
+        "SELECT status FROM spiral_rounds WHERE id=?", (round_id,)
+    ).fetchone()[0] == "failed"
