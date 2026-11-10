@@ -202,15 +202,38 @@ class GlobalTaskWorker:
                             feedback = StrategyFeedback(**feedback_data)
                         if operation == "save_pending_drafts":
                             return await context["executor"].save_pending_drafts(round_id)
-                        if operation == "run":
+                        if operation in {"run", "activation_promote"}:
+                            activation_input = None
+                            if operation == "activation_promote":
+                                sample_id = str(task.payload.get("sample_content_id") or "").strip()
+                                frozen_sample = task.payload.get("activation_sample_snapshot")
+                                if not sample_id or not isinstance(frozen_sample, dict):
+                                    raise ValueError("Activation 生产任务缺少样稿身份或不可变快照")
+                                sample_row = context["conn"].execute(
+                                    "SELECT sc.*,sr.status AS run_status FROM sample_contents sc "
+                                    "JOIN sample_runs sr ON sr.id=sc.sample_run_id AND sr.tenant_id=sc.tenant_id "
+                                    "WHERE sc.id=? AND sc.tenant_id=? AND sc.adopted_at IS NOT NULL "
+                                    "AND NOT EXISTS (SELECT 1 FROM activation_run_deletions d WHERE d.sample_run_id=sr.id)",
+                                    (sample_id, task.tenant_id),
+                                ).fetchone()
+                                if sample_row is None or sample_row["quality_status"] != "pass" or sample_row["run_status"] != "ready":
+                                    raise PermissionError("Activation 样稿已删除、未授权或不再满足正式生产条件")
+                                from src.core.activation_sample_snapshot import verify_activation_sample_snapshot
+                                current_sample = dict(sample_row)
+                                verify_activation_sample_snapshot(current_sample, frozen_sample)
+                                activation_input = {
+                                    "current": current_sample,
+                                    "snapshot": frozen_sample,
+                                }
                             try:
                                 report = await context["executor"].run(
                                     round_id,
-                                    topic_count=task.payload.get("topic_count"),
+                                    topic_count=1 if activation_input is not None else task.payload.get("topic_count"),
                                     platform_values=task.payload.get("platforms"),
-                                    save_drafts=task.payload.get("save_drafts"),
+                                    save_drafts=False if activation_input is not None else task.payload.get("save_drafts"),
                                     feedback=feedback,
                                     template_data=task.payload.get("template_snapshot"),
+                                    activation_sample=activation_input,
                                 )
                             except asyncio.CancelledError:
                                 self._mark_content_plan_failed(context["conn"], round_id, cfg=context["cfg"])

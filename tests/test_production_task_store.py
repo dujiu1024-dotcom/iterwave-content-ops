@@ -94,6 +94,13 @@ def test_idempotent_create_returns_same_task(store):
     assert store.step_progress("step-stable-1")["total"] == 1
 
 
+def test_idempotent_key_rejects_changed_input_snapshot(store):
+    first = make_task(store)
+    with pytest.raises(ProductionTaskError, match="不同生产输入快照"):
+        make_task(store, input_snapshot={"topic": "different-topic"})
+    assert store.get_task(first["id"])["input_snapshot"]["task_input"] == {"topic": "topic-a"}
+
+
 def test_one_strategy_step_can_create_multiple_independent_tasks(store):
     tasks = store.create_tasks_for_step(
         round_id=7, master_plan_version_id=11, sub_plan_id="sub-a",

@@ -315,12 +315,17 @@ class _PassGuard:
         return type("Outcome", (), {"passes": True, "reason": "ok"})()
 
 
-def test_promoted_sample_inherits_round_plan_attribution(api_client):
+def test_promoted_sample_inherits_round_plan_attribution(api_client, tmp_path, monkeypatch):
+    from src.core.task_queue import GlobalTaskQueue
+
     client, conn, _cfg = api_client
     _store, master_id, sub_id, version, stage, line_version_id, round_id = _create_bound_round(
         client, conn, "promote-sub",
     )
     api_main._g_ctx["guard"] = _PassGuard()
+    queue = GlobalTaskQueue(tmp_path / "shared" / "system.db")
+    queue.initialize()
+    monkeypatch.setattr(api_main, "_task_queue", queue)
     now = api_main.storage_now().isoformat(sep=" ", timespec="seconds")
     conn.execute(
         "INSERT INTO sample_runs(id,tenant_id,platform,account_description,status,"
@@ -338,19 +343,35 @@ def test_promoted_sample_inherits_round_plan_attribution(api_client):
     conn.commit()
 
     response = client.post("/api/activation/saved/sample-promote/promote", json={"round_id": round_id})
-    assert response.status_code == 201, response.text
-    content_id = response.json()["content_id"]
-    content_row = conn.execute(
-        "SELECT master_plan_version_id,sub_plan_id,sub_plan_version_id,sub_plan_stage_id,"
-        "production_line_version_id FROM contents WHERE id=?", (content_id,),
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert body["sample_content_id"] == "sample-promote"
+    assert body["draft_status"] == "draft_pending_after_success"
+    assert body["platform_draft_saved"] is False
+    assert body["publication_started"] is False
+
+    task = queue.get(body["task_id"])
+    assert task is not None and task.status == "queued"
+    assert task.payload["operation"] == "activation_promote"
+    assert task.payload["round_id"] == round_id
+    assert task.payload["save_drafts"] is False
+    binding = task.payload["execution_snapshot"]["round_binding"]
+    assert binding["master_plan_version_id"] == master_id
+    assert binding["sub_plan_id"] == sub_id
+    assert binding["sub_plan_version_id"] == int(version["id"])
+    assert binding["sub_plan_stage_id"] == int(stage["id"])
+    assert binding["sub_plan_snapshot_sha256"]
+    assert binding["sub_plan_stage_snapshot_sha256"]
+    sample = conn.execute(
+        "SELECT promoted_task_id,promoted_round_id FROM sample_contents WHERE id='sample-promote'"
     ).fetchone()
-    assert tuple(content_row) == (master_id, sub_id, int(version["id"]),
-                                  int(stage["id"]), line_version_id)
-    draft_row = conn.execute(
-        "SELECT master_plan_version_id,sub_plan_id,sub_plan_version_id,sub_plan_stage_id "
-        "FROM drafts WHERE content_id=?", (content_id,),
-    ).fetchone()
-    assert tuple(draft_row) == (master_id, sub_id, int(version["id"]), int(stage["id"]))
+    assert tuple(sample) == (body["task_id"], round_id)
+    # 入队阶段不得提前创建正式内容或平台草稿；Worker 成功后才会持久化 draft_pending。
+    assert conn.execute("SELECT COUNT(*) FROM contents WHERE round_id=?", (round_id,)).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM drafts d JOIN contents c ON c.id=d.content_id WHERE c.round_id=?",
+        (round_id,),
+    ).fetchone()[0] == 0
 
 
 def test_adopted_content_draft_keeps_plan_attribution(cfg, conn):
