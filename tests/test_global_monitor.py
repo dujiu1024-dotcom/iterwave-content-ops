@@ -162,7 +162,7 @@ def test_global_todos_sanitize_task_and_media_generation_errors(tmp_path, test_a
 
 
 def test_global_todos_suppress_recent_hot_topic_failures_for_one_hour(tmp_path, test_auth, monkeypatch):
-    from datetime import timedelta
+    from datetime import timedelta, timezone
 
     registry = TenantRegistry(tmp_path / "workspace")
     registry.initialize()
