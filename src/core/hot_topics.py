@@ -718,7 +718,7 @@ class HotTopicCollector:
         from .safe_http import SafeHTTPStatusError
 
         body = None
-        for attempt in range(2):
+        for attempt in range(3):
             try:
                 body, _content_type = _fetch_public_text(
                     url, timeout=self.hcfg.fetch_timeout_seconds,
@@ -726,12 +726,14 @@ class HotTopicCollector:
                 )
                 break
             except SafeHTTPStatusError as exc:
-                if exc.status_code != 429 or attempt >= 1:
+                if exc.status_code != 429 or attempt >= 2:
                     raise
-                delay = 30.0
+                # Two bounded retries (three total attempts). Retry-After takes
+                # precedence; otherwise use exponential backoff: 30s, then 60s.
+                delay = 30.0 * (2 ** attempt)
                 if exc.retry_after:
                     try:
-                        delay = float(exc.retry_after)
+                        delay = max(0.0, float(exc.retry_after))
                     except (TypeError, ValueError):
                         try:
                             retry_at = parsedate_to_datetime(str(exc.retry_after))
@@ -739,11 +741,11 @@ class HotTopicCollector:
                                 retry_at = retry_at.replace(tzinfo=timezone.utc)
                             delay = max(0.0, (retry_at - _utc_now()).total_seconds())
                         except (TypeError, ValueError, OverflowError):
-                            delay = 30.0
-                if delay > 60.0:
-                    # Do not retry earlier than a long server-specified Retry-After.
+                            delay = 30.0 * (2 ** attempt)
+                if delay > 120.0:
+                    # Never retry before a longer server-provided Retry-After.
                     raise
-                time.sleep(max(0.0, delay))
+                time.sleep(delay)
         if body is None:
             raise RuntimeError("热点数据源限流后重试仍未获得响应")
         payload = json.loads(body)
