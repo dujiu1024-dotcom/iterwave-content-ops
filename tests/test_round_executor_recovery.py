@@ -701,3 +701,37 @@ def test_restart_preserves_pending_drafts_when_production_tasks_already_succeede
     assert conn.execute(
         "SELECT status FROM drafts WHERE id = ?", (draft_id,),
     ).fetchone()[0] == "draft_pending"
+
+
+def test_finalize_dry_run_advances_round_with_pending_drafts(cfg, conn, seed):
+    round_id = seed.round(status="producing")
+    seed.draft(round_id, platform="xhs", draft_status="draft_pending", fetch_status=None)
+    executor = _executor(cfg, conn)
+
+    report = {"steps": [], "errors": []}
+    executor._finalize_round(round_id, report, save_drafts=False)
+
+    assert report["final_status"] == "awaiting_publish"
+    assert any(step.get("step") == "dry_run" for step in report["steps"])
+    assert conn.execute(
+        "SELECT status FROM spiral_rounds WHERE id = ?", (round_id,)
+    ).fetchone()[0] == "awaiting_publish"
+    assert conn.execute(
+        "SELECT status FROM drafts WHERE content_id IN "
+        "(SELECT id FROM contents WHERE round_id = ?)", (round_id,)
+    ).fetchone()[0] == "draft_pending"
+
+
+def test_finalize_save_drafts_mode_keeps_pending_round_producing(cfg, conn, seed):
+    round_id = seed.round(status="producing")
+    seed.draft(round_id, platform="xhs", draft_status="draft_pending", fetch_status=None)
+    executor = _executor(cfg, conn)
+
+    report = {"steps": [], "errors": []}
+    executor._finalize_round(round_id, report, save_drafts=True)
+
+    assert report["final_status"] == "producing"
+    assert report["errors"]
+    assert conn.execute(
+        "SELECT status FROM spiral_rounds WHERE id = ?", (round_id,)
+    ).fetchone()[0] == "producing"
